@@ -1641,6 +1641,18 @@ If configuration, the baseline build, or controls fail before a mutation is
 attempted, the report records normal restoration as skipped and preserves the
 original failure. It does not rebuild or certify target artifacts. Once a
 mutation is attempted, the runner rebuilds and checks the normal target.
+Target mode checks that every selected mutant source can be opened for writing
+before CMake configure/build or CTest starts. This check opens each confined
+regular source without truncating it and records its hash; a read-only source is
+reported as an infrastructure error, with normal restore skipped because no
+mutant was applied. An optional `--smoke-control-inventory` accepts the same
+JSON `names` schema as `--expected-control-inventory`. It must be a nonempty,
+unique subset of that inventory. After the target is built and its CTest
+executables are bound to the CMake File API artifact, those exact smoke cases
+run first. Any failed, incomplete, skipped, errored, or timed-out smoke result
+stops the run before the full control and mutant filters. Omitting this option
+keeps the existing target-mode order.
+
 Enable `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY` when configuring the focused
 targets. From a clean detached checkout, a Wipe Tower run is:
 

@@ -38,6 +38,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -545,6 +546,67 @@ def _expected_control_names(argument: str, root: Path) -> tuple[list[str], dict[
     if len(set(names)) != len(names):
         raise MutationError("expected control inventory contains duplicate test names")
     return names, {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _ctest_exact_names_regex(names: Sequence[str]) -> str:
+    """Build a CTest regex that selects only the supplied test names."""
+    if not names:
+        raise MutationError("exact CTest selection requires at least one test name")
+    metacharacters = set(r"\.^$*+?()[]{}|")
+    alternatives = ["".join("\\" + character if character in metacharacters else character
+                            for character in name)
+                   for name in names]
+    return "^(" + "|".join(alternatives) + ")$"
+
+
+def _preflight_mutant_source_writability(mutants: Sequence[Mutant], root: Path) -> list[dict[str, Any]]:
+    """Check selected sources can be opened for mutation without changing bytes."""
+    root = root.resolve(strict=True)
+    selected: dict[Path, list[str]] = {}
+    for mutant in mutants:
+        try:
+            path = (root / mutant.path).resolve(strict=True)
+        except OSError as exc:
+            raise MutationError(
+                f"mutant {mutant.id} source cannot be resolved for writability preflight: "
+                f"{mutant.path}: {exc}") from exc
+        if not _path_under(path, root):
+            raise MutationError(
+                f"mutant {mutant.id} source escapes repository root: {mutant.path}")
+        if not path.is_file():
+            raise MutationError(f"mutant {mutant.id} source is not a regular file: {mutant.path}")
+        selected.setdefault(path, []).append(mutant.id)
+
+    results: list[dict[str, Any]] = []
+    for path, mutant_ids in selected.items():
+        try:
+            before = path.stat()
+            if not stat.S_ISREG(before.st_mode):
+                raise MutationError(f"selected mutant source is not a regular file: {path}")
+            before_bytes = path.read_bytes()
+            descriptor = os.open(path, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise MutationError(f"selected mutant source is not a regular file: {path}")
+                if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                    raise MutationError(f"selected mutant source changed during preflight: {path}")
+            finally:
+                os.close(descriptor)
+            after_bytes = path.read_bytes()
+            if after_bytes != before_bytes:
+                raise MutationError(f"selected mutant source bytes changed during preflight: {path}")
+        except OSError as exc:
+            raise MutationError(
+                f"selected mutant source is not writable by this process: {path}: {exc}") from exc
+        results.append({
+            "path": str(path),
+            "mutant_ids": mutant_ids,
+            "sha256": hashlib.sha256(before_bytes).hexdigest(),
+            "writable": True,
+            "bytes_preserved": True,
+        })
+    return results
 
 
 def _resolve_executable(argument: str, label: str) -> str:
@@ -1533,6 +1595,8 @@ def run_mutation(args: argparse.Namespace) -> int:
     target_spec: dict[str, Any] | None = None
     expected_control: list[str] | None = None
     expected_control_file: dict[str, str] | None = None
+    smoke_control: list[str] | None = None
+    smoke_control_file: dict[str, str] | None = None
     if target_mode:
         explicit_build = args.build_command is not None or args.build_argv_file is not None
         explicit_test = args.test_command is not None or args.test_argv_file is not None
@@ -1563,6 +1627,14 @@ def run_mutation(args: argparse.Namespace) -> int:
         }
         expected_control, expected_control_file = _expected_control_names(
             args.expected_control_inventory, repo)
+        if args.smoke_control_inventory is not None:
+            smoke_control, smoke_control_file = _expected_control_names(
+                args.smoke_control_inventory, repo)
+            outside = sorted(set(smoke_control) - set(expected_control))
+            if outside:
+                raise MutationError(
+                    "smoke control inventory must be a subset of the expected control inventory; "
+                    f"unknown names={outside}")
         build_argv: list[str] | None = None
         test_argv: list[str] | None = None
         build_argv_file = test_argv_file = None
@@ -1573,7 +1645,7 @@ def run_mutation(args: argparse.Namespace) -> int:
             raise MutationError("explicit mode requires exactly one of --test-command/--test-argv-file")
         if any(getattr(args, name, None) is not None for name in
                ("cmake", "ctest", "target", "config", "jobs", "control_regex",
-                "expected_control_inventory", "exclude_label_regex")):
+                "expected_control_inventory", "exclude_label_regex", "smoke_control_inventory")):
             raise MutationError("CMake/CTest target flags require --target and cannot be mixed with explicit mode")
         build_argv, build_argv_file = _command_arguments(
             args.build_command, args.build_argv_file, root=repo, command_name="build")
@@ -1622,6 +1694,8 @@ def run_mutation(args: argparse.Namespace) -> int:
                                         "test": test_argv})
     if target_mode and expected_control_file is not None:
         preflight["expected_control_inventory"] = expected_control_file
+    if target_mode and smoke_control_file is not None:
+        preflight["smoke_control_inventory"] = smoke_control_file
     report: dict[str, Any] = {
         "schema_version": 1,
         "status": "in_progress",
@@ -1708,12 +1782,14 @@ def run_mutation(args: argparse.Namespace) -> int:
         return tests, binary
 
     def run_target_control(worktree: Path, build_dir: Path, *, phase: str,
-                           names: Sequence[str], artifact: dict[str, Any]) -> dict[str, Any]:
+                           names: Sequence[str], artifact: dict[str, Any],
+                           selection_regex: str | None = None) -> dict[str, Any]:
         assert target_spec is not None
         log_path = next_log(phase)
         junit_path = log_path.with_suffix(".junit.xml")
         argv = [target_spec["ctest"], "--test-dir", str(build_dir),
-                "-C", target_spec["config"], "-R", target_spec["control_regex"]]
+                "-C", target_spec["config"], "-R",
+                selection_regex if selection_regex is not None else target_spec["control_regex"]]
         if target_spec["exclude_label_regex"]:
             argv.extend(["-LE", target_spec["exclude_label_regex"]])
         argv.extend(["--no-tests=error", "--output-on-failure", "--parallel",
@@ -1797,6 +1873,21 @@ def run_mutation(args: argparse.Namespace) -> int:
         args.reuse_detached_checkout)
     with _with_finalizer(worktree_context, restore_normal_target) as worktree:
         build_dir = (worktree / args.build_dir).resolve()
+        if target_mode:
+            try:
+                writable_sources = _preflight_mutant_source_writability(mutants, worktree)
+                report["preflight"]["mutant_source_writability"] = {
+                    "status": "passed", "files": writable_sources,
+                }
+                _checkpoint(report_path, report, "mutant_source_writability_preflight")
+            except MutationError as exc:
+                report["preflight"]["mutant_source_writability"] = {
+                    "status": "failed", "error": str(exc),
+                }
+                report["status"] = "infrastructure_error"
+                report["error"] = str(exc)
+                _checkpoint(report_path, report, "mutant_source_writability_failed")
+                return 2
         if configure_argv:
             configure = run_command(_expand(configure_argv, root=worktree, build=build_dir),
                                     cwd=worktree, timeout=args.timeout,
@@ -1867,6 +1958,7 @@ def run_mutation(args: argparse.Namespace) -> int:
                     "executable": target_artifact,
                     "control_test_names": list(expected_control),
                     "control_test_count": len(expected_control),
+                    "smoke_control_test_names": list(smoke_control) if smoke_control is not None else None,
                     "filter_test_names": target_selection,
                     "ctest_discovery": target_discovery_outputs.get(
                         "post-build-ctest-discovery"),
@@ -1880,6 +1972,17 @@ def run_mutation(args: argparse.Namespace) -> int:
                                   "--output-junit", "{junit}"])
                 report["commands"]["build_argv"] = build
                 report["commands"]["test_argv"] = test_argv
+                if smoke_control is not None:
+                    smoke = run_target_control(
+                        worktree, build_dir, phase="focused-smoke",
+                        names=smoke_control, artifact=target_artifact,
+                        selection_regex=_ctest_exact_names_regex(smoke_control))
+                    report["focused_smoke"] = smoke
+                    _checkpoint(report_path, report, "focused_smoke")
+                    if smoke["status"] != "passed":
+                        report["status"] = "focused_smoke_failed"
+                        _checkpoint(report_path, report, "focused_smoke_failed")
+                        return 2
                 control = run_target_control(worktree, build_dir, phase="focused-control",
                                              names=expected_control, artifact=target_artifact)
                 report["focused_control"] = control
@@ -2089,6 +2192,8 @@ def _parser() -> argparse.ArgumentParser:
                      help="CTest label regex excluded from focused control and mutation selections")
     run.add_argument("--expected-control-inventory",
                      help="JSON file containing the exact CTest test-name array (or an object with names)")
+    run.add_argument("--smoke-control-inventory",
+                     help="optional nonempty subset of the expected control inventory to run before the full control")
     run.add_argument("--mutants", action="append",
                      help="JSON mutant manifest; repeat to share one build across manifests (default: three Flow smoke mutants)")
     run.add_argument("--mutants-sha256", action="append",
