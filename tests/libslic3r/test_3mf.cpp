@@ -4977,10 +4977,11 @@ TEST_CASE("Object and support usage flags follow their own volume records", "[3M
 
 namespace {
 
-// A 0.6 standard-flow nozzle on extruder 0 and a 0.4 high-flow nozzle on extruder 1, with the given logical nozzle ids.
-std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles(int first_id, int second_id)
+// A standard-flow nozzle on extruder 0 and a high-flow nozzle on extruder 1, with the given diameters and logical nozzle ids.
+std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles(int first_id, int second_id, const char *first_diameter = "0.4",
+                                                      const char *second_diameter = "0.4")
 {
-    return {{"0.6", nvtStandard, 0, first_id}, {"0.4", nvtHighFlow, 1, second_id}};
+    return {{first_diameter, nvtStandard, 0, first_id}, {second_diameter, nvtHighFlow, 1, second_id}};
 }
 
 } // namespace
@@ -5003,7 +5004,7 @@ TEST_CASE("Plate nozzle metadata from a layered grouping lists every used nozzle
 
     const FilamentInfo &both = filament_info(plate, 0);
     CHECK(both.group_id == std::vector<int>{0, 1});
-    // With two diameters the recorded one is currently the smaller (0.4), not the first nozzle's 0.6.
+    // Both nozzles are 0.4, so the recorded diameter is unambiguous.
     CHECK_THAT(both.nozzle_diameter, Catch::Matchers::WithinAbs(.4, 1e-8));
     CHECK(both.nozzle_volume_type == get_nozzle_volume_type_string(nvtHybrid));
     const FilamentInfo &single = filament_info(plate, 1);
@@ -5014,6 +5015,25 @@ TEST_CASE("Plate nozzle metadata from a layered grouping lists every used nozzle
     REQUIRE(plate.nozzle_group_result.has_value());
     CHECK(plate.nozzle_group_result->get_layer_filament_nozzle_maps() == layer_maps);
     CHECK(plate.nozzle_group_result->is_support_dynamic_nozzle_map());
+}
+
+TEST_CASE("Plate nozzle metadata for a filament on nozzles of different diameters records one of them", "[3MF][PlateMetadata][Nozzles]")
+{
+    GCodeProcessorResult result;
+    set_materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    // Filament 0 prints on the 0.6 nozzle on layer 0 and on the 0.4 nozzle on layer 1.
+    auto grouping = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<std::vector<int>>{{0}, {1}},
+                                                                       two_nozzles(0, 1, "0.6", "0.4"), std::vector<unsigned int>{0},
+                                                                       std::vector<std::vector<unsigned int>>{{0}, {0}});
+    REQUIRE(grouping.has_value());
+    // One scalar diameter has to stand for two nozzles; which one is not specified, so only membership is checked.
+    result.nozzle_group_result = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*grouping);
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament_info(plate, 0).group_id == std::vector<int>{0, 1});
+    CHECK_THAT(filament_info(plate, 0).nozzle_diameter,
+               Catch::Matchers::WithinAbs(.4, 1e-8) || Catch::Matchers::WithinAbs(.6, 1e-8));
 }
 
 TEST_CASE("A single assigned nozzle keeps its exact nonstandard diameter and volume type in the plate metadata", "[3MF][PlateMetadata][Nozzles]")
