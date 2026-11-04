@@ -5567,13 +5567,20 @@ TEST_CASE("Static print configs expose the options of their own class only", "[C
     CHECK(std::find(keys.begin(), keys.end(), "skirt_distance") == keys.end());
 }
 
-TEST_CASE("Every option of a static print config is registered with a matching definition", "[Config][ConfigContracts]")
+TEST_CASE("Each registered option of PrintObjectConfig has a definition with a matching type", "[Config][ConfigContracts]")
 {
     const PrintObjectConfig object_config;
     const ConfigDef *def = object_config.def();
     REQUIRE(def != nullptr);
     const auto keys = object_config.keys();
     REQUIRE_FALSE(keys.empty());
+
+    // keys() comes from the registration itself, so an option left out of it would not show up
+    // in the loop below; a fixed list of options declared by PrintObjectConfig guards that.
+    for (const char *known : {"layer_height", "seam_position", "brim_object_gap"}) {
+        CAPTURE(known);
+        CHECK(std::find(keys.begin(), keys.end(), known) != keys.end());
+    }
 
     for (const std::string &key : keys) {
         CAPTURE(key);
@@ -5588,19 +5595,26 @@ TEST_CASE("Every option of a static print config is registered with a matching d
 TEST_CASE("Definition metadata of a static option matches its default-constructed value", "[Config][ConfigContracts]")
 {
     const PrintObjectConfig object_config;
-    const ConfigOptionDef *layer_height = object_config.def()->get("layer_height");
+    const ConfigDef *def = object_config.def();
+    REQUIRE(def != nullptr);
+
+    const ConfigOptionDef *layer_height = def->get("layer_height");
+    const ConfigOption *layer_height_value = object_config.option("layer_height");
     REQUIRE(layer_height != nullptr);
     REQUIRE(static_cast<bool>(layer_height->default_value));
+    REQUIRE(layer_height_value != nullptr);
     CHECK(layer_height->type == coFloat);
-    CHECK(layer_height->default_value->serialize() == object_config.option("layer_height")->serialize());
+    CHECK(layer_height->default_value->serialize() == "0.2");
+    CHECK(layer_height_value->serialize() == "0.2");
 
-    // A different option type, to tell the check above from one that only reads one option.
-    const ConfigOptionDef *seam = object_config.def()->get("seam_position");
+    const ConfigOptionDef *seam = def->get("seam_position");
+    const ConfigOption *seam_value = object_config.option("seam_position");
     REQUIRE(seam != nullptr);
     REQUIRE(static_cast<bool>(seam->default_value));
+    REQUIRE(seam_value != nullptr);
     CHECK(seam->type == coEnum);
-    CHECK(seam->default_value->serialize() == object_config.option("seam_position")->serialize());
-    CHECK(seam->default_value->serialize() != layer_height->default_value->serialize());
+    CHECK(seam->default_value->serialize() == "aligned");
+    CHECK(seam_value->serialize() == "aligned");
 }
 
 } // namespace config_static_definition_contracts
