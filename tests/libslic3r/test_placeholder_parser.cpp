@@ -1,10 +1,12 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <random>
 #include <utility>
 #include <string>
+#include <vector>
 #include <memory>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
@@ -687,5 +689,142 @@ TEST_CASE("Placeholder interpolation averages nearly coincident table coordinate
     parser.set("probe", 0.0000025);
     CHECK_THAT(std::stod(parser.process("{interpolate_table(probe,(0,10),(0.00001,30))}")),
                Catch::Matchers::WithinAbs(20., 1e-9));
+}
+
+TEST_CASE("Placeholder parser reports and applies only changed configuration", "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    auto base = DynamicPrintConfig::full_print_config();
+    base.set_deserialize_strict({
+        { "layer_height", "0.2" },
+        { "wall_loops", "2" }
+    });
+    auto changed = base;
+    changed.set_deserialize_strict({
+        { "layer_height", "0.3" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(base));
+    CHECK_FALSE(parser.apply_config(base));
+    CHECK(parser.process("{layer_height}") == "0.2");
+    CHECK(parser.process("{wall_loops}") == "2");
+
+    const std::vector<std::string> diff = parser.config_diff(changed);
+    CHECK(diff.size() == 2);
+    CHECK(std::find(diff.begin(), diff.end(), "layer_height") != diff.end());
+    CHECK(std::find(diff.begin(), diff.end(), "wall_loops") != diff.end());
+
+    parser.apply_only(changed, { "layer_height" });
+    CHECK(parser.process("{layer_height}") == "0.3");
+    CHECK(parser.process("{wall_loops}") == "2");
+
+    const std::vector<std::string> remaining_diff = parser.config_diff(changed);
+    REQUIRE(remaining_diff.size() == 1);
+    REQUIRE(remaining_diff.front() == "wall_loops");
+    REQUIRE(parser.apply_config(changed));
+    CHECK_FALSE(parser.apply_config(changed));
+    CHECK(parser.config_diff(changed).empty());
+}
+
+TEST_CASE("Placeholder parser merges an rvalue configuration",
+          "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    DynamicPrintConfig moved_config = DynamicPrintConfig::full_print_config();
+    moved_config.set_deserialize_strict({
+        { "layer_height", "0.25" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    parser.set("already_present", "keep");
+    parser.apply_config(std::move(moved_config));
+    CHECK(parser.process("{layer_height}") == "0.25");
+    CHECK(parser.process("{wall_loops}") == "3");
+    CHECK(parser.process("{already_present}") == "keep");
+}
+
+TEST_CASE("Placeholder parser resolves configuration overrides before stored and external values",
+          "[PlaceholderParser][PlaceholderParserLookup]")
+{
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    external.set_deserialize_strict({
+        { "layer_height", "0.1" },
+        { "wall_loops", "7" }
+    });
+    DynamicPrintConfig stored;
+    stored.set_deserialize_strict({ { "layer_height", "0.2" } });
+    DynamicPrintConfig override;
+    override.set_deserialize_strict({ { "layer_height", "0.3" } });
+
+    PlaceholderParser parser(&external);
+    REQUIRE(stored.option("wall_loops") == nullptr);
+    REQUIRE(parser.apply_config(stored));
+    CHECK(parser.process("{layer_height}") == "0.2");
+    CHECK(parser.process("{layer_height}", 0, &override) == "0.3");
+    CHECK(parser.process("{wall_loops}") == "7");
+}
+
+TEST_CASE("Placeholder parser writes scalar output values and reads them back",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_float", new ConfigOptionFloat(1.5));
+    outputs.set_key_value("output_int", new ConfigOptionInt(2));
+    outputs.set_key_value("output_string", new ConfigOptionString("before"));
+    outputs.set_key_value("output_bool", new ConfigOptionBool(false));
+
+    const std::string rendered = parser.process(
+        "{output_float = 2.75}{output_int = 7}{output_string = \"ready\"}{output_bool = true}"
+        "{output_float},{output_int},{output_string},{output_bool}",
+        0, nullptr, &outputs, nullptr);
+    CHECK(rendered == "2.75,7,ready,true");
+
+    const auto *float_value = outputs.option<ConfigOptionFloat>("output_float");
+    const auto *int_value = outputs.option<ConfigOptionInt>("output_int");
+    const auto *string_value = outputs.option<ConfigOptionString>("output_string");
+    const auto *bool_value = outputs.option<ConfigOptionBool>("output_bool");
+    REQUIRE(float_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(string_value != nullptr);
+    REQUIRE(bool_value != nullptr);
+    CHECK_THAT(float_value->value, Catch::Matchers::WithinAbs(2.75, 1e-12));
+    CHECK(int_value->value == 7);
+    CHECK(string_value->value == "ready");
+    CHECK(bool_value->value);
+}
+
+TEST_CASE("Placeholder parser rejects writes to read-only parser values",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    parser.set("read_only", 4);
+    DynamicConfig outputs;
+    outputs.set_key_value("writable", new ConfigOptionInt(1));
+
+    CHECK_THROWS_WITH(parser.process("{read_only = 5}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Cannot modify a read-only variable"));
+    CHECK(parser.process("{writable = 2}{writable}", 0, nullptr, &outputs, nullptr) == "2");
+}
+
+TEST_CASE("Placeholder parser protects local and global variable scopes",
+          "[PlaceholderParser][PlaceholderParserVariables]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{global shared = 1}"),
+                      Catch::Matchers::ContainsSubstring("Global variables are not available"));
+
+    PlaceholderParser::ContextData context;
+    context.global_config = std::make_unique<DynamicConfig>();
+    context.global_config->set_key_value("shared", new ConfigOptionInt(5));
+    CHECK_THROWS_WITH(parser.process("{local shared = 2}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in global scope"));
+    REQUIRE(context.global_config->option<ConfigOptionInt>("shared") != nullptr);
+    CHECK(context.global_config->option<ConfigOptionInt>("shared")->value == 5);
+
+    CHECK_THROWS_WITH(parser.process("{local scoped = 2}{global scoped = 3}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in local scope"));
+    CHECK(context.global_config->option("scoped") == nullptr);
 }
 
