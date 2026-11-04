@@ -4481,6 +4481,136 @@ TEST_CASE("BBS release_PlateData_list empties the list, including empty entries 
     CHECK(none.empty());
 }
 
+namespace {
+
+// A preset whose config carries `value` under the type's characteristic key, whose preset name is
+// "envelope-<id>" and whose identity key (the name the importer gives the loaded preset) is "<id>".
+Preset make_embedded_preset(Preset::Type type, const std::string &id, double value)
+{
+    Preset preset(type, "envelope-" + id);
+    preset.version = *Semver::parse("3.2.1.0");
+    if (type == Preset::TYPE_PRINT) {
+        preset.config.set_key_value("print_settings_id", new ConfigOptionString(id));
+        preset.config.set_key_value("layer_height", new ConfigOptionFloat(value));
+    } else if (type == Preset::TYPE_FILAMENT) {
+        preset.config.set_key_value("filament_settings_id", new ConfigOptionStrings({id}));
+        preset.config.set_key_value("filament_diameter", new ConfigOptionFloats({value}));
+    } else if (type == Preset::TYPE_PRINTER) {
+        preset.config.set_key_value("printer_settings_id", new ConfigOptionString(id));
+        preset.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({value}));
+    }
+    return preset;
+}
+
+double embedded_value(const Preset &preset)
+{
+    if (preset.type == Preset::TYPE_PRINT)
+        return preset.config.opt_float("layer_height");
+    const char *key = preset.type == Preset::TYPE_FILAMENT ? "filament_diameter" : "nozzle_diameter";
+    const auto *values = preset.config.option<ConfigOptionFloats>(key);
+    REQUIRE(values != nullptr);
+    REQUIRE(values->values.size() == 1);
+    return values->values.front();
+}
+
+// Exports the shared model with the given presets embedded, then loads it back.
+void round_trip_presets(const std::string &archive, const std::vector<Preset *> &presets, LoadedProject &loaded)
+{
+    store_with_strategy(archive, SaveStrategy::Zip64 | SaveStrategy::Silence,
+                        [&presets](Model &, PlateData &, StoreParams &params) { params.project_presets = presets; });
+    Model imported;
+    REQUIRE(load_model(archive, imported, loaded));
+    REQUIRE(imported.objects.size() == 1);
+}
+
+} // namespace
+
+TEST_CASE("Embedded presets of each supported type keep their identity, type, version and value", "[3MF][EmbeddedPreset]")
+{
+    const Preset::Type type = GENERATE(Preset::TYPE_PRINT, Preset::TYPE_FILAMENT, Preset::TYPE_PRINTER);
+    CAPTURE(int(type));
+    const double value = type == Preset::TYPE_PRINT ? .31 : type == Preset::TYPE_FILAMENT ? 2.85 : .25;
+    Preset preset = make_embedded_preset(type, "identity", value);
+
+    ScopedTemporaryFile archive(".3mf");
+    LoadedProject loaded;
+    round_trip_presets(archive.string(), {&preset}, loaded);
+    REQUIRE(loaded.presets.size() == 1);
+    const Preset &actual = *loaded.presets.front();
+    // The loaded preset is named after the identity key, not the exported preset name.
+    CHECK(actual.name == "identity");
+    CHECK(actual.type == type);
+    CHECK(actual.is_project_embedded);
+    CHECK(actual.version == preset.version);
+    CHECK_THAT(embedded_value(actual), Catch::Matchers::WithinAbs(value, 1e-6));
+}
+
+TEST_CASE("Embedded presets are numbered independently per type and each keeps its own content", "[3MF][EmbeddedPreset]")
+{
+    // Interleaved order, with null entries around them, so a shared or misplaced counter would collide or swap.
+    Preset print_a = make_embedded_preset(Preset::TYPE_PRINT, "print-a", .11);
+    Preset filament_a = make_embedded_preset(Preset::TYPE_FILAMENT, "filament-a", 1.61);
+    Preset printer_a = make_embedded_preset(Preset::TYPE_PRINTER, "printer-a", .35);
+    Preset print_b = make_embedded_preset(Preset::TYPE_PRINT, "print-b", .22);
+    Preset filament_b = make_embedded_preset(Preset::TYPE_FILAMENT, "filament-b", 2.85);
+    Preset printer_b = make_embedded_preset(Preset::TYPE_PRINTER, "printer-b", .45);
+    const std::vector<Preset *> presets{nullptr, &print_a, &filament_a, &printer_a, &print_b, nullptr, &filament_b, &printer_b};
+
+    ScopedTemporaryFile archive(".3mf");
+    LoadedProject loaded;
+    round_trip_presets(archive.string(), presets, loaded);
+
+    // One archive entry per preset, numbered 1 and 2 within each type.
+    std::string payload;
+    for (const char *entry : {"Metadata/process_settings_1.config", "Metadata/process_settings_2.config",
+                              "Metadata/filament_settings_1.config", "Metadata/filament_settings_2.config",
+                              "Metadata/machine_settings_1.config", "Metadata/machine_settings_2.config"}) {
+        INFO("entry " << entry);
+        CHECK(read_3mf_entry(archive.string(), payload, entry));
+    }
+    for (const char *entry : {"Metadata/process_settings_3.config", "Metadata/filament_settings_3.config", "Metadata/machine_settings_3.config"}) {
+        INFO("entry " << entry);
+        CHECK_FALSE(read_3mf_entry(archive.string(), payload, entry));
+    }
+
+    REQUIRE(loaded.presets.size() == 6);
+    for (const Preset *expected : {&print_a, &filament_a, &printer_a, &print_b, &filament_b, &printer_b}) {
+        const std::string identity = expected->name.substr(std::string("envelope-").size());
+        INFO("preset " << identity);
+        const auto found = std::find_if(loaded.presets.begin(), loaded.presets.end(),
+                                        [&identity](const Preset *actual) { return actual->name == identity; });
+        REQUIRE(found != loaded.presets.end());
+        CHECK((*found)->type == expected->type);
+        CHECK((*found)->is_project_embedded);
+        CHECK_THAT(embedded_value(**found), Catch::Matchers::WithinAbs(embedded_value(*expected), 1e-6));
+    }
+}
+
+TEST_CASE("Embedded presets of an unsupported type are left out and do not displace supported ones", "[3MF][EmbeddedPreset]")
+{
+    Preset ignored(Preset::TYPE_SLA_PRINT, "unsupported-sla");
+    ignored.config.set_key_value("print_settings_id", new ConfigOptionString("unsupported-sla"));
+    Preset retained = make_embedded_preset(Preset::TYPE_PRINT, "retained-print", .28);
+    Preset retained_filament = make_embedded_preset(Preset::TYPE_FILAMENT, "retained-filament", 1.6);
+
+    ScopedTemporaryFile archive(".3mf");
+    LoadedProject loaded;
+    round_trip_presets(archive.string(), {&ignored, &retained, nullptr, &retained_filament}, loaded);
+    REQUIRE(loaded.presets.size() == 2);
+    for (const Preset *actual : loaded.presets) {
+        INFO("preset " << actual->name);
+        CHECK(actual->name != "unsupported-sla");
+        if (actual->type == Preset::TYPE_PRINT) {
+            CHECK(actual->name == "retained-print");
+            CHECK_THAT(embedded_value(*actual), Catch::Matchers::WithinAbs(.28, 1e-6));
+        } else {
+            CHECK(actual->type == Preset::TYPE_FILAMENT);
+            CHECK(actual->name == "retained-filament");
+            CHECK_THAT(embedded_value(*actual), Catch::Matchers::WithinAbs(1.6, 1e-6));
+        }
+    }
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
