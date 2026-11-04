@@ -7302,9 +7302,10 @@ std::map<std::string, std::string> round_trip(const MakerMetadata& values)
 
 TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
 {
-    // Markup characters and text that already looks like an entity must survive literally.
+    // Markup characters and text that already looks like an entity (including &quot; and &apos;
+    // spelled out) must survive literally: unescaping is a single pass.
     const MakerMetadata values{"Maker & <Lab> &amp; &unknown; literal", "maker-7 & <rev> &amp; literal",
-                               "prototype & <inside> &amp; literal", "rev <7> &amp;"};
+                               "prototype & <inside> &amp; &quot; &apos; literal", "rev <7> &amp;"};
     const auto metadata = round_trip(values);
     const std::map<std::string, std::string> expected{
         {"MakerLab", values.maker_name},
@@ -7320,17 +7321,15 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
     }
 }
 
-TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata][!shouldfail]")
+TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
 {
     const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
                                "rev 7"};
     const auto metadata = round_trip(values);
-    // Known bug: the importer's xml_unescape() decodes &amp; &lt; &gt; but not &quot; or &apos;, so
-    // quotes come back as entities; fixed by the follow-up fix PR. The unquoted entry is not
-    // affected and is checked above.
     CHECK(metadata.at("MakerLab") == values.maker_name);
     CHECK(metadata.at("MakerLabVersion") == values.maker_version);
     CHECK(metadata.at("MakerWorkflow") == values.workflow);
+    CHECK(metadata.at("MakerRevision") == values.revision);
 }
 
 } // namespace bbs_maker_metadata_contracts

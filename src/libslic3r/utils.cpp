@@ -1660,6 +1660,16 @@ std::string xml_unescape(std::string s)
 				i += 5;
 				pos = i;
 			}
+			else if (s.substr(i, 6) == "&quot;") {
+				ret += s.substr(pos, i - pos) + "\"";
+				i += 6;
+				pos = i;
+			}
+			else if (s.substr(i, 6) == "&apos;") {
+				ret += s.substr(pos, i - pos) + "'";
+				i += 6;
+				pos = i;
+			}
 			else {
 				++i;
 			}
