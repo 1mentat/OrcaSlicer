@@ -8396,7 +8396,7 @@ const std::vector<sla::SupportPoint> support_points = {
 };
 
 const std::vector<sla::DrainHole> drain_holes = {
-    sla::DrainHole(Vec3f(10.f, 20.f, 30.f), Vec3f(0.f, 3.f, 4.f), 1.25f, 7.5f),
+    sla::DrainHole(Vec3f(10.f, 20.f, 30.f), Vec3f(0.f, 3.f, 4.f), 1.25f, 7.5f, true),
     sla::DrainHole(Vec3f(-4.f, 8.f, 12.f), Vec3f(2.f, -1.f, 2.f), 2.75f, 3.25f),
 };
 
@@ -8478,18 +8478,20 @@ TEST_CASE("Generic 3MF stores SLA support points with their radius and island fl
         CHECK_THAT(numbers[i], WithinAbs(expected[i], 1e-5));
 }
 
-TEST_CASE("Generic 3MF stores SLA drain holes 1 mm above the mesh for compatibility", "[3MF][Generic3MFMetadata]")
+TEST_CASE("Generic 3MF stores SLA drain holes one unit back along the normal for compatibility", "[3MF][Generic3MFMetadata]")
 {
     Model source = make_three_object_model();
     source.objects[2]->sla_drain_holes = drain_holes;
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
 
-    // The export leaves the source holes as they were.
+    // The export leaves every field of the source holes as it was (the failed flag is not stored in the archive).
     REQUIRE(source.objects[2]->sla_drain_holes.size() == drain_holes.size());
     for (size_t i = 0; i < drain_holes.size(); ++i) {
         CHECK(source.objects[2]->sla_drain_holes[i].pos == drain_holes[i].pos);
         CHECK(source.objects[2]->sla_drain_holes[i].normal == drain_holes[i].normal);
+        CHECK(source.objects[2]->sla_drain_holes[i].radius == drain_holes[i].radius);
+        CHECK(source.objects[2]->sla_drain_holes[i].failed == drain_holes[i].failed);
         CHECK(source.objects[2]->sla_drain_holes[i].height == drain_holes[i].height);
     }
     // The exporter keeps the elevated position of the first implementation for compatibility (see the
@@ -8520,7 +8522,7 @@ TEST_CASE("Generic 3MF omits empty optional metadata entries", "[3MF][Generic3MF
     CHECK_FALSE(has_entry(archive.string(), "Metadata/Slic3r_PE_sla_drain_holes.txt"));
 }
 
-TEST_CASE("Generic 3MF writes height profiles of six or eight values and drops shorter or odd ones", "[3MF][Generic3MFMetadata]")
+TEST_CASE("Generic 3MF writes even-count height profiles of six or more values and omits odd and two-value ones", "[3MF][Generic3MFMetadata]")
 {
     // Counts 0, 2, 3, 5 and 7 are not stored; 6 and 8 are stored.
     // A count of 4 is deliberately left out: the exporter writes it (size >= 4) while the profile reader
