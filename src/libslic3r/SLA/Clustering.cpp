@@ -62,6 +62,8 @@ ClusteredPoints cluster(Index3D &sindex,
         Elems cluster = {};
         Elems pts = {*it};
         group(pts, cluster);
+        if (cluster.empty())
+            cluster.emplace_back(*it);
 
         for(auto& c : cluster) sindex.remove(c);
         it = sindex.begin();

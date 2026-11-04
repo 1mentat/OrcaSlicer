@@ -1706,9 +1706,19 @@ error. Use `tests/mutations/sla_hollowing_settings.json` with `sla_print_tests`
 and exact control inventory `tests/controls/sla_hollowing_settings.json`.
 Pass `--control-regex "$(cat tests/controls/sla_hollowing_settings.regex)"`
 and `--expected-control-inventory tests/controls/sla_hollowing_settings.json`
-to retain all 59 source-file controls. The mutation label is
+to retain the pipeline source-file controls. The mutation label is
 `SLAHollowingVariance`. These are bounded box/sphere contracts; drain-hole
 behavior is outside scope because that step is disabled.
+
+SLA support diameter, base height, and head penetration in
+`sla_supptgen_tests.cpp` are checked through public support-mesh sections and
+bounds. Use `tests/mutations/sla_support_geometry_settings.json` with
+`sla_print_tests`, the regex in
+`tests/controls/sla_support_geometry_settings.regex`, and the matching JSON
+control inventory. This broader SLA cohort includes clustering and existing
+support-generation controls; the hollowing inventory remains scoped to the
+pipeline file. The reject-all clustering regression uses a callback budget to
+fail before an implementation with no progress can allocate indefinitely.
 
 Pass `--cmake` and `--ctest` when the configured worker needs specific tools.
 Keep the worker's existing CPU, memory, swap, and locale limits.

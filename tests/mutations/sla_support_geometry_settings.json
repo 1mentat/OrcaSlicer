@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "description": "SLA support geometry and bounded clustering producer probes",
+  "mutants": [
+    {
+      "id": "sla-support-base-diameter-conversion-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.base_radius_mm = 0.5*c.support_base_diameter.getFloat();",
+      "new": "    scfg.base_radius_mm = c.support_base_diameter.getFloat();",
+      "description": "Change the diameter-to-radius conversion to diameter-as-radius; the public half-height pedestal spans then exceed the independently derived frustum widths at the default and upper endpoint.",
+      "test_filter": "^SLASupportSettingsVariance$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "expected_oracle": "Ordinary cross-section width or support-mesh z-bound assertions fail for the changed setting."
+    },
+    {
+      "id": "sla-support-base-height-read-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.base_height_mm = c.support_base_height.getFloat();",
+      "new": "    scfg.base_height_mm = 1.0;",
+      "description": "Replace the configured base height with its default; the zero-height and 2 mm public sections no longer match their frustum spans.",
+      "test_filter": "^SLASupportSettingsVariance$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "expected_oracle": "Ordinary cross-section width or support-mesh z-bound assertions fail for the changed setting."
+    },
+    {
+      "id": "sla-support-head-penetration-read-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.head_penetration_mm = c.support_head_penetration.getFloat();",
+      "new": "    scfg.head_penetration_mm = 0.0;",
+      "description": "Replace configured support-head penetration with zero; the public pinhead mesh no longer advances by the requested 0.2 and 0.8 mm relative to its zero endpoint.",
+      "test_filter": "^SLASupportSettingsVariance$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "expected_oracle": "Ordinary cross-section width or support-mesh z-bound assertions fail for the changed setting."
+    },
+    {
+      "id": "sla-cluster-empty-fallback-removed",
+      "path": "src/libslic3r/SLA/Clustering.cpp",
+      "old": "        if (cluster.empty())",
+      "new": "        if (false && cluster.empty())",
+      "description": "Disable the empty-cluster singleton fallback; the bounded reject-all predicate case exceeds its call budget and fails an ordinary assertion.",
+      "test_filter": "^Termination$",
+      "expected_oracle": "The bounded reject-all path sets its exception flag, then REQUIRE_FALSE(budget_exceeded) fails normally.",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1
+    },
+    {
+      "id": "sla-cluster-empty-fallback-forced-unconditionally",
+      "path": "src/libslic3r/SLA/Clustering.cpp",
+      "old": "        if (cluster.empty())",
+      "new": "        if (true)",
+      "description": "Force the singleton fallback even after successful clustering; the positive two-point all-accept control must detect a duplicated seed.",
+      "test_filter": "^Termination$",
+      "expected_oracle": "The positive two-point result contains a duplicate member, failing the ordinary cluster-size assertion.",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1
+    }
+  ]
+}

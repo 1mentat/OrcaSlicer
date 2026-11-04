@@ -3,6 +3,36 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "support_base_diameter": {
+      "test": "tests/sla_print/sla_supptgen_tests.cpp",
+      "tag": "[SLAPrint][SLASupportSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..30 mm with default 4 mm. One fixed manual support point is processed by public SLAPrint at 0, 4 and 30 mm; a public support-mesh section halfway through the 1 mm pedestal is compared with the geometric frustum span (1, 2.5 and 15.5 mm). This covers the registered diameter endpoints and default on this fixture; other support settings and geometry interactions are unclaimed."
+    },
+    "support_base_height": {
+      "test": "tests/sla_print/sla_supptgen_tests.cpp",
+      "tag": "[SLAPrint][SLASupportSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers minimum 0 mm and default 1 mm with no maximum. On the same public SLAPrint manual-point fixture, the support-mesh section 0.5 mm above ground has 1, 2.5 and 3.25 mm span for heights 0, 1 and selected 2 mm, derived from the pillar and frustum dimensions. This is a bounded geometry claim at those values; no upper range is registered or claimed."
+    },
+    "support_head_penetration": {
+      "test": "tests/sla_print/sla_supptgen_tests.cpp",
+      "tag": "[SLAPrint][SLASupportSettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers minimum 0 mm and default 0.2 mm with no maximum. The same public SLAPrint fixture compares the top z-bound of the generated support pinhead at 0, 0.2 and selected 0.8 mm; its movement into the model follows the configured penetration depth. Other normals, automatically generated points and full numeric-range behavior are unclaimed."
+    },
     "hollowing_min_thickness": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
       "tag": "[SLAHollowingVariance]",

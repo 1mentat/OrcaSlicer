@@ -58,6 +58,11 @@ Require the native control's exit status and exact JUnit inventory to pass befor
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
 into a survivor.
+After the first normal build, run the exact new or changed cases and capture
+their JUnit before running the preserved broader control cohort. Reuse that
+binary when the source is unchanged. The mutation runner's `--timeout` bounds
+each complete command as well as each CTest case; allow enough time for the
+whole control cohort.
 Bind discovery to the executable's identity after rebuilding; an inventory copied
 from an earlier build can have correct names but identify the wrong executable.
 Direct bundled Catch2 binaries return `TestFailureExitCode` (42) for failed
