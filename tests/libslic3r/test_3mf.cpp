@@ -64,6 +64,7 @@
 #include <type_traits> // for std::enable_if_t
 #include <typeinfo>    // for typeid
 #include <regex>
+#include <set>
 #include <vector>
 #include <utility>
 
@@ -4463,6 +4464,21 @@ TEST_CASE("BBS 3MF assigns custom-gcode records that carry no plate element to t
     CHECK(info.gcodes[1].extruder == 3);
     CHECK(info.gcodes[1].color == "#445566");
     CHECK(info.gcodes[1].extra == "tool-extra");
+}
+
+TEST_CASE("BBS release_PlateData_list empties the list, including empty entries and an empty list", "[3MF][Bbs3mfExtended][Plates]")
+{
+    // Deleting the plates cannot be observed from here (no leak checker); the contract asserted is that the
+    // list is left empty and that null entries and an already empty list are accepted.
+    std::set<std::pair<int, int>> objects{{0, 0}};
+    PlateDataPtrs plates{new PlateData(0, objects, false), nullptr, new PlateData(1, objects, true)};
+    REQUIRE(plates.size() == 3);
+    release_PlateData_list(plates);
+    CHECK(plates.empty());
+
+    PlateDataPtrs none;
+    release_PlateData_list(none);
+    CHECK(none.empty());
 }
 
 } // namespace bbs_archive_contracts
