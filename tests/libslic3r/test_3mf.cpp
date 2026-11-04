@@ -4977,10 +4977,10 @@ TEST_CASE("Object and support usage flags follow their own volume records", "[3M
 
 namespace {
 
-// Nozzle 0 is a 0.6 standard-flow nozzle on extruder 0, nozzle 1 a 0.4 high-flow nozzle on extruder 1.
-std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles()
+// A 0.6 standard-flow nozzle on extruder 0 and a 0.4 high-flow nozzle on extruder 1, with the given logical nozzle ids.
+std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles(int first_id, int second_id)
 {
-    return {{"0.6", nvtStandard, 0, 0}, {"0.4", nvtHighFlow, 1, 1}};
+    return {{"0.6", nvtStandard, 0, first_id}, {"0.4", nvtHighFlow, 1, second_id}};
 }
 
 } // namespace
@@ -4990,10 +4990,12 @@ TEST_CASE("Plate nozzle metadata from a layered grouping lists every used nozzle
     GCodeProcessorResult result;
     set_materials(result);
     result.print_statistics.total_volumes_per_extruder = {{0, 1000.}, {1, 2000.}};
-    // Filament 0 prints on nozzle 0 on layers 0 and 2 and on nozzle 1 on layer 1; filament 1 only on nozzle 1.
+    // Both filaments print on every layer. Filament 0 uses nozzle 0 on layers 0 and 2 and switches to nozzle 1
+    // on layer 1; filament 1 stays on nozzle 1. (The stamping reads the per-layer maps only; it does not
+    // consult the per-layer filament sequences.)
     const std::vector<std::vector<int>> layer_maps{{0, 1}, {1, 1}, {0, 1}};
-    auto grouping = MultiNozzleUtils::LayeredNozzleGroupResult::create(layer_maps, two_nozzles(), std::vector<unsigned int>{0, 1},
-                                                                       std::vector<std::vector<unsigned int>>{{0, 1}, {1}, {0, 1}});
+    auto grouping = MultiNozzleUtils::LayeredNozzleGroupResult::create(layer_maps, two_nozzles(0, 1), std::vector<unsigned int>{0, 1},
+                                                                       std::vector<std::vector<unsigned int>>{{0, 1}, {0, 1}, {0, 1}});
     REQUIRE(grouping.has_value());
     result.nozzle_group_result = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*grouping);
     PlateData plate;
@@ -5001,7 +5003,7 @@ TEST_CASE("Plate nozzle metadata from a layered grouping lists every used nozzle
 
     const FilamentInfo &both = filament_info(plate, 0);
     CHECK(both.group_id == std::vector<int>{0, 1});
-    // Two nozzles of different diameters: the smallest is recorded, not the first nozzle's 0.6.
+    // With two diameters the recorded one is currently the smaller (0.4), not the first nozzle's 0.6.
     CHECK_THAT(both.nozzle_diameter, Catch::Matchers::WithinAbs(.4, 1e-8));
     CHECK(both.nozzle_volume_type == get_nozzle_volume_type_string(nvtHybrid));
     const FilamentInfo &single = filament_info(plate, 1);
@@ -5035,13 +5037,14 @@ TEST_CASE("A single assigned nozzle keeps its exact nonstandard diameter and vol
 
 TEST_CASE("A static grouping supplies plate nozzle metadata but is not kept as the plate's layered result", "[3MF][PlateMetadata][Nozzles]")
 {
+    // Logical nozzle ids that are neither list positions nor in ascending order.
     FilamentInfo first;
     first.id = 0;
-    first.group_id = {0, 1};
+    first.group_id = {5, 2};
     FilamentInfo second;
     second.id = 1;
-    second.group_id = {1};
-    auto grouping = MultiNozzleUtils::StaticNozzleGroupResult::create({first, second}, two_nozzles(), {0, 1}, {0, 1}, false);
+    second.group_id = {2};
+    auto grouping = MultiNozzleUtils::StaticNozzleGroupResult::create({first, second}, two_nozzles(5, 2), {0, 1}, {5, 2}, false);
     REQUIRE(grouping.has_value());
     GCodeProcessorResult result;
     set_materials(result);
@@ -5050,10 +5053,11 @@ TEST_CASE("A static grouping supplies plate nozzle metadata but is not kept as t
     PlateData plate;
     plate.parse_filament_info(&result);
 
-    CHECK(filament_info(plate, 0).group_id == std::vector<int>{0, 1});
+    CHECK(filament_info(plate, 0).group_id == std::vector<int>{2, 5});
     CHECK_THAT(filament_info(plate, 0).nozzle_diameter, Catch::Matchers::WithinAbs(.4, 1e-8));
     CHECK(filament_info(plate, 0).nozzle_volume_type == get_nozzle_volume_type_string(nvtHybrid));
-    CHECK(filament_info(plate, 1).group_id == std::vector<int>{1});
+    CHECK(filament_info(plate, 1).group_id == std::vector<int>{2});
+    CHECK_THAT(filament_info(plate, 1).nozzle_diameter, Catch::Matchers::WithinAbs(.4, 1e-8));
     CHECK(filament_info(plate, 1).nozzle_volume_type == get_nozzle_volume_type_string(nvtHighFlow));
     CHECK_FALSE(plate.nozzle_group_result.has_value());
 }
