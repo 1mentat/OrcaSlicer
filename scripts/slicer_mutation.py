@@ -1604,13 +1604,19 @@ def run_mutation(args: argparse.Namespace) -> int:
             raise MutationError("CMake/CTest target mode cannot be combined with explicit build/test argv")
         if args.configure_command:
             raise MutationError("CMake/CTest target mode uses the existing configured build and cannot configure it")
-        for name in ("cmake", "ctest", "config", "jobs", "control_regex", "expected_control_inventory"):
+        for name in ("cmake", "ctest", "config", "jobs", "expected_control_inventory"):
             if not getattr(args, name, None):
                 raise MutationError(f"target mode requires --{name.replace('_', '-')}")
         if isinstance(args.jobs, bool) or args.jobs <= 0:
             raise MutationError("--jobs must be a positive integer")
+        if args.control_regex == "":
+            raise MutationError("target mode --control-regex must not be empty")
+        expected_control, expected_control_file = _expected_control_names(
+            args.expected_control_inventory, repo)
+        control_regex = (args.control_regex if args.control_regex is not None
+                         else _ctest_exact_names_regex(expected_control))
         try:
-            re.compile(args.control_regex)
+            re.compile(control_regex)
             if args.exclude_label_regex:
                 re.compile(args.exclude_label_regex)
         except re.error as exc:
@@ -1621,12 +1627,10 @@ def run_mutation(args: argparse.Namespace) -> int:
             "jobs": args.jobs,
             "cmake": _resolve_executable(args.cmake, "CMake"),
             "ctest": _resolve_executable(args.ctest, "CTest"),
-            "control_regex": args.control_regex,
+            "control_regex": control_regex,
             "exclude_label_regex": ("NotWorking|RequiresApp" if args.exclude_label_regex is None
                                      else args.exclude_label_regex),
         }
-        expected_control, expected_control_file = _expected_control_names(
-            args.expected_control_inventory, repo)
         if args.smoke_control_inventory is not None:
             smoke_control, smoke_control_file = _expected_control_names(
                 args.smoke_control_inventory, repo)
@@ -2187,7 +2191,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--jobs", type=int, help="bounded CMake and CTest parallelism for target mode")
     run.add_argument("--cmake", help="CMake executable for target mode")
     run.add_argument("--ctest", help="CTest executable for target mode")
-    run.add_argument("--control-regex", help="CTest test-name regex for the focused control inventory")
+    run.add_argument("--control-regex",
+                     help="optional CTest test-name regex; defaults to exact expected-inventory names")
     run.add_argument("--exclude-label-regex",
                      help="CTest label regex excluded from focused control and mutation selections")
     run.add_argument("--expected-control-inventory",

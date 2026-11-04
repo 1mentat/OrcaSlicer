@@ -1812,9 +1812,11 @@ class MutationTargetModeTests(unittest.TestCase):
                     tests, {"other_NOT_BUILT"}, build, other)
 
     def _fixture(self, root, *, first_control_fails=False, failed_baseline_build=False,
-                 failed_restore_build=False, control_names=None, smoke_names=None,
-                 smoke_failure=False, smoke_missing_identity=False, invalid_smoke=False):
+                 failed_restore_build=False, control_names=None, discovered_names=None,
+                 control_regex="^Focused::", smoke_names=None, smoke_failure=False,
+                 smoke_missing_identity=False, invalid_smoke=False):
         control_names = control_names or ["Focused::one"]
+        discovered_names = discovered_names or control_names
         repo = root / "repo"
         repo.mkdir()
         build = repo / "build"
@@ -1882,26 +1884,24 @@ class MutationTargetModeTests(unittest.TestCase):
             "sys.exit(8 if fail else 0)\n", encoding="utf-8")
         cmake.chmod(0o755)
         ctest.chmod(0o755)
-        args = slicer_mutation._parser().parse_args([
+        target_args = [
             "run", "--root", str(repo), "--build-dir", "build", "--target", "fake_tests",
             "--config", "Release", "--jobs", "2", "--cmake", str(cmake), "--ctest", str(ctest),
-            "--control-regex", "^Focused::", "--expected-control-inventory", str(expected),
+        ]
+        if control_regex is not None:
+            target_args.extend(["--control-regex", control_regex])
+        target_args.extend([
+            "--expected-control-inventory", str(expected),
             "--mutants", str(first), "--mutants", str(second), "--max-mutants", "2",
             "--timeout", "30", "--out", str(output),
         ])
         if smoke_names is not None or invalid_smoke:
-            args = slicer_mutation._parser().parse_args([
-                "run", "--root", str(repo), "--build-dir", "build", "--target", "fake_tests",
-                "--config", "Release", "--jobs", "2", "--cmake", str(cmake), "--ctest", str(ctest),
-                "--control-regex", "^Focused::", "--expected-control-inventory", str(expected),
-                "--smoke-control-inventory", str(smoke),
-                "--mutants", str(first), "--mutants", str(second), "--max-mutants", "2",
-                "--timeout", "30", "--out", str(output),
-            ])
+            target_args.extend(["--smoke-control-inventory", str(smoke)])
+        args = slicer_mutation._parser().parse_args(target_args)
         env = {"TARGET_REPO": str(repo), "TARGET_SOURCE": str(source),
                "TARGET_ENV_LOG": str(root / "child-env.jsonl"),
                "TARGET_CTEST_LOG": str(root / "ctest-events.jsonl"),
-               "TARGET_TEST_NAMES": json.dumps(control_names)}
+               "TARGET_TEST_NAMES": json.dumps(discovered_names)}
         if smoke_names is not None and not invalid_smoke:
             env["SMOKE_TEST_NAMES"] = json.dumps(smoke_names)
         if smoke_failure:
@@ -1951,6 +1951,7 @@ class MutationTargetModeTests(unittest.TestCase):
             self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
             report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["target_mode"]["control_regex"], "^Focused::")
             self.assertEqual(report["focused_control"]["test_evidence"], 1)
             self.assertEqual([row["status"] for row in report["mutants"]], ["killed", "killed"])
             self.assertTrue(all(row["log_evidence"]["assertion_failure"]
@@ -1980,6 +1981,62 @@ class MutationTargetModeTests(unittest.TestCase):
                                     (output / "profiles").resolve())
                                 for row in child_rows))
             self.assertGreater(len({row["TMPDIR"] for row in child_rows}), 1)
+
+    def test_target_mode_derives_exact_escaped_regex_from_inventory_when_omitted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = ["Focused::variant[1]", "Focused::value+2"]
+            decoys = ["Focused::variant1", "Focused::value2"]
+            code, _repo, source, output, _env_log = self._run_fake_target(
+                root, control_names=names, discovered_names=names + decoys,
+                control_regex=None)
+            self.assertEqual(code, 0)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "pass")
+            expected_regex = slicer_mutation._ctest_exact_names_regex(names)
+            self.assertEqual(report["target_mode"]["control_regex"], expected_regex)
+            self.assertEqual(report["target_mode"]["control_test_names"], names)
+            events = [json.loads(line) for line in
+                      (root / "ctest-events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(events)
+            self.assertTrue(all(event["names"] == names for event in events))
+
+    def test_target_mode_rejects_invalid_inventory_before_default_regex_derivation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            inventory = root / "expected.json"
+            inventory.write_text(json.dumps(["Focused::one", "Focused::one"]),
+                                 encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--target", "fake_tests",
+                "--config", "Release", "--jobs", "1", "--cmake", "cmake",
+                "--ctest", "ctest", "--expected-control-inventory", str(inventory),
+                "--out", str(root / "evidence"),
+            ])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "duplicate test names"):
+                slicer_mutation.run_mutation(args)
+            self.assertFalse((root / "evidence").exists())
+
+    def test_target_mode_rejects_empty_explicit_control_regex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            inventory = root / "expected.json"
+            inventory.write_text(json.dumps(["Focused::one"]), encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--target", "fake_tests",
+                "--config", "Release", "--jobs", "1", "--cmake", "cmake",
+                "--ctest", "ctest", "--control-regex", "",
+                "--expected-control-inventory", str(inventory),
+                "--out", str(root / "evidence"),
+            ])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "must not be empty"):
+                slicer_mutation.run_mutation(args)
+            self.assertFalse((root / "evidence").exists())
 
     def test_target_mode_runs_exact_smoke_subset_before_full_controls_and_mutants(self):
         with tempfile.TemporaryDirectory() as temp:
