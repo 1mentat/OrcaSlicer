@@ -5434,3 +5434,52 @@ TEST_CASE("Boolean substitution helpers distinguish enum-shaped and truthy value
 }
 
 } // namespace config_deserialization_contracts
+
+namespace config_nil_handling_contracts {
+
+TEST_CASE("DynamicConfig remove_nil_options removes only fully nil vectors", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("nil", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+    config.set_key_value("all_nil", new ConfigOptionIntsNullable({ConfigOptionIntsNullable::nil_value(), ConfigOptionIntsNullable::nil_value()}));
+    config.set_key_value("mixed", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value(), 2.}));
+    config.set_key_value("value", new ConfigOptionInt(7));
+
+    const size_t removed = config.remove_nil_options();
+    CHECK(removed == 2);
+    CHECK_FALSE(config.has("nil"));
+    CHECK_FALSE(config.has("all_nil"));
+    CHECK(config.has("mixed"));
+    CHECK(config.has("value"));
+    CHECK(config.size() == 2);
+}
+
+TEST_CASE("DynamicPrintConfig null_nullables clears nullable values without removing options", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *speed = config.option<ConfigOptionFloatsOrPercentsNullable>("small_perimeter_speed");
+    auto *retract = config.option<ConfigOptionFloatsNullable>("filament_retract_length_nc");
+    auto *retract_layer = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
+    REQUIRE(speed != nullptr);
+    REQUIRE(retract != nullptr);
+    REQUIRE(retract_layer != nullptr);
+    speed->values = {FloatOrPercent(37., false), FloatOrPercent(12., true)};
+    retract->values = {1.5, 2.5};
+    retract_layer->values = {1, 0};
+    config.option<ConfigOptionFloat>("layer_height")->value = 0.3;
+    config.option<ConfigOptionBools>("retract_when_changing_layer")->values = {1, 0};
+
+    CHECK_NOTHROW(config.null_nullables());
+
+    for (const char *key : {"small_perimeter_speed", "filament_retract_length_nc", "filament_retract_when_changing_layer"}) {
+        CAPTURE(key);
+        REQUIRE(config.has(key));
+        CHECK(config.option(key)->is_nil());
+        CHECK(config.option(key)->serialize() == "nil");
+    }
+    // Options that cannot be nil keep their values.
+    CHECK_THAT(config.option<ConfigOptionFloat>("layer_height")->value, Catch::Matchers::WithinAbs(0.3, 1e-9));
+    CHECK(config.option<ConfigOptionBools>("retract_when_changing_layer")->values == std::vector<unsigned char>{1, 0});
+}
+
+} // namespace config_nil_handling_contracts
