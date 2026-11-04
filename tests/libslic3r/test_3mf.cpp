@@ -8079,32 +8079,16 @@ TEST_CASE("G-code archive streams preserve project metadata and configuration", 
     CHECK(row.second == int(archive.model.objects.front()->instances[0]->id().id));
 }
 
-// The archive loads and yields one plate whether or not the source plate had image and bounding-box
-// paths; the next case's tagged assertions rely on this.
-TEST_CASE("G-code archive streams load a plate with and without image and bounding-box paths", "[3MF][3MFStream]")
+// The stream loader keeps archive-relative paths (unlike the file loader, which prefixes the backup
+// folder): the plate reports the generated entry names, or nothing when the plate had no such file.
+TEST_CASE("G-code archive streams preserve plate image and bounding-box paths", "[3MF][3MFStream]")
 {
     const bool populated = GENERATE(false, true);
     CAPTURE(populated);
     StreamArchive archive(populated);
     StreamLoad stream;
     REQUIRE(stream.load(read_all(archive.file.string())));
-    CHECK(stream.loaded.plates.size() == 1);
-}
-
-// Known bug: the stream importer assigns `pick_file.empty()` and `pattern_bbox_file.empty()` (a bool)
-// to the plate's string members (bbs_3mf.cpp, load_gcode_3mf_from_stream), so the plate gets a
-// one-character string (0x01 when the path is empty, 0x00 when it is set) instead of the stored
-// path. The stream loader keeps archive-relative paths (unlike the file loader, which prefixes the
-// backup folder): the expected values are Metadata/pick_1.png and Metadata/plate_1.json. Fixed by
-// the follow-up fix PR. Load success and the plate count are asserted by the previous case; if
-// either failed here the test would run no assertion and be reported as an unexpected pass.
-TEST_CASE("G-code archive streams preserve plate image and bounding-box paths", "[3MF][3MFStream][!shouldfail]")
-{
-    const bool populated = GENERATE(false, true);
-    StreamArchive archive(populated);
-    StreamLoad stream;
-    if (!stream.load(read_all(archive.file.string())) || stream.loaded.plates.size() != 1)
-        return;
+    REQUIRE(stream.loaded.plates.size() == 1);
     CHECK(stream.loaded.plates.front()->pick_file == (populated ? "Metadata/pick_1.png" : ""));
     CHECK(stream.loaded.plates.front()->pattern_bbox_file == (populated ? "Metadata/plate_1.json" : ""));
 }
