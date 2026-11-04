@@ -711,8 +711,11 @@ double ConfigBase::get_abs_value_at(const t_config_option_key &opt_key, size_t i
 {
     const ConfigOption *raw_opt = this->option(opt_key);
     assert(raw_opt != nullptr);
+    // coFloats / coFloatsOrPercents are shared by the nullable and non-nullable option classes,
+    // which are distinct types: cast to the one the option really is.
     if (raw_opt->type() == coFloats) {
-        return static_cast<const ConfigOptionFloats*>(raw_opt)->get_at(index);
+        return raw_opt->nullable() ? static_cast<const ConfigOptionFloatsNullable*>(raw_opt)->get_at(index)
+                                   : static_cast<const ConfigOptionFloats*>(raw_opt)->get_at(index);
     }
     if (raw_opt->type() == coFloatsOrPercents) {
         const ConfigDef *def = this->def();
@@ -725,8 +728,11 @@ double ConfigBase::get_abs_value_at(const t_config_option_key &opt_key, size_t i
         } else {
             const ConfigOption *ratio_opt = this->option(opt_def->ratio_over);
             assert(ratio_opt->type() == coFloats);
-            const ConfigOptionFloats *ratio_values = static_cast<const ConfigOptionFloats *>(ratio_opt);
-            return static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index).get_abs_value(ratio_values->get_at(index));
+            const double ratio = ratio_opt->nullable() ? static_cast<const ConfigOptionFloatsNullable *>(ratio_opt)->get_at(index)
+                                                       : static_cast<const ConfigOptionFloats *>(ratio_opt)->get_at(index);
+            const FloatOrPercent &value = raw_opt->nullable() ? static_cast<const ConfigOptionFloatsOrPercentsNullable *>(raw_opt)->get_at(index)
+                                                              : static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index);
+            return value.get_abs_value(ratio);
         }
     }
 
