@@ -8999,3 +8999,80 @@ TEST_CASE("BBS thumbnail accessor picks the Bambu middle, then the standard, the
 }
 
 } // namespace bbs_thumbnail_accessor_contracts
+
+namespace bbs_calibration_thumbnail_contracts {
+using namespace Slic3r;
+
+namespace {
+
+std::vector<std::string> entry_names(const std::string& path)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+    std::vector<std::string> names;
+    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&zip); ++i) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &stat));
+        std::string name(stat.m_filename);
+        std::replace(name.begin(), name.end(), '\\', '/');
+        names.push_back(name);
+    }
+    return names;
+}
+
+bool store_with_calibration_thumbnail(const std::string& path, ThumbnailData& thumbnail, SaveStrategy strategy)
+{
+    ScopedTemporaryDir backup("orca_bbs_calibration_thumbnail");
+    Model model;
+    model.set_backup_path(backup.string());
+    ScopeGuard detach([&model] { model.set_backup_path("detach"); });
+    model.add_object("calibration-cube", "cube.stl", make_cube(4., 5., 6.))->add_instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.config                = config;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+    StoreParams params;
+    params.path                       = path;
+    params.model                      = &model;
+    params.config                     = &config;
+    params.plate_data_list            = {&plate};
+    params.calibration_thumbnail_data = {&thumbnail};
+    params.strategy                   = strategy;
+    return store_bbs_3mf(params);
+}
+
+} // namespace
+
+// The calibration thumbnail writer in the exporter is an unfinished stub (its body is commented out
+// and the application passes no calibration thumbnails), so no calibration image is ever written.
+// Whether a valid calibration thumbnail should make the export fail, as it does today, is an open
+// question and is not asserted here.
+TEST_CASE("BBS export skips a calibration thumbnail it does not store", "[3MF][Bbs3mfCalibration]")
+{
+    ThumbnailData invalid;
+    invalid.set(2, 2);
+    invalid.pixels.pop_back();
+    REQUIRE_FALSE(invalid.is_valid());
+    ThumbnailData valid;
+    valid.set(2, 2);
+    std::fill(valid.pixels.begin(), valid.pixels.end(), static_cast<unsigned char>(0x7a));
+    REQUIRE(valid.is_valid());
+
+    // An invalid thumbnail is skipped, and a valid one is ignored when static output is disabled.
+    ScopedTemporaryFile with_invalid(".3mf");
+    REQUIRE(store_with_calibration_thumbnail(with_invalid.string(), invalid, SaveStrategy::Zip64 | SaveStrategy::Silence));
+    ScopedTemporaryFile with_valid_skip_static(".3mf");
+    REQUIRE(store_with_calibration_thumbnail(with_valid_skip_static.string(), valid,
+                                             SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipStatic));
+    for (const std::string& path : {with_invalid.string(), with_valid_skip_static.string()}) {
+        const std::vector<std::string> names = entry_names(path);
+        // Positive control: a real 3MF with its model part, and no image entry of any kind.
+        CHECK(std::count(names.begin(), names.end(), "3D/3dmodel.model") == 1);
+        CHECK(std::none_of(names.begin(), names.end(), [](const std::string& name) { return boost::algorithm::iends_with(name, ".png"); }));
+    }
+}
+
+} // namespace bbs_calibration_thumbnail_contracts
