@@ -4932,3 +4932,341 @@ TEST_CASE("Multi-to-multi rejects a config without the identity columns", "[Conf
     CHECK(old_config.update_values_from_multi_to_multi(new_config, keys, "missing_id", "missing_variant", variants) == -1);
     CHECK(speeds(old_config) == std::vector<double>({11.}));
 }
+
+namespace config_dynamic_container_contracts {
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+DynamicConfig dynamic_pair(double left, double right)
+{
+    DynamicConfig config;
+    config.set_key_value("left", new ConfigOptionFloat(left));
+    config.set_key_value("right", new ConfigOptionFloat(right));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("DynamicConfig equality, diff, equal, and skipped keys are coherent", "[Config][ConfigContracts]")
+{
+    DynamicConfig left = dynamic_pair(1., 2.);
+    DynamicConfig right = dynamic_pair(1., 5.);
+
+    CHECK_FALSE(left.equals(right));
+    CHECK(left.equal(right) == t_config_option_keys{"left"});
+    CHECK(left.diff(right) == t_config_option_keys{"right"});
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.is_different());
+    REQUIRE(report.differences.count("right") == 1);
+    const auto &difference = report.differences.at("right");
+    CHECK(difference.is_different_value());
+    REQUIRE(difference.left_value.has_value());
+    REQUIRE(difference.right_value.has_value());
+    CHECK(*difference.left_value != *difference.right_value);
+
+    const std::set<std::string> skipped{"right"};
+    CHECK(left.equals(right, &skipped));
+}
+
+TEST_CASE("DynamicConfig equals, equal and diff ignore keys present on one side only", "[Config][ConfigContracts]")
+{
+    DynamicConfig left = dynamic_pair(1., 2.);
+    DynamicConfig right = dynamic_pair(1., 2.);
+    left.set_key_value("left_only", new ConfigOptionInt(1));
+    right.set_key_value("right_only", new ConfigOptionInt(2));
+
+    CHECK(left.equals(right));
+    CHECK(left.diff(right).empty());
+    CHECK(left.equal(right) == t_config_option_keys{"left", "right"});
+
+    right.opt<ConfigOptionFloat>("right")->value = 3.;
+    CHECK_FALSE(left.equals(right));
+    CHECK(left.diff(right) == t_config_option_keys{"right"});
+}
+
+TEST_CASE("DynamicConfig diff report distinguishes missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("only_left", new ConfigOptionInt(3));
+    right.set_key_value("only_right", new ConfigOptionString("yes"));
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.differences.size() == 2);
+    REQUIRE(report.differences.count("only_left") == 1);
+    REQUIRE(report.differences.count("only_right") == 1);
+    CHECK(report.differences.at("only_left").left_value == "3");
+    CHECK_FALSE(report.differences.at("only_left").right_value.has_value());
+    CHECK_FALSE(report.differences.at("only_right").left_value.has_value());
+    CHECK(report.differences.at("only_right").right_value == "yes");
+}
+
+TEST_CASE("DynamicConfig copy constructors deep-copy the options", "[Config][ConfigContracts]")
+{
+    DynamicConfig original;
+    original.set_key_value("count", new ConfigOptionInt(4));
+
+    const ConfigBase &original_base = original;
+    DynamicConfig copied_from_base(original_base);
+    REQUIRE(copied_from_base.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied_from_base.opt<ConfigOptionInt>("count")->value == 4);
+    copied_from_base.opt<ConfigOptionInt>("count")->value = 6;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+
+    DynamicConfig copied(original);
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 4);
+    copied.opt<ConfigOptionInt>("count")->value = 9;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+    CHECK(copied_from_base.opt<ConfigOptionInt>("count")->value == 6);
+}
+
+TEST_CASE("DynamicConfig operator== compares the values of its keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig original;
+    original.set_key_value("count", new ConfigOptionInt(4));
+
+    const DynamicConfig identical(original);
+    CHECK(original == identical);
+
+    DynamicConfig changed(original);
+    changed.opt<ConfigOptionInt>("count")->value = 9;
+    CHECK_FALSE(original == changed);
+}
+
+TEST_CASE("DynamicConfig += by reference adds missing keys as independent copies", "[Config][ConfigContracts]")
+{
+    DynamicConfig target;
+    target.set_key_value("count", new ConfigOptionInt(9));
+    DynamicConfig extra;
+    extra.set_key_value("label", new ConfigOptionString("extra"));
+
+    target += extra;
+    REQUIRE(target.has("label"));
+    CHECK(target.opt_string("label") == "extra");
+    // Existing keys are still there.
+    REQUIRE(target.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(target.opt<ConfigOptionInt>("count")->value == 9);
+    CHECK(extra.opt_string("label") == "extra");
+
+    extra.opt_string("label") = "changed";
+    CHECK(target.opt_string("label") == "extra");
+}
+
+TEST_CASE("DynamicConfig += from an rvalue replaces existing keys, adds new ones and empties the source", "[Config][ConfigContracts]")
+{
+    DynamicConfig target;
+    target.set_key_value("count", new ConfigOptionInt(9));
+    target.set_key_value("kept", new ConfigOptionBool(true));
+
+    DynamicConfig replacement;
+    replacement.set_key_value("count", new ConfigOptionInt(17));
+    replacement.set_key_value("label", new ConfigOptionString("moved"));
+    target += std::move(replacement);
+
+    CHECK(target.size() == 3);
+    REQUIRE(target.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(target.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(target.opt_string("label") == "moved");
+    CHECK(target.opt<ConfigOptionBool>("kept")->value);
+    // The header documents that the source options are cleared.
+    CHECK(replacement.empty());
+}
+
+TEST_CASE("DynamicConfig move constructor takes the options of the source", "[Config][ConfigContracts]")
+{
+    DynamicConfig source;
+    source.set_key_value("count", new ConfigOptionInt(17));
+    source.set_key_value("label", new ConfigOptionString("moved"));
+
+    DynamicConfig moved(std::move(source));
+    CHECK(moved.size() == 2);
+    REQUIRE(moved.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(moved.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(moved.opt_string("label") == "moved");
+    // The header documents that the source options are cleared.
+    CHECK(source.empty());
+}
+
+TEST_CASE("DynamicConfig swap exchanges all options of both configs", "[Config][ConfigContracts]")
+{
+    DynamicConfig first;
+    first.set_key_value("count", new ConfigOptionInt(17));
+    first.set_key_value("label", new ConfigOptionString("moved"));
+    DynamicConfig second;
+    second.set_key_value("other", new ConfigOptionBool(true));
+
+    first.swap(second);
+
+    CHECK(first.size() == 1);
+    CHECK(first.has("other"));
+    CHECK_FALSE(first.has("count"));
+    CHECK_FALSE(first.has("label"));
+    CHECK(second.size() == 2);
+    CHECK_FALSE(second.has("other"));
+    REQUIRE(second.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(second.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(second.opt_string("label") == "moved");
+}
+
+TEST_CASE("DynamicConfig erase removes one key and reports whether it existed", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("count", new ConfigOptionInt(1));
+    config.set_key_value("label", new ConfigOptionString("kept"));
+
+    CHECK(config.erase("count"));
+    CHECK_FALSE(config.has("count"));
+    CHECK(config.has("label"));
+    CHECK_FALSE(config.erase("count"));
+    CHECK(config.size() == 1);
+}
+
+TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts][!shouldfail]")
+{
+    DynamicConfig target;
+    target.set_key_value("count", new ConfigOptionInt(4));
+    DynamicConfig source;
+    source.set_key_value("count", new ConfigOptionInt(12));
+
+    target += source;
+    // Known bug: the lvalue operator+= only adds missing keys and keeps the old value of existing
+    // ones; it should overwrite them with the source value, as the rvalue overload does.
+    CHECK(target.opt<ConfigOptionInt>("count")->value == 12);
+}
+
+TEST_CASE("ConfigBase equality ignores missing options but reports present differences", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("shared", new ConfigOptionString("same"));
+    left.set_key_value("left_only", new ConfigOptionInt(1));
+    right.set_key_value("shared", new ConfigOptionString("same"));
+    right.set_key_value("right_only", new ConfigOptionInt(2));
+
+    const ConfigBase &left_base = left;
+    const ConfigBase &right_base = right;
+    CHECK(left_base.equals(right_base));
+    CHECK(left_base.equal(right_base) == t_config_option_keys{"shared"});
+    CHECK(left_base.diff(right_base).empty());
+
+    right.opt_string("shared") = "changed";
+    CHECK_FALSE(left_base.equals(right_base));
+    CHECK(left_base.diff(right_base) == t_config_option_keys{"shared"});
+
+    const std::set<std::string> skipped{"shared"};
+    CHECK(left_base.equals(right_base, &skipped));
+}
+
+TEST_CASE("ConfigBase apply_only copies only the addressed slot of a populated vector", "[Config][ConfigContracts][ConfigApplyOnly]")
+{
+    DynamicPrintConfig source = DynamicPrintConfig::full_print_config();
+    auto *source_plugins = source.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(source_plugins != nullptr);
+    source_plugins->values = {"alpha", "beta"};
+
+    DynamicPrintConfig populated = DynamicPrintConfig::full_print_config();
+    auto *populated_plugins = populated.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(populated_plugins != nullptr);
+    populated_plugins->values = {"left", "right"};
+    populated.apply_only(source, {"slicing_pipeline_plugin#1"});
+    CHECK(populated_plugins->values == std::vector<std::string>{"left", "beta"});
+}
+
+TEST_CASE("ConfigBase apply_only creates a missing vector and sets the addressed slot", "[Config][ConfigContracts][ConfigApplyOnly]")
+{
+    DynamicPrintConfig source = DynamicPrintConfig::full_print_config();
+    auto *source_plugins = source.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(source_plugins != nullptr);
+    source_plugins->values = {"alpha", "beta"};
+
+    // A DynamicPrintConfig made from a selected default set has no vector object yet.
+    std::unique_ptr<DynamicPrintConfig> sparse(DynamicPrintConfig::new_from_defaults_keys({"layer_height"}));
+    REQUIRE(sparse != nullptr);
+    REQUIRE_FALSE(sparse->has("slicing_pipeline_plugin"));
+    sparse->apply_only(source, {"slicing_pipeline_plugin#1"});
+    const auto *materialized_plugins = sparse->option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(materialized_plugins != nullptr);
+    REQUIRE(materialized_plugins->values.size() == 2);
+    CHECK(materialized_plugins->values[1] == "beta");
+}
+
+TEST_CASE("DynamicConfig indexed accessors preserve regular and nullable option semantics", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    auto *regular_floats = config.option<ConfigOptionFloats>("filament_change_length_nc");
+    REQUIRE(regular_floats != nullptr);
+    regular_floats->values = {6., 7.};
+    double &regular_value = config.opt_float("filament_change_length_nc", 1);
+    regular_value = 7.5;
+    CHECK_THAT(regular_floats->values[0], WithinAbs(6., 1e-12));
+    CHECK_THAT(regular_floats->values[1], WithinAbs(7.5, 1e-12));
+
+    auto *nullable_floats = config.option<ConfigOptionFloatsNullable>("filament_retract_length_nc");
+    REQUIRE(nullable_floats != nullptr);
+    nullable_floats->values = {ConfigOptionFloatsNullable::nil_value(), 2.5};
+    double &nullable_value = config.opt_float("filament_retract_length_nc", 1);
+    nullable_value = 2.75;
+    CHECK_THAT(nullable_floats->values[1], WithinAbs(2.75, 1e-12));
+    CHECK(std::isnan(nullable_floats->values[0]));
+    CHECK(std::isnan(config.opt_float("filament_retract_length_nc", 0)));
+
+    const DynamicPrintConfig &const_config = config;
+    CHECK_THAT(const_config.opt_float("filament_change_length_nc", 0), WithinAbs(6., 1e-12));
+    CHECK_THAT(const_config.opt_float("filament_change_length_nc", 1), WithinAbs(7.5, 1e-12));
+    CHECK(std::isnan(const_config.opt_float("filament_retract_length_nc", 0)));
+    CHECK_THAT(const_config.opt_float("filament_retract_length_nc", 1), WithinAbs(2.75, 1e-12));
+
+    auto *regular_bools = config.option<ConfigOptionBools>("retract_when_changing_layer");
+    REQUIRE(regular_bools != nullptr);
+    regular_bools->values = {0, 1};
+    CHECK_FALSE(const_config.opt_bool("retract_when_changing_layer", 0));
+    CHECK(const_config.opt_bool("retract_when_changing_layer", 1));
+
+    auto *nullable_bools = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
+    REQUIRE(nullable_bools != nullptr);
+    nullable_bools->values = {ConfigOptionBoolsNullable::nil_value(), 0, 1};
+    // Concrete slots read back as stored; how a nil slot reads is deliberately not pinned.
+    CHECK_FALSE(const_config.opt_bool("filament_retract_when_changing_layer", 1));
+    CHECK(const_config.opt_bool("filament_retract_when_changing_layer", 2));
+}
+
+TEST_CASE("DynamicConfig indexed accessors read and write the addressed slot of each vector type", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicConfig config;
+    config.set_key_value("ratio_slots", new ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(12., false), FloatOrPercent(25., true)}));
+    config.set_key_value("int_slots", new ConfigOptionInts({3, 5}));
+    config.set_key_value("nullable_int_slots", new ConfigOptionIntsNullable({ConfigOptionIntsNullable::nil_value(), 11}));
+    config.set_key_value("enum_slots", new ConfigOptionEnumsGeneric({4, 9}));
+    config.set_key_value("nullable_enum_slots", new ConfigOptionEnumsGenericNullable({ConfigOptionEnumsGenericNullable::nil_value(), 12}));
+    auto *nullable_bool_slots = new ConfigOptionBoolsNullable;
+    nullable_bool_slots->values = {ConfigOptionBoolsNullable::nil_value(), 0, 1};
+    config.set_key_value("nullable_bool_slots", nullable_bool_slots);
+
+    FloatOrPercent &ratio_slot = config.opt_float_or_percent_nullable("ratio_slots", 1);
+    ratio_slot.value = 30.;
+    ratio_slot.percent = true;
+    config.opt_int("int_slots", 1) = 7;
+    config.opt_int_nullable("nullable_int_slots", 1) = 13;
+
+    const DynamicConfig &view = config;
+    CHECK_THAT(view.opt_float_or_percent_nullable("ratio_slots", 0).value, WithinAbs(12., 1e-12));
+    CHECK_FALSE(view.opt_float_or_percent_nullable("ratio_slots", 0).percent);
+    CHECK_THAT(view.opt_float_or_percent_nullable("ratio_slots", 1).value, WithinAbs(30., 1e-12));
+    CHECK(view.opt_float_or_percent_nullable("ratio_slots", 1).percent);
+    CHECK(view.opt_int("int_slots", 0) == 3);
+    CHECK(view.opt_int("int_slots", 1) == 7);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 1) == 13);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 0) == ConfigOptionIntsNullable::nil_value());
+    CHECK(view.opt_enum("enum_slots", 0) == 4);
+    CHECK(view.opt_enum("enum_slots", 1) == 9);
+    CHECK(view.opt_enum_nullable("nullable_enum_slots", 1) == 12);
+    CHECK(view.opt_enum_nullable("nullable_enum_slots", 0) == ConfigOptionEnumsGenericNullable::nil_value());
+    CHECK_FALSE(view.opt_bool_nullable("nullable_bool_slots", 1));
+    CHECK(view.opt_bool_nullable("nullable_bool_slots", 2));
+}
+
+} // namespace config_dynamic_container_contracts
