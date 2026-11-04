@@ -4891,3 +4891,88 @@ TEST_CASE("Legacy exporter rejects an object with an empty volume mesh", "[Legac
 }
 
 } // namespace legacy_3mf_contracts
+
+namespace plate_metadata_contracts {
+
+namespace {
+
+// Three filaments with different diameters and densities, so each result can be traced to its own entry.
+void set_materials(GCodeProcessorResult &result)
+{
+    result.filament_diameters = {2.f, 1.f, 3.f};
+    result.filament_densities = {1.25f, 2.f, .5f};
+}
+
+const FilamentInfo &filament_info(const PlateData &plate, int id)
+{
+    const auto found = std::find_if(plate.slice_filaments_info.begin(), plate.slice_filaments_info.end(),
+                                    [id](const FilamentInfo &info) { return info.id == id; });
+    REQUIRE(found != plate.slice_filaments_info.end());
+    return *found;
+}
+
+} // namespace
+
+TEST_CASE("Plate filament length and mass come from each filament's own diameter and density", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    set_materials(result);
+    // Volumes are in mm^3; length is volume / cross-section in metres, mass volume * density in grams.
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}, {1, 2000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    CHECK_THAT(filament_info(plate, 0).used_m, Catch::Matchers::WithinAbs(1. / PI, 1e-6));
+    CHECK_THAT(filament_info(plate, 0).used_g, Catch::Matchers::WithinAbs(1.25, 1e-6));
+    CHECK_THAT(filament_info(plate, 1).used_m, Catch::Matchers::WithinAbs(8. / PI, 1e-6));
+    CHECK_THAT(filament_info(plate, 1).used_g, Catch::Matchers::WithinAbs(4., 1e-6));
+}
+
+TEST_CASE("Plate filament properties are looked up by filament id when ids are sparse", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    set_materials(result);
+    // Only filament 2 is used: it must take the third diameter and density, not the first.
+    result.print_statistics.total_volumes_per_extruder = {{2, 9000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    CHECK_THAT(filament_info(plate, 2).used_m, Catch::Matchers::WithinAbs(4. / PI, 1e-6));
+    CHECK_THAT(filament_info(plate, 2).used_g, Catch::Matchers::WithinAbs(4.5, 1e-6));
+}
+
+TEST_CASE("A zero filament diameter gives zero length and keeps the mass", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    set_materials(result);
+    result.filament_diameters[0] = 0.f;
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK_THAT(filament_info(plate, 0).used_m, Catch::Matchers::WithinAbs(0., 0.));
+    CHECK_THAT(filament_info(plate, 0).used_g, Catch::Matchers::WithinAbs(1.25, 1e-6));
+}
+
+TEST_CASE("Object and support usage flags follow their own volume records", "[3MF][PlateMetadata]")
+{
+    // The flag needs a volume above EPSILON (1e-4 mm^3): 0 and 5e-5 are below it, 2e-4 and the large
+    // values above. The exact-equal case is not exercised.
+    static_assert(EPSILON == 1e-4, "the rows below straddle this threshold");
+    const double object_volume = GENERATE(0., 5e-5, 2e-4, 3.);
+    const double support_volume = GENERATE(0., 5e-5, 2e-4, 7.);
+    CAPTURE(object_volume, support_volume);
+    GCodeProcessorResult result;
+    set_materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}, {1, 0.}};
+    result.print_statistics.model_volumes_per_extruder = {{0, object_volume}};
+    result.print_statistics.support_volumes_per_extruder = {{0, support_volume}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament_info(plate, 0).used_for_object == (object_volume > 1e-4));
+    CHECK(filament_info(plate, 0).used_for_support == (support_volume > 1e-4));
+    // Filament 1 has no model or support records at all.
+    CHECK_FALSE(filament_info(plate, 1).used_for_object);
+    CHECK_FALSE(filament_info(plate, 1).used_for_support);
+}
+
+} // namespace plate_metadata_contracts
