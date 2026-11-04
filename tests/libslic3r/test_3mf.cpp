@@ -4955,9 +4955,11 @@ TEST_CASE("A zero filament diameter gives zero length and keeps the mass", "[3MF
 
 TEST_CASE("Object and support usage flags follow their own volume records", "[3MF][PlateMetadata]")
 {
-    // 0 and 1e-6 mm^3 are not used (the threshold is EPSILON), 3 mm^3 is.
-    const double object_volume = GENERATE(0., 1e-6, 3.);
-    const double support_volume = GENERATE(0., 1e-6, 7.);
+    // The flag needs a volume above EPSILON (1e-4 mm^3): 0 and 5e-5 are below it, 2e-4 and the large
+    // values above. The exact-equal case is not exercised.
+    static_assert(EPSILON == 1e-4, "the rows below straddle this threshold");
+    const double object_volume = GENERATE(0., 5e-5, 2e-4, 3.);
+    const double support_volume = GENERATE(0., 5e-5, 2e-4, 7.);
     CAPTURE(object_volume, support_volume);
     GCodeProcessorResult result;
     set_materials(result);
@@ -4966,8 +4968,8 @@ TEST_CASE("Object and support usage flags follow their own volume records", "[3M
     result.print_statistics.support_volumes_per_extruder = {{0, support_volume}};
     PlateData plate;
     plate.parse_filament_info(&result);
-    CHECK(filament_info(plate, 0).used_for_object == (object_volume > 1.));
-    CHECK(filament_info(plate, 0).used_for_support == (support_volume > 1.));
+    CHECK(filament_info(plate, 0).used_for_object == (object_volume > 1e-4));
+    CHECK(filament_info(plate, 0).used_for_support == (support_volume > 1e-4));
     // Filament 1 has no model or support records at all.
     CHECK_FALSE(filament_info(plate, 1).used_for_object);
     CHECK_FALSE(filament_info(plate, 1).used_for_support);
