@@ -5270,3 +5270,49 @@ TEST_CASE("DynamicConfig indexed accessors read and write the addressed slot of 
 }
 
 } // namespace config_dynamic_container_contracts
+
+namespace config_intsgroups_order_contracts {
+
+TEST_CASE("Grouped integer settings order by the first differing group or value", "[Config][ConfigContracts][ConfigGroupOrder]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    const ConfigOptionIntsGroups higher_first({std::vector<int>{2, 0}});
+    CHECK(value < higher_first);
+    CHECK_FALSE(higher_first < value);
+
+    const ConfigOptionIntsGroups higher_second({std::vector<int>{1, 10}});
+    CHECK(value < higher_second);
+    CHECK_FALSE(higher_second < value);
+
+    // Only the second group differs.
+    const ConfigOptionIntsGroups two_low({std::vector<int>{1, 9}, std::vector<int>{5}});
+    const ConfigOptionIntsGroups two_high({std::vector<int>{1, 9}, std::vector<int>{6}});
+    CHECK(two_low < two_high);
+    CHECK_FALSE(two_high < two_low);
+}
+
+TEST_CASE("Grouped integer settings are not less than an equal value", "[Config][ConfigContracts][ConfigGroupOrder][!shouldfail]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}, std::vector<int>{5}});
+    const ConfigOptionIntsGroups identical(value);
+    const ConfigOptionIntsGroups empty;
+    // Known bug: operator< returns true when every compared group is equal, so a < a holds;
+    // it should be false for equal values (a strict weak ordering).
+    CHECK_FALSE(value < identical);
+    CHECK_FALSE(identical < value);
+    CHECK_FALSE(empty < empty);
+}
+
+// Hidden: reads past the end of the shorter operand's groups (undefined behavior).
+TEST_CASE("Grouped integer settings with more groups than the other side are not less", "[Config][ConfigContracts][ConfigGroupOrder][.]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    const ConfigOptionIntsGroups empty;
+    const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
+    // Known bug: operator< indexes rhs.values[i] for every lhs group, past the end when rhs has
+    // fewer groups; it should order a prefix before the longer sequence and not be less than it.
+    CHECK_FALSE(value < empty);
+    CHECK_FALSE(longer < value);
+}
+
+} // namespace config_intsgroups_order_contracts
