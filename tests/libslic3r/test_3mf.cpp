@@ -8607,31 +8607,56 @@ TEST_CASE("Generic 3MF stores the thumbnail as a PNG entry with its relationship
         for (int col = 0; col < 3; ++col)
             for (int channel = 0; channel < 4; ++channel) {
                 INFO("image row " << image_row << " column " << col << " channel " << channel);
+                // The encoder flips rows and the decoder reads bottom-up, so this pins the round trip of the
+                // pair, not the stored row order.
                 CHECK(decoded.buf[4 * (size_t(image_row) * 3 + col) + channel] == source_rows[image_row][col][channel]);
             }
 
+    // Each relationship is checked as one element, so a swapped target and type would fail.
     std::string relationships;
     REQUIRE(read_3mf_entry(archive.string(), relationships, "_rels/.rels"));
-    CHECK(relationships.find("Target=\"/Metadata/thumbnail.png\"") != std::string::npos);
-    CHECK(relationships.find("Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\"") != std::string::npos);
+    boost::property_tree::ptree relationship_tree;
+    std::istringstream relationship_input(relationships);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(relationship_input, relationship_tree));
+    std::map<std::string, std::pair<std::string, std::string>> by_target; // target -> {type, id}
+    for (const auto& child : relationship_tree.get_child("Relationships"))
+        if (child.first == "Relationship") {
+            const auto& attributes = child.second.get_child("<xmlattr>");
+            REQUIRE(by_target.emplace(attributes.get<std::string>("Target"),
+                                      std::make_pair(attributes.get<std::string>("Type"), attributes.get<std::string>("Id"))).second);
+        }
+    REQUIRE(by_target.count("/3D/3dmodel.model") == 1);
+    REQUIRE(by_target.count("/Metadata/thumbnail.png") == 1);
+    CHECK(by_target.at("/3D/3dmodel.model").first == "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel");
+    CHECK(by_target.at("/Metadata/thumbnail.png").first ==
+          "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail");
+    CHECK(by_target.at("/3D/3dmodel.model").second == "rel-1");
+    CHECK(by_target.at("/Metadata/thumbnail.png").second == "rel-2");
+    CHECK(by_target.size() == 2);
     std::string content_types;
     REQUIRE(read_3mf_entry(archive.string(), content_types, "[Content_Types].xml"));
     CHECK(content_types.find("Extension=\"png\" ContentType=\"image/png\"") != std::string::npos);
 }
 
+// Note: the package relationships list the thumbnail even when no entry is written (an exporter
+// inconsistency logged as an open question), so this case does not assert the relationships.
 TEST_CASE("Generic 3MF writes no thumbnail entry without a valid thumbnail", "[3MF][Generic3MFThumbnail]")
 {
     Model source = make_cube_model();
-    ThumbnailData invalid;
-    invalid.set(3, 2);
-    invalid.pixels.pop_back();
-    REQUIRE_FALSE(invalid.is_valid());
+    ThumbnailData short_buffer;
+    short_buffer.set(3, 2);
+    short_buffer.pixels.pop_back();
+    REQUIRE_FALSE(short_buffer.is_valid());
+    ThumbnailData zero_size; // default: zero width and height, no pixels
+    REQUIRE_FALSE(zero_size.is_valid());
 
     ScopedTemporaryFile without(".3mf");
     REQUIRE(store_3mf(without.string().c_str(), &source, nullptr, false));
-    ScopedTemporaryFile with_invalid(".3mf");
-    REQUIRE(store_3mf(with_invalid.string().c_str(), &source, nullptr, false, &invalid));
-    for (const std::string& path : {without.string(), with_invalid.string()}) {
+    ScopedTemporaryFile with_short(".3mf");
+    REQUIRE(store_3mf(with_short.string().c_str(), &source, nullptr, false, &short_buffer));
+    ScopedTemporaryFile with_zero(".3mf");
+    REQUIRE(store_3mf(with_zero.string().c_str(), &source, nullptr, false, &zero_size));
+    for (const std::string& path : {without.string(), with_short.string(), with_zero.string()}) {
         // Positive control: the archive is a readable 3MF with a model part.
         CHECK(has_entry(path, "3D/3dmodel.model"));
         CHECK_FALSE(has_entry(path, "Metadata/thumbnail.png"));
