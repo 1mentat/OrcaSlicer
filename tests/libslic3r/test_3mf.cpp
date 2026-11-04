@@ -4383,6 +4383,80 @@ TEST_CASE("BBS 3MF tolerates malformed brim point records and keeps the valid on
     CHECK_THAT(second[1].head_front_radius, Catch::Matchers::WithinAbs(0.25, 1e-5));
 }
 
+namespace {
+
+// Stores a project whose plate 1 has custom G-code (so the exporter writes the per-layer file), then
+// replaces that file with `xml`.
+void store_with_custom_gcode_file(const std::string &path, const std::string &xml)
+{
+    store_with_strategy(path, SaveStrategy::Zip64 | SaveStrategy::Silence, [](Model &model, PlateData &, StoreParams &) {
+        model.plates_custom_gcodes[0].mode = CustomGCode::Mode::SingleExtruder;
+        model.plates_custom_gcodes[0].gcodes = {{0.2, CustomGCode::ColorChange, 1, "#000000", ""}};
+    });
+    REQUIRE(rewrite_3mf_entries(path, [&xml](std::string &name, std::string &data) {
+        if (name != "Metadata/custom_gcode_per_layer.xml")
+            return false;
+        data = xml;
+        return true;
+    }));
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF falls back to the multi-extruder mode for an unrecognised custom-gcode mode", "[3MF][Bbs3mfExtended][CustomGCode][Errors]")
+{
+    const std::string mode = GENERATE("UnknownMode", "");
+    CAPTURE(mode);
+    ScopedTemporaryFile archive(".3mf");
+    store_with_custom_gcode_file(archive.string(),
+        "<custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.6\" type=\"3\" extruder=\"2\" color=\"#c0ffee\" extra=\"tool_change\"/>"
+        "<mode value=\"" + mode + "\"/></plate></custom_gcodes_per_layer>");
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const CustomGCode::Info &info = loaded_model.plates_custom_gcodes.at(0);
+    // The exported mode (SingleExtruder) and the unset default (Undef) are both different from the result.
+    CHECK(info.mode == CustomGCode::Mode::MultiExtruder);
+    REQUIRE(info.gcodes.size() == 1);
+    CHECK(info.gcodes.front().extruder == 2);
+    CHECK(info.gcodes.front().color == "#c0ffee");
+}
+
+TEST_CASE("BBS 3MF assigns custom-gcode records that carry no plate element to the first plate", "[3MF][Bbs3mfExtended][CustomGCode][Legacy]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    // Older projects listed the layers directly below the root element. One record is in the old
+    // form (gcode attribute) and one in the current form (type and extra attributes).
+    store_with_custom_gcode_file(archive.string(),
+        "<custom_gcodes_per_layer>"
+        "<layer top_z=\"0.6\" extruder=\"2\" color=\"#112233\" gcode=\"M601\"/>"
+        "<layer top_z=\"1.2\" type=\"" + std::to_string(int(CustomGCode::ToolChange)) +
+        "\" extruder=\"3\" color=\"#445566\" extra=\"tool-extra\"/>"
+        "<mode value=\"MultiAsSingle\"/></custom_gcodes_per_layer>");
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    REQUIRE(loaded_model.plates_custom_gcodes.count(0) == 1);
+    const CustomGCode::Info &info = loaded_model.plates_custom_gcodes.at(0);
+    CHECK(info.mode == CustomGCode::Mode::MultiAsSingle);
+    REQUIRE(info.gcodes.size() == 2);
+    CHECK_THAT(info.gcodes[0].print_z, Catch::Matchers::WithinAbs(0.6, 1e-9));
+    CHECK(info.gcodes[0].type == CustomGCode::PausePrint);
+    CHECK(info.gcodes[0].extruder == 2);
+    CHECK(info.gcodes[0].color == "#112233");
+    CHECK(info.gcodes[0].extra == "#112233");
+    CHECK_THAT(info.gcodes[1].print_z, Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK(info.gcodes[1].type == CustomGCode::ToolChange);
+    CHECK(info.gcodes[1].extruder == 3);
+    CHECK(info.gcodes[1].color == "#445566");
+    CHECK(info.gcodes[1].extra == "tool-extra");
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
