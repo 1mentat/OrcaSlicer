@@ -1680,6 +1680,11 @@ TEST_CASE("is_published_3mf_flag accepts only the literal \"1\"", "[3mf]") {
     CHECK_FALSE(is_published_3mf_flag("true"));
     CHECK_FALSE(is_published_3mf_flag(""));
     CHECK_FALSE(is_published_3mf_flag("YES"));
+    // Surrounding whitespace is not trimmed: only the exact marker counts.
+    CHECK_FALSE(is_published_3mf_flag(" 1"));
+    CHECK_FALSE(is_published_3mf_flag("1 "));
+    CHECK_FALSE(is_published_3mf_flag("1\n"));
+    CHECK_FALSE(is_published_3mf_flag("11"));
 }
 
 // bbs_3mf_is_published is the lightweight metadata probe used to decide whether a file was
