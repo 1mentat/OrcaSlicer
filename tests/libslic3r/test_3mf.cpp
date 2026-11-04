@@ -7235,3 +7235,102 @@ TEST_CASE("BBS slice metadata keeps raw names for Bambu printers and other firmw
 }
 
 } // namespace bbs_slice_info_name_contracts
+
+namespace bbs_maker_metadata_contracts {
+using namespace Slic3r;
+
+namespace {
+
+struct MakerMetadata
+{
+    std::string maker_name;
+    std::string maker_version;
+    std::string workflow;
+    std::string revision;
+};
+
+// Stores a minimal archive carrying the MakerLab fields and two custom metadata entries and
+// returns the model-level metadata the importer reads back; also checks that the serialized
+// model is well-formed XML with exactly one metadata element per key.
+std::map<std::string, std::string> round_trip(const MakerMetadata& values)
+{
+    ScopedTemporaryDir backup("orca_bbs_maker_metadata_store");
+    Model source;
+    source.set_backup_path(backup.string());
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    source.add_object("maker-part", "maker.stl", make_cube(4., 5., 6.))->add_instance();
+    source.mk_name    = values.maker_name;
+    source.mk_version = values.maker_version;
+    source.md_name    = {"MakerWorkflow", "MakerRevision"};
+    source.md_value   = {values.workflow, values.revision};
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    std::stringstream input(model_xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::map<std::string, int> element_count;
+    for (const auto& node : tree.get_child("model"))
+        if (node.first == "metadata")
+            ++element_count[node.second.get<std::string>("<xmlattr>.name")];
+    for (const char* key : {"MakerLab", "MakerLabVersion", "MakerWorkflow", "MakerRevision"}) {
+        INFO(key);
+        CHECK(element_count[key] == 1);
+    }
+
+    Model loaded_model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.model_info != nullptr);
+    return loaded_model.model_info->metadata_items;
+}
+
+} // namespace
+
+TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    // Markup characters and text that already looks like an entity must survive literally.
+    const MakerMetadata values{"Maker & <Lab> &amp; &unknown; literal", "maker-7 & <rev> &amp; literal",
+                               "prototype & <inside> &amp; literal", "rev <7> &amp;"};
+    const auto metadata = round_trip(values);
+    const std::map<std::string, std::string> expected{
+        {"MakerLab", values.maker_name},
+        {"MakerLabVersion", values.maker_version},
+        {"MakerWorkflow", values.workflow},
+        {"MakerRevision", values.revision},
+    };
+    for (const auto& [key, value] : expected) {
+        INFO(key);
+        const auto found = metadata.find(key);
+        REQUIRE(found != metadata.end());
+        CHECK(found->second == value);
+    }
+}
+
+TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata][!shouldfail]")
+{
+    const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
+                               "rev 7"};
+    const auto metadata = round_trip(values);
+    // Known bug: the importer's xml_unescape() decodes &amp; &lt; &gt; but not &quot; or &apos;, so
+    // quotes come back as entities; fixed by the follow-up fix PR. The unquoted entry is not
+    // affected and is checked above.
+    CHECK(metadata.at("MakerLab") == values.maker_name);
+    CHECK(metadata.at("MakerLabVersion") == values.maker_version);
+    CHECK(metadata.at("MakerWorkflow") == values.workflow);
+}
+
+} // namespace bbs_maker_metadata_contracts
