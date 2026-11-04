@@ -5316,3 +5316,121 @@ TEST_CASE("Grouped integer settings with more groups than the other side are not
 }
 
 } // namespace config_intsgroups_order_contracts
+
+namespace config_deserialization_contracts {
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("ConfigSubstitutionContext empty tracks substitution records, not unknown keys", "[Config][ConfigContracts]")
+{
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(context.empty());
+    context.unrecogized_keys.emplace_back("future_option");
+    CHECK(context.empty());
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"future_option"});
+
+    context.substitutions.push_back(ConfigSubstitution{nullptr, "future_value", ConfigOptionUniquePtr(new ConfigOptionInt(1))});
+    CHECK_FALSE(context.empty());
+}
+
+TEST_CASE("Config resolver returns present options and throws for missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("known_value", new ConfigOptionInt(17));
+    const ConfigBase &resolver = config;
+
+    const ConfigOption *known = resolver.option_throw("known_value");
+    REQUIRE(known != nullptr);
+    CHECK(known->type() == ConfigOptionInt::static_type());
+    CHECK(known == config.option("known_value"));
+    CHECK(known->serialize() == "17");
+    REQUIRE_THROWS_AS(resolver.option_throw("missing_value"), UnknownOptionException);
+}
+
+TEST_CASE("Strict deserialization converts typed string-key items", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const std::string bool_key = "gcode_comments";
+    const std::string int_key = "raft_layers";
+    // Both are coFloat options; the items differ in the C++ literal type they are given as.
+    const std::string float_literal_key = "max_bridge_length";
+    const std::string double_literal_key = "layer_height";
+
+    config.set_deserialize_strict({
+        {bool_key, true},
+        {int_key, 8},
+        {float_literal_key, 1.25f},
+        {double_literal_key, 0.5}
+    });
+
+    const auto *bool_value = config.option<ConfigOptionBool>(bool_key);
+    const auto *int_value = config.option<ConfigOptionInt>(int_key);
+    const auto *float_value = config.option<ConfigOptionFloat>(float_literal_key);
+    const auto *double_value = config.option<ConfigOptionFloat>(double_literal_key);
+    REQUIRE(bool_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(float_value != nullptr);
+    REQUIRE(double_value != nullptr);
+    CHECK(bool_value->value);
+    CHECK(int_value->value == 8);
+    CHECK_THAT(float_value->value, WithinAbs(1.25, 1e-9));
+    CHECK_THAT(double_value->value, WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("set_deserialize_strict stores absolute and percent line widths as typed values", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"outer_wall_line_width", "120%"},
+        {"inner_wall_line_width", 0.42}
+    });
+
+    const auto *outer = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
+    REQUIRE(outer != nullptr);
+    CHECK(outer->percent);
+    CHECK_THAT(outer->value, WithinAbs(120., 1e-9));
+    // 120% of a base width that is neither of the stored widths.
+    CHECK_THAT(config.get_abs_value("outer_wall_line_width", 0.45), WithinAbs(0.54, 1e-9));
+
+    const auto *inner = config.option<ConfigOptionFloatOrPercent>("inner_wall_line_width");
+    REQUIRE(inner != nullptr);
+    CHECK_FALSE(inner->percent);
+    CHECK_THAT(inner->value, WithinAbs(0.42, 1e-9));
+}
+
+TEST_CASE("Boolean substitution helpers distinguish enum-shaped and truthy values", "[Config][ConfigContracts][ConfigDeserialize]")
+{
+    const std::vector<std::pair<std::string, bool>> enum_cases{
+        {"enabled", true}, {" On ", true}, {"off", true},
+        {"yes please", false}, {"1future", false}, {"a.b", false},
+        {"", false}, {std::string(64, 'a'), true}, {std::string(65, 'a'), false}
+    };
+    for (const auto &[value, expected] : enum_cases) {
+        CAPTURE(value);
+        CHECK(ConfigHelpers::looks_like_enum_value(value) == expected);
+    }
+    CHECK(ConfigHelpers::enum_looks_like_true_value(" ENABLED "));
+    CHECK(ConfigHelpers::enum_looks_like_true_value("on"));
+    CHECK_FALSE(ConfigHelpers::enum_looks_like_true_value("yes"));
+
+    ConfigOptionBoolsNullable nullable;
+    CHECK(nullable.deserialize_with_substitutions(
+              "nil, ENABLED, off", false, ConfigHelpers::DeserializationSubstitution::DefaultsToFalse)
+          == ConfigHelpers::DeserializationResult::Substituted);
+    CHECK(nullable.values == std::vector<unsigned char>{ConfigOptionBoolsNullable::nil_value(), 1, 0});
+    CHECK(nullable.serialize() == "nil,1,0");
+
+    // An enum-shaped word that is not "on" / "enabled" takes the substitution default.
+    ConfigOptionBoolsNullable defaults_to_true;
+    CHECK(defaults_to_true.deserialize_with_substitutions(
+              "off, 0", false, ConfigHelpers::DeserializationSubstitution::DefaultsToTrue)
+          == ConfigHelpers::DeserializationResult::Substituted);
+    CHECK(defaults_to_true.values == std::vector<unsigned char>{1, 0});
+
+    // Without a substitution rule the same words are rejected.
+    ConfigOptionBoolsNullable strict;
+    CHECK(strict.deserialize_with_substitutions(
+              "enabled", false, ConfigHelpers::DeserializationSubstitution::Disabled)
+          == ConfigHelpers::DeserializationResult::Failed);
+}
+
+} // namespace config_deserialization_contracts
