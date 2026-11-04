@@ -6908,3 +6908,80 @@ TEST_CASE("BBS backup removal keeps the folder unless everything is removed", "[
 }
 
 } // namespace bbs_backup_contracts
+
+namespace bbs_source_metadata_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("BBS 3MF preserves source-volume provenance and path policy", "[3MF][Bbs3mfSourceMetadata]")
+{
+    const bool full_path_sources = GENERATE(false, true);
+    CAPTURE(full_path_sources);
+
+    Model source;
+    ModelObject* object = source.add_object();
+    object->name        = "source-provenance-object";
+    ModelVolume* part   = object->add_volume(make_cube(2., 3., 4.));
+    part->name          = "sourced-part";
+    part->source.input_file              = "/tmp/orca-source/component.stl";
+    part->source.object_idx              = 7;
+    part->source.volume_idx              = 11;
+    part->source.mesh_offset             = Vec3d(1.25, -2.5, 3.75);
+    part->source.is_converted_from_inches = true;
+
+    // The modifier has no source record, so the importer must not manufacture source ids,
+    // offsets or conversion flags for it.
+    ModelVolume* modifier = object->add_volume(make_cube(1., 2., 1.), ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->name        = "unsourced-modifier";
+    object->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_source_metadata_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+    ScopedTemporaryFile archive(".3mf");
+
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence |
+                             (full_path_sources ? SaveStrategy::FullPathSources : SaveStrategy::Default);
+    REQUIRE(store_bbs_3mf(params));
+
+    Model loaded_model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->volumes.size() == 2);
+
+    const ModelVolume* loaded_part     = loaded_model.objects.front()->volumes[0];
+    const ModelVolume* loaded_modifier = loaded_model.objects.front()->volumes[1];
+
+    CHECK(loaded_part->name == "sourced-part");
+    CHECK(loaded_part->type() == ModelVolumeType::MODEL_PART);
+    CHECK_THAT(its_volume(loaded_part->mesh().its), WithinAbs(24., 1e-5));
+    CHECK(loaded_part->source.input_file == (full_path_sources ? "/tmp/orca-source/component.stl" : "component.stl"));
+    CHECK(loaded_part->source.object_idx == 7);
+    CHECK(loaded_part->source.volume_idx == 11);
+    CHECK_THAT(loaded_part->source.mesh_offset.x(), WithinAbs(1.25, 1e-6));
+    CHECK_THAT(loaded_part->source.mesh_offset.y(), WithinAbs(-2.5, 1e-6));
+    CHECK_THAT(loaded_part->source.mesh_offset.z(), WithinAbs(3.75, 1e-6));
+    CHECK(loaded_part->source.is_converted_from_inches);
+    CHECK_FALSE(loaded_part->source.is_converted_from_meters);
+
+    CHECK(loaded_modifier->name == "unsourced-modifier");
+    CHECK(loaded_modifier->type() == ModelVolumeType::PARAMETER_MODIFIER);
+    CHECK_THAT(its_volume(loaded_modifier->mesh().its), WithinAbs(2., 1e-5));
+    CHECK(loaded_modifier->source.input_file.empty());
+    CHECK(loaded_modifier->source.object_idx == -1);
+    CHECK(loaded_modifier->source.volume_idx == -1);
+    CHECK(loaded_modifier->source.mesh_offset.isApprox(Vec3d::Zero(), 1e-9));
+    CHECK_FALSE(loaded_modifier->source.is_converted_from_inches);
+    CHECK_FALSE(loaded_modifier->source.is_converted_from_meters);
+}
+
+} // namespace bbs_source_metadata_contracts
