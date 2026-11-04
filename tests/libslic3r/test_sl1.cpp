@@ -1,5 +1,6 @@
 #include <miniz.h>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Point.hpp"
@@ -11,6 +12,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/Format/SL1.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/SLA/RasterBase.hpp"
@@ -28,6 +30,7 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -133,6 +136,82 @@ std::vector<std::pair<std::string, size_t>> archive_entries(const std::string &p
     return result;
 }
 
+class SL1RasterArchiveReader
+{
+    MZ_Archive m_archive{};
+    bool       m_open = false;
+
+public:
+    explicit SL1RasterArchiveReader(const std::string &path)
+        : m_open(open_zip_reader(&m_archive.arch, path))
+    {}
+
+    ~SL1RasterArchiveReader()
+    {
+        if (m_open)
+            close_zip_reader(&m_archive.arch);
+    }
+
+    bool is_open() const { return m_open; }
+
+    MZ_Archive &archive() { return m_archive; }
+};
+
+std::vector<std::uint8_t> read_archive_entry(const std::string &path,
+                                            const std::string &name)
+{
+    SL1RasterArchiveReader reader(path);
+    REQUIRE(reader.is_open());
+
+    const int index = mz_zip_reader_locate_file(&reader.archive().arch, name.c_str(), nullptr, 0);
+    REQUIRE(index >= 0);
+
+    mz_zip_archive_file_stat stat;
+    REQUIRE(mz_zip_reader_file_stat(&reader.archive().arch, mz_uint(index), &stat));
+
+    size_t extracted_size = 0;
+    void *raw = mz_zip_reader_extract_to_heap(&reader.archive().arch,
+                                              mz_uint(index), &extracted_size, 0);
+    std::unique_ptr<void, decltype(&mz_free)> owner(raw, &mz_free);
+    REQUIRE(owner != nullptr);
+    REQUIRE(extracted_size == size_t(stat.m_uncomp_size));
+
+    const auto *begin = static_cast<const std::uint8_t *>(owner.get());
+    return std::vector<std::uint8_t>(begin, begin + extracted_size);
+}
+
+png::ImageGreyscale render_sl1_layer(const SLAPrinterConfig &config,
+                                     const ExPolygon &shape)
+{
+    SL1Archive archive(config);
+    archive.draw_layers(1, [&shape](sla::RasterBase &raster, size_t) {
+        raster.draw(shape);
+    }, []() { return false; });
+
+    SLAPrint print;
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "raster-settings");
+
+    const std::vector<std::uint8_t> bytes =
+        read_archive_entry(output.string(), "raster-settings00000.png");
+    png::ImageGreyscale image;
+    const png::ReadBuf input{bytes.data(), bytes.size()};
+    REQUIRE(png::decode_png(input, image));
+    return image;
+}
+
+SLAPrinterConfig raster_settings_config(double gamma)
+{
+    SLAPrinterConfig config;
+    config.display_width.value = 10.;
+    config.display_height.value = 8.;
+    config.display_orientation.value = sladoLandscape;
+    config.display_mirror_x.value = false;
+    config.display_mirror_y.value = false;
+    config.gamma_correction.value = gamma;
+    return config;
+}
+
 void require_mesh(const indexed_triangle_set &mesh)
 {
     REQUIRE_FALSE(mesh.vertices.empty());
@@ -211,6 +290,107 @@ std::vector<std::array<float, 4>> layer_bounds(const indexed_triangle_set &mesh)
 }
 
 } // namespace
+
+TEST_CASE("SL1 raster dimensions and footprint follow display pixel settings",
+          "[SL1][SLARasterSettings][SL1RasterResolution]")
+{
+    struct ResolutionCase {
+        const char *label;
+        size_t      pixels_x;
+        size_t      pixels_y;
+        bool        use_defaults;
+    };
+
+    const std::array<ResolutionCase, 3> cases{{
+        {"registered defaults", 2560, 1440, true},
+        {"registered minimum", 100, 100, false},
+        {"asymmetric representative", 128, 160, false},
+    }};
+    const ExPolygon shape = square(2.5, 2.0, 7.5, 6.0);
+
+    for (const ResolutionCase &test_case : cases) {
+        INFO("resolution case: " << test_case.label);
+        SLAPrinterConfig config = raster_settings_config(0.);
+        if (!test_case.use_defaults) {
+            config.display_pixels_x.value = int(test_case.pixels_x);
+            config.display_pixels_y.value = int(test_case.pixels_y);
+        }
+
+        const png::ImageGreyscale image = render_sl1_layer(config, shape);
+        REQUIRE(image.cols == test_case.pixels_x);
+        REQUIRE(image.rows == test_case.pixels_y);
+        REQUIRE(image.buf.size() == image.cols * image.rows);
+
+        size_t active_pixels = 0;
+        size_t min_col = image.cols;
+        size_t max_col = 0;
+        size_t min_row = image.rows;
+        size_t max_row = 0;
+        for (size_t row = 0; row < image.rows; ++row) {
+            for (size_t col = 0; col < image.cols; ++col) {
+                if (image.get(row, col) < 128)
+                    continue;
+                ++active_pixels;
+                min_col = std::min(min_col, col);
+                max_col = std::max(max_col, col);
+                min_row = std::min(min_row, row);
+                max_row = std::max(max_row, row);
+            }
+        }
+
+        REQUIRE(active_pixels > 0);
+        const size_t active_width = max_col - min_col + 1;
+        const size_t active_height = max_row - min_row + 1;
+        CHECK(active_width == test_case.pixels_x / 2);
+        CHECK(active_height == test_case.pixels_y / 2);
+        CHECK(active_pixels == (test_case.pixels_x * test_case.pixels_y) / 4);
+
+        const double pixel_width_mm = config.display_width.value / double(image.cols);
+        const double pixel_height_mm = config.display_height.value / double(image.rows);
+        CHECK_THAT(double(active_width) * pixel_width_mm, WithinAbs(5., 1e-6));
+        CHECK_THAT(double(active_height) * pixel_height_mm, WithinAbs(4., 1e-6));
+        CHECK_THAT(double(active_pixels) * pixel_width_mm * pixel_height_mm,
+                   WithinAbs(20., 1e-6));
+    }
+}
+
+TEST_CASE("SL1 raster gamma follows known fractional pixel coverage",
+          "[SL1][SLARasterSettings][SL1RasterGamma]")
+{
+    constexpr size_t pixels = 100;
+    constexpr double display_width_mm = 10.;
+    constexpr double display_height_mm = 8.;
+    const double pixel_width_mm = display_width_mm / double(pixels);
+    const double pixel_height_mm = display_height_mm / double(pixels);
+    // The lower edge leaves 1/4 coverage in its pixel; the upper edge covers 3/4.
+    const ExPolygon shape = square(10.75 * pixel_width_mm,
+                                   20. * pixel_height_mm,
+                                   20.75 * pixel_width_mm,
+                                   80. * pixel_height_mm);
+
+    const std::array<double, 3> cases{{0., 0.5, 1.}};
+
+    for (double gamma : cases) {
+        INFO("gamma: " << gamma);
+        SLAPrinterConfig config = raster_settings_config(gamma);
+        config.display_pixels_x.value = int(pixels);
+        config.display_pixels_y.value = int(pixels);
+        const png::ImageGreyscale image = render_sl1_layer(config, shape);
+        REQUIRE(image.cols == pixels);
+        REQUIRE(image.rows == pixels);
+        REQUIRE(image.buf.size() == image.cols * image.rows);
+
+        const auto expected_value = [gamma](double coverage) {
+            if (gamma == 0.)
+                return coverage < 0.5 ? 0. : 255.;
+            return 255. * std::pow(coverage, gamma);
+        };
+        CHECK_THAT(double(image.get(50, 10)), WithinAbs(expected_value(0.25), 2.));
+        CHECK_THAT(double(image.get(50, 20)), WithinAbs(expected_value(0.75), 2.));
+        CHECK(image.get(50, 15) == 255);
+        CHECK(image.get(50, 5) == 0);
+    }
+}
 
 TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1][SLASVGFormatExtended]")
 {

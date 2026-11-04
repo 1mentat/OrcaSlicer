@@ -1897,6 +1897,36 @@
       ],
       "reason": "Independent off/on Y mirroring imports to bounds reflected about the configured 24 mm display height."
     },
+    "display_pixels_x": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterResolution]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises the registered minimum 100x100, unchanged defaults 2560x1440, and asymmetric 128x160 pixels with a fixed 5x4 mm rectangle. Independent encoded dimensions, active pixel counts, physical width/height, and 20 square mm area are checked with landscape orientation and mirrors disabled. Numeric domains have no registered upper endpoint; this is not a full joint-settings claim."
+    },
+    "display_pixels_y": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterResolution]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises the registered minimum 100x100, unchanged defaults 2560x1440, and asymmetric 128x160 pixels with a fixed 5x4 mm rectangle. Independent encoded dimensions, active pixel counts, physical width/height, and 20 square mm area are checked with landscape orientation and mirrors disabled. Numeric domains have no registered upper endpoint; this is not a full joint-settings claim."
+    },
+    "gamma_correction": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterGamma]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises gamma 0 (threshold), 0.5, and registered maximum/default 1 on independently specified quarter- and three-quarter-pixel rectangle edges. Decoded grayscale values follow threshold or 255*pow(coverage,gamma), within two quantization levels, with full-interior and empty-exterior controls."
+    },
     "display_width": {
       "test": "tests/libslic3r/test_sl1.cpp",
       "tag": "[SL1]",

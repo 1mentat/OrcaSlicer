@@ -318,6 +318,20 @@ set_property(TARGET libslic3r_png_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_png_tests)
 slicer_enable_llvm_source_coverage(libslic3r_png_tests)
 
+# Focused SL1 archive and raster settings contracts, without duplicate CTest registration.
+# Keep the standalone NanoSVG implementation TU available to linked libslic3r objects.
+add_executable(libslic3r_sl1_raster_settings_tests EXCLUDE_FROM_ALL
+    test_sl1.cpp
+    ../fff_print/fff_print_tests.cpp)
+target_link_libraries(libslic3r_sl1_raster_settings_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(libslic3r_sl1_raster_settings_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_property(TARGET libslic3r_sl1_raster_settings_tests PROPERTY FOLDER "tests")
+orcaslicer_copy_test_dlls(libslic3r_sl1_raster_settings_tests)
+slicer_enable_llvm_source_coverage(libslic3r_sl1_raster_settings_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_sl1_raster_settings_tests TEST_PREFIX "FocusedSL1Raster::")
+endif ()
+
 # Focused SVG export contracts, without duplicate CTest registration.
 # Keep the standalone NanoSVG implementation TU used by SVG import tests.
 add_executable(libslic3r_svg_tests EXCLUDE_FROM_ALL
