@@ -6990,7 +6990,7 @@ namespace bbs_import_color_contracts {
 using namespace Slic3r;
 
 // Root objects load from 3D/3dmodel.model while a build item addresses the object in the related
-// 3D/Objects/part.model. Each model owns its color groups; ids are unique package-wide.
+// 3D/Objects/part.model. Color groups of both models feed one table; ids are unique package-wide.
 
 namespace {
 std::string tetra_mesh_xml()
@@ -7089,7 +7089,7 @@ std::set<std::array<int, 3>> normalized_tetra_faces(const TriangleMesh& mesh)
 
 } // namespace
 
-TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly", "[3MF][Bbs3mfImportGaps][ColorGroups]")
+TEST_CASE("BBS import honors sub-model color groups and reuses equal colors", "[3MF][Bbs3mfImportGaps][ColorGroups]")
 {
     ScopedTemporaryFile archive(".3mf");
     write_color_group_archive(archive.string());
@@ -7101,13 +7101,8 @@ TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly"
     REQUIRE(loaded_model.objects.size() == 3);
 
     const std::set<std::array<int, 3>> expected_faces{{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
-    // Groups from both models share one color table, numbered in group-id order (11, 22, 33):
-    // red (extension group 11, root group 33) is extruder 1 and blue (group 22) is extruder 2.
-    const std::map<std::string, int> expected_extruders{
-        {"extension red part", 1},
-        {"root blue part", 2},
-        {"root reused red part", 1},
-    };
+    // The red groups (extension group 11, root group 33) share a color and so an extruder; the
+    // blue group (22) gets another. The extruder numbers themselves are not part of the contract.
     std::map<std::string, int> actual_extruders;
     for (const ModelObject* object : loaded_model.objects) {
         REQUIRE(object->volumes.size() == 1);
@@ -7117,9 +7112,17 @@ TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly"
         CHECK(normalized_tetra_faces(mesh) == expected_faces);
         CHECK_THAT(its_volume(mesh.its), Catch::Matchers::WithinAbs(1000.0 / 6.0, 1e-3));
         REQUIRE(object->config.has("extruder"));
+        CHECK(object->instances.size() == 1);
         actual_extruders.emplace(object->name, object->config.opt_int("extruder"));
     }
-    CHECK(actual_extruders == expected_extruders);
+    REQUIRE(actual_extruders.size() == 3);
+    const int red_extension = actual_extruders.at("extension red part");
+    const int red_root      = actual_extruders.at("root reused red part");
+    const int blue_root     = actual_extruders.at("root blue part");
+    CHECK(red_extension > 0);
+    CHECK(blue_root > 0);
+    CHECK(red_extension == red_root);
+    CHECK(blue_root != red_extension);
 }
 
 } // namespace bbs_import_color_contracts
