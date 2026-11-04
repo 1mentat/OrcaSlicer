@@ -631,10 +631,28 @@ void save_fixture(const ScopedTemporaryFile &file)
     REQUIRE(ObjParser::objbinsave(file.string().c_str(), fixture()));
 }
 
+bool obj_binary_cache_rejects_unsupported_native_version()
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    size_t unsupported_version = 99;
+    if constexpr (sizeof(size_t) > sizeof(int))
+        unsupported_version = static_cast<size_t>(UINT64_C(0x100000001));
+    append_raw(bytes, unsupported_version);
+    // Keep the older int-width reader's misaligned first coordinate bounded.
+    for (int i = 0; i < 10; ++i)
+        append_raw(bytes, size_t{0});
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    return !ObjParser::objbinload(cache.string().c_str(), loaded);
+}
+
 } // namespace
 
 TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and smoothing", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     const ObjParser::ObjData original = fixture();
     REQUIRE(ObjParser::objbinsave(cache.string().c_str(), original));
@@ -670,6 +688,7 @@ TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and sm
 
 TEST_CASE("OBJ binary cache supports an empty data set and clears prior records", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile full(".objbin");
     ScopedTemporaryFile empty(".objbin");
     const ObjParser::ObjData original = fixture();
@@ -709,6 +728,7 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary]
 
 TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -723,6 +743,7 @@ TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary
 
 TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -737,6 +758,7 @@ TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OB
 
 TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -763,6 +785,7 @@ TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJP
 
 TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -799,6 +822,7 @@ TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native 
 
 TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser]")
 {
+    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile full(".objbin");
     save_fixture(full);
     boost::nowide::ifstream input(full.string(), std::ios::binary);
