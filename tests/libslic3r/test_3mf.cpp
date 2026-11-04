@@ -4597,6 +4597,30 @@ TEST_CASE("Embedded presets leave an unsupported SLA print preset out of the arc
     ScopedTemporaryFile archive(".3mf");
     LoadedProject loaded;
     round_trip_presets(archive.string(), {&ignored, &retained, nullptr, &retained_filament}, loaded);
+    // The archive itself: no entry mentions the SLA preset, and the retained presets sit in their own entries.
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, archive.string()));
+        const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+        for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+            if (stat.m_is_directory || stat.m_uncomp_size == 0)
+                continue;
+            std::string data(size_t(stat.m_uncomp_size), '\0');
+            REQUIRE(mz_zip_reader_extract_to_mem(&zip, index, data.data(), data.size(), 0));
+            INFO("entry " << stat.m_filename);
+            CHECK(data.find("unsupported-sla") == std::string::npos);
+        }
+    }
+    std::string entry_text;
+    REQUIRE(read_3mf_entry(archive.string(), entry_text, "Metadata/process_settings_1.config"));
+    CHECK(entry_text.find("retained-print") != std::string::npos);
+    REQUIRE(read_3mf_entry(archive.string(), entry_text, "Metadata/filament_settings_1.config"));
+    CHECK(entry_text.find("retained-filament") != std::string::npos);
+    CHECK_FALSE(read_3mf_entry(archive.string(), entry_text, "Metadata/process_settings_2.config"));
+
     REQUIRE(loaded.presets.size() == 2);
     const auto find_preset = [&loaded](const std::string &name) -> const Preset * {
         for (const Preset *actual : loaded.presets)
