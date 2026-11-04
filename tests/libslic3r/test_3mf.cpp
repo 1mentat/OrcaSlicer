@@ -52,6 +52,8 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <functional>
 
 #include <catch2/catch_tostring.hpp>
@@ -5372,8 +5374,11 @@ struct Fixture
 {
     ScopedTemporaryDir backup{"orca_split_source"};
     ScopedTemporaryDir loaded_backup{"orca_split_loaded"};
+    // Restore reads <backup-folder>/.3mf and external parts below that folder.
+    // Its error path preserves the folder, so keep a separate cleanup owner.
     ScopedTemporaryDir archive_root{"orca_split_archive"};
     boost::filesystem::path archive = archive_root.path() / "project.3mf";
+    boost::filesystem::path backup_archive = archive_root.path() / ".3mf";
     Model source;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Fixture()
@@ -5390,6 +5395,30 @@ struct Fixture
         config.set_key_value("layer_height", new ConfigOptionFloat(.21));
     }
 
+    boost::filesystem::path backup_part_path(const ModelObject& object) const
+    {
+        return backup_archive.parent_path() / "3D" / "Objects" /
+               (object.name + "_" + std::to_string(source.get_object_backup_id(object)) + ".model");
+    }
+
+    void materialize_backup_parts()
+    {
+        // SaveStrategy::Backup leaves SplitModel object parts outside the .3mf; the application's
+        // backup manager writes them next to it. Run that same writer here (it is asynchronous)
+        // so the parts carry the production ids the backup root refers to.
+        source.set_backup_path(archive_root.string());
+        boost::filesystem::create_directories(backup_part_path(*source.objects.front()).parent_path());
+        source.set_need_backup();
+        for (ModelObject* object : source.objects)
+            save_object_mesh(*object);
+        for (const ModelObject* object : source.objects) {
+            const boost::filesystem::path part = backup_part_path(*object);
+            for (int attempt = 0; attempt < 600 && !boost::filesystem::exists(part); ++attempt)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            REQUIRE(boost::filesystem::exists(part));
+        }
+    }
+
     void store(SaveStrategy extra = SaveStrategy::Default)
     {
         PlateData plate;
@@ -5398,23 +5427,25 @@ struct Fixture
         for (size_t i = 0; i < source.objects.size(); ++i)
             plate.objects_and_instances.emplace_back(int(i), 0);
         StoreParams params;
-        params.path            = archive.string();
+        params.path            = (extra & SaveStrategy::Backup ? backup_archive : archive).string();
         params.model           = &source;
         params.config          = &config;
         params.plate_data_list = {&plate};
         params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | extra;
         REQUIRE(store_bbs_3mf(params));
+        if (extra & SaveStrategy::Backup)
+            materialize_backup_parts();
     }
 
-    bool load(LoadedSplit& result)
+    bool load(LoadedSplit& result, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
     {
         result.model.set_backup_path(loaded_backup.string());
         ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
         bool bbl = false, orca = false;
         Semver version;
-        return load_bbs_3mf(archive.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
-                            &result.project.presets, &bbl, &orca, &version, nullptr,
-                            LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+        const boost::filesystem::path& input = (strategy & LoadStrategy::Restore) ? backup_archive : archive;
+        return load_bbs_3mf(input.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
+                            &result.project.presets, &bbl, &orca, &version, nullptr, strategy);
     }
 };
 
@@ -5707,6 +5738,216 @@ TEST_CASE("Shared meshes in split archives retain separate object identities and
         const auto& actual = named(loaded.model, expected->name);
         CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
         check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+    }
+}
+
+namespace {
+
+int first_object_id(const std::string& object)
+{
+    const size_t object_begin = object.find("<object ");
+    REQUIRE(object_begin != std::string::npos);
+    const size_t object_end = object.find('>', object_begin);
+    REQUIRE(object_end != std::string::npos);
+    const size_t id_begin = object.find("id=\"", object_begin);
+    REQUIRE(id_begin != std::string::npos);
+    REQUIRE(id_begin < object_end);
+    const size_t value_begin = id_begin + std::string("id=\"").size();
+    const size_t value_end = object.find('"', value_begin);
+    REQUIRE(value_end != std::string::npos);
+    REQUIRE(value_end < object_end);
+    return std::stoi(object.substr(value_begin, value_end - value_begin));
+}
+
+void replace_first_object_id(std::string& object, int old_id, int new_id)
+{
+    const size_t object_begin = object.find("<object ");
+    REQUIRE(object_begin != std::string::npos);
+    const size_t object_end = object.find('>', object_begin);
+    REQUIRE(object_end != std::string::npos);
+    const std::string old_attr = "id=\"" + std::to_string(old_id) + "\"";
+    const std::string new_attr = "id=\"" + std::to_string(new_id) + "\"";
+    const size_t attr = object.find(old_attr, object_begin);
+    REQUIRE(attr != std::string::npos);
+    REQUIRE(attr < object_end);
+    object.replace(attr, old_attr.size(), new_attr);
+}
+
+void set_object_uuid(std::string& object, const std::string& uuid)
+{
+    const size_t attr = object.find("p:UUID=\"");
+    REQUIRE(attr != std::string::npos);
+    const size_t begin = attr + std::string("p:UUID=\"").size();
+    const size_t end = object.find('"', begin);
+    REQUIRE(end != std::string::npos);
+    object.replace(begin, end - begin, uuid);
+}
+
+size_t strip_bbs_version_metadata(std::string& xml)
+{
+    size_t removed = 0;
+    for (const char* name : {"BambuStudio:3mfVersion", "bamboo_slicer:Version3mf"}) {
+        const std::string open = "<metadata name=\"" + std::string(name) + "\">";
+        const std::string close = "</metadata>";
+        while (true) {
+            const size_t begin = xml.find(open);
+            if (begin == std::string::npos)
+                break;
+            const size_t end = xml.find(close, begin + open.size());
+            REQUIRE(end != std::string::npos);
+            xml.erase(begin, end + close.size() - begin);
+            ++removed;
+        }
+    }
+    return removed;
+}
+
+// Backs up the fixture (backup ids 17 and 42) and rewrites first-cube's external part into a
+// mesh-less wrapper object whose single component is the real object, then routes the root
+// model through that wrapper. The wrapper's serialized id is 123 while its UUID encodes backup
+// object 0x11; with `keep_bbs_marker` the root references the restored id 17, otherwise the
+// serialized id 123 and the part-level BBS version markers are removed.
+void rewrite_restore_component_fixture(Fixture& fixture, bool keep_bbs_marker)
+{
+    fixture.source.set_object_backup_id(*fixture.source.objects[0], 17);
+    fixture.source.set_object_backup_id(*fixture.source.objects[1], 42);
+    fixture.store(SaveStrategy::Backup);
+
+    const boost::filesystem::path part = fixture.backup_part_path(*fixture.source.objects[0]);
+    size_t part_edits = 0;
+    REQUIRE(rewrite_3mf_entries(part.string(), [&](std::string& name, std::string& data) {
+        if (!is_part(name))
+            return false;
+        ++part_edits;
+        const std::string original = data;
+        const size_t first_object = original.find("<object ");
+        REQUIRE(first_object != std::string::npos);
+        const size_t first_object_end = original.find("</object>", first_object);
+        REQUIRE(first_object_end != std::string::npos);
+        REQUIRE(original.find("<object ", first_object + 1) == std::string::npos);
+        const size_t object_close_size = std::string("</object>").size();
+        const std::string original_object = original.substr(first_object, first_object_end + object_close_size - first_object);
+        const int production_id = first_object_id(original_object);
+        // The backup writer numbers a part's first volume object (1 << 16) | backup id.
+        REQUIRE(production_id == (1 << 16 | 17));
+        REQUIRE(original.find("name=\"BambuStudio:3mfVersion\"") != std::string::npos);
+
+        std::string child = original_object;
+        replace_first_object_id(child, production_id, 1);
+        set_object_uuid(child, "00000001-81cb-4c03-9d28-80fed5dfa1dc");
+
+        std::string wrapper = original_object;
+        replace_first_object_id(wrapper, production_id, 123);
+        set_object_uuid(wrapper, "00000011-61cb-4c03-9d28-80fed5dfa1dc");
+        const size_t mesh_begin = wrapper.find("<mesh>");
+        REQUIRE(mesh_begin != std::string::npos);
+        const size_t mesh_end = wrapper.find("</mesh>", mesh_begin);
+        REQUIRE(mesh_end != std::string::npos);
+        wrapper.erase(mesh_begin, mesh_end + std::string("</mesh>").size() - mesh_begin);
+        const size_t wrapper_close = wrapper.rfind("</object>");
+        REQUIRE(wrapper_close != std::string::npos);
+        wrapper.insert(wrapper_close,
+                       "\n    <components>\n"
+                       "      <component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>\n"
+                       "    </components>\n");
+
+        // The child comes first so it can move from id 1 to 65553 when the wrapper closes.
+        data = original.substr(0, first_object) + child + wrapper + original.substr(first_object_end + object_close_size);
+        if (!keep_bbs_marker)
+            // The ordinary sub-model exporter also writes the marker in the part header, so
+            // omitting only a newly added object marker would not make a true negative control.
+            REQUIRE(strip_bbs_version_metadata(data) >= 1);
+        return true;
+    }));
+    REQUIRE(part_edits == 1);
+
+    size_t root_edits = 0;
+    REQUIRE(rewrite_3mf_entries(fixture.backup_archive.string(), [&](std::string& name, std::string& data) {
+        if (name != "3D/3dmodel.model")
+            return false;
+        ++root_edits;
+        // A distinct UUID suffix keeps the root wrapper out of the separate main-model remap
+        // that would otherwise run before external assembly.
+        replace_text(data, "p:UUID=\"00000011-61cb-4c03-9d28-80fed5dfa1dc\"", "p:UUID=\"00000011-71cb-4c03-9d28-80fed5dfa1dc\"");
+        const size_t path = data.find("3D/Objects/first-cube_17.model");
+        REQUIRE(path != std::string::npos);
+        const std::string reference = "objectid=\"65553\"";
+        const size_t external_id = data.find(reference, path);
+        REQUIRE(external_id != std::string::npos);
+        data.replace(external_id, reference.size(), "objectid=\"" + std::to_string(keep_bbs_marker ? 17 : 123) + "\"");
+        if (!keep_bbs_marker)
+            REQUIRE(strip_bbs_version_metadata(data) >= 1);
+        return true;
+    }));
+    REQUIRE(root_edits == 1);
+}
+
+} // namespace
+
+TEST_CASE("Split model Restore remaps production object ids and preserves geometry", "[3MF][SplitModelRestore]")
+{
+    Fixture f;
+    // Non-sequential IDs make accidental sequential reconstruction observable.
+    f.source.set_object_backup_id(*f.source.objects[0], 17);
+    f.source.set_object_backup_id(*f.source.objects[1], 42);
+    f.store(SaveStrategy::Backup);
+
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded, LoadStrategy::Restore));
+    REQUIRE(loaded.model.objects.size() == f.source.objects.size());
+
+    for (const ModelObject* expected : f.source.objects) {
+        const ModelObject& actual = named(loaded.model, expected->name);
+        CHECK(actual.instances.size() == expected->instances.size());
+        REQUIRE(actual.volumes.size() == 1);
+        CHECK(actual.volumes[0]->name == expected->volumes[0]->name);
+        CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
+        check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+        CHECK(loaded.model.get_object_backup_id(actual) == f.source.get_object_backup_id(*expected));
+    }
+    CHECK(loaded.model.get_object_backup_id(named(loaded.model, "first-cube")) == 17);
+    CHECK(loaded.model.get_object_backup_id(named(loaded.model, "second-cube")) == 42);
+    CHECK_THAT(loaded.project.config.opt_float("layer_height"), WithinAbs(.21, 1e-8));
+}
+
+TEST_CASE("Split model Restore rejects a missing referenced object part", "[3MF][SplitModelRestore]")
+{
+    Fixture f;
+    f.store(SaveStrategy::Backup);
+    {
+        LoadedSplit intact;
+        REQUIRE(f.load(intact, LoadStrategy::Restore));
+        REQUIRE(intact.model.objects.size() == f.source.objects.size());
+        // Restore assigns the archive's parent as the model backup path. Detach before the
+        // positive control dies so Model::~Model() cannot remove the staged part directory.
+        intact.model.set_backup_path("detach");
+    }
+    const auto missing_part = f.backup_part_path(*f.source.objects.front());
+    REQUIRE(boost::filesystem::exists(missing_part));
+    REQUIRE(boost::filesystem::remove(missing_part));
+
+    LoadedSplit loaded;
+    CHECK_FALSE(f.load(loaded, LoadStrategy::Restore));
+}
+
+TEST_CASE("Split restore component graphs preserve geometry with and without BBS markers",
+          "[3MF][SplitModelRestore][Bbs3mfRestore][Bbs3mfUUID]")
+{
+    for (bool keep_bbs_marker : {true, false}) {
+        CAPTURE(keep_bbs_marker);
+        Fixture fixture;
+        rewrite_restore_component_fixture(fixture, keep_bbs_marker);
+        LoadedSplit loaded;
+        REQUIRE(fixture.load(loaded, LoadStrategy::Restore));
+        REQUIRE(loaded.model.objects.size() == 2);
+        for (const ModelObject* expected : fixture.source.objects) {
+            CAPTURE(expected->name);
+            const auto& actual = named(loaded.model, expected->name);
+            REQUIRE(actual.volumes.size() == 1);
+            REQUIRE(actual.instances.size() == 1);
+            CHECK_THAT(actual.raw_mesh().volume(), WithinAbs(expected->raw_mesh().volume(), 1e-5));
+            check_box(actual.bounding_box_exact(), expected->bounding_box_exact());
+        }
     }
 }
 
