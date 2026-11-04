@@ -6636,10 +6636,12 @@ struct BackupEvents
     }
 };
 
-// A Backup task is a queue barrier: it runs after all earlier work and its type-1 callback is
-// emitted only once the UI task pump has processed that prefix. Pumping happens on the calling
-// thread, so no assertion runs on the worker. Queued object snapshots are delayed by the worker
-// for a few seconds, hence the generous timeout.
+// A Backup task is queued behind all earlier work, and its type-1 callback is emitted once the
+// UI task pump has processed that prefix. Pumping happens on the calling thread, so no assertion
+// runs on the worker. Limitation: completion is detected by counting type-1 callbacks, not by
+// identifying this call's task, so a Backup task queued elsewhere (for instance by the worker's
+// own interval timer, which the tests disable) could satisfy it early. The timeout only needs to
+// tolerate a loaded machine: a queued Backup task releases the worker's snapshot delay at once.
 bool flush_backup_barrier(const std::shared_ptr<BackupEvents>& events, std::chrono::milliseconds timeout = std::chrono::seconds(30))
 {
     const std::size_t target_ui_callbacks = events->snapshot().ui_backup_callbacks + 1;
@@ -6828,6 +6830,81 @@ TEST_CASE("BBS backup writes valid mesh geometry for an object snapshot", "[3MF]
     CHECK(triangle_count == 12);
     CHECK(triangle_indices_ok);
     CHECK(used_vertices.size() == 8);
+}
+
+void write_text(const boost::filesystem::path& path, const std::string& text)
+{
+    boost::nowide::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << text;
+}
+
+TEST_CASE("BBS backup tracks other changes separately for the plain and backup flags", "[3MF][Bbs3mfBackup][Changes]")
+{
+    ScopedTemporaryDir backup("orca_bbs_backup_changes");
+    Model model;
+    model.set_backup_path(backup.string());
+    model.set_need_backup();
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{model, events};
+    // The flags are process-wide; start from a known state.
+    clear_other_changes(false);
+    clear_other_changes(true);
+    REQUIRE_FALSE(has_other_changes(false));
+    REQUIRE_FALSE(has_other_changes(true));
+
+    put_other_changes();
+    CHECK(has_other_changes(false));
+    CHECK(has_other_changes(true));
+
+    // Clearing one flag leaves the other.
+    clear_other_changes(false);
+    CHECK_FALSE(has_other_changes(false));
+    CHECK(has_other_changes(true));
+
+    // The backup flag is cleared when the worker's backup barrier reaches the UI thread.
+    REQUIRE(flush_backup_barrier(events));
+    CHECK_FALSE(has_other_changes(true));
+    CHECK_FALSE(has_other_changes(false));
+}
+
+TEST_CASE("BBS backup removal keeps the folder unless everything is removed", "[3MF][Bbs3mfBackup][Removal]")
+{
+    ScopedTemporaryDir backup("orca_bbs_backup_removal");
+    const boost::filesystem::path objects = backup.path() / "3D" / "Objects";
+    boost::filesystem::create_directories(objects);
+    write_text(backup.path() / ".3mf", "staged-archive");
+    write_text(backup.path() / "origin.txt", "/source/project.3mf");
+    write_text(objects / "part_1.model", "staged-part");
+
+    Model model;
+    model.set_backup_path(backup.string());
+    model.set_need_backup();
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{model, events};
+    REQUIRE(flush_backup_barrier(events));
+
+    SECTION("removing only the staged data")
+    {
+        remove_backup(model, false);
+        REQUIRE(flush_backup_barrier(events));
+        CHECK_FALSE(boost::filesystem::exists(backup.path() / ".3mf"));
+        CHECK_FALSE(boost::filesystem::exists(objects / "part_1.model"));
+        // The folder, its (now empty) object directory and unrelated files stay.
+        CHECK(boost::filesystem::is_directory(objects));
+        CHECK(boost::filesystem::exists(backup.path() / "origin.txt"));
+    }
+
+    SECTION("removing everything")
+    {
+        remove_backup(model, true);
+        REQUIRE(flush_backup_barrier(events));
+        CHECK_FALSE(boost::filesystem::exists(backup.path()));
+    }
 }
 
 } // namespace bbs_backup_contracts
