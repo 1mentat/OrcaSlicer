@@ -7992,3 +7992,194 @@ TEST_CASE("BBS ShareMesh export of a rotated volume keeps its placement", "[3MF]
 }
 
 } // namespace bbs_nested_component_contracts
+
+namespace stream_archive_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+// A saved one-plate project that tests then damage or load through the G-code archive stream entry
+// point. The model holds one object with two instances, but only the first instance (0, 0) is on the
+// plate: obj_inst_map is keyed by object id, so two instances of one object would collapse into a
+// single row, which these tests do not cover.
+struct StreamArchive
+{
+    ScopedTemporaryDir backup{"orca_stream_store"};
+    ScopedTemporaryFile file{".3mf"};
+    Model model;
+    DynamicPrintConfig config{DynamicPrintConfig::full_print_config()};
+    PlateData plate;
+
+    explicit StreamArchive(bool image_paths = false)
+    {
+        bbs_archive_contracts::make_model(model);
+        model.set_backup_path(backup.string());
+        model.model_info              = std::make_shared<ModelInfo>();
+        model.model_info->model_name  = "Stream <model>";
+        model.model_info->description = "Metadata & configuration";
+        config.set_deserialize_strict({{"layer_height", 0.24}, {"wall_loops", 3}});
+        bbs_archive_contracts::make_plate(plate, 0, {{0, 0}});
+        plate.locked = true;
+        if (image_paths) {
+            // The exporter only needs these to be non-empty; it records its generated entry names.
+            plate.pick_file         = "source-pick.png";
+            plate.pattern_bbox_file = "source-bounds.json";
+        }
+        PlateDataPtrs plates{&plate};
+        bbs_archive_contracts::store_model(file.string(), model, config, plates);
+    }
+    ~StreamArchive() { model.set_backup_path("detach"); }
+};
+
+// The destination of a stream import; detaches its backup folder on every exit path.
+struct StreamLoad
+{
+    Model model;
+    bbs_archive_contracts::LoadedProject loaded;
+    ~StreamLoad() { model.set_backup_path("detach"); }
+
+    bool load(const std::string& bytes)
+    {
+        // Stream import may write the project configuration and thumbnail into the destination
+        // model's backup folder, so give the destination an owned writable one.
+        loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_stream_load");
+        model.set_backup_path(loaded.backup->string());
+        std::istringstream stream(bytes, std::ios::in | std::ios::binary);
+        return load_gcode_3mf_from_stream(stream, &loaded.config, &model, &loaded.plates, &loaded.version);
+    }
+};
+
+std::string read_all(const std::string& path)
+{
+    boost::nowide::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("G-code archive streams preserve project metadata and configuration", "[3MF][3MFStream]")
+{
+    StreamArchive archive;
+    StreamLoad stream;
+    REQUIRE(stream.load(read_all(archive.file.string())));
+    REQUIRE(stream.model.model_info != nullptr);
+    CHECK(stream.model.model_info->model_name == "Stream <model>");
+    CHECK(stream.model.model_info->description == "Metadata & configuration");
+    CHECK_THAT(stream.loaded.config.opt_float("layer_height"), WithinAbs(0.24, 1e-6));
+    CHECK(stream.loaded.config.opt_int("wall_loops") == 3);
+    REQUIRE(stream.loaded.plates.size() == 1);
+    CHECK(stream.loaded.plates.front()->plate_index == 0);
+    CHECK(stream.loaded.plates.front()->locked);
+    // The plate row keeps the source instance id and index of the instance on the plate.
+    REQUIRE(stream.loaded.plates.front()->obj_inst_map.size() == 1);
+    const auto& row = stream.loaded.plates.front()->obj_inst_map.begin()->second;
+    CHECK(row.first == 0);
+    CHECK(row.second == int(archive.model.objects.front()->instances[0]->id().id));
+}
+
+// The archive loads and yields one plate whether or not the source plate had image and bounding-box
+// paths; the next case's tagged assertions rely on this.
+TEST_CASE("G-code archive streams load a plate with and without image and bounding-box paths", "[3MF][3MFStream]")
+{
+    const bool populated = GENERATE(false, true);
+    CAPTURE(populated);
+    StreamArchive archive(populated);
+    StreamLoad stream;
+    REQUIRE(stream.load(read_all(archive.file.string())));
+    CHECK(stream.loaded.plates.size() == 1);
+}
+
+// Known bug: the stream importer assigns `pick_file.empty()` and `pattern_bbox_file.empty()` (a bool)
+// to the plate's string members (bbs_3mf.cpp, load_gcode_3mf_from_stream), so the plate gets a
+// one-character string (0x01 when the path is empty, 0x00 when it is set) instead of the stored
+// path. The stream loader keeps archive-relative paths (unlike the file loader, which prefixes the
+// backup folder): the expected values are Metadata/pick_1.png and Metadata/plate_1.json. Fixed by
+// the follow-up fix PR. Load success and the plate count are asserted by the previous case; if
+// either failed here the test would run no assertion and be reported as an unexpected pass.
+TEST_CASE("G-code archive streams preserve plate image and bounding-box paths", "[3MF][3MFStream][!shouldfail]")
+{
+    const bool populated = GENERATE(false, true);
+    StreamArchive archive(populated);
+    StreamLoad stream;
+    if (!stream.load(read_all(archive.file.string())) || stream.loaded.plates.size() != 1)
+        return;
+    CHECK(stream.loaded.plates.front()->pick_file == (populated ? "Metadata/pick_1.png" : ""));
+    CHECK(stream.loaded.plates.front()->pattern_bbox_file == (populated ? "Metadata/plate_1.json" : ""));
+}
+
+TEST_CASE("G-code archive streams reject a missing relationships or model part", "[3MF][3MFStream]")
+{
+    const std::string missing = GENERATE(std::string("_rels/.rels"), std::string("3D/3dmodel.model"));
+    CAPTURE(missing);
+    StreamArchive archive;
+    {
+        // Positive control: the undamaged archive loads.
+        StreamLoad control;
+        REQUIRE(control.load(read_all(archive.file.string())));
+    }
+    bool renamed = false;
+    REQUIRE(rewrite_3mf_entries(archive.file.string(), [&](std::string& name, std::string&) {
+        if (name != missing)
+            return false;
+        name    = "removed/" + name;
+        renamed = true;
+        return true;
+    }));
+    REQUIRE(renamed);
+    StreamLoad stream;
+    CHECK_FALSE(stream.load(read_all(archive.file.string())));
+}
+
+TEST_CASE("G-code archive streams reject malformed model and plate XML", "[3MF][3MFStream]")
+{
+    const std::string broken = GENERATE(std::string("3D/3dmodel.model"), std::string("Metadata/model_settings.config"));
+    CAPTURE(broken);
+    StreamArchive archive;
+    bool replaced = false;
+    REQUIRE(rewrite_3mf_entries(archive.file.string(), [&](std::string& name, std::string& data) {
+        if (name != broken)
+            return false;
+        data     = "<broken";
+        replaced = true;
+        return true;
+    }));
+    REQUIRE(replaced);
+    StreamLoad stream;
+    CHECK_FALSE(stream.load(read_all(archive.file.string())));
+}
+
+TEST_CASE("G-code archive streams reject empty and non-ZIP input", "[3MF][3MFStream]")
+{
+    const std::string bytes = GENERATE(std::string(), std::string("this is not a ZIP file"));
+    CAPTURE(bytes);
+    StreamLoad stream;
+    CHECK_FALSE(stream.load(bytes));
+}
+
+TEST_CASE("G-code archive streams retain the encoded plate thumbnail bytes", "[3MF][3MFStream]")
+{
+    // Only the eight PNG signature bytes: the stream import keeps the encoded entry without decoding it.
+    const std::string png_signature("\x89PNG\r\n\x1a\n", 8);
+    StreamArchive archive;
+    bool inserted = false;
+    REQUIRE(rewrite_3mf_entries(archive.file.string(), [&](std::string& name, std::string& data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+        const auto end = data.find("</plate>");
+        REQUIRE(end != std::string::npos);
+        data.insert(end, "<metadata key=\"thumbnail_file\" value=\"Metadata/contract-thumb.png\"/>");
+        inserted = true;
+        return true;
+    }, {{"Metadata/contract-thumb.png", png_signature}}));
+    REQUIRE(inserted);
+    StreamLoad stream;
+    REQUIRE(stream.load(read_all(archive.file.string())));
+    REQUIRE(stream.loaded.plates.size() == 1);
+    CHECK(stream.loaded.plates.front()->thumbnail_file == "Metadata/contract-thumb.png");
+    const auto& bytes = stream.loaded.plates.front()->plate_thumbnail.pixels;
+    CHECK(std::string(bytes.begin(), bytes.end()) == png_signature);
+}
+
+} // namespace stream_archive_contracts
