@@ -11,6 +11,7 @@
 #include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Point.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -1076,4 +1077,152 @@ TEST_CASE("Placeholder parser resolves vector percentages against the selected p
     REQUIRE(single_parser.apply_config(single_config));
     CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 0)), Catch::Matchers::WithinAbs(25., 1e-12));
     CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
+}
+
+TEST_CASE("Placeholder vector assignments update only the selected element",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+
+    // Each vector type gets two writes, to elements 1 and 2, and is read back in full: an assignment
+    // that ignores the index, writes a fixed element or leaves element zero changed cannot pass.
+    CHECK(parser.process("{local values=(10,20,30)}{values[1]=42}{values[2]=43}{values[0]},{values[1]},{values[2]}")
+          == "10,42,43");
+    CHECK(parser.process("{local values=(1.5,2.5,3.5)}{values[1]=4.75}{values[2]=5.25}{values[0]},{values[1]},{values[2]}")
+          == "1.5,4.75,5.25");
+    CHECK(parser.process("{local values=(\"alpha\",\"beta\",\"gamma\")}{values[1]=\"delta\"}{values[2]=\"omega\"}"
+                         "{values[0]}|{values[1]}|{values[2]}")
+          == "alpha|delta|omega");
+    CHECK(parser.process("{local values=(false,false,false)}{values[1]=true}{values[0]},{values[1]},{values[2]}")
+          == "false,true,false");
+    CHECK(parser.process("{local values=(true,true,false)}{values[2]=true}{values[0]},{values[1]},{values[2]}")
+          == "true,true,true");
+}
+
+TEST_CASE("Placeholder parser copies vectors and rejects incompatible vector types",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    // Assigning one local int vector to another existing int vector copies every element.
+    CHECK(parser.process("{local source=(3,4,5)}{local target=(0,0,0)}{target=source}{target[0]},{target[1]},{target[2]}")
+          == "3,4,5");
+    CHECK_THROWS_WITH(
+        parser.process("{local source=(3,4)}{local target=(false,false)}{target=source}"),
+        Catch::Matchers::ContainsSubstring("Left hand side is a bool vector"));
+}
+
+TEST_CASE("Placeholder parser clones percent vectors as float local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "retract_before_wipe", "10,20,30" } });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{local copied = retract_before_wipe}{copied[0]},{copied[1]},{copied[2]}") == "10,20,30");
+    CHECK(parser.process("{local copied = retract_before_wipe}{size(copied)}") == "3");
+    // The clone is a float vector, not a percent vector: it can be copied into an existing float vector,
+    // which a percent vector could not (vector copies require identical element types).
+    CHECK(parser.process("{local copied = retract_before_wipe}{local floats = (0.5,0.5,0.5)}{floats = copied}"
+                         "{floats[0]},{floats[1]},{floats[2]}") == "10,20,30");
+}
+
+TEST_CASE("Placeholder parser rejects empty and mixed-type initializer vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{local empty_vec = ()}"),
+                      Catch::Matchers::ContainsSubstring("Cannot create vector variable from an empty initializer list"));
+    CHECK_THROWS_WITH(parser.process("{local mixed = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Mixing numeric and boolean types"));
+}
+
+TEST_CASE("Placeholder parser copies floating-point vectors independently",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    DynamicConfig external;
+    external.set_key_value("source_values", new ConfigOptionFloats({ 1., 2., 3. }));
+    PlaceholderParser parser(&external);
+
+    CHECK(parser.process(
+        "{local copied_values = source_values}{copied_values[1] = 1.5}"
+        "{copied_values[0]},{copied_values[1]},{copied_values[2]}|"
+        "{source_values[0]},{source_values[1]},{source_values[2]}") == "1,1.5,3|1,2,3");
+}
+
+TEST_CASE("Placeholder parser rejects incompatible vector copies with preserved targets",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    DynamicConfig outputs;
+    outputs.set_key_value("floats", new ConfigOptionFloats({ 9., 8. }));
+    outputs.set_key_value("ints", new ConfigOptionInts({ 7, 6 }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old", "keep" }));
+    DynamicConfig inputs;
+    inputs.set_key_value("source_ints", new ConfigOptionInts({ 1, 2 }));
+    inputs.set_key_value("source_strings", new ConfigOptionStrings({ "x", "y" }));
+    PlaceholderParser parser;
+    auto run = [&parser, &inputs, &outputs](const std::string &script) {
+        return parser.process(script, 0, &inputs, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{floats = source_ints}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is a float vector"));
+    const auto &floats = outputs.option<ConfigOptionFloats>("floats")->values;
+    REQUIRE(floats.size() == 2);
+    CHECK_THAT(floats[0], Catch::Matchers::WithinAbs(9., 1e-12));
+    CHECK_THAT(floats[1], Catch::Matchers::WithinAbs(8., 1e-12));
+    CHECK_THROWS_WITH(run("{ints = source_strings}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is an int vector"));
+    CHECK(outputs.option<ConfigOptionInts>("ints")->values == std::vector<int>{ 7, 6 });
+    CHECK_THROWS_WITH(run("{strings = source_ints}"),
+                      Catch::Matchers::ContainsSubstring("Left hand side is a string vector"));
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "old", "keep" });
+}
+
+TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    auto *speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(speed != nullptr);
+    speed->values = { 60., 70. };
+    speed->set_at_to_nil(0);
+    speed->set_at_to_nil(1);
+    PlaceholderParser nil_parser;
+    REQUIRE(nil_parser.apply_config(config));
+    // Both a new local and an existing local vector are refused as the target of a copy.
+    CHECK_THROWS_WITH(nil_parser.process("{local copied = outer_wall_speed}"),
+                      Catch::Matchers::ContainsSubstring("optional values are undefined (nil)"));
+    CHECK_THROWS_WITH(nil_parser.process("{local target = (1.5,2.5)}{target = outer_wall_speed}"),
+                      Catch::Matchers::ContainsSubstring("optional values are undefined (nil)"));
+
+    auto points_config = DynamicPrintConfig::full_print_config();
+    auto *area = points_config.option<ConfigOptionPoints>("printable_area");
+    REQUIRE(area != nullptr);
+    area->values = { Vec2d(1., 2.) };
+    PlaceholderParser points_parser;
+    REQUIRE(points_parser.apply_config(points_config));
+    CHECK_THROWS_WITH(points_parser.process("{local copied = printable_area}"),
+                      Catch::Matchers::ContainsSubstring("Duplicating this type of vector variable"));
+}
+
+TEST_CASE("Placeholder parser rejects local names that shadow system and output symbols",
+          "[PlaceholderParser][PlaceholderParserVariables]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    // The name is checked when the declaration is resolved, before the initializer is evaluated,
+    // so scalar and vector declarations are refused alike.
+    CHECK_THROWS_WITH(parser.process("{local layer_height = 2}"),
+                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
+    CHECK_THROWS_WITH(parser.process("{local nozzle_diameter = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
+
+    DynamicConfig outputs;
+    outputs.set_key_value("output_value", new ConfigOptionInt(1));
+    CHECK_THROWS_WITH(parser.process("{local output_value = 2}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("system output variable"));
+    CHECK_THROWS_WITH(parser.process("{local output_value = (1,2)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("system output variable"));
 }
