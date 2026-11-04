@@ -7752,3 +7752,158 @@ TEST_CASE("BBS importer loads a component-aliased second build item as an indepe
 }
 
 } // namespace foreign_instance_split_contracts
+
+namespace bbs_nested_component_contracts {
+using namespace Slic3r;
+
+namespace {
+
+// Resource 1 is a 10 x 20 x 30 mm box (not a cube, so a rotation changes its extents). Resource 2
+// places it at (10, 3, 5). Resource 3 places resource 2 at (20, 6, 9) (a nested component) and the
+// box itself at (-20, -4, -8), rotated 90 degrees about z when `rotate_second` is set. Build item 2
+// is a wrapped box, item 3 an assembly of two parts.
+std::string nested_component_model(bool rotate_second)
+{
+    const std::string second_linear = rotate_second ? "0 1 0 -1 0 0 0 0 1" : "1 0 0 0 1 0 0 0 1";
+    return R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+ <metadata name="Application">ThirdParty-1.0</metadata>
+ <resources>
+  <object id="1" type="model">
+   <mesh>
+    <vertices>
+     <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="10" y="20" z="0"/><vertex x="0" y="20" z="0"/>
+     <vertex x="0" y="0" z="30"/><vertex x="10" y="0" z="30"/><vertex x="10" y="20" z="30"/><vertex x="0" y="20" z="30"/>
+    </vertices>
+    <triangles>
+     <triangle v1="0" v2="2" v3="1"/><triangle v1="0" v2="3" v3="2"/>
+     <triangle v1="4" v2="5" v3="6"/><triangle v1="4" v2="6" v3="7"/>
+     <triangle v1="0" v2="1" v3="5"/><triangle v1="0" v2="5" v3="4"/>
+     <triangle v1="1" v2="2" v3="6"/><triangle v1="1" v2="6" v3="5"/>
+     <triangle v1="2" v2="3" v3="7"/><triangle v1="2" v2="7" v3="6"/>
+     <triangle v1="3" v2="0" v3="4"/><triangle v1="3" v2="4" v3="7"/>
+    </triangles>
+   </mesh>
+  </object>
+  <object id="2" type="model">
+   <components>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 10 3 5"/>
+   </components>
+  </object>
+  <object id="3" type="model">
+   <components>
+    <component objectid="2" transform="1 0 0 0 1 0 0 0 1 20 6 9"/>
+    <component objectid="1" transform=")XML" + second_linear + R"XML( -20 -4 -8"/>
+   </components>
+  </object>
+ </resources>
+ <build>
+  <item objectid="2" printable="1"/>
+  <item objectid="3" printable="1"/>
+ </build>
+</model>)XML";
+}
+
+struct NestedResult
+{
+    Model model;
+    bbs_archive_contracts::LoadedProject state;
+    BoundingBoxf3 wrapped;
+    std::vector<BoundingBoxf3> parts; // assembly volumes, sorted by min x
+};
+
+// World-space box of one volume (instance and volume transforms applied).
+BoundingBoxf3 world_box(const ModelObject& object, const ModelVolume& volume)
+{
+    return volume.mesh().transformed_bounding_box(object.instances.front()->get_matrix() * volume.get_matrix());
+}
+
+void load_nested(bool rotate_second, NestedResult& result)
+{
+    const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    const std::string model = nested_component_model(rotate_second);
+    ScopedTemporaryFile archive(".3mf");
+    {
+        Zipper zip(archive.string());
+        zip.add_entry("_rels/.rels", relationships.data(), relationships.size());
+        zip.add_entry("3D/3dmodel.model", model.data(), model.size());
+        zip.finalize();
+    }
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), result.model, result.state));
+    CHECK_FALSE(result.state.is_bbl);
+    REQUIRE(result.model.objects.size() == 2);
+
+    const auto by_volume_count = [&](size_t count) -> const ModelObject* {
+        const auto found = std::find_if(result.model.objects.begin(), result.model.objects.end(),
+                                        [count](const ModelObject* object) { return object->volumes.size() == count; });
+        return found == result.model.objects.end() ? nullptr : *found;
+    };
+    const ModelObject* wrapped  = by_volume_count(1);
+    const ModelObject* assembly = by_volume_count(2);
+    REQUIRE(wrapped != nullptr);
+    REQUIRE(assembly != nullptr);
+    REQUIRE(wrapped->instances.size() == 1);
+    REQUIRE(assembly->instances.size() == 1);
+    result.wrapped = world_box(*wrapped, *wrapped->volumes.front());
+    CHECK_THAT(its_volume(wrapped->volumes.front()->mesh().its), Catch::Matchers::WithinRel(6000., 1e-6));
+    for (const ModelVolume* volume : assembly->volumes) {
+        CHECK_THAT(its_volume(volume->mesh().its), Catch::Matchers::WithinRel(6000., 1e-6));
+        result.parts.push_back(world_box(*assembly, *volume));
+    }
+    std::sort(result.parts.begin(), result.parts.end(),
+              [](const BoundingBoxf3& a, const BoundingBoxf3& b) { return a.min.x() < b.min.x(); });
+}
+
+} // namespace
+
+TEST_CASE("BBS foreign import expands nested components into transformed volumes", "[3MF][Bbs3mfComponents][Bbs3mfForeign]")
+{
+    // Each volume is placed by the product of its component transforms.
+    NestedResult r;
+    load_nested(false, r);
+    REQUIRE(r.parts.size() == 2);
+    CHECK((r.wrapped.min - Vec3d(10., 3., 5.)).norm() < 1e-5);
+    CHECK((r.wrapped.max - Vec3d(20., 23., 35.)).norm() < 1e-5);
+    CHECK((r.parts[0].min - Vec3d(-20., -4., -8.)).norm() < 1e-5);
+    CHECK((r.parts[0].max - Vec3d(-10., 16., 22.)).norm() < 1e-5);
+    // Nested: (10, 3, 5) then (20, 6, 9).
+    CHECK((r.parts[1].min - Vec3d(30., 9., 14.)).norm() < 1e-5);
+    CHECK((r.parts[1].max - Vec3d(40., 29., 44.)).norm() < 1e-5);
+}
+
+TEST_CASE("BBS foreign import keeps the rotated extents of a rotated component", "[3MF][Bbs3mfComponents][Bbs3mfForeign]")
+{
+    NestedResult r;
+    load_nested(true, r);
+    REQUIRE(r.parts.size() == 2);
+    // A 90 degree turn about z swaps the x and y extents of the 10 x 20 x 30 box; the nested,
+    // unrotated part keeps them.
+    const Vec3d rotated_size = r.parts[0].size();
+    const Vec3d nested_size  = r.parts[1].size();
+    CHECK((rotated_size - Vec3d(20., 10., 30.)).norm() < 1e-5);
+    CHECK((nested_size - Vec3d(10., 20., 30.)).norm() < 1e-5);
+}
+
+// Known bug: a rotated component that reuses an already loaded mesh is positioned wrongly. Such a
+// part goes through the shared-mesh path in _generate_volumes_new (add_volume_with_shared_mesh), which
+// starts from an identity volume transform, and the importer then translates the volume by the mesh's
+// init shift (the centering offset c = (5, 10, 15)) in world space after the component transform is
+// set. The part's offset becomes t + c = (-15, 6, 7) instead of t + R*c = (-30, 1, 7), so it spans
+// x in [-25, -5] and y in [1, 11] instead of x in [-40, -20] and y in [-4, 6]. Unrotated shared
+// parts coincide (R*c = c), which is why the translation case passes. This test relies on the
+// rotated part being the second use of mesh 1 (the shared-mesh path) and on the sort by min x
+// placing it at parts[0]; reordering the components would silently stop covering that path.
+// Fixed by a follow-up fix PR.
+TEST_CASE("BBS foreign import places a rotated component by its transform", "[3MF][Bbs3mfComponents][Bbs3mfForeign][!shouldfail]")
+{
+    NestedResult r;
+    load_nested(true, r);
+    REQUIRE(r.parts.size() == 2);
+    CHECK((r.parts[0].min - Vec3d(-40., -4., -8.)).norm() < 1e-5);
+    CHECK((r.parts[0].max - Vec3d(-20., 6., 22.)).norm() < 1e-5);
+}
+
+} // namespace bbs_nested_component_contracts
