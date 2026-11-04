@@ -7509,3 +7509,106 @@ TEST_CASE("BBS import rejects a package whose only object has a non-model object
 }
 
 } // namespace bbs_object_type_contracts
+
+namespace bbs_plate_bbox_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+PlateBBoxData make_bbox(double offset, int first_extruder, const std::string& bed_type, const std::string& object_name, int object_id)
+{
+    PlateBBoxData bbox;
+    bbox.bbox_all        = {offset + 1, offset + 2, offset + 31, offset + 42};
+    bbox.filament_ids    = {first_extruder, first_extruder + 2};
+    bbox.filament_colors = {"#11" + std::to_string(first_extruder) + "111", "#22" + std::to_string(first_extruder) + "222"};
+    bbox.is_seq_print    = first_extruder % 2 == 1;
+    bbox.first_extruder  = first_extruder;
+    bbox.nozzle_diameter = 0.4f + 0.2f * float(first_extruder);
+    bbox.version         = 1 + first_extruder;
+    bbox.bed_type        = bed_type;
+    bbox.first_layer_time = 8.5f + float(first_extruder);
+    bbox.bbox_objs.push_back({object_id, {offset + 3, offset + 4, offset + 21, offset + 22}, 120.f + float(offset), .2f + .04f * float(first_extruder),
+                              object_name});
+    return bbox;
+}
+
+nlohmann::json read_json(const std::string& path)
+{
+    boost::nowide::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    return nlohmann::json::parse(input);
+}
+
+} // namespace
+
+TEST_CASE("BBS extracts each plate's persisted bounding-box JSON file on load", "[3MF][Bbs3mfImportMetadata][PlateBBox]")
+{
+    // Two plates with different data in every field, so a plate loading the other's file fails.
+    const PlateBBoxData bboxes[2] = {make_bbox(0., 0, "Textured PEI Plate", "bbox-cube-a", 7), make_bbox(100., 1, "Cool Plate", "bbox-cube-b", 9)};
+
+    ScopedTemporaryDir store_backup("orca_bbs_plate_bbox_store");
+    Model source;
+    source.set_backup_path(store_backup.string());
+    ScopeGuard detach_source([&source] { source.set_backup_path("detach"); });
+    source.add_object("bbox-a", "a.stl", make_cube(4., 5., 6.))->add_instance();
+    source.add_object("bbox-b", "b.stl", make_cube(6., 5., 4.))->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate0;
+    plate0.plate_index           = 0;
+    plate0.objects_and_instances = {{0, 0}};
+    plate0.pattern_bbox_file     = "ignored-source-name-0.json";
+    PlateData plate1;
+    plate1.plate_index           = 1;
+    plate1.objects_and_instances = {{1, 0}};
+    plate1.pattern_bbox_file     = "ignored-source-name-1.json";
+    PlateBBoxData bbox_copies[2] = {bboxes[0], bboxes[1]};
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate0, &plate1};
+    params.id_bboxes       = {&bbox_copies[0], &bbox_copies[1]};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    // The importer writes Metadata/* payloads below the backup root without creating the folder.
+    ScopedTemporaryDir load_backup("orca_bbs_plate_bbox_load");
+    boost::filesystem::create_directories(load_backup.path() / "Metadata");
+    Model loaded_model;
+    loaded_model.set_backup_path(load_backup.string());
+    ScopeGuard detach_loaded([&loaded_model] { loaded_model.set_backup_path("detach"); });
+    bbs_archive_contracts::LoadedProject loaded;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &loaded.config, &substitutions, &loaded_model, &loaded.plates, &loaded.presets,
+                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                         nullptr, 0));
+    REQUIRE(loaded.plates.size() == 2);
+
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("plate " << i);
+        const PlateData& plate = *loaded.plates[i];
+        // The stored name is replaced by the archive entry extracted below the backup root.
+        REQUIRE_FALSE(plate.pattern_bbox_file.empty());
+        CHECK(plate.pattern_bbox_file.find("ignored-source-name") == std::string::npos);
+        CHECK(plate.pattern_bbox_file.find("Metadata/plate_" + std::to_string(i + 1) + ".json") != std::string::npos);
+        REQUIRE(boost::filesystem::exists(plate.pattern_bbox_file));
+
+        const PlateBBoxData& expected = bboxes[i];
+        nlohmann::json expected_json;
+        expected.to_json(expected_json);
+        const nlohmann::json actual = read_json(plate.pattern_bbox_file);
+        // The extracted file must be exactly what the exporter wrote for this plate's data.
+        CHECK(actual == expected_json);
+        CHECK(actual.at("bed_type").get<std::string>() == expected.bed_type);
+        CHECK(actual.at("bbox_objects").at(0).at("name").get<std::string>() == expected.bbox_objs[0].name);
+        CHECK(actual.at("bbox_objects").at(0).at("id").get<int>() == expected.bbox_objs[0].id);
+        CHECK_THAT(actual.at("bbox_all").at(0).get<double>(), WithinAbs(expected.bbox_all[0], 1e-5));
+    }
+    CHECK(loaded.plates[0]->pattern_bbox_file != loaded.plates[1]->pattern_bbox_file);
+}
+
+} // namespace bbs_plate_bbox_contracts
