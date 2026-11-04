@@ -6163,3 +6163,97 @@ TEST_CASE("BBS project lifecycle preserves project identity beside embedded pres
 }
 
 } // namespace bbs_project_lifecycle_contracts
+
+namespace bbs_restore_probe_contracts {
+using namespace Slic3r;
+
+namespace {
+
+void write_text(const boost::filesystem::path& path, const std::string& text)
+{
+    boost::nowide::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << text;
+}
+
+} // namespace
+
+TEST_CASE("BBS restore probe reports a staged archive and origin", "[3MF][Bbs3mfRecovery]")
+{
+    ScopedTemporaryDir backup("orca_bbs_restore_probe");
+    const boost::filesystem::path archive = backup.path() / ".3mf";
+    write_text(archive, "staged-archive-placeholder");
+
+    SECTION("with an origin file")
+    {
+        write_text(backup.path() / "origin.txt", "/source/project.3mf");
+        std::string path   = backup.string();
+        std::string origin = "stale-origin";
+        REQUIRE(has_restore_data(path, origin));
+        CHECK(boost::filesystem::path(path).generic_string() == archive.generic_string());
+        CHECK(origin == "/source/project.3mf");
+    }
+
+    SECTION("without an origin file the origin is left alone")
+    {
+        std::string path   = backup.string();
+        std::string origin = "unchanged-origin";
+        REQUIRE(has_restore_data(path, origin));
+        CHECK(boost::filesystem::path(path).generic_string() == archive.generic_string());
+        CHECK(origin == "unchanged-origin");
+    }
+
+    SECTION("a folder without a staged archive has no restore data")
+    {
+        const boost::filesystem::path empty_folder = backup.path() / "empty-backup";
+        boost::filesystem::create_directories(empty_folder);
+        write_text(empty_folder / "origin.txt", "/ignored/project.3mf");
+        std::string path   = empty_folder.string();
+        std::string origin = "unchanged-origin";
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(boost::filesystem::path(path).generic_string() == empty_folder.generic_string());
+        CHECK(origin == "unchanged-origin");
+    }
+}
+
+TEST_CASE("BBS restore probe rejects empty and locked paths", "[3MF][Bbs3mfRecovery]")
+{
+    ScopedTemporaryDir backup("orca_bbs_restore_lock");
+    const boost::filesystem::path lock = backup.path() / "lock.txt";
+    write_text(backup.path() / ".3mf", "staged-archive-placeholder");
+
+    SECTION("a lock held by this process")
+    {
+        // A lock naming a live process that runs the same executable means another session of
+        // this application owns the folder.
+        const unsigned current_pid = get_current_pid();
+        REQUIRE_FALSE(get_process_name(static_cast<int>(current_pid)).empty());
+        write_text(lock, std::to_string(current_pid));
+        std::string path   = backup.string();
+        std::string origin = "old-origin";
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(boost::filesystem::path(path).generic_string() == backup.path().generic_string());
+        CHECK(origin == "<lock>");
+    }
+
+    SECTION("a lock that is not a process id")
+    {
+        write_text(lock, "not-a-process-id");
+        std::string path   = backup.string();
+        std::string origin = "old-origin";
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(boost::filesystem::path(path).generic_string() == backup.path().generic_string());
+        CHECK(origin == "old-origin");
+    }
+
+    SECTION("an empty path")
+    {
+        std::string path;
+        std::string origin = "old-origin";
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(path.empty());
+        CHECK(origin == "<lock>"); // the value the plater compares against
+    }
+}
+
+} // namespace bbs_restore_probe_contracts
