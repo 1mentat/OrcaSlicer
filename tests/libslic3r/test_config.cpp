@@ -3828,6 +3828,154 @@ TEST_CASE("Config option vectors collect scalar values and first vector values, 
     check_values(slots.values, {10., 20., 10., 7.});
 }
 
+TEST_CASE("ConfigOption base accessors fail closed and equal scalars are not overridden", "[Config][ConfigContracts][ConfigBase]")
+{
+    ConfigOptionString text("left");
+    ConfigOption &base = text;
+
+    REQUIRE_THROWS_AS(base.getInt(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getFloat(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getBool(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.setInt(9), BadOptionTypeException);
+
+    ConfigOptionInt number(3);
+    ConfigOption &number_base = number;
+    number_base.setInt(-7);
+    CHECK(number_base.getInt() == -7);
+
+    ConfigOptionString same("left");
+    ConfigOptionString replacement("right");
+    std::vector<int> default_index{0};
+    CHECK_FALSE(base.overriden_by(&same));
+    CHECK(base.overriden_by(&replacement));
+    CHECK_FALSE(base.apply_override(&same, default_index));
+    CHECK(text.value == "left");
+}
+
+TEST_CASE("Scalar apply_override reports whether the value differs and leaves the default index alone", "[Config][ConfigContracts][ConfigScalarOverride]")
+{
+    const std::vector<int> initial_index{7, -1};
+    std::vector<int> default_index = initial_index;
+
+    ConfigOptionString text("left");
+    ConfigOptionString replacement_text("right");
+    ConfigOption &text_base = text;
+    CHECK(text_base.apply_override(&replacement_text, default_index));
+
+    ConfigOptionInt number(3);
+    ConfigOptionInt replacement_number(7);
+    ConfigOption &number_base = number;
+    CHECK(number_base.apply_override(&replacement_number, default_index));
+
+    ConfigOptionFloat decimal(1.25);
+    ConfigOptionFloat replacement_decimal(2.5);
+    ConfigOption &decimal_base = decimal;
+    CHECK(decimal_base.apply_override(&replacement_decimal, default_index));
+
+    ConfigOptionBool flag(false);
+    ConfigOptionBool replacement_flag(true);
+    ConfigOption &flag_base = flag;
+    CHECK(flag_base.apply_override(&replacement_flag, default_index));
+
+    ConfigOptionPoint point(Vec2d(1., 2.));
+    ConfigOptionPoint replacement_point(Vec2d(3., 4.));
+    ConfigOption &point_base = point;
+    CHECK(point_base.apply_override(&replacement_point, default_index));
+
+    ConfigOptionFloatOrPercent absolute(12.5, false);
+    const ConfigOptionFloatOrPercent same_value_percentage(12.5, true);
+    ConfigOption &absolute_base = absolute;
+    CHECK(absolute_base.apply_override(&same_value_percentage, default_index));
+
+    CHECK(default_index == initial_index);
+}
+
+TEST_CASE("Representative scalar options copy through the virtual override setter", "[Config][ConfigContracts][ConfigScalarOverride][!shouldfail]")
+{
+    std::vector<int> default_index{7, -1};
+
+    ConfigOptionString text("left");
+    const ConfigOptionString replacement_text("right");
+    ConfigOption &text_base = text;
+    text_base.apply_override(&replacement_text, default_index);
+
+    ConfigOptionInt number(3);
+    const ConfigOptionInt replacement_number(7);
+    ConfigOption &number_base = number;
+    number_base.apply_override(&replacement_number, default_index);
+
+    ConfigOptionFloat decimal(1.25);
+    const ConfigOptionFloat replacement_decimal(2.5);
+    ConfigOption &decimal_base = decimal;
+    decimal_base.apply_override(&replacement_decimal, default_index);
+
+    ConfigOptionBool flag(false);
+    const ConfigOptionBool replacement_flag(true);
+    ConfigOption &flag_base = flag;
+    flag_base.apply_override(&replacement_flag, default_index);
+
+    ConfigOptionPoint point(Vec2d(1., 2.));
+    const ConfigOptionPoint replacement_point(Vec2d(3., 4.));
+    ConfigOption &point_base = point;
+    point_base.apply_override(&replacement_point, default_index);
+
+    // Known bug: the base ConfigOption::apply_override assigns through the base class (slicing) and
+    // reports a change without copying the value; fixed by the follow-up fix PR
+    CHECK(text.value == "right");
+    CHECK(number.value == 7);
+    CHECK_THAT(decimal.value, WithinAbs(2.5, 1e-12));
+    CHECK(flag.value);
+    CHECK_THAT(point.value.x(), WithinAbs(3., 1e-12));
+    CHECK_THAT(point.value.y(), WithinAbs(4., 1e-12));
+    // Once applied, the same source no longer differs from the target.
+    CHECK_FALSE(text_base.apply_override(&replacement_text, default_index));
+    CHECK_FALSE(number_base.apply_override(&replacement_number, default_index));
+}
+
+TEST_CASE("Derived scalar options preserve subtype state through override", "[Config][ConfigContracts][ConfigScalarOverride][!shouldfail]")
+{
+    std::vector<int> default_index{3, 1};
+
+    ConfigOptionFloatOrPercent absolute(12.5, false);
+    const ConfigOptionFloatOrPercent percentage(25., true);
+    ConfigOption &absolute_base = absolute;
+    absolute_base.apply_override(&percentage, default_index);
+
+    const t_config_enum_values keys{{"marlin", int(gcfMarlinLegacy)},
+                                    {"reprap", int(gcfRepRapFirmware)}};
+    ConfigOptionEnumGeneric generic(&keys, int(gcfMarlinLegacy));
+    const ConfigOptionEnum<GCodeFlavor> specialized(gcfRepRapFirmware);
+    ConfigOption &generic_base = generic;
+    generic_base.apply_override(&specialized, default_index);
+
+    ConfigOptionEnum<GCodeFlavor> specialized_target(gcfMarlinLegacy);
+    ConfigOption &specialized_base = specialized_target;
+    specialized_base.apply_override(&generic, default_index);
+
+    // Known bug: the base ConfigOption::apply_override reports a change without copying any value
+    // or subtype state; fixed by the follow-up fix PR
+    CHECK_THAT(absolute.value, WithinAbs(25., 1e-12));
+    CHECK(absolute.percent);
+    CHECK(absolute.serialize() == "25%");
+    CHECK(generic.value == int(gcfRepRapFirmware));
+    CHECK(generic.keys_map == &keys);
+    CHECK(generic.serialize() == "reprap");
+    CHECK(specialized_target.value == gcfRepRapFirmware);
+}
+
+TEST_CASE("Scalar overrides reject incompatible types before changing state", "[Config][ConfigContracts][ConfigScalarOverride]")
+{
+    std::vector<int> default_index{5};
+    ConfigOptionString text("left");
+    const ConfigOptionInt incompatible(7);
+    ConfigOption &text_base = text;
+
+    // The rejection comes from the equality comparison the override starts with.
+    REQUIRE_THROWS_AS(text_base.apply_override(&incompatible, default_index), ConfigurationError);
+    CHECK(text.value == "left");
+    CHECK(default_index == std::vector<int>{5});
+}
+
 } // namespace config_option_value_contracts
 
 TEST_CASE("Bridge line width is limited by the smallest nozzle while other widths use the largest", "[Config][Validation]")
