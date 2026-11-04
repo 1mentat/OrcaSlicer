@@ -396,7 +396,7 @@ set_property(TARGET libslic3r_voronoi_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_voronoi_tests)
 slicer_enable_llvm_source_coverage(libslic3r_voronoi_tests)
 
-# Focused Config tests, without duplicate CTest registration.
+# Focused Config tests, with opt-in CTest registration.
 # Reuse the standalone NanoSVG implementation TU needed by linked libslic3r objects.
 add_executable(libslic3r_config_tests EXCLUDE_FROM_ALL
     test_config.cpp
@@ -406,6 +406,9 @@ target_include_directories(libslic3r_config_tests PRIVATE ${CMAKE_SOURCE_DIR}/sr
 set_property(TARGET libslic3r_config_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_config_tests)
 slicer_enable_llvm_source_coverage(libslic3r_config_tests)
+if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
+    orcaslicer_discover_tests(libslic3r_config_tests TEST_PREFIX "FocusedConfig::")
+endif()
 
 # Focused config-variant tests, without duplicate CTest registration.
 # Use the standalone NanoSVG provider required by the linked libslic3r archive.

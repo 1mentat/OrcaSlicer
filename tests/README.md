@@ -250,6 +250,8 @@ the option is off by default.
 The same option registers `libslic3r_3mf_tests` and
 `fff_print_wipe_tower_tests` with `Focused3MF::` and `FocusedWipeTower::`
 prefixes, so format and tower contracts can join a focused PR run.
+It registers `libslic3r_config_tests` with `FocusedConfig::` names for config
+validation and mutation checks using the smaller executable.
 It also registers `fff_print_tree_support_tests` and
 `fff_print_multifilament_tests` with `FocusedTreeSupport::` and
 `FocusedMultiFilament::` prefixes. These excluded targets compile only their
