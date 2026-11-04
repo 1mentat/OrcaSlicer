@@ -6091,21 +6091,32 @@ TEST_CASE("BBS project lifecycle preserves model identity, metadata, and two pla
     CHECK(loaded.plates[1]->plate_name == "second plate");
     CHECK_FALSE(loaded.plates[0]->locked);
     CHECK(loaded.plates[1]->locked);
-    // Each plate row is {object key -> {instance index, instance id}}; the importer keeps the
-    // source instance id, which ties every row to one specific source instance.
-    const auto check_row = [&](const PlateData& plate, const ModelObject& object, size_t instance, size_t index) {
+    // A plate row is {object key -> {instance index, source instance id}}. Finds the row of one
+    // source instance, checks its stored index and returns the object key it is filed under.
+    const auto row_key = [&](const PlateData& plate, const ModelObject& object, int instance) {
         const int instance_id = static_cast<int>(object.instances[instance]->id().id);
         const auto row = std::find_if(plate.obj_inst_map.begin(), plate.obj_inst_map.end(),
                                       [&](const auto& entry) { return entry.second.second == instance_id; });
         REQUIRE(row != plate.obj_inst_map.end());
-        CHECK(row->second.first == static_cast<int>(index));
+        CHECK(row->second.first == instance);
+        return row->first;
     };
     REQUIRE(loaded.plates[0]->obj_inst_map.size() == 2);
     REQUIRE(loaded.plates[1]->obj_inst_map.size() == 2);
-    check_row(*loaded.plates[0], *first, 0, 0);
-    check_row(*loaded.plates[0], *second, 1, 1);
-    check_row(*loaded.plates[1], *first, 1, 1);
-    check_row(*loaded.plates[1], *second, 0, 0);
+    const int first_key = row_key(*loaded.plates[0], *first, 0);
+    const int second_key = row_key(*loaded.plates[0], *second, 1);
+    CHECK(first_key != second_key);
+    CHECK(row_key(*loaded.plates[1], *first, 1) == first_key);
+    CHECK(row_key(*loaded.plates[1], *second, 0) == second_key);
+    // The importer resolves each row's object key to a loaded object and records the source
+    // instance id there, so a row filed under the wrong key lands on the wrong object.
+    const auto check_loaded_ids = [&](const ModelObject& expected, const ModelObject& actual, const std::vector<bool>& on_plate) {
+        REQUIRE(actual.instances.size() == expected.instances.size());
+        for (size_t i = 0; i < expected.instances.size(); ++i)
+            CHECK(actual.instances[i]->loaded_id == (on_plate[i] ? static_cast<size_t>(expected.instances[i]->id().id) : 0));
+    };
+    check_loaded_ids(*first, *loaded.model.objects[0], {true, true, false});
+    check_loaded_ids(*second, *loaded.model.objects[1], {true, true});
     CHECK_THAT(loaded.config.opt_float("layer_height"), WithinAbs(0.24, 1e-6));
 }
 
