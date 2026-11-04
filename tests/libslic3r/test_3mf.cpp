@@ -7126,3 +7126,110 @@ TEST_CASE("BBS import honors sub-model color groups and reuses equal colors", "[
 }
 
 } // namespace bbs_import_color_contracts
+
+namespace bbs_slice_info_name_contracts {
+using namespace Slic3r;
+using boost::property_tree::ptree;
+
+namespace {
+
+struct SliceInfoObject
+{
+    int identify_id = 0;
+    std::string name;
+};
+
+// Stores a sliced single-plate archive holding "<first>" (two instances) and "<second>" (one) and
+// returns the plate's objects from slice_info.config in file order, with the source instance ids.
+std::vector<SliceInfoObject> sliced_objects(const std::string& first, const std::string& second, GCodeFlavor flavor,
+                                            std::vector<int>& source_instance_ids)
+{
+    Model model;
+    ModelObject* a = model.add_object(first.c_str(), "a.stl", make_cube(4., 5., 6.));
+    a->add_instance();
+    a->add_instance();
+    ModelObject* b = model.add_object(second.c_str(), "b.stl", make_cube(7., 8., 9.));
+    b->add_instance();
+    source_instance_ids = {int(a->instances[0]->id().id), int(a->instances[1]->id().id), int(b->instances[0]->id().id)};
+
+    ScopedTemporaryDir backup("orca_bbs_slice_info_names");
+    model.set_backup_path(backup.string());
+    ScopeGuard detach([&model] { model.set_backup_path("detach"); });
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(flavor));
+    PlateData plate;
+    plate.is_sliced_valid       = true;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}, {0, 1}, {1, 0}};
+    plate.config                = config;
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &model;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    std::stringstream input(slice_info);
+    ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<SliceInfoObject> objects;
+    for (const auto& plate_node : tree.get_child("config"))
+        if (plate_node.first == "plate")
+            for (const auto& node : plate_node.second)
+                if (node.first == "object")
+                    objects.push_back({node.second.get<int>("<xmlattr>.identify_id"), node.second.get<std::string>("<xmlattr>.name")});
+    return objects;
+}
+
+} // namespace
+
+TEST_CASE("BBS slice metadata labels external-firmware objects with safe names", "[3MF][Bbs3mfSliceInfoNames]")
+{
+    // Klipper, Marlin and RepRapFirmware label objects in the g-code as
+    // "<sanitized name>_id_<object index>_copy_<instance index>"; slice_info.config repeats those labels.
+    const GCodeFlavor flavor = GENERATE(gcfKlipper, gcfMarlinLegacy, gcfMarlinFirmware, gcfRepRapFirmware);
+    CAPTURE(flavor);
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    std::vector<int> ids;
+    const auto objects = sliced_objects("  Bracket [A] @ B  ", "Plain", flavor, ids);
+    REQUIRE(objects.size() == 3);
+    CHECK(objects[0].name == "Bracket_A_B_id_0_copy_0");
+    CHECK(objects[1].name == "Bracket_A_B_id_0_copy_1");
+    CHECK(objects[2].name == "Plain_id_1_copy_0");
+    for (size_t i = 0; i < 3; ++i)
+        CHECK(objects[i].identify_id == ids[i]);
+}
+
+TEST_CASE("BBS slice metadata keeps raw names for Bambu printers and other firmware", "[3MF][Bbs3mfSliceInfoNames]")
+{
+    // A Bambu printer keeps raw names whatever the flavor; a printer whose flavor does not label
+    // objects keeps them too.
+    const auto [is_bbl, flavor] = GENERATE(table<bool, GCodeFlavor>({
+        {true, gcfMarlinFirmware},
+        {false, gcfRepetier},
+    }));
+    CAPTURE(is_bbl, flavor);
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = is_bbl;
+
+    std::vector<int> ids;
+    const auto objects = sliced_objects("Raw & <Label>", "  Padded [B]  ", flavor, ids);
+    REQUIRE(objects.size() == 3);
+    CHECK(objects[0].name == "Raw & <Label>");
+    CHECK(objects[1].name == "Raw & <Label>");
+    CHECK(objects[2].name == "  Padded [B]  ");
+    for (size_t i = 0; i < 3; ++i)
+        CHECK(objects[i].identify_id == ids[i]);
+}
+
+} // namespace bbs_slice_info_name_contracts
