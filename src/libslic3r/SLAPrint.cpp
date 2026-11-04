@@ -860,7 +860,10 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "display_pixels_y",
         "display_mirror_x",
         "display_mirror_y",
-        "display_orientation"
+        "display_orientation",
+        "fast_tilt_time",
+        "slow_tilt_time",
+        "area_fill"
     };
 
     static std::unordered_set<std::string> steps_ignore = {
@@ -868,9 +871,6 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "printable_height",
         "printer_technology",
         "filename_format",
-        "fast_tilt_time",
-        "slow_tilt_time",
-        "area_fill",
         "bottle_cost",
         "bottle_volume",
         "bottle_weight",

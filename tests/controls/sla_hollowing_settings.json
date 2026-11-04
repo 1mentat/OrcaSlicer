@@ -14,6 +14,7 @@
     "SLA bottle metadata changes retain completed geometry and statistics",
     "SLA buildplate-only setting omits blocked support while retaining a clear buildplate route",
     "SLA clearing a processed print releases object ownership",
+    "SLA completed statistics follow tilt and area-fill changes on reapply",
     "SLA cube processing creates one area-preserving model slice per layer",
     "SLA drain holes transform with inverse-transpose normals and stick-out",
     "SLA drain-hole edits invalidate the drill-hole step",

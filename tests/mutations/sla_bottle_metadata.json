@@ -5,8 +5,8 @@
     {
       "id": "bottle-cost-invalidates-raster-stage",
       "path": "src/libslic3r/SLAPrint.cpp",
-      "old": "        \"display_orientation\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\",",
-      "new": "        \"display_orientation\",\n        \"bottle_cost\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"bottle_cost\",",
+      "new": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",",
       "expected_matches": 1,
       "test_filter": "^SLABottleMetadata$",
       "expected_test_count": 1,
@@ -16,8 +16,8 @@
     {
       "id": "bottle-volume-invalidates-raster-stage",
       "path": "src/libslic3r/SLAPrint.cpp",
-      "old": "        \"display_orientation\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\",\n        \"bottle_volume\",",
-      "new": "        \"display_orientation\",\n        \"bottle_volume\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\",",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"bottle_cost\",\n        \"bottle_volume\",",
+      "new": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_volume\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"bottle_cost\",",
       "expected_matches": 1,
       "test_filter": "^SLABottleMetadata$",
       "expected_test_count": 1,
@@ -27,8 +27,8 @@
     {
       "id": "bottle-weight-invalidates-raster-stage",
       "path": "src/libslic3r/SLAPrint.cpp",
-      "old": "        \"display_orientation\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\",\n        \"bottle_volume\",\n        \"bottle_weight\",",
-      "new": "        \"display_orientation\",\n        \"bottle_weight\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_cost\",\n        \"bottle_volume\",",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"bottle_cost\",\n        \"bottle_volume\",\n        \"bottle_weight\",",
+      "new": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\",\n        \"bottle_weight\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"bottle_cost\",\n        \"bottle_volume\",",
       "expected_matches": 1,
       "test_filter": "^SLABottleMetadata$",
       "expected_test_count": 1,

@@ -541,6 +541,75 @@ TEST_CASE("SLA area fill selects fast versus slow layer timing",
     check_sla_layer_times(fast, { 2.0, 2.0, 2.0, 2.0, 2.0, 2.0 });
 }
 
+TEST_CASE("SLA completed statistics follow tilt and area-fill changes on reapply",
+          "[SLAPrint][SLALifecycle][SLAStatisticsApply]")
+{
+    DynamicPrintConfig config = sla_statistics_config(2.0, 2.0, 100.0, 0.0, 0.0);
+    SlaCubeFixture fixture(config, make_cube(10.0, 10.0, 3.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const auto apply_and_compare = [&](const char *key, double value,
+                                       std::size_t expected_fast_layers,
+                                       std::size_t expected_slow_layers,
+                                       double expected_time) {
+        config.set_deserialize_strict({{key, value}});
+        const SLAPrint::ApplyStatus status = fixture.print.apply(fixture.model, config);
+        CHECK(status != SLAPrint::APPLY_STATUS_UNCHANGED);
+
+        fixture.print.process();
+        REQUIRE(fixture.print.finished());
+
+        const SlaStatisticsRun fresh = run_sla_statistics(config);
+        const SLAPrintStatistics &stats = fixture.print.print_statistics();
+        CHECK(stats.fast_layers_count == expected_fast_layers);
+        CHECK(stats.slow_layers_count == expected_slow_layers);
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(expected_time, 1e-8));
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(fresh.estimated_time, 1e-8));
+
+        SlaStatisticsRun reapplied;
+        reapplied.layer_times = stats.layers_times;
+        reapplied.object_material = stats.objects_used_material;
+        reapplied.support_material = stats.support_used_material;
+        reapplied.estimated_time = stats.estimated_print_time;
+        reapplied.fast_layers = stats.fast_layers_count;
+        reapplied.slow_layers = stats.slow_layers_count;
+
+        const SLAPrintObject *object = fixture.print.objects().front();
+        const double mm2_scale = scaled<double>(1.0) * scaled<double>(1.0);
+        for (const SLAPrintObject::SliceRecord &record : object->get_slice_index()) {
+            REQUIRE(record.is_valid());
+            CHECK(record.get_slice(soSupport).empty());
+            const ExPolygons &model_slice = record.get_slice(soModel);
+            REQUIRE(model_slice.size() == 1);
+            reapplied.model_slice_areas.push_back(model_slice.front().area() / mm2_scale);
+        }
+
+        CHECK(reapplied.fast_layers == fresh.fast_layers);
+        CHECK(reapplied.slow_layers == fresh.slow_layers);
+        check_same_sla_geometry(fresh, reapplied);
+        check_sla_layer_times(reapplied, fresh.layer_times);
+    };
+
+    const SLAPrintStatistics &initial_stats = fixture.print.print_statistics();
+    CHECK(initial_stats.fast_layers_count == 6);
+    CHECK(initial_stats.slow_layers_count == 0);
+    CHECK_THAT(initial_stats.estimated_print_time, Catch::Matchers::WithinAbs(12.0, 1e-8));
+
+    // All six layers are fast at 100% fill. Raising fast tilt by 2 s adds 12 s.
+    apply_and_compare("fast_tilt_time", 2.0, 6, 0, 24.0);
+    // At area_fill=0, each positive-area model layer is classified as slow.
+    apply_and_compare("area_fill", 0.0, 0, 6, 12.0);
+    // Those six slow layers now each include the 3 s slow-tilt duration.
+    apply_and_compare("slow_tilt_time", 3.0, 0, 6, 30.0);
+}
+
 TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAHollowingToggle]")
 {
     // Run the disabled control through the same public task boundary.  The
