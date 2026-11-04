@@ -2025,7 +2025,7 @@ namespace client
                     goto err;
                 c = static_cast<boost::uint8_t>(*it ++);
                 // We must have a continuation byte:
-                if (cnt > 1 && (c & 0xC0) != 0x80)
+                if ((c & 0xC0) != 0x80)
                     goto err;
             }
             first = it;

@@ -890,15 +890,18 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
                       Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
 }
 
-// Known bug: utf8_char_parser only checks continuation bytes before the last one, so a truncated-by-substitution
-// sequence such as E2 82 28 is accepted; fixed by the follow-up fix PR.
 TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
-          "[PlaceholderParser][PlaceholderParserUnicode][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserUnicode]")
 {
     PlaceholderParser parser;
-    // Euro sign E2 82 AC with the final continuation byte replaced by ASCII '('.
-    std::string literal = "{\"";
-    literal.append("\xE2\x82\x28", 3);
-    literal += "\"}";
-    CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+    // 0x28 is ASCII '(' in place of the final continuation byte of a 2-, 3- and 4-byte sequence.
+    const std::array<std::string, 3> invalid = {{
+        std::string("\xC3\x28", 2), std::string("\xE2\x82\x28", 3), std::string("\xF0\x9F\x98\x28", 4),
+    }};
+    for (const std::string &bytes : invalid) {
+        INFO(bytes.size());
+        CHECK_THROWS_WITH(parser.process("{\"" + bytes + "\"}"), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+    }
+    // The same 3-byte sequence with a valid final continuation byte (euro sign) is still accepted.
+    CHECK(parser.process("{\"" + std::string("\xE2\x82\xAC", 3) + "\"}") == std::string("\xE2\x82\xAC", 3));
 }
