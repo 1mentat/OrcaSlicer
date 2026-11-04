@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <random>
 #include <utility>
 #include <string>
@@ -10,6 +11,7 @@
 #include <memory>
 #include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Point.hpp"
 
@@ -1225,4 +1227,235 @@ TEST_CASE("Placeholder parser rejects local names that shadow system and output 
                       Catch::Matchers::ContainsSubstring("system output variable"));
     CHECK_THROWS_WITH(parser.process("{local output_value = (1,2)}", 0, nullptr, &outputs, nullptr),
                       Catch::Matchers::ContainsSubstring("system output variable"));
+}
+
+TEST_CASE("Placeholder output vector writes preserve untouched elements and reject invalid assignments",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    const auto check_percent_values = [](const DynamicConfig &config, const std::vector<double> &expected) {
+        const auto *option = config.option<ConfigOptionPercents>("retract_before_wipe");
+        REQUIRE(option != nullptr);
+        REQUIRE(option->values.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
+    };
+
+    DynamicConfig outputs;
+    outputs.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK(parser.process("{retract_before_wipe[1] = 42}{retract_before_wipe[0]},{retract_before_wipe[1]},{retract_before_wipe[2]}",
+                         0, nullptr, &outputs, nullptr) == "10,42,30");
+    check_percent_values(outputs, { 10., 42., 30. });
+
+    DynamicConfig out_of_range;
+    out_of_range.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[3] = 42}", 0, nullptr, &out_of_range, nullptr),
+        Catch::Matchers::ContainsSubstring("Index out of range"));
+    check_percent_values(out_of_range, { 10., 20., 30. });
+
+    DynamicConfig empty;
+    empty.set_key_value("retract_before_wipe", new ConfigOptionPercents({}));
+    const auto *empty_option = empty.option<ConfigOptionPercents>("retract_before_wipe");
+    REQUIRE(empty_option != nullptr);
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[0] = 42}", 0, nullptr, &empty, nullptr),
+        Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+    CHECK(empty_option->values.empty());
+
+    DynamicConfig nonnumeric;
+    nonnumeric.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[1] = true}", 0, nullptr, &nonnumeric, nullptr),
+        Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_percent_values(nonnumeric, { 10., 20., 30. });
+}
+
+TEST_CASE("Placeholder parser assigns vectors by initializer list and repeat count",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_ints", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("output_floats", new ConfigOptionFloats({ 0.5, 1.5 }));
+    outputs.set_key_value("output_strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("output_bools", new ConfigOptionBools({ false, false }));
+
+    CHECK(parser.process(
+        "{output_ints = (7,8,9)}{output_floats = repeat(3,1.25)}"
+        "{output_strings = (\"new\",9)}{output_bools = (true,false)}",
+        0, nullptr, &outputs, nullptr).empty());
+
+    const auto *float_values = outputs.option<ConfigOptionFloats>("output_floats");
+    REQUIRE(float_values != nullptr);
+    REQUIRE(float_values->values.size() == 3);
+    for (double value : float_values->values)
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(1.25, 1e-12));
+
+    CHECK(parser.process(
+        "{output_ints[0]},{output_ints[1]},{output_ints[2]}|"
+        "{output_floats[0]},{output_floats[1]},{output_floats[2]},{size(output_floats)}|"
+        "{output_strings[0]},{output_strings[1]}|"
+        "{output_bools[0]},{output_bools[1]}",
+        0, nullptr, &outputs, nullptr) == "7,8,9|1.25,1.25,1.25,3|new,9|true,false");
+}
+
+TEST_CASE("Placeholder parser assigns scalar outputs and rejects vector-shaped values for them",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
+    outputs.set_key_value("flag", new ConfigOptionBool(false));
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{percent = 25}{percent}") == "25");
+    CHECK_THROWS_WITH(run("{flag = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{number = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+}
+
+TEST_CASE("Placeholder parser rejects scalar and vector mismatches between local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
+    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable"));
+}
+
+TEST_CASE("Placeholder parser converts vector elements and preserves unsupported output vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("floats", new ConfigOptionFloats({ 1., 2. }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, true }));
+    outputs.set_key_value("points", new ConfigOptionPoints({ Vec2d(1., 2.) }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{floats[1] = 3}{strings[0] = 9}").empty());
+    CHECK_THAT(outputs.option<ConfigOptionFloats>("floats")->values[1], Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values[0] == "9");
+    CHECK_THROWS_WITH(run("{flags[1] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{points[0] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].x(),
+               Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].y(),
+               Catch::Matchers::WithinAbs(2., 1e-12));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values[1]);
+}
+
+TEST_CASE("Placeholder parser validates repeat counts and preserves vector values on errors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{numbers = repeat(1.5, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Expected number of elements"));
+    CHECK_THROWS_WITH(run("{numbers = repeat(-1, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 1, 2 });
+    CHECK(run("{numbers = repeat(0, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values.empty());
+    CHECK_THROWS_WITH(run("{flags = repeat(2, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(run("{flags = repeat(2, true)}").empty());
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 1, 1 });
+    CHECK(run("{numbers = repeat(3, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 4, 4 });
+}
+
+TEST_CASE("Placeholder parser converts initializer lists and rejects incompatible booleans",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1 }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{numbers = (4,5)}{strings = (\"new\", 6)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 5 });
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "new", "6" });
+    CHECK_THROWS_WITH(run("{flags = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
+}
+
+// Known bug: a one-element initializer list assigned to a scalar output variable ("scalar_var = ( scalar )") is
+// assigned, then the scalar branch of vector_variable_assign_initializer_list lacks a return and falls into the vector
+// switch, which ends in `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this
+// test aborts there; in a Release build it passes, because the assertion is compiled out after the value was stored.
+TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar output",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    CHECK(parser.process("{number = (1)}", 0, nullptr, &outputs, nullptr).empty());
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 1);
+}
+
+// Known bug: an initializer list assigned to a percent output vector reaches `default: assert(false)` in
+// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626), because the switch has no coPercents
+// case. Whether the fix supports percent vectors or rejects them, the call must not assert and must not be ignored:
+// it either reports an error or stores the values. Built without NDEBUG this test aborts at that assertion; in a
+// Release build the assignment is silently ignored (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns an initializer list to a percent output vector or reports an error",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = (1,2)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 1., 2. }));
+}
+
+// Known bug: repeat() assigned to a percent output vector reaches `default: assert(false)` in
+// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420), because the switch has no coPercents
+// case. As above, a fix may support or reject percent vectors, but the call must not assert and must not be ignored.
+// Built without NDEBUG this test aborts at that assertion; in a Release build the assignment is silently ignored
+// (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or reports an error",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = repeat(2, 5)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 5., 5. }));
 }
