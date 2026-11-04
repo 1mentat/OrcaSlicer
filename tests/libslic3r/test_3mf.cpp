@@ -6528,8 +6528,8 @@ TEST_CASE("BBS 3MF skips a plate mapping for a resource without a build instance
     PlateData plate0;
     PlateData plate1;
     make_two_plate_model(source, plate0, plate1);
-    // The object is last, so it exists as a resource but is removed after parsing, leaving the
-    // plate row to name an object index that no longer exists.
+    // An object without instances has no build item, so the importer never creates a model object
+    // for it; its plate row resolves to a resource path but to no loaded object.
     ModelObject* unbuilt = source.add_object("unbuilt-part", "unbuilt.stl", make_cube(3., 4., 5.));
     REQUIRE(unbuilt->instances.empty());
     plate0.objects_and_instances.emplace_back(2, 0);
