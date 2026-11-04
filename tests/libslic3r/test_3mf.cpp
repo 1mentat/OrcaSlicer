@@ -4547,7 +4547,7 @@ TEST_CASE("Embedded presets of each supported type keep their identity, type, ve
 
 TEST_CASE("Embedded presets are numbered independently per type and each keeps its own content", "[3MF][EmbeddedPreset]")
 {
-    // Interleaved order, with null entries around them, so a shared or misplaced counter would collide or swap.
+    // Interleaved order, with null entries among them, so presets of different types are not adjacent.
     Preset print_a = make_embedded_preset(Preset::TYPE_PRINT, "print-a", .11);
     Preset filament_a = make_embedded_preset(Preset::TYPE_FILAMENT, "filament-a", 1.61);
     Preset printer_a = make_embedded_preset(Preset::TYPE_PRINTER, "printer-a", .35);
@@ -4560,7 +4560,8 @@ TEST_CASE("Embedded presets are numbered independently per type and each keeps i
     LoadedProject loaded;
     round_trip_presets(archive.string(), presets, loaded);
 
-    // One archive entry per preset, numbered 1 and 2 within each type.
+    // The writer currently numbers entries 1 and 2 within each type. The importer accepts any numbering,
+    // so this documents the writer, not a loader contract.
     std::string payload;
     for (const char *entry : {"Metadata/process_settings_1.config", "Metadata/process_settings_2.config",
                               "Metadata/filament_settings_1.config", "Metadata/filament_settings_2.config",
@@ -4586,7 +4587,7 @@ TEST_CASE("Embedded presets are numbered independently per type and each keeps i
     }
 }
 
-TEST_CASE("Embedded presets of an unsupported type are left out and do not displace supported ones", "[3MF][EmbeddedPreset]")
+TEST_CASE("Embedded presets leave an unsupported SLA print preset out of the archive", "[3MF][EmbeddedPreset]")
 {
     Preset ignored(Preset::TYPE_SLA_PRINT, "unsupported-sla");
     ignored.config.set_key_value("print_settings_id", new ConfigOptionString("unsupported-sla"));
@@ -4597,18 +4598,21 @@ TEST_CASE("Embedded presets of an unsupported type are left out and do not displ
     LoadedProject loaded;
     round_trip_presets(archive.string(), {&ignored, &retained, nullptr, &retained_filament}, loaded);
     REQUIRE(loaded.presets.size() == 2);
-    for (const Preset *actual : loaded.presets) {
-        INFO("preset " << actual->name);
-        CHECK(actual->name != "unsupported-sla");
-        if (actual->type == Preset::TYPE_PRINT) {
-            CHECK(actual->name == "retained-print");
-            CHECK_THAT(embedded_value(*actual), Catch::Matchers::WithinAbs(.28, 1e-6));
-        } else {
-            CHECK(actual->type == Preset::TYPE_FILAMENT);
-            CHECK(actual->name == "retained-filament");
-            CHECK_THAT(embedded_value(*actual), Catch::Matchers::WithinAbs(1.6, 1e-6));
-        }
-    }
+    const auto find_preset = [&loaded](const std::string &name) -> const Preset * {
+        for (const Preset *actual : loaded.presets)
+            if (actual->name == name)
+                return actual;
+        return nullptr;
+    };
+    CHECK(find_preset("unsupported-sla") == nullptr);
+    const Preset *print = find_preset("retained-print");
+    const Preset *filament = find_preset("retained-filament");
+    REQUIRE(print != nullptr);
+    REQUIRE(filament != nullptr);
+    CHECK(print->type == Preset::TYPE_PRINT);
+    CHECK_THAT(embedded_value(*print), Catch::Matchers::WithinAbs(.28, 1e-6));
+    CHECK(filament->type == Preset::TYPE_FILAMENT);
+    CHECK_THAT(embedded_value(*filament), Catch::Matchers::WithinAbs(1.6, 1e-6));
 }
 
 } // namespace bbs_archive_contracts
