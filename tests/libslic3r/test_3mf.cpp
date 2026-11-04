@@ -8837,7 +8837,9 @@ bool is_uniform_png(const std::string& archive, const std::string& entry, int si
 
 TEST_CASE("BBS package relationships target the generated thumbnails of the exported plate", "[3MF][Bbs3mfMetadata][BbsPlateRelationships]")
 {
-    // -1 exports no particular plate (the relationships name plate 1's files); 0 and 1 select a plate.
+    // -1 exports no particular plate: the root relationships then name the fixed plate-1 files, as long as
+    // the packing data carries no cover or auxiliary thumbnail (none here); 0 and 1 select a plate. The
+    // root relationships are numbered rel-1, rel-2, rel-4 and rel-5 (rel-3 is not written there).
     const int export_plate = GENERATE(-1, 0, 1);
     CAPTURE(export_plate);
     const std::string number = std::to_string(export_plate < 0 ? 1 : export_plate + 1);
@@ -8896,3 +8898,89 @@ TEST_CASE("BBS package relationships target the generated thumbnails of the expo
 }
 
 } // namespace bbs_plate_relationship_contracts
+
+namespace bbs_thumbnail_accessor_contracts {
+using namespace Slic3r;
+
+namespace {
+
+const std::string thumbnail_type = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
+const std::string middle_type    = "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle";
+const std::string small_type     = "http://schemas.bambulab.com/package/2021/cover-thumbnail-small";
+
+struct Rel
+{
+    std::string target;
+    std::string type;
+};
+
+// Writes an archive whose package relationships are `relationships`, with one entry per payload
+// (name without the leading slash). The accessor returns entry bytes without decoding them.
+void write_archive_with_relationships(const std::string& path, const std::vector<Rel>& relationships,
+                                      const std::vector<std::pair<std::string, std::string>>& entries)
+{
+    std::string rels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                       "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n";
+    int id = 0;
+    for (const Rel& relationship : relationships)
+        rels += "  <Relationship Target=\"" + relationship.target + "\" Id=\"rel-" + std::to_string(++id) + "\" Type=\"" +
+                relationship.type + "\"/>\n";
+    rels += "</Relationships>";
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", rels.data(), rels.size());
+    for (const auto& [name, data] : entries)
+        archive.add_entry(name, data.data(), data.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS thumbnail accessor picks the Bambu middle, then the standard, then the plate 1 thumbnail", "[3MF][Bbs3mfThumbnailAccessor]")
+{
+    // Every candidate entry has its own bytes, so the returned bytes name the entry that was chosen.
+    const std::string middle   = "\x89PNG middle-entry";
+    const std::string standard = "\x89PNG standard-entry";
+    const std::string small    = "\x89PNG small-entry";
+    const std::string plate_1  = "\x89PNG plate-1-entry";
+    const std::vector<std::pair<std::string, std::string>> entries = {
+        {"Metadata/middle.png", middle}, {"Metadata/standard.png", standard}, {"Metadata/small.png", small}, {"Metadata/plate_1.png", plate_1}};
+
+    enum Case { MiddleAndStandard, MiddleOnly, StandardOnly, NonPngStandard, NoThumbnailRelationship, SmallOnly };
+    const Case which = GENERATE(MiddleAndStandard, MiddleOnly, StandardOnly, NonPngStandard, NoThumbnailRelationship, SmallOnly);
+    CAPTURE(int(which));
+    std::vector<Rel> relationships;
+    std::string expected;
+    switch (which) {
+    case MiddleAndStandard:
+        relationships = {{"/Metadata/standard.png", thumbnail_type}, {"/Metadata/middle.png", middle_type}};
+        expected      = middle; // the Bambu middle relationship wins whichever is listed first
+        break;
+    case MiddleOnly:
+        relationships = {{"/Metadata/middle.png", middle_type}};
+        expected      = middle;
+        break;
+    case StandardOnly:
+        relationships = {{"/Metadata/standard.png", thumbnail_type}};
+        expected      = standard;
+        break;
+    case NonPngStandard:
+        // A standard thumbnail relationship that does not name a .png is ignored: the fixed path is used.
+        relationships = {{"/Metadata/standard.jpg", thumbnail_type}};
+        expected      = plate_1;
+        break;
+    case NoThumbnailRelationship:
+        relationships = {{"/Metadata/unrelated.png", "http://example.com/unrelated"}};
+        expected      = plate_1;
+        break;
+    case SmallOnly:
+        // The cover-small relationship is not used by the accessor.
+        relationships = {{"/Metadata/small.png", small_type}};
+        expected      = plate_1;
+        break;
+    }
+    ScopedTemporaryFile archive(".3mf");
+    write_archive_with_relationships(archive.string(), relationships, entries);
+    CHECK(bbs_3mf_get_thumbnail(archive.string().c_str()) == expected);
+}
+
+} // namespace bbs_thumbnail_accessor_contracts
