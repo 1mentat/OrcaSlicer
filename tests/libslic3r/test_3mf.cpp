@@ -4256,6 +4256,133 @@ TEST_CASE("BBS 3MF ignores unusable filament sequence data and keeps the model a
     }
 }
 
+namespace {
+
+// A two-object model whose objects carry a layer range and brim points, stored as a project
+// archive, so the layer-range and brim-point entries exist before a test replaces them.
+void store_object_record_fixture(const std::string &path)
+{
+    Model source;
+    make_model(source, true);
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    source.objects[0]->layer_config_ranges[{0., 1.}].assign_config(std::move(range_config));
+    DynamicPrintConfig other_range_config;
+    other_range_config.set_key_value("layer_height", new ConfigOptionFloat(0.17));
+    source.objects[1]->layer_config_ranges[{0., 2.}].assign_config(std::move(other_range_config));
+    source.objects[0]->brim_points.emplace_back(1.f, 2.f, 0.3f, 0.45f);
+    source.objects[1]->brim_points.emplace_back(3.f, 4.f, 0.5f, 0.65f);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_ext_object_records_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+}
+
+void replace_archive_entry(const std::string &path, const std::string &entry, const std::string &text)
+{
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != entry)
+            return false;
+        data = text;
+        return true;
+    }));
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF tolerates layer range records with invalid or repeated object ids and keeps the first per object", "[3MF][Bbs3mfExtended][Errors][LayerRanges]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_object_record_fixture(archive.string());
+
+    // Control: the exported records restore on the matching objects.
+    {
+        Model control_model;
+        LoadedProject control;
+        REQUIRE(load_model(archive.string(), control_model, control));
+        REQUIRE(control_model.objects.size() == 2);
+        REQUIRE(control_model.objects[0]->layer_config_ranges.size() == 1);
+        CHECK_THAT(control_model.objects[0]->layer_config_ranges.begin()->second.opt_float("layer_height"),
+                   Catch::Matchers::WithinAbs(0.31, 1e-6));
+    }
+
+    const auto range = [](const char *id, const char *min_z, const char *max_z, const char *layer_height) {
+        return std::string("<object id=\"") + id + "\"><range min_z=\"" + min_z + "\" max_z=\"" + max_z +
+               "\"><option opt_key=\"layer_height\">" + layer_height + "</option></range></object>";
+    };
+    // Ids 0 and "abc" are invalid (they match no object, so those rows only show the import copes),
+    // the second record for id 1 repeats it (the first record must win), and id 3 names no object.
+    replace_archive_entry(archive.string(), "Metadata/layer_config_ranges.xml",
+                          "<?xml version=\"1.0\"?><objects>" + range("0", "0", "1", "0.45") + range("abc", "0", "1", "0.46") +
+                              range("1", "0", "1", "0.25") + range("1", "1", "2", "0.35") + range("2", "0", "2", "0.15") +
+                              range("3", "0", "1", "0.55") + "</objects>");
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 2);
+    REQUIRE(loaded_model.objects[0]->name == "base-object");
+    REQUIRE(loaded_model.objects[1]->name == "second-object");
+
+    // The first record for an id wins; the repeated one (a different range and value) is dropped.
+    REQUIRE(loaded_model.objects[0]->layer_config_ranges.size() == 1);
+    const auto &first = *loaded_model.objects[0]->layer_config_ranges.begin();
+    CHECK_THAT(first.first.first, Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(first.first.second, Catch::Matchers::WithinAbs(1., 1e-6));
+    CHECK_THAT(first.second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.25, 1e-6));
+
+    REQUIRE(loaded_model.objects[1]->layer_config_ranges.size() == 1);
+    const auto &second = *loaded_model.objects[1]->layer_config_ranges.begin();
+    CHECK_THAT(second.first.second, Catch::Matchers::WithinAbs(2., 1e-6));
+    CHECK_THAT(second.second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.15, 1e-6));
+}
+
+TEST_CASE("BBS 3MF tolerates malformed brim point records and keeps the valid ones", "[3MF][Bbs3mfExtended][Errors][Brim]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_object_record_fixture(archive.string());
+
+    // Malformed lines come first and a repeat of id 1 follows the valid record, so a parser that stops at
+    // the first bad line or lets a later record win fails. "not-a-coordinate" and "object_id=1" both have no
+    // '|' (one parse branch); ids 0 and "x" both parse to 0 (one branch); "a=b=c" has two '='. The version
+    // header only keeps the file well-formed: it is skipped as a malformed record even without header handling.
+    replace_archive_entry(archive.string(), "Metadata/brim_ear_points.txt",
+                          "brim_points_format_version=0\n"
+                          "not-a-coordinate\n"
+                          "object_id=1\n"
+                          "object_id=0|9 9 9 9\n"
+                          "object_id=x|9 9 9 9\n"
+                          "a=b=c|9 9 9 9\n"
+                          "object_id=1|1.5 2.5 0.375 0.625\n"
+                          "object_id=1|8 8 8 8\n"
+                          "object_id=2|3.5 4.5 0.5 0.75 5.5 6.5 0.875 0.25\n");
+
+    Model loaded_model;
+    LoadedProject loaded;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 2);
+    REQUIRE(loaded_model.objects[0]->name == "base-object");
+
+    const BrimPoints &first = loaded_model.objects[0]->brim_points;
+    REQUIRE(first.size() == 1);
+    CHECK_THAT(first[0].pos(0), Catch::Matchers::WithinAbs(1.5, 1e-5));
+    CHECK_THAT(first[0].pos(1), Catch::Matchers::WithinAbs(2.5, 1e-5));
+    CHECK_THAT(first[0].pos(2), Catch::Matchers::WithinAbs(0.375, 1e-5));
+    CHECK_THAT(first[0].head_front_radius, Catch::Matchers::WithinAbs(0.625, 1e-5));
+
+    const BrimPoints &second = loaded_model.objects[1]->brim_points;
+    REQUIRE(second.size() == 2);
+    CHECK_THAT(second[0].pos(0), Catch::Matchers::WithinAbs(3.5, 1e-5));
+    CHECK_THAT(second[0].head_front_radius, Catch::Matchers::WithinAbs(0.75, 1e-5));
+    CHECK_THAT(second[1].pos(1), Catch::Matchers::WithinAbs(6.5, 1e-5));
+    CHECK_THAT(second[1].pos(2), Catch::Matchers::WithinAbs(0.875, 1e-5));
+    CHECK_THAT(second[1].head_front_radius, Catch::Matchers::WithinAbs(0.25, 1e-5));
+}
+
 } // namespace bbs_archive_contracts
 
 namespace legacy_3mf_contracts {
