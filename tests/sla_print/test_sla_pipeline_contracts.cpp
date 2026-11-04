@@ -15,6 +15,8 @@
 #include "libslic3r/BoundingBox.hpp"
 #include <string>
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <optional>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
@@ -1211,6 +1213,31 @@ TEST_CASE("SLA relative correction rebuilds transformed geometry", "[SLAPrint][S
     CHECK_THAT(model_slice_area_mm2(*fixture.print.objects().front()), Catch::Matchers::WithinRel(150.0, 0.01));
 }
 
+TEST_CASE("SLA correction vectors shorter than two values retain the unity fallback",
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionShortVector]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.5}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.5}));
+    config.set_deserialize_strict({
+        {"relative_correction_x", 2.0},
+        {"relative_correction_y", 3.0},
+        {"relative_correction_z", 4.0},
+        {"material_correction_x", 5.0},
+        {"material_correction_y", 6.0},
+        {"material_correction_z", 7.0},
+    });
+
+    Model empty_model;
+    SLAPrint print;
+    print.apply(empty_model, std::move(config));
+
+    const Vec3d correction = print.relative_correction();
+    CHECK_THAT(correction.x(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.y(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.z(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+}
+
 TEST_CASE("SLA model extension and deletion synchronize print objects by ID", "[SLAPrint][SLALifecycle]")
 {
     LifecycleFixture fixture;
@@ -1875,6 +1902,65 @@ TEST_CASE("SLA material correction scales transformed slice geometry",
     CHECK_THAT(material.bbox_x, Catch::Matchers::WithinRel(base.bbox_x * 1.5, 1e-5));
     CHECK_THAT(material.bbox_y, Catch::Matchers::WithinRel(base.bbox_y * 0.8, 1e-5));
     CHECK_THAT(material.bbox_z, Catch::Matchers::WithinRel(base.bbox_z, 1e-5));
+}
+
+TEST_CASE("SLA validation rejects nonpositive or nonfinite effective correction scales",
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionScaleValidation]")
+{
+    SlaCubeFixture positive_scale(sla_config(1.0), make_cube(10.0, 10.0, 4.0));
+    const auto positive_validation = positive_scale.print.validate();
+    INFO("positive scale validation: " << positive_validation.string);
+    REQUIRE(positive_validation.string.empty());
+    REQUIRE(positive_scale.print.objects().size() == 1);
+    const Vec3d positive_bounds = positive_scale.print.objects().front()->transformed_mesh().bounding_box().size();
+    CHECK(positive_bounds.x() > 0.);
+    CHECK(positive_bounds.y() > 0.);
+    CHECK(positive_bounds.z() > 0.);
+
+    struct InvalidCorrectionCase {
+        const char *name;
+        const char *primary_key;
+        double primary_value;
+        const char *secondary_key;
+        double secondary_value;
+    };
+    const std::array<InvalidCorrectionCase, 10> invalid_cases = {{
+        {"zero relative X", "relative_correction_x", 0.0, "material_correction_x", 1.0},
+        {"zero relative Y", "relative_correction_y", 0.0, "material_correction_y", 1.0},
+        {"zero relative Z", "relative_correction_z", 0.0, "material_correction_z", 1.0},
+        {"zero material X", "material_correction_x", 0.0, "relative_correction_x", 1.0},
+        {"zero material Y", "material_correction_y", 0.0, "relative_correction_y", 1.0},
+        {"zero material Z", "material_correction_z", 0.0, "relative_correction_z", 1.0},
+        {"negative effective factor", "relative_correction_y", -1.0, "material_correction_y", 1.0},
+        {"infinite scalar factor", "relative_correction_x",
+         std::numeric_limits<double>::infinity(), "material_correction_x", 1.0},
+        {"NaN scalar factor", "material_correction_y",
+         std::numeric_limits<double>::quiet_NaN(), "relative_correction_y", 1.0},
+        {"finite factors with infinite product", "relative_correction_z",
+         1e200, "material_correction_z", 1e200},
+    }};
+
+    for (const InvalidCorrectionCase &test_case : invalid_cases) {
+        INFO("invalid scale case: " << test_case.name);
+        DynamicPrintConfig config = sla_config(1.0);
+        if (std::isfinite(test_case.primary_value) && std::isfinite(test_case.secondary_value)) {
+            config.set_deserialize_strict({
+                {test_case.primary_key, test_case.primary_value},
+                {test_case.secondary_key, test_case.secondary_value},
+            });
+        } else {
+            config.set_key_value(test_case.primary_key, new ConfigOptionFloat(test_case.primary_value));
+            config.set_key_value(test_case.secondary_key, new ConfigOptionFloat(test_case.secondary_value));
+        }
+
+        Model empty_model;
+        SLAPrint print;
+        print.apply(empty_model, std::move(config));
+        REQUIRE(print.objects().empty());
+        const StringObjectException validation = print.validate();
+        INFO("invalid scale validation: " << validation.string);
+        CHECK_FALSE(validation.string.empty());
+    }
 }
 
 TEST_CASE("SLA pillar connection modes preserve intended near and far bridge topology",

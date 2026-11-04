@@ -10291,19 +10291,23 @@ void  handle_legacy_sla(DynamicPrintConfig &config)
 {
     for (std::string corr : {"relative_correction", "material_correction"}) {
         if (config.has(corr)) {
+            const ConfigOptionFloats *legacy_correction = config.opt<ConfigOptionFloats>(corr);
+            if (legacy_correction->values.size() < 2)
+                continue;
+
             if (std::string corr_x = corr + "_x"; !config.has(corr_x)) {
                 auto* opt = config.opt<ConfigOptionFloat>(corr_x, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];
+                opt->value = legacy_correction->values[0];
             }
 
             if (std::string corr_y = corr + "_y"; !config.has(corr_y)) {
                 auto* opt = config.opt<ConfigOptionFloat>(corr_y, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];
+                opt->value = legacy_correction->values[0];
             }
 
             if (std::string corr_z = corr + "_z"; !config.has(corr_z)) {
                 auto* opt = config.opt<ConfigOptionFloat>(corr_z, true);
-                opt->value = config.opt<ConfigOptionFloats>(corr)->values[1];
+                opt->value = legacy_correction->values[1];
             }
         }
     }

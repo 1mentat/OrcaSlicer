@@ -642,6 +642,12 @@ std::string SLAPrint::output_filename(const std::string &filename_base) const
 
 StringObjectException SLAPrint::validate(std::vector<StringObjectException> *warnings, Polygons *collison_polygons, std::vector<std::pair<Polygon, float>> *height_polygons) const
 {
+    const Vec3d correction = this->relative_correction();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(correction(axis)) || correction(axis) <= 0.)
+            return {L("SLA correction scales must be finite and greater than zero.")};
+    }
+
     for(SLAPrintObject * po : m_objects) {
 
         const ModelObject *mo = po->model_object();

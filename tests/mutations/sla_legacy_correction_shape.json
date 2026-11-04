@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "SLA legacy correction vector-shape migration probes.",
+  "mutants": [
+    {
+      "id": "sla-legacy-short-vector-partial-axis-created",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "            if (legacy_correction->values.size() < 2)\n                continue;",
+      "new": "            if (legacy_correction->values.size() < 2) {\n                auto *opt = config.opt<ConfigOptionFloat>(corr + \"_x\", true);\n                opt->value = 1.;\n                continue;\n            }",
+      "test_filter": "^SLALegacyCorrectionMalformed$",
+      "description": "Create a safe, synthetic X axis for malformed vectors; malformed file and typed inputs must remain unexpanded.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "122602922c48e87375cf5765e1a15cf24bc56a9ab0e9202bd9d76422c64e4b31",
+      "new_sha256": "b1bc664b178c8a255d67c5690b86856cf1d1c734bb70d495a2ee189e6e102202",
+      "unique_old_anchor_matches": 1
+    },
+    {
+      "id": "sla-legacy-valid-vector-z-mapped-from-x",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "opt->value = legacy_correction->values[1];",
+      "new": "opt->value = legacy_correction->values[0];",
+      "test_filter": "^SLALegacyCorrectionExpansion$",
+      "description": "Map the legacy second correction component from X instead of its registered Z source; valid migration preserves independent axis values.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "4ae7bea2879c9fea1d563d8fcab31f8b2212303519e4a367fb46e285eee79a32",
+      "new_sha256": "68e1943d1991d2f335e852ffe98991bcf4564f61cc8c81aa2d42011ea081ad52",
+      "unique_old_anchor_matches": 1
+    }
+  ]
+}

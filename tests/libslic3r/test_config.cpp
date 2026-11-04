@@ -2172,7 +2172,7 @@ TEST_CASE("PrintConfig legacy values that cannot be represented are discarded", 
     }
 }
 
-TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[PrintConfigBehavior][Config]")
+TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[PrintConfigBehavior][Config][SLALegacyCorrectionExpansion]")
 {
     DynamicPrintConfig config;
     config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
@@ -2185,6 +2185,78 @@ TEST_CASE("Legacy SLA vector corrections are expanded into axis options", "[Prin
     CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
     CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.9, 1e-9));
     CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(0.8, 1e-9));
+}
+
+TEST_CASE("Malformed legacy SLA correction vectors leave axis options unchanged",
+          "[PrintConfigBehavior][Config][Regression][SLALegacyCorrectionMalformed]")
+{
+    const std::array<std::string, 2> correction_keys = {"relative_correction", "material_correction"};
+    const std::array<std::string, 2> file_arrays = {"[]", "[\"1.25\"]"};
+
+    for (const std::string &key : correction_keys) {
+        INFO("legacy key=" << key);
+
+        DynamicPrintConfig typed_empty;
+        typed_empty.set_key_value(key, new ConfigOptionFloats(std::vector<double>{}));
+        handle_legacy_sla(typed_empty);
+        for (const std::string suffix : {"_x", "_y", "_z"})
+            CHECK_FALSE(typed_empty.has(key + suffix));
+
+        for (const std::string &array : file_arrays) {
+            INFO("serialized array=" << array);
+            ScopedTemporaryFile input(".json");
+            {
+                boost::nowide::ofstream out(input.string());
+                REQUIRE(out.is_open());
+                out << "{\"" << key << "\":" << array << "}";
+                out.close();
+                REQUIRE(out.good());
+            }
+
+            DynamicPrintConfig parsed;
+            ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+            std::map<std::string, std::string> key_values;
+            std::string reason;
+            REQUIRE(parsed.load_from_json(input.string(), substitutions, true, key_values, reason) == 0);
+            CHECK(reason.empty());
+            REQUIRE(parsed.has(key));
+            REQUIRE_FALSE(parsed.has(key + "_x"));
+            REQUIRE_FALSE(parsed.has(key + "_y"));
+            REQUIRE_FALSE(parsed.has(key + "_z"));
+
+            const ConfigOptionFloats *legacy = parsed.opt<ConfigOptionFloats>(key);
+            REQUIRE(legacy != nullptr);
+            REQUIRE(legacy->values.size() == 1);
+            if (array == "[]")
+                CHECK_THAT(legacy->values.front(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+            else
+                CHECK_THAT(legacy->values.front(), Catch::Matchers::WithinAbs(1.25, 1e-9));
+
+            handle_legacy_sla(parsed);
+            for (const std::string suffix : {"_x", "_y", "_z"})
+                CHECK_FALSE(parsed.has(key + suffix));
+        }
+    }
+}
+
+TEST_CASE("Legacy SLA vector migration preserves explicit axis options", "[PrintConfigBehavior][Config]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.9, 0.8}));
+    config.set_deserialize_strict({
+        {"relative_correction_x", 1.7},
+        {"material_correction_z", 1.4},
+    });
+
+    handle_legacy_sla(config);
+
+    CHECK_THAT(config.opt_float("relative_correction_x"), Catch::Matchers::WithinAbs(1.7, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_y"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_z"), Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(1.4, 1e-9));
 }
 
 TEST_CASE("Legacy composite thumbnail values become canonical definitions", "[PrintConfigBehavior][Config]")

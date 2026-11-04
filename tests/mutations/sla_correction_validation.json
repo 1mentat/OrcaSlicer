@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "SLA effective axis correction validation producer probes.",
+  "mutants": [
+    {
+      "id": "sla-correction-zero-scale-accepted",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "if (!std::isfinite(correction(axis)) || correction(axis) <= 0.)",
+      "new": "if (!std::isfinite(correction(axis)) || correction(axis) < 0.)",
+      "test_filter": "^SLACorrectionScaleValidation$",
+      "description": "Allow an effective zero correction scale; the bounded empty-model public validation case requires rejection.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "b0fdae154a4435611e282ff95057eb0d5f3b20416a42fd2996b25e135f7dc336",
+      "new_sha256": "ba86ab8202c66e3ca865c10094580f79cce8b44610437ab8d5ea5152037a1f01",
+      "unique_old_anchor_matches": 1
+    },
+    {
+      "id": "sla-correction-nonfinite-scale-accepted",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "if (!std::isfinite(correction(axis)) || correction(axis) <= 0.)",
+      "new": "if (correction(axis) <= 0.)",
+      "test_filter": "^SLACorrectionScaleValidation$",
+      "description": "Remove finite-scale validation; the bounded infinity and NaN rows require rejection.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "b0fdae154a4435611e282ff95057eb0d5f3b20416a42fd2996b25e135f7dc336",
+      "new_sha256": "bf07ff7c6bf0d05eab249651d690e9cc8cf25da75d00dd09f6b1de779ce1d235",
+      "unique_old_anchor_matches": 1
+    },
+    {
+      "id": "sla-correction-z-scale-unvalidated",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "for (int axis = 0; axis < 3; ++axis) {",
+      "new": "for (int axis = 0; axis < 2; ++axis) {",
+      "test_filter": "^SLACorrectionScaleValidation$",
+      "description": "Skip validation of Z correction; the zero-Z row requires the same public rejection as X and Y.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "a7c5c0c666b0a7bf49d0ab84a8e28dc8420550eca80fc844113ced84cf269239",
+      "new_sha256": "74e6c97366e0386e6def59531a166d098b9de33ba724d5de37bd0fe9f4afd138",
+      "unique_old_anchor_matches": 1
+    }
+  ]
+}
