@@ -34,6 +34,16 @@ void require_linear_fit(const Polyline& path)
     CHECK(path.fitting_result[0].start_point_index == 0);
     CHECK(path.fitting_result[0].end_point_index == path.points.size() - 1);
 }
+void require_large_coordinate_spacing_progress()
+{
+    const coord_t magnitude = coord_t(1LL << 60);
+    for (const coord_t origin : {magnitude, -magnitude}) {
+        const Polyline source{Points{Point(origin, 37), Point(origin + 512, 37)}};
+        const auto pieces = source.equally_spaced_lines(300.);
+        REQUIRE(pieces.size() == 2);
+        REQUIRE(pieces.front().last_point() == Point(origin + 300, 37));
+    }
+}
 } // namespace
 
 TEST_CASE("Polyline leftmost point selects the smallest horizontal coordinate", "[Polyline][PolylineOperations]")
@@ -309,6 +319,7 @@ TEST_CASE("Equally spaced line pieces retain a short path and its internal verti
 }
 TEST_CASE("Equally spaced line pieces reject invalid distances", "[Polyline][PolylineOperations]")
 {
+    require_large_coordinate_spacing_progress();
     const Polyline source = elbow();
     for (double distance : {0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
         CHECK_THROWS_AS(source.equally_spaced_lines(distance), InvalidArgument);
@@ -343,6 +354,7 @@ TEST_CASE("Equally spaced pieces make progress at the smallest representable uni
 
 TEST_CASE("Sub-unit spacing uses the smallest representable coordinate distance", "[Polyline][PolylineOperations]")
 {
+    require_large_coordinate_spacing_progress();
     const Polyline source{Points{Point(0, 0), Point(10, 0), Point(10, 10)}};
     for (double distance : {0.4, std::numeric_limits<double>::min()}) {
         const auto pieces = source.equally_spaced_lines(distance);
@@ -416,6 +428,7 @@ TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "
 
 TEST_CASE("Equally spaced pieces remain finite and exact near large positive and negative coordinates", "[Polyline][PolylineOperations]")
 {
+    require_large_coordinate_spacing_progress();
     const coord_t magnitude = coord_t(1LL << 60);
     for (const coord_t origin : {magnitude, -magnitude}) {
         const Polyline source{Points{Point(origin, 37), Point(origin + 4096, 37)}};
@@ -433,6 +446,7 @@ TEST_CASE("Equally spaced pieces remain finite and exact near large positive and
 
 TEST_CASE("Translating a bent polyline far from the origin preserves its partitions", "[Polyline][PolylineOperations]")
 {
+    require_large_coordinate_spacing_progress();
     const Polyline local{Points{Point(0, 0), Point(2048, 0), Point(2048, 2048)}};
     const coord_t magnitude = coord_t(1LL << 60);
     for (const double distance : {1., 128., 513.}) {
