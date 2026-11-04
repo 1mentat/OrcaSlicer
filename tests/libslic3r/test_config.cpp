@@ -5688,10 +5688,7 @@ TEST_CASE("ConfigBase get_abs_value_at resolves nullable travel speed slots agai
     CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 2), Catch::Matchers::WithinAbs(12., 1e-12));
 }
 
-// Hidden: for a coPercent option with ratio_over, get_abs_value casts the option to
-// ConfigOptionFloatOrPercent, an invalid cast (undefined behavior). The result varies between
-// runs and builds (sometimes the expected value), which a [!shouldfail] tag cannot express.
-TEST_CASE("ConfigBase get_abs_value resolves a registered coPercent ratio against layer height", "[Config][ConfigGetter][Regression][.]")
+TEST_CASE("ConfigBase get_abs_value resolves a registered coPercent ratio against layer height", "[Config][ConfigGetter][Regression]")
 {
     const std::string ratio_key = GENERATE(std::string("ironing_flow"), std::string("support_ironing_flow"));
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -5704,8 +5701,6 @@ TEST_CASE("ConfigBase get_abs_value resolves a registered coPercent ratio agains
     flow->value = 50.;
 
     // Both registered percentage settings use layer_height as their ratio base.
-    // Known bug: the ratio_over branch casts the coPercent option to ConfigOptionFloatOrPercent;
-    // in practice it returns the raw value (50) instead of 0.1.
     CHECK_THAT(config.get_abs_value(ratio_key), Catch::Matchers::WithinAbs(0.1, 1e-12));
 }
 
