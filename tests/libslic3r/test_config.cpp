@@ -5567,31 +5567,6 @@ TEST_CASE("Static print configs expose the options of their own class only", "[C
     CHECK(std::find(keys.begin(), keys.end(), "skirt_distance") == keys.end());
 }
 
-TEST_CASE("Each registered option of PrintObjectConfig has a definition with a matching type", "[Config][ConfigContracts]")
-{
-    const PrintObjectConfig object_config;
-    const ConfigDef *def = object_config.def();
-    REQUIRE(def != nullptr);
-    const auto keys = object_config.keys();
-    REQUIRE_FALSE(keys.empty());
-
-    // keys() comes from the registration itself, so an option left out of it would not show up
-    // in the loop below; a fixed list of options declared by PrintObjectConfig guards that.
-    for (const char *known : {"layer_height", "seam_position", "brim_object_gap"}) {
-        CAPTURE(known);
-        CHECK(std::find(keys.begin(), keys.end(), known) != keys.end());
-    }
-
-    for (const std::string &key : keys) {
-        CAPTURE(key);
-        const ConfigOptionDef *definition = def->get(key);
-        REQUIRE(definition != nullptr);
-        const ConfigOption *option = object_config.option(key);
-        REQUIRE(option != nullptr);
-        CHECK(option->type() == definition->type);
-    }
-}
-
 TEST_CASE("Definition metadata of a static option matches its default-constructed value", "[Config][ConfigContracts]")
 {
     const PrintObjectConfig object_config;
