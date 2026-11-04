@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
 
@@ -901,4 +902,178 @@ TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is no
     literal.append("\xE2\x82\x28", 3);
     literal += "\"}";
     CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser uses the external filament map for vector access",
+          "[PlaceholderParser][PlaceholderParserMapping]")
+{
+    DynamicPrintConfig stored = DynamicPrintConfig::full_print_config();
+    auto *outer_wall_speed = stored.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(outer_wall_speed != nullptr);
+    outer_wall_speed->values = { 60., 70., 80. };
+
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    auto *filament_map = external.option<ConfigOptionInts>("filament_map");
+    REQUIRE(filament_map != nullptr);
+    // Requests 0 and 1 resolve to distinct nonzero stored slots 1 and 2.
+    // Thus both the mapping branch and its last-slot bound are observable;
+    // the fallback 0 cannot accidentally satisfy either row.
+    filament_map->values = { 1, 2 };
+
+    PlaceholderParser parser(&external);
+    REQUIRE(parser.apply_config(stored));
+    const std::string mapped_first = parser.process("{outer_wall_speed}", 0);
+    const std::string mapped_last = parser.process("{outer_wall_speed}", 1);
+    CHECK(mapped_first == "70");
+    CHECK(mapped_last == "80");
+}
+
+TEST_CASE("Placeholder parser reports negative legacy vector indexes",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    parser.set("idx", -1);
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[idx]]"),
+                      Catch::Matchers::ContainsSubstring("Negative vector index"));
+    parser.set("idx", 0);
+    CHECK(parser.process("[nozzle_temperature[idx]]") == "357");
+}
+
+TEST_CASE("Placeholder parser changes the legacy vector index with filament_change",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "200,210,220" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    CHECK_THAT(parser.process("{filament_change(1)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=210"));
+    CHECK_THAT(parser.process("{filament_change(2)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=220"));
+}
+
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices and rejects invalid index variables",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    parser.set("index", 1);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
+    parser.set("index", "one");
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
+                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
+                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
+    parser.set("scalar", 1);
+    parser.set("index", 0);
+    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+}
+
+TEST_CASE("Placeholder parser validates legacy indexes and optional vector elements",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "200,210" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    parser.set("scalar", 1);
+    parser.set("index", 1);
+    CHECK_THROWS_WITH(parser.process("[scalar_0]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature_bad]"),
+                      Catch::Matchers::ContainsSubstring("Invalid vector index"));
+    CHECK(parser.process("[nozzle_temperature_[index]]") == "210");
+
+    auto empty_config = DynamicPrintConfig::full_print_config();
+    auto *empty_speed = empty_config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(empty_speed != nullptr);
+    empty_speed->values.clear();
+    PlaceholderParser empty_parser;
+    REQUIRE(empty_parser.apply_config(empty_config));
+    CHECK_THROWS_WITH(empty_parser.process("[outer_wall_speed_0]"),
+                      Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+
+    auto nil_config = DynamicPrintConfig::full_print_config();
+    auto *nil_speed = nil_config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(nil_speed != nullptr);
+    nil_speed->values = { 60., 70. };
+    nil_speed->set_at_to_nil(1);
+    PlaceholderParser nil_parser;
+    REQUIRE(nil_parser.apply_config(nil_config));
+    CHECK_THROWS_WITH(nil_parser.process("[outer_wall_speed_1]"),
+                      Catch::Matchers::ContainsSubstring("element of vector of optional values"));
+}
+
+TEST_CASE("Placeholder parser resolves point and enum vector elements",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    auto *area = config.option<ConfigOptionPoints>("printable_area");
+    REQUIRE(area != nullptr);
+    area->values = { Vec2d(3., 4.), Vec2d(5., 6.) };
+    auto *nozzle_type = config.option<ConfigOptionEnumsGenericNullable>("nozzle_type");
+    REQUIRE(nozzle_type != nullptr);
+    nozzle_type->values = { ntHardenedSteel };
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{printable_area[0]}") == "[3, 4]");
+    CHECK(parser.process("{nozzle_type[0]}") == std::to_string(static_cast<int>(ntHardenedSteel)));
+    CHECK_THROWS_WITH(parser.process("{printable_area}"),
+                      Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
+}
+
+TEST_CASE("Placeholder parser rejects empty() and size() of non-vectors and indexes into empty output vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("scalar", new ConfigOptionInt(4));
+    outputs.set_key_value("empty_values", new ConfigOptionInts({}));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{empty(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{empty(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+}
+
+TEST_CASE("Placeholder parser resolves vector percentages against the selected parent element",
+          "[PlaceholderParser][PlaceholderParserPercentParents]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("bridge_speed", new ConfigOptionFloats({ 20., 40. }));
+    config.set_key_value("internal_bridge_speed", new ConfigOptionFloatsOrPercents({
+        FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
+    }));
+    DynamicConfig external;
+    external.set_key_value("filament_map", new ConfigOptionInts({ 1, 0 }));
+    PlaceholderParser parser(&external);
+    REQUIRE(parser.apply_config(config));
+
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[0]}")), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[1]}")), Catch::Matchers::WithinAbs(20., 1e-12));
+
+    // Single-element vectors use element zero even when the filament maps to extruder one.
+    auto single_config = DynamicPrintConfig::full_print_config();
+    single_config.set_key_value("bridge_speed", new ConfigOptionFloats({ 25. }));
+    single_config.set_key_value("internal_bridge_speed",
+                                new ConfigOptionFloatsOrPercents({ FloatOrPercent{ 120., true } }));
+    PlaceholderParser single_parser(&external);
+    REQUIRE(single_parser.apply_config(single_config));
+    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 0)), Catch::Matchers::WithinAbs(25., 1e-12));
+    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
 }
