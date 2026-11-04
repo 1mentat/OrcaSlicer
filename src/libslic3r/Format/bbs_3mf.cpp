@@ -4189,7 +4189,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         if (!m_curr_metadata_name.empty()) {
             BOOST_LOG_TRIVIAL(info) << "load_3mf found metadata key = " << m_curr_metadata_name << ", value = " << xml_unescape(m_curr_characters);
-            model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters);
+            // The exporter escapes the MakerLab name and version twice (see the metadata_item_map
+            // fill in the writer), so their quote entities survive one XML parse and are decoded here.
+            const bool decode_quotes = m_curr_metadata_name == BBL_MAKERLAB_TAG || m_curr_metadata_name == BBL_MAKERLAB_VERSION_TAG;
+            model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters, decode_quotes);
         }
 
         return true;

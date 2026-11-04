@@ -7304,7 +7304,7 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
 {
     // Markup characters and text that already looks like an entity (including &quot; and &apos;
     // spelled out) must survive literally: unescaping is a single pass.
-    const MakerMetadata values{"Maker & <Lab> &amp; &unknown; literal", "maker-7 & <rev> &amp; literal",
+    const MakerMetadata values{"Maker & <Lab> &amp; &quot; &unknown; literal", "maker-7 & <rev> &amp; &apos; literal",
                                "prototype & <inside> &amp; &quot; &apos; literal", "rev <7> &amp;"};
     const auto metadata = round_trip(values);
     const std::map<std::string, std::string> expected{
@@ -7321,15 +7321,59 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
     }
 }
 
-TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
+TEST_CASE("BBS export round-trips quote characters in the MakerLab name and version", "[3MF][Bbs3mfMakerLabMetadata]")
 {
-    const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
-                               "rev 7"};
+    // Only these two keys are decoded for quotes: their values are the ones the exporter escapes twice
+    // and the importer can recognize by name. Custom entries cannot be told apart on import.
+    const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype", "rev 7"};
     const auto metadata = round_trip(values);
     CHECK(metadata.at("MakerLab") == values.maker_name);
     CHECK(metadata.at("MakerLabVersion") == values.maker_version);
-    CHECK(metadata.at("MakerWorkflow") == values.workflow);
-    CHECK(metadata.at("MakerRevision") == values.revision);
+}
+
+TEST_CASE("BBS import leaves quote entities in other text unchanged", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    // Plate names and custom metadata are written escaped once; text that literally reads like a
+    // quote entity must come back exactly as it was stored (no extra decoding of &quot; / &apos;).
+    const std::string literal_plate = "plate &quot; &apos; end";
+    const std::string real_quotes   = "plate \"double\" 'single'";
+    const std::string literal_note  = "note &quot; &apos; end";
+
+    ScopedTemporaryDir backup("orca_bbs_literal_entities_store");
+    Model source;
+    source.set_backup_path(backup.string());
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    source.add_object("entity-part", "entity.stl", make_cube(4., 5., 6.))->add_instance();
+    source.add_object("entity-part-2", "entity2.stl", make_cube(6., 5., 4.))->add_instance();
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->metadata_items["CustomNote"] = literal_note;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate0;
+    plate0.plate_index           = 0;
+    plate0.plate_name            = literal_plate;
+    plate0.objects_and_instances = {{0, 0}};
+    PlateData plate1;
+    plate1.plate_index           = 1;
+    plate1.plate_name            = real_quotes;
+    plate1.objects_and_instances = {{1, 0}};
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate0, &plate1};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    Model loaded_model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 2);
+    CHECK(loaded.plates[0]->plate_name == literal_plate);
+    CHECK(loaded.plates[1]->plate_name == real_quotes);
+    REQUIRE(loaded_model.model_info != nullptr);
+    CHECK(loaded_model.model_info->metadata_items.at("CustomNote") == literal_note);
 }
 
 } // namespace bbs_maker_metadata_contracts
