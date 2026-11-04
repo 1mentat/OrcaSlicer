@@ -8664,3 +8664,133 @@ TEST_CASE("Generic 3MF writes no thumbnail entry without a valid thumbnail", "[3
 }
 
 } // namespace generic_3mf_thumbnail_contracts
+
+namespace bbs_plate_thumbnail_contracts {
+using namespace Slic3r;
+
+namespace {
+
+// Expected colour of the small-preview pixel for source block (bx, by): the red base is averaged
+// with its +60 twin (see make_pattern), so the expected red is base + 30.
+std::array<unsigned char, 4> block_color(int bx, int by)
+{
+    return {static_cast<unsigned char>((bx * 2 + by * 5) % 100 + 20), static_cast<unsigned char>((bx * 7 + by * 3) % 200 + 20),
+            static_cast<unsigned char>((bx + by * 11) % 200 + 20), static_cast<unsigned char>(200 + (bx + by) % 50)};
+}
+
+// A thumbnail whose every (width / 128) x (height / 128) block has its own colour; red alternates
+// between the base and base + 60 in a checkerboard inside the block, so a correct block average gives
+// base + 30 for red and the base for the other channels.
+ThumbnailData make_pattern(int width, int height)
+{
+    const int sw = width / PLATE_THUMBNAIL_SMALL_WIDTH;
+    const int sh = height / PLATE_THUMBNAIL_SMALL_HEIGHT;
+    ThumbnailData thumbnail;
+    thumbnail.set(width, height);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            auto color = block_color(x / sw, y / sh);
+            if ((x + y) % 2 == 1)
+                color[0] = static_cast<unsigned char>(color[0] + 60);
+            for (int channel = 0; channel < 4; ++channel)
+                thumbnail.pixels[4 * (size_t(y) * width + x) + channel] = color[channel];
+        }
+    return thumbnail;
+}
+
+// Stores a one-plate project with the thumbnail and returns the decoded small preview of that plate.
+png::ImageColorscale small_preview(const ThumbnailData& thumbnail)
+{
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_store");
+    Model model;
+    model.set_backup_path(backup.string());
+    ScopeGuard detach([&model] { model.set_backup_path("detach"); });
+    model.add_object("thumbnail-cube", "cube.stl", make_cube(4., 5., 6.))->add_instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index           = 0;
+    plate.objects_and_instances = {{0, 0}};
+    plate.plate_thumbnail       = thumbnail;
+    ThumbnailData thumbnail_copy = thumbnail;
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &model;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.thumbnail_data  = {&thumbnail_copy};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string png_bytes;
+    REQUIRE(read_3mf_entry(archive.string(), png_bytes, "Metadata/plate_1_small.png"));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{png_bytes.data(), png_bytes.size()}, decoded));
+    return decoded;
+}
+
+bool small_preview_has_expected_size(const png::ImageColorscale& decoded)
+{
+    return decoded.cols == PLATE_THUMBNAIL_SMALL_WIDTH && decoded.rows == PLATE_THUMBNAIL_SMALL_HEIGHT && decoded.bytes_per_pixel == 4 &&
+           decoded.buf.size() == size_t(4) * PLATE_THUMBNAIL_SMALL_WIDTH * PLATE_THUMBNAIL_SMALL_HEIGHT;
+}
+
+// Checks every pixel of the small preview against the expected block colours (one assertion per pixel).
+void check_small_preview_pixels(const png::ImageColorscale& decoded)
+{
+    for (int by = 0; by < PLATE_THUMBNAIL_SMALL_HEIGHT; ++by)
+        for (int bx = 0; bx < PLATE_THUMBNAIL_SMALL_WIDTH; ++bx) {
+            const auto expected        = block_color(bx, by);
+            const unsigned char* pixel = &decoded.buf[4 * (size_t(by) * PLATE_THUMBNAIL_SMALL_WIDTH + bx)];
+            const bool same = pixel[0] == expected[0] + 30 && pixel[1] == expected[1] && pixel[2] == expected[2] && pixel[3] == expected[3];
+            if (!same) {
+                CHECK(int(pixel[0]) == expected[0] + 30);
+                CHECK(int(pixel[1]) == int(expected[1]));
+                CHECK(int(pixel[2]) == int(expected[2]));
+                CHECK(int(pixel[3]) == int(expected[3]));
+                INFO("first mismatch at small preview pixel (" << bx << ", " << by << ")");
+                return;
+            }
+        }
+    SUCCEED("every small preview pixel matches its block");
+}
+
+} // namespace
+
+TEST_CASE("BBS plate thumbnails downsample square source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample]")
+{
+    const png::ImageColorscale decoded = small_preview(make_pattern(256, 256));
+    REQUIRE(small_preview_has_expected_size(decoded));
+    check_small_preview_pixels(decoded);
+}
+
+TEST_CASE("BBS plate thumbnails keep the small preview size for source blocks wider than tall", "[3MF][Bbs3mfThumbnailDownsample]")
+{
+    // 384 x 256 gives 3 x 2 pixel blocks.
+    CHECK(small_preview_has_expected_size(small_preview(make_pattern(384, 256))));
+}
+
+// Known bug: the downsampler steps the source by (sw wide, sh tall) blocks but indexes the small
+// image with `i / sw` and `j / sh` (the divisors are swapped), so for non-square blocks (3 x 2 pixels
+// here) blocks land on the wrong small pixels: pixel (0, 0) holds a neighbouring block's average.
+// Fixed by a follow-up fix PR. The previous case asserts the size precondition; if it does not hold
+// here the test runs no assertion and is reported as an unexpected pass.
+TEST_CASE("BBS plate thumbnails downsample wide source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample][!shouldfail]")
+{
+    const png::ImageColorscale decoded = small_preview(make_pattern(384, 256));
+    if (!small_preview_has_expected_size(decoded))
+        return;
+    check_small_preview_pixels(decoded);
+}
+
+// Known bug: with 2 x 3 pixel blocks (256 x 384) the same swapped indexes (`i / sw` runs up to 190,
+// past the 128 rows of the small image) write beyond the small pixel buffer, a heap overflow that
+// crashes the process here; hidden so the suite does not abort. Fixed by the same follow-up PR.
+TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small preview", "[.][3MF][Bbs3mfThumbnailDownsample][Bbs3mfThumbnailDownsampleTall]")
+{
+    const png::ImageColorscale decoded = small_preview(make_pattern(256, 384));
+    REQUIRE(small_preview_has_expected_size(decoded));
+    check_small_preview_pixels(decoded);
+}
+
+} // namespace bbs_plate_thumbnail_contracts
