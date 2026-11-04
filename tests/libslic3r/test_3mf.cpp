@@ -6171,7 +6171,7 @@ namespace {
 
 void write_text(const boost::filesystem::path& path, const std::string& text)
 {
-    boost::nowide::ofstream output(path.string(), std::ios::binary | std::ios::trunc);
+    boost::nowide::ofstream output(path, std::ios::binary | std::ios::trunc);
     REQUIRE(output.good());
     output << text;
 }
@@ -6236,7 +6236,7 @@ TEST_CASE("BBS restore probe rejects empty and locked paths", "[3MF][Bbs3mfRecov
         CHECK(origin == "<lock>");
     }
 
-    SECTION("an unreadable lock")
+    SECTION("a lock that is not a process id")
     {
         write_text(lock, "not-a-process-id");
         std::string path   = backup.string();
@@ -6252,6 +6252,7 @@ TEST_CASE("BBS restore probe rejects empty and locked paths", "[3MF][Bbs3mfRecov
         std::string origin = "old-origin";
         CHECK_FALSE(has_restore_data(path, origin));
         CHECK(path.empty());
+        CHECK(origin == "<lock>"); // the value the plater compares against
     }
 }
 
