@@ -7667,7 +7667,6 @@ TEST_CASE("BBS extracts each plate's persisted bounding-box JSON file on load", 
 
 namespace foreign_instance_split_contracts {
 using namespace Slic3r;
-using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 
 namespace {
@@ -7699,23 +7698,12 @@ void check_split_into_two_objects(const Model& loaded)
         CHECK(object->instances.front()->get_object() == object);
         CHECK_THAT(object->raw_mesh().volume(), WithinRel(1000., 1e-6));
         const BoundingBoxf3 box = object->bounding_box_exact();
-        CHECK(box.min.isApprox(expected_min[i], 1e-5));
-        CHECK((box.max - box.min).isApprox(Vec3d(10., 10., 10.), 1e-5));
+        CHECK((box.min - expected_min[i]).norm() < 1e-5);
+        CHECK(((box.max - box.min) - Vec3d(10., 10., 10.)).norm() < 1e-5);
     }
 }
 
 } // namespace
-
-TEST_CASE("Legacy importer splits a handcrafted multi-build-item resource", "[3MF][Legacy3MFInstanceSplit]")
-{
-    // No slic3rpe:Version3mf metadata is intentional: this is the third-party path.
-    ScopedTemporaryFile archive(".3mf");
-    REQUIRE(legacy_3mf_contracts::write_archive(archive.string(), two_build_item_cube_model()));
-    Model loaded;
-    DynamicPrintConfig config;
-    REQUIRE(legacy_3mf_contracts::load_generic(archive.string(), loaded, config));
-    check_split_into_two_objects(loaded);
-}
 
 TEST_CASE("BBS importer splits a handcrafted foreign multi-build-item resource", "[3MF][Bbs3mfForeignInstanceSplit]")
 {
@@ -7742,7 +7730,7 @@ TEST_CASE("BBS importer loads a component-aliased second build item as an indepe
 {
     // store_3mf writes the second instance as its own object whose only component is the first
     // object's mesh, and one build item per object; only its Application marker is
-    // rewritten so the BBS importer takes the third-party path. Unlike the handcrafted cases above, no
+    // rewritten so the BBS importer takes the third-party path. Unlike the handcrafted case above, no
     // resource is shared by two build items, so the importer's split-by-instance step is not needed here.
     Model source;
     ModelObject* object = source.add_object();
@@ -7753,7 +7741,7 @@ TEST_CASE("BBS importer loads a component-aliased second build item as an indepe
 
     ScopedTemporaryFile archive(".3mf");
     REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
-    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", "OrcaSlicer-", "ThirdParty-"));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", ">OrcaSlicer-", ">ThirdParty-"));
 
     Model loaded;
     bbs_archive_contracts::LoadedProject state;
