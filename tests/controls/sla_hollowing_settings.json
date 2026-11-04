@@ -11,6 +11,7 @@
     "SLA attached SL1 archive rasterizes stepped model layers",
     "SLA automatic support generation creates printable support geometry",
     "SLA blocked model-facing supports anchor to the intervening body",
+    "SLA bottle metadata changes retain completed geometry and statistics",
     "SLA buildplate-only setting omits blocked support while retaining a clear buildplate route",
     "SLA clearing a processed print releases object ownership",
     "SLA cube processing creates one area-preserving model slice per layer",

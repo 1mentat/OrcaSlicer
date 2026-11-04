@@ -955,6 +955,127 @@ TEST_CASE("SLA reapplying an unchanged model keeps completed state", "[SLAPrint]
     CHECK(fixture.print.finished());
 }
 
+TEST_CASE("SLA bottle metadata changes retain completed geometry and statistics", "[SLAPrint][SLALifecycle][SLABottleMetadata]")
+{
+    LifecycleFixture fixture;
+    const auto print_step_done = [&fixture](SLAPrintStep step) {
+        using SLAPrintState = PrintBaseWithState<SLAPrintStep, slapsCount>;
+        return static_cast<const SLAPrintState &>(fixture.print).is_step_done(step);
+    };
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.print.objects().size() == 1);
+    REQUIRE(fixture.config.option("bottle_cost") != nullptr);
+    REQUIRE(fixture.config.option("bottle_volume") != nullptr);
+    REQUIRE(fixture.config.option("bottle_weight") != nullptr);
+    CHECK_THAT(fixture.config.option("bottle_cost")->getFloat(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(fixture.config.option("bottle_volume")->getFloat(), Catch::Matchers::WithinAbs(1000.0, 1e-9));
+    CHECK_THAT(fixture.config.option("bottle_weight")->getFloat(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
+
+    fixture.process_all();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(print_step_done(slapsMergeSlicesAndEval));
+    REQUIRE(print_step_done(slapsRasterize));
+    REQUIRE(fixture.print.is_step_done(slaposObjectSlice));
+    REQUIRE(fixture.print.is_step_done(slaposSliceSupports));
+
+    const SLAPrintStatistics baseline_stats = fixture.print.print_statistics();
+    CHECK(baseline_stats.objects_used_material > 0.0);
+    CHECK(baseline_stats.estimated_print_time > 0.0);
+
+    std::vector<ExPolygons> baseline_model_slices;
+    const SLAPrintObject *baseline_object = fixture.print.objects().front();
+    const ObjectID baseline_object_id = baseline_object->id();
+    baseline_model_slices.reserve(baseline_object->get_slice_index().size());
+    for (const SLAPrintObject::SliceRecord &record : baseline_object->get_slice_index()) {
+        REQUIRE(record.is_valid());
+        CHECK(record.get_slice(soSupport).empty());
+        const ExPolygons &model_slices = record.get_slice(soModel);
+        REQUIRE(!model_slices.empty());
+        baseline_model_slices.push_back(model_slices);
+    }
+
+    std::vector<double> baseline_print_layer_levels;
+    std::vector<std::size_t> baseline_print_layer_slice_counts;
+    for (const auto &layer : fixture.print.print_layers()) {
+        baseline_print_layer_levels.push_back(layer.level());
+        baseline_print_layer_slice_counts.push_back(layer.slices().size());
+    }
+
+    const auto check_completed_output = [&]() {
+        CHECK(fixture.print.finished());
+        CHECK(print_step_done(slapsMergeSlicesAndEval));
+        CHECK(print_step_done(slapsRasterize));
+        CHECK(fixture.print.is_step_done(slaposObjectSlice));
+        CHECK(fixture.print.is_step_done(slaposSliceSupports));
+        REQUIRE(fixture.print.objects().size() == 1);
+
+        const SLAPrintObject *object = fixture.print.objects().front();
+        CHECK(object->id() == baseline_object_id);
+        const auto &slice_index = object->get_slice_index();
+        CHECK(slice_index.size() == baseline_model_slices.size());
+        if (slice_index.size() == baseline_model_slices.size()) {
+            for (std::size_t i = 0; i < slice_index.size(); ++i) {
+                const ExPolygons &model_slices = slice_index[i].get_slice(soModel);
+                CHECK(model_slices == baseline_model_slices[i]);
+                CHECK(slice_index[i].get_slice(soSupport).empty());
+            }
+        }
+
+        const auto &print_layers = fixture.print.print_layers();
+        CHECK(print_layers.size() == baseline_print_layer_levels.size());
+        if (print_layers.size() == baseline_print_layer_levels.size()) {
+            for (std::size_t i = 0; i < print_layers.size(); ++i) {
+                CHECK_THAT(print_layers[i].level(), Catch::Matchers::WithinAbs(baseline_print_layer_levels[i], 1e-9));
+                CHECK(print_layers[i].slices().size() == baseline_print_layer_slice_counts[i]);
+            }
+        }
+
+        const SLAPrintStatistics &stats = fixture.print.print_statistics();
+        CHECK_THAT(stats.objects_used_material, Catch::Matchers::WithinAbs(baseline_stats.objects_used_material, 1e-9));
+        CHECK_THAT(stats.support_used_material, Catch::Matchers::WithinAbs(baseline_stats.support_used_material, 1e-9));
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(baseline_stats.estimated_print_time, 1e-9));
+        CHECK(stats.fast_layers_count == baseline_stats.fast_layers_count);
+        CHECK(stats.slow_layers_count == baseline_stats.slow_layers_count);
+        CHECK(stats.layers_times.size() == baseline_stats.layers_times.size());
+        if (stats.layers_times.size() == baseline_stats.layers_times.size()) {
+            for (std::size_t i = 0; i < stats.layers_times.size(); ++i)
+                CHECK_THAT(stats.layers_times[i], Catch::Matchers::WithinAbs(baseline_stats.layers_times[i], 1e-9));
+        }
+    };
+
+    DynamicPrintConfig accepted_config = fixture.config;
+    const auto apply_metadata = [&](const char *key, double value, SLAPrint::ApplyStatus expected_status) {
+        DynamicPrintConfig updated_config = accepted_config;
+        updated_config.set_deserialize_strict({{key, value}});
+
+        const SLAPrint::ApplyStatus status = fixture.print.apply(fixture.model, updated_config);
+        CHECK(status == expected_status);
+        check_completed_output();
+
+        const SLAPrint::ApplyStatus repeated_status = fixture.print.apply(fixture.model, updated_config);
+        CHECK(repeated_status == SLAPrint::APPLY_STATUS_UNCHANGED);
+        check_completed_output();
+        accepted_config = std::move(updated_config);
+    };
+
+    // bottle_cost has the same registered minimum and default: zero.
+    apply_metadata("bottle_cost", 0.0, SLAPrint::APPLY_STATUS_UNCHANGED);
+    apply_metadata("bottle_cost", 2.5, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_cost", 0.0, SLAPrint::APPLY_STATUS_CHANGED);
+
+    apply_metadata("bottle_volume", 50.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_volume", 500.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_volume", 1000.0, SLAPrint::APPLY_STATUS_CHANGED);
+
+    apply_metadata("bottle_weight", 0.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_weight", 2.5, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_weight", 1.0, SLAPrint::APPLY_STATUS_CHANGED);
+}
+
 TEST_CASE("SLA raster-only changes invalidate merge while retaining object slices", "[SLAPrint][SLALifecycle]")
 {
     LifecycleFixture fixture;

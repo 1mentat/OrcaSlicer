@@ -3,6 +3,36 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "bottle_cost": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum/default 0 and representative 2.5, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
+    "bottle_volume": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum 50, representative 500 and default 1000, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
+    "bottle_weight": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum 0, representative 2.5 and default 1, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
     "support_base_diameter": {
       "test": "tests/sla_print/sla_supptgen_tests.cpp",
       "tag": "[SLAPrint][SLASupportSettingsVariance]",
