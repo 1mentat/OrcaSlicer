@@ -42,6 +42,7 @@
 
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <utility>
@@ -5593,3 +5594,117 @@ TEST_CASE("Definition metadata of a static option matches its default-constructe
 }
 
 } // namespace config_static_definition_contracts
+
+namespace config_getter_contracts {
+
+TEST_CASE("ConfigBase get_abs_value resolves registered scalar values and line width inheritance", "[Config][ConfigGetter]")
+{
+    const bool comments_enabled = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigBase &base = config;
+
+    auto *layer_height = config.option<ConfigOptionFloat>("layer_height");
+    auto *slow_down_layers = config.option<ConfigOptionInt>("slow_down_layers");
+    auto *gcode_comments = config.option<ConfigOptionBool>("gcode_comments");
+    auto *max_detour = config.option<ConfigOptionFloatOrPercent>("max_travel_detour_distance");
+    auto *seam_start = config.option<ConfigOptionFloatOrPercent>("seam_slope_start_height");
+    auto *line_width = config.option<ConfigOptionFloatOrPercent>("line_width");
+    auto *outer_wall_width = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
+    auto *bridge_density = config.option<ConfigOptionPercent>("bridge_density");
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(slow_down_layers != nullptr);
+    REQUIRE(gcode_comments != nullptr);
+    REQUIRE(max_detour != nullptr);
+    REQUIRE(seam_start != nullptr);
+    REQUIRE(line_width != nullptr);
+    REQUIRE(outer_wall_width != nullptr);
+    REQUIRE(bridge_density != nullptr);
+
+    layer_height->value = 0.28;
+    slow_down_layers->value = 3;
+    gcode_comments->value = comments_enabled;
+    max_detour->value = 2.75;
+    max_detour->percent = false;
+    seam_start->value = 50.;
+    seam_start->percent = true;
+    line_width->value = 0.48;
+    line_width->percent = false;
+    outer_wall_width->value = 0.;
+    outer_wall_width->percent = false;
+    bridge_density->value = 37.;
+
+    CHECK_THAT(base.get_abs_value("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-12));
+    CHECK_THAT(base.get_abs_value("slow_down_layers"), Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK_THAT(base.get_abs_value("gcode_comments"), Catch::Matchers::WithinAbs(comments_enabled ? 1. : 0., 1e-12));
+    CHECK_THAT(base.get_abs_value("max_travel_detour_distance"), Catch::Matchers::WithinAbs(2.75, 1e-12));
+    // seam_slope_start_height is defined as a percentage of layer_height.
+    CHECK_THAT(base.get_abs_value("seam_slope_start_height"), Catch::Matchers::WithinAbs(0.14, 1e-12));
+    // A zero *_line_width value inherits line_width.
+    CHECK_THAT(base.get_abs_value("outer_wall_line_width"), Catch::Matchers::WithinAbs(0.48, 1e-12));
+    // bridge_density has no ratio_over base; its percentage is returned as a unit ratio.
+    CHECK_THAT(base.get_abs_value("bridge_density"), Catch::Matchers::WithinAbs(0.37, 1e-12));
+    REQUIRE_THROWS_AS(base.get_abs_value("not_a_registered_config_key"), std::runtime_error);
+}
+
+TEST_CASE("ConfigBase get_abs_value_at reads the requested slot of a float vector", "[Config][ConfigGetter]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *nozzle_diameter = config.option<ConfigOptionFloats>("nozzle_diameter");
+    REQUIRE(nozzle_diameter != nullptr);
+    nozzle_diameter->values = {0.4, 0.6, 0.8};
+
+    CHECK_THAT(config.get_abs_value_at("nozzle_diameter", 0), Catch::Matchers::WithinAbs(0.4, 1e-12));
+    CHECK_THAT(config.get_abs_value_at("nozzle_diameter", 1), Catch::Matchers::WithinAbs(0.6, 1e-12));
+    CHECK_THAT(config.get_abs_value_at("nozzle_diameter", 2), Catch::Matchers::WithinAbs(0.8, 1e-12));
+    // A scalar option is not a valid target for the indexed getter.
+    CHECK_THROWS_AS(config.get_abs_value_at("layer_height", 0), ConfigurationError);
+}
+
+// Hidden: travel_speed and initial_layer_travel_speed are nullable vectors, but get_abs_value_at
+// casts them to the non-nullable ConfigOptionFloats / ConfigOptionFloatsOrPercents (an invalid
+// cast, undefined behavior). The values come out right in practice, so this passes today by
+// accident of the object layout; there is no non-nullable percent vector option to test with.
+TEST_CASE("ConfigBase get_abs_value_at resolves nullable travel speed slots against the matching base slot", "[Config][ConfigGetter][.]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *travel_speed = config.option<ConfigOptionFloatsNullable>("travel_speed");
+    auto *initial_layer_travel = config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_speed");
+    REQUIRE(travel_speed != nullptr);
+    REQUIRE(initial_layer_travel != nullptr);
+
+    travel_speed->values = {40., 60., 80.};
+    initial_layer_travel->values = {
+        FloatOrPercent(50., true),
+        FloatOrPercent(75., true),
+        FloatOrPercent(12., false)
+    };
+
+    // Known bug: the nullable options are cast to their non-nullable template instantiations.
+    CHECK_THAT(config.get_abs_value_at("travel_speed", 1), Catch::Matchers::WithinAbs(60., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 0), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 1), Catch::Matchers::WithinAbs(45., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 2), Catch::Matchers::WithinAbs(12., 1e-12));
+}
+
+// Hidden: for a coPercent option with ratio_over, get_abs_value casts the option to
+// ConfigOptionFloatOrPercent, an invalid cast (undefined behavior). The result varies between
+// runs and builds (sometimes the expected value), which a [!shouldfail] tag cannot express.
+TEST_CASE("ConfigBase get_abs_value resolves a registered coPercent ratio against layer height", "[Config][ConfigGetter][Regression][.]")
+{
+    const std::string ratio_key = GENERATE(std::string("ironing_flow"), std::string("support_ironing_flow"));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *layer_height = config.option<ConfigOptionFloat>("layer_height");
+    auto *flow = config.option<ConfigOptionPercent>(ratio_key);
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(flow != nullptr);
+
+    layer_height->value = 0.2;
+    flow->value = 50.;
+
+    // Both registered percentage settings use layer_height as their ratio base.
+    // Known bug: the ratio_over branch casts the coPercent option to ConfigOptionFloatOrPercent;
+    // in practice it returns the raw value (50) instead of 0.1.
+    CHECK_THAT(config.get_abs_value(ratio_key), Catch::Matchers::WithinAbs(0.1, 1e-12));
+}
+
+} // namespace config_getter_contracts
