@@ -8938,6 +8938,8 @@ void write_archive_with_relationships(const std::string& path, const std::vector
 TEST_CASE("BBS thumbnail accessor picks the Bambu middle, then the standard, then the plate 1 thumbnail", "[3MF][Bbs3mfThumbnailAccessor]")
 {
     // Every candidate entry has its own bytes, so the returned bytes name the entry that was chosen.
+    // Not covered: several relationships of the same type, a ".PNG" extension in capitals, and a
+    // relationship naming an entry that is missing (open question: the accessor returns nothing then).
     const std::string middle   = "\x89PNG middle-entry";
     const std::string standard = "\x89PNG standard-entry";
     const std::string small    = "\x89PNG small-entry";
@@ -8945,15 +8947,28 @@ TEST_CASE("BBS thumbnail accessor picks the Bambu middle, then the standard, the
     const std::vector<std::pair<std::string, std::string>> entries = {
         {"Metadata/middle.png", middle}, {"Metadata/standard.png", standard}, {"Metadata/small.png", small}, {"Metadata/plate_1.png", plate_1}};
 
-    enum Case { MiddleAndStandard, MiddleOnly, StandardOnly, NonPngStandard, NoThumbnailRelationship, SmallOnly };
-    const Case which = GENERATE(MiddleAndStandard, MiddleOnly, StandardOnly, NonPngStandard, NoThumbnailRelationship, SmallOnly);
+    enum Case { StandardThenMiddle, MiddleThenStandard, MiddleWithoutLeadingSlash, MiddleOnly, StandardOnly, NonPngStandard, NoThumbnailRelationship, SmallOnly };
+    const Case which = GENERATE(StandardThenMiddle, MiddleThenStandard, MiddleWithoutLeadingSlash, MiddleOnly, StandardOnly, NonPngStandard,
+                                NoThumbnailRelationship, SmallOnly);
     CAPTURE(int(which));
     std::vector<Rel> relationships;
     std::string expected;
     switch (which) {
-    case MiddleAndStandard:
+    // The middle entry is chosen with either listing order, which excludes both a first-wins and a
+    // last-wins reading of the relationships; the precedence itself is the structural line
+    // `if (m_thumbnail_middle.empty()) m_thumbnail_middle = m_thumbnail_path;` in the importer.
+    case StandardThenMiddle:
         relationships = {{"/Metadata/standard.png", thumbnail_type}, {"/Metadata/middle.png", middle_type}};
-        expected      = middle; // the Bambu middle relationship wins whichever is listed first
+        expected      = middle;
+        break;
+    case MiddleThenStandard:
+        relationships = {{"/Metadata/middle.png", middle_type}, {"/Metadata/standard.png", thumbnail_type}};
+        expected      = middle;
+        break;
+    case MiddleWithoutLeadingSlash:
+        // Targets are normally written with a leading slash; the extractor accepts one without.
+        relationships = {{"Metadata/middle.png", middle_type}};
+        expected      = middle;
         break;
     case MiddleOnly:
         relationships = {{"/Metadata/middle.png", middle_type}};
