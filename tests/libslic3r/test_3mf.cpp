@@ -5320,6 +5320,16 @@ using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 using Entry = std::pair<std::string, std::string>;
 
+namespace {
+
+size_t count_of(const std::string& text, const std::string& token)
+{
+    size_t count = 0;
+    for (size_t at = text.find(token); at != std::string::npos; at = text.find(token, at + token.size()))
+        ++count;
+    return count;
+}
+
 struct LoadedSplit
 {
     Model model;
@@ -5423,6 +5433,8 @@ void check_box(const BoundingBoxf3& actual, const BoundingBoxf3& expected)
     }
 }
 
+} // namespace
+
 TEST_CASE("Split model archives store each object in a distinct referenced part", "[3MF][SplitModel]")
 {
     Fixture f;
@@ -5432,9 +5444,14 @@ TEST_CASE("Split model archives store each object in a distinct referenced part"
     for (const auto& [name, data] : all)
         if (is_part(name)) {
             CHECK_FALSE(data.empty());
+            CHECK(count_of(data, "<mesh>") == 1);
+            CHECK(count_of(data, "<object ") == 1);
             REQUIRE(part_names.insert(name).second);
         }
     REQUIRE(part_names.size() == 2);
+    auto root = std::find_if(all.begin(), all.end(), [](const Entry& e) { return e.first == "3D/3dmodel.model"; });
+    REQUIRE(root != all.end());
+    CHECK(count_of(root->second, "<mesh>") == 0);
     auto rels = std::find_if(all.begin(), all.end(), [](const Entry& e) { return e.first == "3D/_rels/3dmodel.model.rels"; });
     REQUIRE(rels != all.end());
     for (const auto& name : part_names)
@@ -5489,7 +5506,7 @@ TEST_CASE("Split model instances retain their individual placement and printabil
     CHECK(named(loaded.model, "second-cube").instances.size() == 1);
 }
 
-TEST_CASE("Split model object names survive Unicode archive part encoding", "[3MF][SplitModel]")
+TEST_CASE("Split model non-ASCII object names round trip", "[3MF][SplitModel]")
 {
     Fixture f;
     f.source.objects[0]->name = "Größe-部品";
@@ -5509,6 +5526,8 @@ TEST_CASE("Split model volumes preserve geometry types and relative transforms",
     modifier->name = "modifier";
     modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
     modifier->set_offset(Vec3d(4., -2., 1.));
+    modifier->set_rotation(Vec3d(0., 0., Geometry::deg2rad(30.)));
+    modifier->set_scaling_factor(Vec3d(1.5, 1., 2.));
     f.store();
     LoadedSplit loaded;
     REQUIRE(f.load(loaded));
@@ -5526,6 +5545,8 @@ TEST_CASE("Split model volumes preserve geometry types and relative transforms",
     CHECK(loaded_modifier->type() == ModelVolumeType::PARAMETER_MODIFIER);
     CHECK_THAT(its_volume(loaded_modifier->mesh().its), WithinAbs(6., 1e-5));
     CHECK(loaded_modifier->get_matrix().matrix().isApprox(modifier->get_matrix().matrix(), 1e-6));
+    CHECK_THAT(loaded_modifier->get_rotation().z(), WithinAbs(Geometry::deg2rad(30.), 1e-5));
+    CHECK_THAT(loaded_modifier->get_scaling_factor().z(), WithinAbs(2., 1e-5));
 }
 
 TEST_CASE("Split model face paint retains support seam and material selections", "[3MF][SplitModel]")
@@ -5557,26 +5578,37 @@ TEST_CASE("Split model face paint retains support seam and material selections",
     REQUIRE(other.volumes.size() == 1);
     CHECK(other.volumes[0]->supported_facets.empty());
     CHECK(other.volumes[0]->seam_facets.empty());
+    CHECK(other.volumes[0]->mmu_segmentation_facets.empty());
+    CHECK(other.volumes[0]->fuzzy_skin_facets.empty());
 }
 
-TEST_CASE("Split model part units scale vertex geometry independently of parent units", "[3MF][SplitModel]")
+TEST_CASE("Split model part units scale each part's vertex geometry by its own unit", "[3MF][SplitModel]")
 {
-    const auto unit     = GENERATE(std::string("centimeter"), std::string("inch"), std::string("meter"));
-    const double factor = unit == "centimeter" ? 10. : unit == "inch" ? 25.4 : 1000.;
+    // Different units per part, so a loader reusing one part's factor for the others cannot pass.
+    const std::map<std::string, std::pair<std::string, double>> units = {
+        {"first-cube", {"inch", 25.4}}, {"second-cube", {"centimeter", 10.}}};
     Fixture f;
     f.store();
+    size_t rewritten = 0;
     REQUIRE(rewrite_3mf_entries(f.archive.string(), [&](std::string& name, std::string& data) {
         if (!is_part(name))
             return false;
-        replace_text(data, "unit=\"millimeter\"", "unit=\"" + unit + "\"");
-        return true;
+        for (const auto& [object, unit] : units)
+            if (name.find("/" + object + "_") != std::string::npos) {
+                replace_text(data, "unit=\"millimeter\"", "unit=\"" + unit.first + "\"");
+                ++rewritten;
+                return true;
+            }
+        return false;
     }));
+    REQUIRE(rewritten == 2);
     LoadedSplit loaded;
     REQUIRE(f.load(loaded));
     for (const auto* expected : f.source.objects) {
-        const auto& actual = named(loaded.model, expected->name);
-        const auto size    = actual.raw_mesh().bounding_box().size();
-        const auto before  = expected->raw_mesh().bounding_box().size();
+        const double factor = units.at(expected->name).second;
+        const auto& actual  = named(loaded.model, expected->name);
+        const auto size     = actual.raw_mesh().bounding_box().size();
+        const auto before   = expected->raw_mesh().bounding_box().size();
         for (int axis = 0; axis < 3; ++axis)
             CHECK_THAT(size[axis], WithinAbs(before[axis] * factor, 1e-3));
         CHECK_THAT(actual.raw_mesh().volume(),
@@ -5591,6 +5623,15 @@ TEST_CASE("Shared meshes in split archives retain separate object identities and
     copy->name = "shared-copy";
     copy->instances[0]->set_offset(Vec3d(40., 50., 0.));
     f.store(SaveStrategy::ShareMesh);
+    // The copy references the first object's mesh instead of writing its own.
+    size_t mesh_count = 0;
+    for (const auto& [name, data] : entries(f.archive.string()))
+        if (is_part(name)) {
+            const bool has_mesh = data.find("<mesh>") != std::string::npos;
+            CHECK(has_mesh == (name.find("/shared-copy_") == std::string::npos));
+            mesh_count += has_mesh;
+        }
+    CHECK(mesh_count == 2);
     LoadedSplit loaded;
     REQUIRE(f.load(loaded));
     REQUIRE(loaded.model.objects.size() == 3);
