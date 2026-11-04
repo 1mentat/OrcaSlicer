@@ -21,12 +21,14 @@
 #include <cereal/types/vector.hpp>
 #include <cereal/archives/binary.hpp>
 
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <iomanip>
 #include <ios>
@@ -41,6 +43,8 @@
 
 #include <set>
 #include <sstream>
+#include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <utility>
@@ -4932,3 +4936,554 @@ TEST_CASE("Multi-to-multi rejects a config without the identity columns", "[Conf
     CHECK(old_config.update_values_from_multi_to_multi(new_config, keys, "missing_id", "missing_variant", variants) == -1);
     CHECK(speeds(old_config) == std::vector<double>({11.}));
 }
+
+namespace config_container_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+DynamicConfig dynamic_pair(double left, double right)
+{
+    DynamicConfig config;
+    config.set_key_value("left", new ConfigOptionFloat(left));
+    config.set_key_value("right", new ConfigOptionFloat(right));
+    return config;
+}
+
+struct EnvironmentRestore {
+    std::string name;
+    std::string old_value;
+    bool had_value;
+
+    explicit EnvironmentRestore(std::string key) : name(std::move(key))
+    {
+        const char *value = std::getenv(name.c_str());
+        had_value = value != nullptr;
+        if (had_value)
+            old_value = value;
+    }
+
+    ~EnvironmentRestore()
+    {
+        if (had_value)
+            boost::nowide::setenv(name.c_str(), old_value.c_str(), 1);
+        else
+            boost::nowide::unsetenv(name.c_str());
+    }
+};
+
+} // namespace
+
+TEST_CASE("ConfigSubstitutionContext empty tracks substitution records, not unknown keys", "[Config][ConfigContracts]")
+{
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(context.empty());
+    context.unrecogized_keys.emplace_back("future_option");
+    CHECK(context.empty());
+    CHECK(context.unrecogized_keys == std::vector<std::string>{"future_option"});
+}
+
+TEST_CASE("DynamicConfig equality, diff, equal, and skipped keys are coherent", "[Config][ConfigContracts]")
+{
+    DynamicConfig left = dynamic_pair(1., 2.);
+    DynamicConfig right = dynamic_pair(1., 5.);
+
+    CHECK_FALSE(left.equals(right));
+    CHECK(left.equal(right) == t_config_option_keys{"left"});
+    CHECK(left.diff(right) == t_config_option_keys{"right"});
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.is_different());
+    REQUIRE(report.differences.count("right") == 1);
+    CHECK(report.differences.at("right").is_different_value());
+    CHECK(report.differences.at("right").left_value == "2");
+    CHECK(report.differences.at("right").right_value == "5");
+
+    const std::set<std::string> skipped{"right"};
+    CHECK(left.equals(right, &skipped));
+}
+
+TEST_CASE("DynamicConfig diff report distinguishes missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("only_left", new ConfigOptionInt(3));
+    right.set_key_value("only_right", new ConfigOptionString("yes"));
+
+    const auto report = left.diff_report(right);
+    REQUIRE(report.differences.size() == 2);
+    REQUIRE(report.differences.count("only_left") == 1);
+    REQUIRE(report.differences.count("only_right") == 1);
+    CHECK(report.differences.at("only_left").left_value == "3");
+    CHECK_FALSE(report.differences.at("only_left").right_value.has_value());
+    CHECK_FALSE(report.differences.at("only_right").left_value.has_value());
+    CHECK(report.differences.at("only_right").right_value == "yes");
+}
+
+TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", "[Config][ConfigContracts]")
+{
+    DynamicConfig original;
+    original.set_key_value("count", new ConfigOptionInt(4));
+
+    const ConfigBase &original_base = original;
+    DynamicConfig copied_from_base(original_base);
+    REQUIRE(copied_from_base.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied_from_base.opt<ConfigOptionInt>("count")->value == 4);
+    copied_from_base.opt<ConfigOptionInt>("count")->value = 6;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+
+    DynamicConfig copied(original);
+    copied.opt<ConfigOptionInt>("count")->value = 9;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+    CHECK_FALSE(original == copied);
+
+    // Exercise the final, all-keys-equal return path as well as the early
+    // mismatch path above.  A mutation of that final return must be visible
+    // to this independent equality contract.
+    DynamicConfig identical(original);
+    CHECK(original == identical);
+
+    DynamicConfig extra;
+    extra.set_key_value("label", new ConfigOptionString("extra"));
+    copied += extra;
+    REQUIRE(copied.has("label"));
+    CHECK(copied.opt_string("label") == "extra");
+    extra.opt_string("label") = "changed";
+    CHECK(copied.opt_string("label") == "extra");
+
+    DynamicConfig replacement;
+    replacement.set_key_value("count", new ConfigOptionInt(17));
+    replacement.set_key_value("label", new ConfigOptionString("moved"));
+    copied += std::move(replacement);
+    CHECK(replacement.empty());
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(copied.opt_string("label") == "moved");
+
+    DynamicConfig moved(std::move(copied));
+    CHECK(copied.empty());
+    CHECK(moved.size() == 2);
+    DynamicConfig swapped;
+    swapped.set_key_value("other", new ConfigOptionBool(true));
+    moved.swap(swapped);
+    CHECK(moved.has("other"));
+    CHECK(swapped.has("count"));
+    CHECK(swapped.erase("count"));
+    CHECK_FALSE(swapped.erase("count"));
+}
+
+TEST_CASE("Config resolver returns present options and throws for missing keys", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("known_value", new ConfigOptionInt(17));
+    const ConfigBase &resolver = config;
+
+    const ConfigOption *known = resolver.option_throw("known_value");
+    REQUIRE(known != nullptr);
+    CHECK(known->type() == ConfigOptionInt::static_type());
+    REQUIRE_THROWS_AS(resolver.option_throw("missing_value"), UnknownOptionException);
+}
+
+TEST_CASE("Strict deserialization converts typed string-key items", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const std::string bool_key = "gcode_comments";
+    const std::string int_key = "raft_layers";
+    const std::string float_key = "max_bridge_length";
+    const std::string double_key = "layer_height";
+
+    config.set_deserialize_strict({
+        {bool_key, true},
+        {int_key, 8},
+        {float_key, 1.25f},
+        {double_key, 0.5}
+    });
+
+    const auto *bool_value = config.option<ConfigOptionBool>(bool_key);
+    const auto *int_value = config.option<ConfigOptionInt>(int_key);
+    const auto *float_value = config.option<ConfigOptionFloat>(float_key);
+    const auto *double_value = config.option<ConfigOptionFloat>(double_key);
+    REQUIRE(bool_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(float_value != nullptr);
+    REQUIRE(double_value != nullptr);
+    CHECK(bool_value->value);
+    CHECK(int_value->value == 8);
+    CHECK_THAT(float_value->value, WithinAbs(1.25, 1e-9));
+    CHECK_THAT(double_value->value, WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("DynamicConfig remove_nil_options removes only fully nil vectors", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("nil", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value()}));
+    config.set_key_value("mixed", new ConfigOptionFloatsNullable({ConfigOptionFloatsNullable::nil_value(), 2.}));
+    config.set_key_value("value", new ConfigOptionInt(7));
+
+    const size_t removed = config.remove_nil_options();
+    CHECK(removed == 1);
+    CHECK_FALSE(config.has("nil"));
+    CHECK(config.has("mixed"));
+    CHECK(config.has("value"));
+}
+
+TEST_CASE("DynamicPrintConfig null_nullables clears nullable values without removing options", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *speed = config.option<ConfigOptionFloatsOrPercentsNullable>("small_perimeter_speed");
+    REQUIRE(speed != nullptr);
+    speed->values = {FloatOrPercent(37., false), FloatOrPercent(12., true)};
+    std::string exception;
+    bool threw = false;
+    try {
+        config.null_nullables();
+    } catch (const std::exception &error) {
+        threw = true;
+        exception = error.what();
+    } catch (...) {
+        threw = true;
+        exception = "non-standard exception";
+    }
+    INFO(exception);
+    REQUIRE_FALSE(threw);
+    REQUIRE(config.has("small_perimeter_speed"));
+    CHECK(speed->is_nil());
+    CHECK(speed->serialize() == "nil");
+}
+
+TEST_CASE("ConfigBase setenv serializes the selected option using uppercase names", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
+    EnvironmentRestore restore("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(boost::nowide::unsetenv("SLIC3R_LAYER_HEIGHT") == 0);
+
+    config.setenv_();
+    const char *value = std::getenv("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(value != nullptr);
+    CHECK(std::string(value) == config.option<ConfigOptionFloat>("layer_height")->serialize());
+}
+
+TEST_CASE("Static print config exposes only its initialized option set", "[Config][ConfigContracts]")
+{
+    PrintObjectConfig object_config;
+    const auto keys = object_config.keys();
+    REQUIRE_FALSE(keys.empty());
+    CHECK(object_config.has("layer_height"));
+    CHECK_FALSE(object_config.has("not_a_print_object_option"));
+    CHECK(object_config.def() != nullptr);
+    CHECK(object_config.def()->has("layer_height"));
+    CHECK_FALSE(object_config.def()->options.empty());
+}
+
+TEST_CASE("Config definitions retain defaults and metadata for a static option", "[Config][ConfigContracts]")
+{
+    PrintObjectConfig object_config;
+    const ConfigOptionDef *definition = object_config.def()->get("layer_height");
+    REQUIRE(definition != nullptr);
+    REQUIRE(static_cast<bool>(definition->default_value));
+    CHECK(definition->type == coFloat);
+    CHECK(definition->default_value->serialize() == object_config.option("layer_height")->serialize());
+    CHECK(object_config.def()->keys().size() >= object_config.keys().size());
+}
+
+TEST_CASE("DynamicPrintConfig set_deserialize updates typed values and absolute ratios", "[Config][ConfigContracts]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.24},
+        {"outer_wall_line_width", "120%"},
+        {"inner_wall_line_width", 0.42}
+    });
+    CHECK_THAT(config.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(0.24, 1e-9));
+    CHECK(config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->percent);
+    CHECK_THAT(config.get_abs_value("outer_wall_line_width", 0.42), WithinAbs(0.504, 1e-9));
+}
+
+TEST_CASE("Grouped integer settings order by the first differing group", "[Config][ConfigContracts][ConfigGroupOrder]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    const ConfigOptionIntsGroups empty;
+    CHECK(empty < value);
+    const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
+    CHECK(value < longer);
+    const ConfigOptionIntsGroups higher({std::vector<int>{2, 0}});
+    CHECK(value < higher);
+    CHECK_FALSE(higher < value);
+}
+
+TEST_CASE("Grouped integer settings are not less than an equal value", "[Config][ConfigContracts][ConfigGroupOrder][!shouldfail]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    const ConfigOptionIntsGroups identical(value);
+    const ConfigOptionIntsGroups empty;
+    // Known bug: operator< returns true when every compared group is equal, so a < a holds;
+    // fixed by the follow-up fix PR
+    CHECK_FALSE(value < identical);
+    CHECK_FALSE(identical < value);
+    CHECK_FALSE(empty < empty);
+}
+
+// Hidden: reads past the end of the shorter operand's groups (undefined behavior).
+TEST_CASE("Grouped integer settings that are longer than the other side are not less", "[Config][ConfigContracts][ConfigGroupOrder][.]")
+{
+    const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    const ConfigOptionIntsGroups empty;
+    const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
+    // Known bug: operator< indexes rhs.values[i] for every lhs group, past the end when rhs is
+    // shorter; fixed by the follow-up fix PR
+    CHECK_FALSE(value < empty);
+    CHECK_FALSE(longer < value);
+}
+
+TEST_CASE("ConfigBase equality ignores missing options but reports present differences", "[Config][ConfigContracts]")
+{
+    DynamicConfig left;
+    DynamicConfig right;
+    left.set_key_value("shared", new ConfigOptionString("same"));
+    left.set_key_value("left_only", new ConfigOptionInt(1));
+    right.set_key_value("shared", new ConfigOptionString("same"));
+    right.set_key_value("right_only", new ConfigOptionInt(2));
+
+    const ConfigBase &left_base = left;
+    const ConfigBase &right_base = right;
+    CHECK(left_base.equals(right_base));
+    CHECK(left_base.equal(right_base) == t_config_option_keys{"shared"});
+    CHECK(left_base.diff(right_base).empty());
+
+    right.opt_string("shared") = "changed";
+    CHECK_FALSE(left_base.equals(right_base));
+    CHECK(left_base.diff(right_base) == t_config_option_keys{"shared"});
+
+    const std::set<std::string> skipped{"shared"};
+    CHECK(left_base.equals(right_base, &skipped));
+}
+
+TEST_CASE("Boolean substitution helpers distinguish enum-shaped and truthy values", "[Config][ConfigContracts][ConfigDeserialize]")
+{
+    const std::vector<std::pair<std::string, bool>> enum_cases{
+        {"enabled", true}, {" On ", true}, {"off", true},
+        {"yes please", false}, {"1future", false}, {"a.b", false},
+        {"", false}, {std::string(64, 'a'), true}, {std::string(65, 'a'), false}
+    };
+    for (const auto &[value, expected] : enum_cases) {
+        CAPTURE(value);
+        CHECK(ConfigHelpers::looks_like_enum_value(value) == expected);
+    }
+    CHECK(ConfigHelpers::enum_looks_like_true_value(" ENABLED "));
+    CHECK(ConfigHelpers::enum_looks_like_true_value("on"));
+    CHECK_FALSE(ConfigHelpers::enum_looks_like_true_value("yes"));
+    CHECK_FALSE(ConfigHelpers::enum_looks_like_true_value("true"));
+
+    ConfigOptionBoolsNullable nullable;
+    CHECK(nullable.deserialize_with_substitutions(
+              "nil, ENABLED, off", false, ConfigHelpers::DeserializationSubstitution::DefaultsToFalse)
+          == ConfigHelpers::DeserializationResult::Substituted);
+    CHECK(nullable.values == std::vector<unsigned char>{ConfigOptionBoolsNullable::nil_value(), 1, 0});
+    CHECK(nullable.serialize() == "nil,1,0");
+    CHECK(nullable.deserialize("1,maybe") == false);
+}
+
+TEST_CASE("ConfigBase apply_only materializes indexed vector slots", "[Config][ConfigContracts][ConfigApplyOnly]")
+{
+    DynamicPrintConfig source = DynamicPrintConfig::full_print_config();
+    auto *source_plugins = source.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(source_plugins != nullptr);
+    source_plugins->values = {"alpha", "beta"};
+
+    // The ordinary vector case preserves the untouched slot while copying only #1.
+    DynamicPrintConfig populated = DynamicPrintConfig::full_print_config();
+    auto *populated_plugins = populated.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(populated_plugins != nullptr);
+    populated_plugins->values = {"left", "right"};
+    populated.apply_only(source, {"slicing_pipeline_plugin#1"});
+    CHECK(populated_plugins->values == std::vector<std::string>{"left", "beta"});
+
+    // A DynamicPrintConfig made from a selected default set has no vector object yet;
+    // the indexed route must create, seed, and then update the requested slot.
+    std::unique_ptr<DynamicPrintConfig> sparse(DynamicPrintConfig::new_from_defaults_keys({"layer_height"}));
+    REQUIRE(sparse != nullptr);
+    REQUIRE_FALSE(sparse->has("slicing_pipeline_plugin"));
+    sparse->apply_only(source, {"slicing_pipeline_plugin#1"});
+    const auto *materialized_plugins = sparse->option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(materialized_plugins != nullptr);
+    REQUIRE(materialized_plugins->values.size() == 2);
+    CHECK(materialized_plugins->values == std::vector<std::string>{"alpha", "beta"});
+}
+
+TEST_CASE("DynamicConfig indexed accessors preserve regular and nullable option semantics", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    auto *regular_floats = config.option<ConfigOptionFloats>("filament_change_length_nc");
+    REQUIRE(regular_floats != nullptr);
+    regular_floats->values = {6., 7.};
+    double &regular_value = config.opt_float("filament_change_length_nc", 1);
+    regular_value = 7.5;
+    CHECK_THAT(regular_floats->values[1], WithinAbs(7.5, 1e-12));
+
+    auto *nullable_floats = config.option<ConfigOptionFloatsNullable>("filament_retract_length_nc");
+    REQUIRE(nullable_floats != nullptr);
+    nullable_floats->values = {ConfigOptionFloatsNullable::nil_value(), 2.5};
+    double &nullable_value = config.opt_float("filament_retract_length_nc", 1);
+    nullable_value = 2.75;
+    CHECK_THAT(nullable_floats->values[1], WithinAbs(2.75, 1e-12));
+    CHECK(std::isnan(config.opt_float("filament_retract_length_nc", 0)));
+
+    const DynamicPrintConfig &const_config = config;
+    CHECK_THAT(const_config.opt_float("filament_change_length_nc", 1), WithinAbs(7.5, 1e-12));
+    CHECK(std::isnan(const_config.opt_float("filament_retract_length_nc", 0)));
+    CHECK_THAT(const_config.opt_float("filament_retract_length_nc", 1), WithinAbs(2.75, 1e-12));
+
+    auto *regular_bools = config.option<ConfigOptionBools>("retract_when_changing_layer");
+    REQUIRE(regular_bools != nullptr);
+    regular_bools->values = {0, 1};
+    CHECK_FALSE(const_config.opt_bool("retract_when_changing_layer", 0));
+    CHECK(const_config.opt_bool("retract_when_changing_layer", 1));
+
+    auto *nullable_bools = config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true);
+    REQUIRE(nullable_bools != nullptr);
+    nullable_bools->values = {ConfigOptionBoolsNullable::nil_value(), 0};
+    // The accessor intentionally exposes the stored nullable sentinel through its
+    // existing boolean conversion (nonzero), while a concrete false remains false.
+    CHECK(const_config.opt_bool("filament_retract_when_changing_layer", 0));
+    CHECK_FALSE(const_config.opt_bool("filament_retract_when_changing_layer", 1));
+}
+
+TEST_CASE("DynamicConfig indexed accessors address owned vector slots", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    DynamicConfig config;
+    config.set_key_value("ratio_slots", new ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(12., false), FloatOrPercent(25., true)}));
+    config.set_key_value("int_slots", new ConfigOptionInts({3, 5}));
+    config.set_key_value("nullable_int_slots", new ConfigOptionIntsNullable({ConfigOptionIntsNullable::nil_value(), 11}));
+    config.set_key_value("enum_slots", new ConfigOptionEnumsGeneric({4, 9}));
+    config.set_key_value("nullable_enum_slots", new ConfigOptionEnumsGenericNullable({ConfigOptionEnumsGenericNullable::nil_value(), 12}));
+    auto *nullable_bool_slots = new ConfigOptionBoolsNullable;
+    nullable_bool_slots->values = {ConfigOptionBoolsNullable::nil_value(), 0};
+    config.set_key_value("nullable_bool_slots", nullable_bool_slots);
+
+    FloatOrPercent &ratio_slot = config.opt_float_or_percent_nullable("ratio_slots", 1);
+    ratio_slot.value = 30.;
+    ratio_slot.percent = true;
+    config.opt_int("int_slots", 1) = 7;
+    config.opt_int_nullable("nullable_int_slots", 1) = 13;
+
+    const DynamicConfig &view = config;
+    CHECK_THAT(view.opt_float_or_percent_nullable("ratio_slots", 1).value, WithinAbs(30., 1e-12));
+    CHECK(view.opt_float_or_percent_nullable("ratio_slots", 1).percent);
+    CHECK(view.opt_int("int_slots", 1) == 7);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 1) == 13);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 0) == ConfigOptionIntsNullable::nil_value());
+    CHECK(view.opt_enum("enum_slots", 1) == 9);
+    CHECK(view.opt_enum_nullable("nullable_enum_slots", 1) == 12);
+    CHECK(view.opt_bool_nullable("nullable_bool_slots", 0));
+    CHECK_FALSE(view.opt_bool_nullable("nullable_bool_slots", 1));
+}
+
+TEST_CASE("ConfigBase scalar getters resolve registered values and line width inheritance", "[Config][ConfigGetter]")
+{
+    const bool comments_enabled = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigBase &base = config;
+
+    auto *layer_height = config.option<ConfigOptionFloat>("layer_height");
+    auto *slow_down_layers = config.option<ConfigOptionInt>("slow_down_layers");
+    auto *gcode_comments = config.option<ConfigOptionBool>("gcode_comments");
+    auto *max_detour = config.option<ConfigOptionFloatOrPercent>("max_travel_detour_distance");
+    auto *seam_start = config.option<ConfigOptionFloatOrPercent>("seam_slope_start_height");
+    auto *line_width = config.option<ConfigOptionFloatOrPercent>("line_width");
+    auto *outer_wall_width = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
+    auto *bridge_density = config.option<ConfigOptionPercent>("bridge_density");
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(slow_down_layers != nullptr);
+    REQUIRE(gcode_comments != nullptr);
+    REQUIRE(max_detour != nullptr);
+    REQUIRE(seam_start != nullptr);
+    REQUIRE(line_width != nullptr);
+    REQUIRE(outer_wall_width != nullptr);
+    REQUIRE(bridge_density != nullptr);
+
+    layer_height->value = 0.2;
+    slow_down_layers->value = 3;
+    gcode_comments->value = comments_enabled;
+    max_detour->value = 2.75;
+    max_detour->percent = false;
+    seam_start->value = 50.;
+    seam_start->percent = true;
+    line_width->value = 0.48;
+    line_width->percent = false;
+    outer_wall_width->value = 0.;
+    outer_wall_width->percent = false;
+    bridge_density->value = 37.;
+
+    CHECK_THAT(base.get_abs_value("layer_height"), Catch::Matchers::WithinAbs(0.2, 1e-12));
+    CHECK_THAT(base.get_abs_value("slow_down_layers"), Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK_THAT(base.get_abs_value("gcode_comments"), Catch::Matchers::WithinAbs(comments_enabled ? 1. : 0., 1e-12));
+    CHECK_THAT(base.get_abs_value("max_travel_detour_distance"), Catch::Matchers::WithinAbs(2.75, 1e-12));
+    // This setting is explicitly defined as a percentage of layer_height.
+    CHECK_THAT(base.get_abs_value("seam_slope_start_height"), Catch::Matchers::WithinAbs(0.1, 1e-12));
+    // A zero *_line_width value inherits the separately pinned line_width value.
+    CHECK_THAT(base.get_abs_value("outer_wall_line_width"), Catch::Matchers::WithinAbs(0.48, 1e-12));
+    // bridge_density has no ratio_over base; its percentage is returned as a unit ratio.
+    CHECK_THAT(base.get_abs_value("bridge_density"), Catch::Matchers::WithinAbs(0.37, 1e-12));
+    REQUIRE_THROWS_AS(base.get_abs_value("not_a_registered_config_key"), std::runtime_error);
+}
+
+TEST_CASE("ConfigBase indexed getters use the matching travel speed slot", "[Config][ConfigGetter]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *travel_speed = config.option<ConfigOptionFloatsNullable>("travel_speed");
+    auto *initial_layer_travel = config.option<ConfigOptionFloatsOrPercentsNullable>("initial_layer_travel_speed");
+    REQUIRE(travel_speed != nullptr);
+    REQUIRE(initial_layer_travel != nullptr);
+
+    travel_speed->values = {40., 60., 80.};
+    initial_layer_travel->values = {
+        FloatOrPercent(50., true),
+        FloatOrPercent(75., true),
+        FloatOrPercent(12., false)
+    };
+
+    CHECK_THAT(config.get_abs_value_at("travel_speed", 1), Catch::Matchers::WithinAbs(60., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 0), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 1), Catch::Matchers::WithinAbs(45., 1e-12));
+    CHECK_THAT(config.get_abs_value_at("initial_layer_travel_speed", 2), Catch::Matchers::WithinAbs(12., 1e-12));
+}
+
+// Hidden: the invalid cast reads memory past the option, so the result differs between runs and
+// builds (sometimes the expected value), which a [!shouldfail] tag cannot express.
+TEST_CASE("ConfigBase resolves a registered coPercent ratio against layer height", "[Config][ConfigGetter][Regression][.]")
+{
+    const std::string ratio_key = GENERATE(std::string("ironing_flow"), std::string("support_ironing_flow"));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *layer_height = config.option<ConfigOptionFloat>("layer_height");
+    auto *flow = config.option<ConfigOptionPercent>(ratio_key);
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(flow != nullptr);
+
+    layer_height->value = 0.2;
+    flow->value = 50.;
+
+    // Both registered percentage settings use layer_height as their ratio base.
+    // Known bug: for a coPercent option the ratio_over branch casts the option to
+    // ConfigOptionFloatOrPercent (a different type), which is undefined behavior; in practice it
+    // returns the raw value (50); fixed by the follow-up fix PR
+    CHECK_THAT(config.get_abs_value(ratio_key), Catch::Matchers::WithinAbs(0.1, 1e-12));
+}
+
+TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts][!shouldfail]")
+{
+    DynamicConfig target;
+    target.set_key_value("count", new ConfigOptionInt(4));
+    DynamicConfig source;
+    source.set_key_value("count", new ConfigOptionInt(12));
+
+    target += source;
+    // Known bug: the lvalue operator+= only adds missing keys and keeps the old value of existing
+    // ones (the rvalue overload is correct); fixed by the follow-up fix PR
+    REQUIRE(target.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(target.opt<ConfigOptionInt>("count")->value == 12);
+}
+
+} // namespace config_container_contracts
