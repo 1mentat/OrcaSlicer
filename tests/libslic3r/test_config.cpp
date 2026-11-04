@@ -5293,28 +5293,30 @@ TEST_CASE("Grouped integer settings order by the first differing group or value"
     CHECK_FALSE(two_high < two_low);
 }
 
-TEST_CASE("Grouped integer settings are not less than an equal value", "[Config][ConfigContracts][ConfigGroupOrder][!shouldfail]")
+TEST_CASE("Grouped integer settings are not less than an equal value", "[Config][ConfigContracts][ConfigGroupOrder]")
 {
     const ConfigOptionIntsGroups value({std::vector<int>{1, 9}, std::vector<int>{5}});
     const ConfigOptionIntsGroups identical(value);
     const ConfigOptionIntsGroups empty;
-    // Known bug: operator< returns true when every compared group is equal, so a < a holds;
-    // it should be false for equal values (a strict weak ordering).
     CHECK_FALSE(value < identical);
     CHECK_FALSE(identical < value);
     CHECK_FALSE(empty < empty);
 }
 
-// Hidden: reads past the end of the shorter operand's groups (undefined behavior).
-TEST_CASE("Grouped integer settings with more groups than the other side are not less", "[Config][ConfigContracts][ConfigGroupOrder][.]")
+// The order is lexicographic over the groups: a prefix is less than the longer sequence.
+TEST_CASE("Grouped integer settings order a prefix before the longer sequence", "[Config][ConfigContracts][ConfigGroupOrder]")
 {
     const ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
     const ConfigOptionIntsGroups empty;
     const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
-    // Known bug: operator< indexes rhs.values[i] for every lhs group, past the end when rhs has
-    // fewer groups; it should order a prefix before the longer sequence and not be less than it.
+    CHECK(empty < value);
     CHECK_FALSE(value < empty);
+    CHECK(value < longer);
     CHECK_FALSE(longer < value);
+    // The first differing group still decides over the length.
+    const ConfigOptionIntsGroups higher({std::vector<int>{2}});
+    CHECK(longer < higher);
+    CHECK_FALSE(higher < longer);
 }
 
 } // namespace config_intsgroups_order_contracts
