@@ -21,6 +21,7 @@
 #include <cereal/types/vector.hpp>
 #include <cereal/archives/binary.hpp>
 
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
 #include <algorithm>
@@ -5483,3 +5484,62 @@ TEST_CASE("DynamicPrintConfig null_nullables clears nullable values without remo
 }
 
 } // namespace config_nil_handling_contracts
+
+namespace config_environment_contracts {
+
+namespace {
+
+// Restores one environment variable to its prior state (set to a value, or unset).
+struct EnvironmentRestore {
+    std::string name;
+    std::string old_value;
+    bool had_value;
+
+    explicit EnvironmentRestore(std::string key) : name(std::move(key))
+    {
+        const char *value = boost::nowide::getenv(name.c_str());
+        had_value = value != nullptr;
+        if (had_value)
+            old_value = value;
+    }
+
+    ~EnvironmentRestore()
+    {
+        if (had_value)
+            boost::nowide::setenv(name.c_str(), old_value.c_str(), 1);
+        else
+            boost::nowide::unsetenv(name.c_str());
+    }
+};
+
+} // namespace
+
+TEST_CASE("ConfigBase setenv_ exports every option as an upper-case SLIC3R_ variable with its serialized value", "[Config][ConfigContracts]")
+{
+    DynamicConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    config.set_key_value("notes", new ConfigOptionString("plain text"));
+
+    const std::vector<std::pair<const char *, const char *>> expected{
+        {"SLIC3R_LAYER_HEIGHT", "0.275"},
+        {"SLIC3R_GCODE_COMMENTS", "1"},
+        {"SLIC3R_NOTES", "plain text"},
+    };
+    std::vector<std::unique_ptr<EnvironmentRestore>> restores;
+    for (const auto &[name, value] : expected) {
+        restores.push_back(std::make_unique<EnvironmentRestore>(name));
+        REQUIRE(boost::nowide::unsetenv(name) == 0);
+    }
+
+    config.setenv_();
+
+    for (const auto &[name, value] : expected) {
+        CAPTURE(name);
+        const char *actual = boost::nowide::getenv(name);
+        REQUIRE(actual != nullptr);
+        CHECK(std::string(actual) == value);
+    }
+}
+
+} // namespace config_environment_contracts
