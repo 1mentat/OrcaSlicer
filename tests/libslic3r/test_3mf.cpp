@@ -8552,3 +8552,115 @@ TEST_CASE("Generic 3MF writes even-count height profiles of six or more values a
 }
 
 } // namespace generic_3mf_metadata_contracts
+
+namespace generic_3mf_thumbnail_contracts {
+using namespace Slic3r;
+
+namespace {
+
+Model make_cube_model()
+{
+    Model model;
+    ModelObject* object = model.add_object();
+    object->name        = "thumbnail-cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    return model;
+}
+
+bool has_entry(const std::string& archive, const std::string& entry)
+{
+    std::string payload;
+    return read_3mf_entry(archive, payload, entry);
+}
+
+} // namespace
+
+TEST_CASE("Generic 3MF stores the thumbnail as a PNG entry with its relationship and content type", "[3MF][Generic3MFThumbnail]")
+{
+    // 3 x 2 pixels with a different RGBA value in every pixel, so a swapped row, column or channel shows.
+    const unsigned char source_rows[2][3][4] = {
+        {{10, 20, 30, 255}, {40, 50, 60, 200}, {70, 80, 90, 150}},
+        {{11, 21, 31, 100}, {41, 51, 61, 50}, {71, 81, 91, 0}},
+    };
+    ThumbnailData thumbnail;
+    thumbnail.set(3, 2);
+    REQUIRE(thumbnail.pixels.size() == 3 * 2 * 4);
+    for (int row = 0; row < 2; ++row)
+        for (int col = 0; col < 3; ++col)
+            for (int channel = 0; channel < 4; ++channel)
+                thumbnail.pixels[4 * (size_t(row) * 3 + col) + channel] = source_rows[row][col][channel];
+
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false, &thumbnail));
+
+    std::string png;
+    REQUIRE(read_3mf_entry(archive.string(), png, "Metadata/thumbnail.png"));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{png.data(), png.size()}, decoded));
+    REQUIRE(decoded.cols == 3);
+    REQUIRE(decoded.rows == 2);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    REQUIRE(decoded.buf.size() == 3 * 2 * 4);
+    for (int image_row = 0; image_row < 2; ++image_row)
+        for (int col = 0; col < 3; ++col)
+            for (int channel = 0; channel < 4; ++channel) {
+                INFO("image row " << image_row << " column " << col << " channel " << channel);
+                // The encoder flips rows and the decoder reads bottom-up, so this pins the round trip of the
+                // pair, not the stored row order.
+                CHECK(decoded.buf[4 * (size_t(image_row) * 3 + col) + channel] == source_rows[image_row][col][channel]);
+            }
+
+    // Each relationship is checked as one element, so a swapped target and type would fail.
+    std::string relationships;
+    REQUIRE(read_3mf_entry(archive.string(), relationships, "_rels/.rels"));
+    boost::property_tree::ptree relationship_tree;
+    std::istringstream relationship_input(relationships);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(relationship_input, relationship_tree));
+    std::map<std::string, std::pair<std::string, std::string>> by_target; // target -> {type, id}
+    for (const auto& child : relationship_tree.get_child("Relationships"))
+        if (child.first == "Relationship") {
+            const auto& attributes = child.second.get_child("<xmlattr>");
+            REQUIRE(by_target.emplace(attributes.get<std::string>("Target"),
+                                      std::make_pair(attributes.get<std::string>("Type"), attributes.get<std::string>("Id"))).second);
+        }
+    REQUIRE(by_target.count("/3D/3dmodel.model") == 1);
+    REQUIRE(by_target.count("/Metadata/thumbnail.png") == 1);
+    CHECK(by_target.at("/3D/3dmodel.model").first == "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel");
+    CHECK(by_target.at("/Metadata/thumbnail.png").first ==
+          "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail");
+    CHECK(by_target.at("/3D/3dmodel.model").second == "rel-1");
+    CHECK(by_target.at("/Metadata/thumbnail.png").second == "rel-2");
+    CHECK(by_target.size() == 2);
+    std::string content_types;
+    REQUIRE(read_3mf_entry(archive.string(), content_types, "[Content_Types].xml"));
+    CHECK(content_types.find("Extension=\"png\" ContentType=\"image/png\"") != std::string::npos);
+}
+
+// Note: the package relationships list the thumbnail even when no entry is written (an exporter
+// inconsistency logged as an open question), so this case does not assert the relationships.
+TEST_CASE("Generic 3MF writes no thumbnail entry without a valid thumbnail", "[3MF][Generic3MFThumbnail]")
+{
+    Model source = make_cube_model();
+    ThumbnailData short_buffer;
+    short_buffer.set(3, 2);
+    short_buffer.pixels.pop_back();
+    REQUIRE_FALSE(short_buffer.is_valid());
+    ThumbnailData zero_size; // default: zero width and height, no pixels
+    REQUIRE_FALSE(zero_size.is_valid());
+
+    ScopedTemporaryFile without(".3mf");
+    REQUIRE(store_3mf(without.string().c_str(), &source, nullptr, false));
+    ScopedTemporaryFile with_short(".3mf");
+    REQUIRE(store_3mf(with_short.string().c_str(), &source, nullptr, false, &short_buffer));
+    ScopedTemporaryFile with_zero(".3mf");
+    REQUIRE(store_3mf(with_zero.string().c_str(), &source, nullptr, false, &zero_size));
+    for (const std::string& path : {without.string(), with_short.string(), with_zero.string()}) {
+        // Positive control: the archive is a readable 3MF with a model part.
+        CHECK(has_entry(path, "3D/3dmodel.model"));
+        CHECK_FALSE(has_entry(path, "Metadata/thumbnail.png"));
+    }
+}
+
+} // namespace generic_3mf_thumbnail_contracts
