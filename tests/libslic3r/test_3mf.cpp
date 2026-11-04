@@ -6357,3 +6357,251 @@ TEST_CASE("BBS 3MF plate selection loads only the requested plate objects", "[3M
 }
 
 } // namespace bbs_selective_plate_contracts
+
+namespace bbs_plate_map_recovery_contracts {
+using namespace Slic3r;
+using bbs_project_lifecycle_contracts::LoadedArchive;
+using bbs_project_lifecycle_contracts::store_archive;
+using bbs_selective_plate_contracts::check_geometry;
+using bbs_selective_plate_contracts::find_named_object;
+
+namespace {
+
+void rewrite_plate_instance_metadata(const std::string &path, size_t plate_index, size_t row_index,
+                                     const std::string &key, const std::string &value, bool remove)
+{
+    bool edited = false;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config" || edited)
+            return false;
+
+        size_t plate_begin = data.find("<plate>");
+        for (size_t index = 0; index < plate_index; ++index) {
+            REQUIRE(plate_begin != std::string::npos);
+            const size_t plate_end = data.find("</plate>", plate_begin);
+            REQUIRE(plate_end != std::string::npos);
+            plate_begin = data.find("<plate>", plate_end);
+        }
+        REQUIRE(plate_begin != std::string::npos);
+        const size_t plate_end = data.find("</plate>", plate_begin);
+        REQUIRE(plate_end != std::string::npos);
+
+        size_t row_begin = data.find("<model_instance>", plate_begin);
+        for (size_t index = 0; index < row_index; ++index) {
+            REQUIRE(row_begin != std::string::npos);
+            const size_t row_end = data.find("</model_instance>", row_begin);
+            REQUIRE(row_end != std::string::npos);
+            row_begin = data.find("<model_instance>", row_end);
+            REQUIRE(row_begin < plate_end);
+        }
+        REQUIRE(row_begin != std::string::npos);
+        REQUIRE(row_begin < plate_end);
+        const size_t row_end = data.find("</model_instance>", row_begin);
+        REQUIRE(row_end != std::string::npos);
+        REQUIRE(row_end < plate_end);
+
+        const std::string metadata = "<metadata key=\"" + key + "\" value=\"";
+        const size_t metadata_begin = data.find(metadata, row_begin);
+        REQUIRE(metadata_begin != std::string::npos);
+        REQUIRE(metadata_begin < row_end);
+        const size_t value_begin = metadata_begin + metadata.size();
+        const size_t value_end = data.find('"', value_begin);
+        REQUIRE(value_end != std::string::npos);
+        REQUIRE(value_end < row_end);
+        if (remove) {
+            const size_t element_end = data.find("/>", value_end);
+            REQUIRE(element_end != std::string::npos);
+            REQUIRE(element_end < row_end);
+            data.erase(metadata_begin, element_end + 2 - metadata_begin);
+        } else {
+            data.replace(value_begin, value_end - value_begin, value);
+        }
+        edited = true;
+        return true;
+    }));
+    REQUIRE(edited);
+}
+
+// Two objects with asymmetric instance use: first-part has two instances, second-part one.
+// Plate one holds first-part #0 and second-part #0; plate two holds first-part #1 and second-part #0.
+void make_two_plate_model(Model& model, PlateData& plate0, PlateData& plate1)
+{
+    ModelObject* first = model.add_object("first-part", "first.stl", make_cube(10., 11., 12.));
+    first->add_instance();
+    first->add_instance();
+    model.add_object("second-part", "second.stl", make_cube(6., 7., 8.))->add_instance();
+    plate0.plate_index           = 0;
+    plate0.plate_name            = "first plate";
+    plate0.objects_and_instances = {{0, 0}, {1, 0}};
+    plate1.plate_index           = 1;
+    plate1.plate_name            = "second plate";
+    plate1.objects_and_instances = {{0, 1}, {1, 0}};
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF skips an unknown plate object while restoring valid siblings",
+          "[3MF][Bbs3mfPlateMapRecovery]")
+{
+    ScopedTemporaryDir source_backup("orca_bbs_plate_map_unknown_store");
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(source_backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_two_plate_model(source, plate0, plate1);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    store_archive(archive.string(), source, config, {&plate0, &plate1}, {}, nullptr);
+    rewrite_plate_instance_metadata(archive.string(), 0, 0, "object_id", "999999", false);
+
+    LoadedArchive loaded;
+    REQUIRE(loaded.load(archive.string(), nullptr));
+    REQUIRE(loaded.model.objects.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+    const ModelObject *first = find_named_object(loaded.model, "first-part");
+    const ModelObject *second = find_named_object(loaded.model, "second-part");
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    check_geometry(*first, *source.objects[0]);
+    check_geometry(*second, *source.objects[1]);
+
+    const PlateData &recovered_plate = *loaded.plates[0];
+    REQUIRE(recovered_plate.obj_inst_map.size() == 2);
+    CHECK(recovered_plate.obj_inst_map.count(999999) == 1);
+    const auto unknown = recovered_plate.obj_inst_map.at(999999);
+    CHECK(unknown.first == 0);
+    CHECK(unknown.second == static_cast<int>(source.objects[0]->instances[0]->id().id));
+    const int sibling_id = static_cast<int>(source.objects[1]->instances[0]->id().id);
+    const auto sibling = std::find_if(recovered_plate.obj_inst_map.begin(), recovered_plate.obj_inst_map.end(),
+                                      [sibling_id](const auto &entry) { return entry.second.second == sibling_id; });
+    REQUIRE(sibling != recovered_plate.obj_inst_map.end());
+    CHECK(sibling->second.first == 0);
+    REQUIRE(second->instances.size() == 1);
+    CHECK(second->instances[0]->loaded_id == static_cast<size_t>(sibling_id));
+    REQUIRE(first->instances.size() == 2);
+    CHECK(first->instances[0]->loaded_id == 0);
+    CHECK(first->instances[1]->loaded_id == static_cast<size_t>(source.objects[0]->instances[1]->id().id));
+}
+
+TEST_CASE("BBS 3MF skips a plate mapping for a resource without a build instance",
+          "[3MF][Bbs3mfPlateMapRecovery]")
+{
+    ScopedTemporaryDir source_backup("orca_bbs_plate_map_unbuilt_store");
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(source_backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_two_plate_model(source, plate0, plate1);
+    ModelObject *unbuilt = source.add_object("unbuilt-part", "unbuilt.stl", make_cube(3., 4., 5.));
+    REQUIRE(unbuilt != nullptr);
+    REQUIRE(unbuilt->instances.empty());
+    plate0.objects_and_instances.emplace_back(2, 0);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    store_archive(archive.string(), source, config, {&plate0, &plate1}, {}, nullptr);
+
+    LoadedArchive loaded;
+    REQUIRE(loaded.load(archive.string(), nullptr));
+    REQUIRE(loaded.model.objects.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+    REQUIRE(loaded.plates[0]->obj_inst_map.size() == 3);
+    const ModelObject *first = find_named_object(loaded.model, "first-part");
+    const ModelObject *second = find_named_object(loaded.model, "second-part");
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    CHECK(find_named_object(loaded.model, "unbuilt-part") == nullptr);
+    check_geometry(*first, *source.objects[0]);
+    check_geometry(*second, *source.objects[1]);
+
+    REQUIRE(first->instances.size() == 2);
+    for (size_t index = 0; index < first->instances.size(); ++index)
+        CHECK(first->instances[index]->loaded_id == static_cast<size_t>(source.objects[0]->instances[index]->id().id));
+    REQUIRE(second->instances.size() == 1);
+    CHECK(second->instances[0]->loaded_id == static_cast<size_t>(source.objects[1]->instances[0]->id().id));
+}
+
+TEST_CASE("BBS 3MF skips an out-of-range plate instance and restores valid siblings",
+          "[3MF][Bbs3mfPlateMapRecovery]")
+{
+    ScopedTemporaryDir source_backup("orca_bbs_plate_map_instance_store");
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(source_backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_two_plate_model(source, plate0, plate1);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    store_archive(archive.string(), source, config, {&plate0, &plate1}, {}, nullptr);
+    // Rewrite both plates so the untouched second plate cannot restore this instance's loaded_id.
+    rewrite_plate_instance_metadata(archive.string(), 0, 1, "instance_id", "1", false);
+    rewrite_plate_instance_metadata(archive.string(), 1, 1, "instance_id", "1", false);
+
+    LoadedArchive loaded;
+    REQUIRE(loaded.load(archive.string(), nullptr));
+    REQUIRE(loaded.model.objects.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+    const ModelObject *first = find_named_object(loaded.model, "first-part");
+    const ModelObject *second = find_named_object(loaded.model, "second-part");
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    check_geometry(*first, *source.objects[0]);
+    check_geometry(*second, *source.objects[1]);
+
+    REQUIRE(loaded.plates[0]->obj_inst_map.size() == 2);
+    const int second_instance_id = static_cast<int>(source.objects[1]->instances[0]->id().id);
+    const auto invalid = std::find_if(loaded.plates[0]->obj_inst_map.begin(), loaded.plates[0]->obj_inst_map.end(),
+                                      [second_instance_id](const auto &entry) {
+                                          return entry.second.second == second_instance_id;
+                                      });
+    REQUIRE(invalid != loaded.plates[0]->obj_inst_map.end());
+    CHECK(invalid->second.first == 1);
+    REQUIRE(first->instances.size() == 2);
+    CHECK(first->instances[0]->loaded_id == static_cast<size_t>(source.objects[0]->instances[0]->id().id));
+    CHECK(first->instances[1]->loaded_id == static_cast<size_t>(source.objects[0]->instances[1]->id().id));
+    REQUIRE(second->instances.size() == 1);
+    CHECK(second->instances[0]->loaded_id == 0);
+}
+
+TEST_CASE("BBS 3MF drops a plate row without an instance id",
+          "[3MF][Bbs3mfPlateMapRecovery]")
+{
+    ScopedTemporaryDir source_backup("orca_bbs_plate_map_missing_id_store");
+    ScopedTemporaryFile archive{".3mf"};
+    Model source;
+    source.set_backup_path(source_backup.string());
+    PlateData plate0;
+    PlateData plate1;
+    make_two_plate_model(source, plate0, plate1);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    store_archive(archive.string(), source, config, {&plate0, &plate1}, {}, nullptr);
+    rewrite_plate_instance_metadata(archive.string(), 0, 0, "instance_id", {}, true);
+
+    LoadedArchive loaded;
+    REQUIRE(loaded.load(archive.string(), nullptr));
+    REQUIRE(loaded.model.objects.size() == 2);
+    REQUIRE(loaded.plates.size() == 2);
+    const ModelObject *first = find_named_object(loaded.model, "first-part");
+    const ModelObject *second = find_named_object(loaded.model, "second-part");
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    check_geometry(*first, *source.objects[0]);
+    check_geometry(*second, *source.objects[1]);
+
+    REQUIRE(loaded.plates[0]->obj_inst_map.size() == 1);
+    const int sibling_id = static_cast<int>(source.objects[1]->instances[0]->id().id);
+    const auto sibling = std::find_if(loaded.plates[0]->obj_inst_map.begin(), loaded.plates[0]->obj_inst_map.end(),
+                                      [sibling_id](const auto &entry) { return entry.second.second == sibling_id; });
+    REQUIRE(sibling != loaded.plates[0]->obj_inst_map.end());
+    CHECK(sibling->second.first == 0);
+    REQUIRE(first->instances.size() == 2);
+    CHECK(first->instances[0]->loaded_id == 0);
+    CHECK(first->instances[1]->loaded_id == static_cast<size_t>(source.objects[0]->instances[1]->id().id));
+    REQUIRE(second->instances.size() == 1);
+    CHECK(second->instances[0]->loaded_id == static_cast<size_t>(sibling_id));
+}
+
+} // namespace bbs_plate_map_recovery_contracts
