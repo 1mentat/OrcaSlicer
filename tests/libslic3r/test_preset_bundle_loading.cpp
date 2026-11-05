@@ -10677,3 +10677,23 @@ TEST_CASE("Preset paths use configured user and base directories with one JSON e
     Preset &preset = add_inmemory_preset(collection, "Fine");
     CHECK(collection.path_for_preset(preset) == base_file.string());
 }
+
+TEST_CASE("Similar printer lookup respects requested model and variant with alias fallback", "[PresetBundleLoading][PresetSimilarPrinter]")
+{
+    PresetBundle bundle;
+    Preset &a = add_inmemory_preset(bundle.printers, "Acme 0.4");
+    a.is_system = true;
+    a.config.option<ConfigOptionString>("printer_model", true)->value = "Acme";
+    a.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    Preset &b = add_inmemory_preset(bundle.printers, "Acme 0.6");
+    b.is_system = true;
+    b.config.option<ConfigOptionString>("printer_model", true)->value = "Acme";
+    b.config.option<ConfigOptionString>("printer_variant", true)->value = "0.6";
+    REQUIRE(bundle.printers.select_preset_by_name("Acme 0.4", true));
+    const Preset *expected = bundle.printers.find_preset("Acme 0.6", false, true);
+    REQUIRE(expected != nullptr);
+    CHECK(bundle.get_similar_printer_preset("Acme", "0.6") == expected);
+    CHECK(bundle.get_similar_printer_preset("Missing", "0.6") == nullptr);
+    bundle.printers.get_selected_preset().alias = "Unmatched 0.4";
+    CHECK(bundle.get_similar_printer_preset("Acme", "0.6") == expected);
+}
