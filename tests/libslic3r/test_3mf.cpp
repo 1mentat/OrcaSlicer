@@ -9415,14 +9415,16 @@ TEST_CASE("BBS import applies valid layer height profile records and skips damag
     bbs_archive_contracts::store_model(archive.string(), source, config, plates);
 
     // One-based object ids. Valid records for objects 2 and 4 (different values); the rest are damaged.
-    // The record for id 9 is not a skip rule: the reader keeps it in its id map and nothing looks it up.
+    // Id 9 is not a skip rule: the reader stores it in its id map and nothing looks it up. Id 0 is rejected by the
+    // reader's explicit zero-id guard, but no object has id 0, so removing that guard is not observable through the
+    // loaded objects: that record documents the rule and cannot kill a mutant of the guard.
     // The repeated-id guard runs before the size/parity checks, so an invalid first record does not reserve
     // its id (not pinned). A record of exactly four values is deliberately not used: the writer stores one while
     // the reader here refuses it, an unresolved asymmetry that is not pinned.
     const std::string records =
         "malformed-row\n"                                  // no "|"
         "not_an_id|0;0.12;0.8;0.2;1.6;0.28\n"              // id field without "="
-        "object_id=0|0;0.12;0.8;0.2;1.6;0.28\n"            // ids are one-based: 0 matches no object
+        "object_id=0|0;0.12;0.8;0.2;1.6;0.28\n"            // rejected by the zero-id guard (not observable: no object has id 0)
         "object_id=2|0;0.12;0.8;0.2;1.6;0.28\n"            // valid
         "object_id=2|0;0.22;0.8;0.3;1.6;0.38\n"            // repeated id: the first record stays
         "object_id=4|0;0.42;0.8;0.5;1.6;0.58\n"            // valid
