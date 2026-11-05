@@ -10618,3 +10618,29 @@ TEST_CASE("Preset vendor lookup inherits the parent vendor without changing chil
     CHECK(&resolved.preset == child);
     CHECK(collection.get_preset_with_vendor_profile(collection.default_preset()).vendor == nullptr);
 }
+
+TEST_CASE("Printer-held aliases register and remove without changing preset identity", "[PresetBundleLoading][PresetHeldAliases]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &filament = add_inmemory_preset(collection, "PLA");
+    filament.alias.clear();
+    auto &compatible = filament.config.option<ConfigOptionStrings>("compatible_printers", true)->values;
+    compatible.clear();
+    CHECK(collection.get_preset_alias(filament) == "PLA");
+    compatible = {"Printer A"};
+    CHECK_FALSE(collection.is_alias_exist("PLA", &filament));
+    collection.set_printer_hold_alias("PLA", filament);
+    CHECK(collection.is_alias_exist("PLA", &filament));
+    CHECK(filament.name == "PLA");
+    collection.set_printer_hold_alias("PLA", filament, true);
+    CHECK_FALSE(collection.is_alias_exist("PLA", &filament));
+    CHECK_FALSE(collection.is_alias_exist("PLA", nullptr));
+
+    // Restore only alias-name registration so a stale printer hold remains observable.
+    filament.alias.clear();
+    compatible.clear();
+    CHECK(collection.get_preset_alias(filament) == "PLA");
+    compatible = {"Printer A"};
+    CHECK_FALSE(collection.is_alias_exist("PLA", &filament));
+}
