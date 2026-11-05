@@ -10553,3 +10553,27 @@ TEST_CASE("Filament type lookup skips ineligible matches before base-type fallba
     CHECK(collection.preset(exact, true).name == "Z High Speed");
     CHECK(collection.filament_id_by_type("PLA High Speed") == "high-speed-id");
 }
+
+TEST_CASE("Filament grouping retains system and user roots without user children", "[PresetBundleLoading][PresetFilamentRoots]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &pla = add_inmemory_preset(collection, "PLA Base");
+    pla.is_system = true;
+    pla.filament_id = "pla-id";
+    Preset &petg = add_inmemory_preset(collection, "PETG Base");
+    petg.is_system = true;
+    petg.filament_id = "petg-id";
+    add_inmemory_preset(collection, "User Root").filament_id = "user-id";
+    add_inmemory_preset(collection, "PLA Child", "PLA Base").filament_id = "pla-id";
+    const auto grouped = collection.get_filament_presets();
+    REQUIRE(grouped.count("pla-id") == 1);
+    REQUIRE(grouped.at("pla-id").size() == 1);
+    CHECK(grouped.at("pla-id").front()->name == "PLA Base");
+    REQUIRE(grouped.count("petg-id") == 1);
+    REQUIRE(grouped.at("petg-id").size() == 1);
+    CHECK(grouped.at("petg-id").front()->name == "PETG Base");
+    REQUIRE(grouped.count("user-id") == 1);
+    REQUIRE(grouped.at("user-id").size() == 1);
+    CHECK(grouped.at("user-id").front()->name == "User Root");
+}
