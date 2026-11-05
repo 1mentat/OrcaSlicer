@@ -1566,22 +1566,34 @@ TEST_CASE("Placeholder relational, equality and logical operators bind in order"
     CHECK(parser.process("{0.1 + 0.2 == 0.4}") == "false");
 }
 
-// Known bug: equality_expression lists "<>" as an alias of "!=", but relational_expression is tried first and
-// consumes the '<' of "<>", then fails on the '>' ("Parsing error ... Expecting an expression."), so the alias
-// can never match. The parse error is an exception that ends the test case, so each input has its own case.
 TEST_CASE("Placeholder inequality operator <> accepts unequal operands",
-          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserExpressions]")
 {
     PlaceholderParser parser;
     CHECK(parser.process("{1 <> 2}") == "true");
+    CHECK(parser.process("{1<>2}") == "true");
 }
 
-// Known bug: see the previous test case; the same parse error hides the result for equal operands.
 TEST_CASE("Placeholder inequality operator <> rejects equal operands",
-          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserExpressions]")
 {
     PlaceholderParser parser;
     CHECK(parser.process("{2 <> 2}") == "false");
+}
+
+TEST_CASE("Placeholder relational operators still parse next to the <> spelling",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 < 2}") == "true");
+    CHECK(parser.process("{1<2}") == "true");
+    CHECK(parser.process("{1 < (2)}") == "true");
+    CHECK(parser.process("{1 < -2}") == "false");
+    CHECK(parser.process("{2 <= 2}") == "true");
+    CHECK(parser.process("{3 > 2}") == "true");
+    CHECK(parser.process("{2 >= 3}") == "false");
+    // Relational operators bind tighter than <>: (1 < 2) <> (3 < 4) compares true with true.
+    CHECK(parser.process("{1 < 2 <> 3 < 4}") == "false");
 }
 
 TEST_CASE("Placeholder ternary operator is right associative, lowest in precedence and lazy",
