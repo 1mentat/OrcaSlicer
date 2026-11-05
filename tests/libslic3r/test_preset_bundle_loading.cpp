@@ -10269,3 +10269,83 @@ TEST_CASE("Physical printer collection selection and preset filters are consiste
     collection.unselect_printer();
     CHECK_FALSE(collection.delete_selected_printer());
 }
+
+// Known bug: saving an existing collection printer self-moves and clears its config.
+TEST_CASE("Deleting a printer preset updates physical printer membership and files", "[PresetBundleLoading][PhysicalPrinterDeletion][!shouldfail]")
+{
+    ScopedTemporaryDir dir("preset-deep-printer-delete");
+    ScopedDataDir data(dir.path());
+    PhysicalPrinterCollection collection(PhysicalPrinter::printer_options());
+    REQUIRE(collection.default_config().opt<ConfigOptionStrings>("preset_names") != nullptr);
+    REQUIRE(collection.default_config().opt<ConfigOptionString>("print_host") != nullptr);
+
+    auto save_printer = [&](const std::string &name, std::initializer_list<const char*> presets, const std::string &host) {
+        PhysicalPrinter printer(name, collection.default_config());
+        REQUIRE(printer.config.opt<ConfigOptionStrings>("preset_names") != nullptr);
+        printer.file = (dir.path() / (name + ".json")).string();
+        for (const char *preset : presets)
+            REQUIRE(printer.add_preset(preset));
+        REQUIRE(printer.config.opt<ConfigOptionString>("print_host") != nullptr);
+        printer.config.opt<ConfigOptionString>("print_host")->value = host;
+        printer.update_preset_names_in_config();
+        printer.save(nullptr);
+    };
+
+    save_printer("Only", {"Removed"}, "only.local");
+    save_printer("Shared", {"Removed", "Keep"}, "shared.local");
+    save_printer("Unrelated", {"Keep"}, "keep.local");
+
+    PresetsConfigSubstitutions substitutions;
+    collection.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(std::distance(collection.begin(), collection.end()) == 3);
+
+    const fs::path only_file = dir.path() / "Only.json";
+    const fs::path shared_file = dir.path() / "Shared.json";
+    REQUIRE(fs::exists(only_file));
+    REQUIRE(fs::exists(shared_file));
+
+    collection.select_printer("Shared", "Keep");
+    REQUIRE(collection.has_selection());
+    CHECK(collection.get_selected_full_printer_name() == "Shared * Keep");
+
+    REQUIRE(collection.delete_preset_from_printers("Removed"));
+    CHECK_FALSE(collection.has_selection());
+    CHECK(collection.find_printer("Only") == nullptr);
+    CHECK_FALSE(fs::exists(only_file));
+    CHECK(fs::exists(shared_file));
+
+    const PhysicalPrinter *shared = collection.find_printer("Shared");
+    REQUIRE(shared != nullptr);
+    REQUIRE(shared->config.opt<ConfigOptionStrings>("preset_names") != nullptr);
+    REQUIRE(shared->config.opt<ConfigOptionString>("preset_name") != nullptr);
+    REQUIRE(shared->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(shared->preset_names == std::set<std::string>{"Keep"});
+    CHECK(shared->config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"Keep"});
+    CHECK(shared->config.opt_string("preset_name") == "Keep");
+    CHECK(shared->config.opt_string("print_host") == "shared.local");
+
+    const PhysicalPrinter *unrelated = collection.find_printer("Unrelated");
+    REQUIRE(unrelated != nullptr);
+    REQUIRE(unrelated->config.opt<ConfigOptionStrings>("preset_names") != nullptr);
+    REQUIRE(unrelated->config.opt<ConfigOptionString>("preset_name") != nullptr);
+    REQUIRE(unrelated->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(unrelated->preset_names == std::set<std::string>{"Keep"});
+    CHECK(unrelated->config.opt_string("print_host") == "keep.local");
+
+    PhysicalPrinterCollection reloaded(PhysicalPrinter::printer_options());
+    reloaded.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(std::distance(reloaded.begin(), reloaded.end()) == 2);
+    const PhysicalPrinter *persisted = reloaded.find_printer("Shared");
+    REQUIRE(persisted != nullptr);
+    REQUIRE(persisted->config.opt<ConfigOptionStrings>("preset_names") != nullptr);
+    REQUIRE(persisted->config.opt<ConfigOptionString>("preset_name") != nullptr);
+    REQUIRE(persisted->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(persisted->preset_names == std::set<std::string>{"Keep"});
+    CHECK(persisted->config.opt_string("print_host") == "shared.local");
+
+    const PhysicalPrinter *persisted_unrelated = reloaded.find_printer("Unrelated");
+    REQUIRE(persisted_unrelated != nullptr);
+    REQUIRE(persisted_unrelated->config.opt<ConfigOptionString>("print_host") != nullptr);
+    CHECK(persisted_unrelated->preset_names == std::set<std::string>{"Keep"});
+    CHECK(persisted_unrelated->config.opt_string("print_host") == "keep.local");
+}
