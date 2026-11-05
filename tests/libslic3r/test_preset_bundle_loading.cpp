@@ -9039,4 +9039,40 @@ TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists
 }
 
 
+// Known bug: repeated boost::format placeholders throw while logging malformed lists; fixed by the follow-up fix PR.
+TEST_CASE("JSON vendor malformed lists return normally and retain models with valid variants",
+          "[Preset][Vendor][VendorJson][VendorJsonMalformed][!shouldfail]")
+{
+    const auto [field, expected_models] = GENERATE(table<std::string, size_t>({
+        {"nozzle_diameter", 0u}, {"default_materials", 1u}, {"not_support_bed_type", 1u},
+    }));
+    CAPTURE(field);
+    ScopedTemporaryDir dir("vendor-json-malformed");
+    ScopedDataDir data(dir.path() / "data");
+    PresetBundle bundle;
+    const std::string vendor = "MalformedListVendor";
+    nlohmann::json document = {
+        {"type", "machine_model"}, {"name", "Malformed List"}, {"model_id", "MALFORMED-1"},
+        {"nozzle_diameter", "0.4"}, {"machine_tech", "FFF"},
+        {"default_materials", ""}, {"not_support_bed_type", ""},
+    };
+    // Valid JSON containing a C-style list with an unterminated quoted item.
+    document[field] = "\"unterminated";
+    write_vendor_model_tree(fs::path(data_dir()), vendor, "Malformed List", document.dump());
+
+    REQUIRE(load_json_vendor(bundle, fs::path(data_dir()), vendor) == 0);
+    if (field != "not_support_bed_type")
+        CHECK(bundle.error_count() == 1);
+    REQUIRE(bundle.vendors.count(vendor) == 1);
+    const VendorProfile &profile = bundle.vendors.at(vendor);
+    REQUIRE(profile.models.size() == expected_models);
+    if (expected_models == 1) {
+        const auto &model = profile.models.front();
+        REQUIRE(model.variants.size() == 1);
+        CHECK(model.variants.front().name == "0.4");
+        CHECK(model.default_materials.empty());
+        CHECK(model.not_support_bed_types.empty());
+    }
+}
+
 } // namespace preset_bundle_workflow_contracts
