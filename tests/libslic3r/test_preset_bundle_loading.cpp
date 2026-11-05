@@ -10043,3 +10043,27 @@ TEST_CASE("Legacy material names convert only for a recognized machine and mater
     PresetBundle::convert_filament_preset_name("Unknown Machine", unknown_machine);
     CHECK(unknown_machine == "Bambu PLA Basic @BBL H2D");
 }
+
+TEST_CASE("Preset parent and base preserve distinct inheritance identities", "[PresetBundleLoading][PresetParentBase]")
+{
+    PresetBundle bundle;
+    PresetCollection &collection = bundle.prints;
+    DynamicPrintConfig config = collection.default_preset().config;
+    config.option<ConfigOptionString>("inherits", true)->value.clear();
+    collection.load_preset({}, "Root", config, false);
+    config.opt<ConfigOptionString>("inherits")->value = "Root";
+    collection.load_preset({}, "Parent", config, false);
+    config.opt<ConfigOptionString>("inherits")->value = "Parent";
+    collection.load_preset({}, "Child", config, false);
+
+    const Preset *child = collection.find_preset("Child");
+    REQUIRE(child != nullptr);
+    const Preset *parent = collection.get_preset_parent(*child);
+    const Preset *base = collection.get_preset_base(*child);
+    REQUIRE(parent != nullptr);
+    REQUIRE(base != nullptr);
+    CHECK(parent->name == "Parent");
+    CHECK(base->name == "Root");
+    CHECK(collection.get_preset_parent(*base) == nullptr);
+    CHECK(collection.get_preset_base(*base) == base);
+}
