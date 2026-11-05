@@ -9671,3 +9671,107 @@ TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets"
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_persistence_contracts {
+
+namespace {
+
+std::map<std::string, std::map<std::string, std::string>> refresh_values(
+    double root_layer_height, double child_layer_height, bool include_obsolete, long update_time)
+{
+    std::map<std::string, std::map<std::string, std::string>> values;
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-root-id", "refresh-account");
+    root.emplace("layer_height", std::to_string(root_layer_height));
+    root[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+    values.emplace("A Refresh Root", std::move(root));
+
+    auto child = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-child-id", "refresh-account",
+                              "A Refresh Root");
+    child.emplace("layer_height", std::to_string(child_layer_height));
+    child[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+    values.emplace("Z Refresh Child", std::move(child));
+
+    if (include_obsolete) {
+        auto obsolete = cloud_values(PRESET_IOT_PRINT_TYPE, "refresh-obsolete-id", "refresh-account");
+        obsolete.emplace("layer_height", "0.22");
+        obsolete[ORCA_JSON_KEY_UPDATE_TIME] = std::to_string(update_time);
+        values.emplace("Obsolete Refresh Process", std::move(obsolete));
+    }
+    return values;
+}
+
+BundleMetadata refresh_metadata(const std::string &name, const std::string &version,
+                                const std::string &description, long updated_time)
+{
+    BundleMetadata metadata = preset_bundle_workflow_contracts::bundle_metadata("refresh-bundle");
+    metadata.name = name;
+    metadata.version = version;
+    metadata.description = description;
+    metadata.updated_time = updated_time;
+    return metadata;
+}
+
+} // namespace
+
+TEST_CASE("Subscribed refresh preserves bundle identity while replacing metadata and values",
+          "[PresetBundle][PresetPersistence][PresetBundleSubscribedRefresh]")
+{
+    ScopedTemporaryDir temp("preset-persistence-subscribed-refresh");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    AppConfig app;
+
+    const BundleMetadata first_metadata = refresh_metadata("Initial Refresh", "1.0.0",
+                                                            "first", 11);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, refresh_values(0.24, 0.28, true, 10), first_metadata,
+        ForwardCompatibilitySubstitutionRule::EnableSilent));
+    const auto first_bundle = bundle.bundles.m_bundles.find("refresh-bundle");
+    REQUIRE(first_bundle != bundle.bundles.m_bundles.end());
+    // Seed a prior-session timestamp so a reset cannot pass merely because both updates
+    // occur within the same wall-clock second.
+    const long long imported_time = 1234567;
+    first_bundle->second.imported_time = imported_time;
+    const Preset *first_child = bundle.prints.find_preset("_subscribed/refresh-bundle/Z Refresh Child");
+    const Preset *obsolete = bundle.prints.find_preset("_subscribed/refresh-bundle/Obsolete Refresh Process");
+    REQUIRE(first_child != nullptr);
+    REQUIRE(obsolete != nullptr);
+    const fs::path obsolete_file(obsolete->file);
+    REQUIRE(fs::exists(obsolete_file));
+
+    const BundleMetadata second_metadata = refresh_metadata("Refreshed Bundle", "2.0.0",
+                                                             "second", 22);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, refresh_values(0.30, 0.33, false, 20), second_metadata,
+        ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    const auto refreshed = bundle.bundles.m_bundles.find("refresh-bundle");
+    REQUIRE(refreshed != bundle.bundles.m_bundles.end());
+    CHECK(refreshed->second.imported_time == imported_time);
+    CHECK(refreshed->second.name == "Refreshed Bundle");
+    CHECK(refreshed->second.version == "2.0.0");
+    CHECK(refreshed->second.description == "second");
+    CHECK(refreshed->second.updated_time == 22);
+    BundleMetadata persisted;
+    REQUIRE(persisted.load_from_json(refreshed->second.path));
+    CHECK(persisted.id == second_metadata.id);
+    CHECK(persisted.name == second_metadata.name);
+    CHECK(persisted.version == second_metadata.version);
+    CHECK(persisted.description == second_metadata.description);
+    CHECK(persisted.updated_time == second_metadata.updated_time);
+    CHECK(persisted.imported_time == imported_time);
+
+    const Preset *root = bundle.prints.find_preset("_subscribed/refresh-bundle/A Refresh Root");
+    const Preset *child = bundle.prints.find_preset("_subscribed/refresh-bundle/Z Refresh Child");
+    REQUIRE(root != nullptr);
+    REQUIRE(child != nullptr);
+    CHECK_THAT(root->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.30, 1e-9));
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(child->inherits() == "_subscribed/refresh-bundle/A Refresh Root");
+    CHECK(bundle.prints.find_preset("_subscribed/refresh-bundle/Obsolete Refresh Process") == nullptr);
+    CHECK_FALSE(fs::exists(obsolete_file));
+    CHECK(refreshed->second.print_presets == std::vector<std::string>{
+        "_subscribed/refresh-bundle/A Refresh Root", "_subscribed/refresh-bundle/Z Refresh Child"});
+}
+
+} // namespace preset_persistence_contracts
