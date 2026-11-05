@@ -9039,9 +9039,8 @@ TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists
 }
 
 
-// Known bug: repeated boost::format placeholders throw while logging malformed lists; fixed by the follow-up fix PR.
 TEST_CASE("JSON vendor malformed lists return normally and retain models with valid variants",
-          "[Preset][Vendor][VendorJson][VendorJsonMalformed][!shouldfail]")
+          "[Preset][Vendor][VendorJson][VendorJsonMalformed]")
 {
     const auto [field, expected_models] = GENERATE(table<std::string, size_t>({
         {"nozzle_diameter", 0u}, {"default_materials", 1u}, {"not_support_bed_type", 1u},
