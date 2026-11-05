@@ -276,7 +276,8 @@ struct PillarConnectionRun
 
 DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode,
                                             const std::optional<double> max_pillar_link_distance = 10.0,
-                                            const double object_elevation = 15.0)
+                                            const double object_elevation = 15.0,
+                                            const std::optional<double> max_bridge_length = 2.5)
 {
     DynamicPrintConfig config = sla_config(1.0);
     config.set_deserialize_strict({
@@ -291,13 +292,14 @@ DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode,
         { "support_base_height",             1.0 },
         { "support_base_safety_distance",    0.5 },
         { "support_critical_angle",          45.0 },
-        // Keep the two manually supplied heads out of one ground cluster: their 3 mm
-        // 3D separation must exceed this clustering limit, while interconnect() still
-        // accepts the pair through support_max_pillar_link_distance below.
-        { "support_max_bridge_length",       2.5 },
         { "support_max_bridges_on_pillar",   8 },
         { "support_pillar_widening_factor",  0.0 },
     });
+    // Keep the existing pillar-mode fixture below the 3 mm cluster threshold;
+    // the bridge-length contract can omit this key to exercise the registered default.
+    if (max_bridge_length.has_value())
+        config.set_key_value("support_max_bridge_length",
+                             new ConfigOptionFloat(*max_bridge_length));
     if (max_pillar_link_distance.has_value())
         config.set_key_value("support_max_pillar_link_distance",
                              new ConfigOptionFloat(*max_pillar_link_distance));
@@ -381,6 +383,78 @@ PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode
     REQUIRE(max_support_centroid_spacing_mm > 2.0);
     return {support_volume, model_volume, support.its.vertices.size(), support.its.indices.size(),
             separated_support_slices, max_support_centroid_spacing_mm, linked_pillars};
+}
+
+struct MaxBridgeLengthRun
+{
+    double support_volume = 0.0;
+    std::size_t pillar_count = 0;
+    std::size_t bridge_count = 0;
+    std::size_t linked_pillar_count = 0;
+};
+
+MaxBridgeLengthRun process_max_bridge_length(std::optional<double> max_bridge_length)
+{
+    constexpr double horizontal_spacing = 2.05;
+    const double vertical_spacing = std::sqrt(9.0 - horizontal_spacing * horizontal_spacing);
+
+    // Two separate one-millimeter islands expose manual support points exactly 3 mm
+    // apart in 3D. The lower point is first, so a joined pair uses it as the center
+    // pillar; the higher point reaches it through a clear downward 45-degree bridge.
+    TriangleMesh model = make_cube(1.0, 1.0, 1.0);
+    TriangleMesh upper_island = make_cube(1.0, 1.0, 1.0);
+    upper_island.translate(Vec3f(float(horizontal_spacing), 0.f, float(vertical_spacing)));
+    model.merge(upper_island);
+    sla::SupportPoints points{
+        sla::SupportPoint(0.5f, 0.5f, 0.f, 0.5f, true),
+        sla::SupportPoint(float(horizontal_spacing + 0.5), 0.5f, float(vertical_spacing), 0.5f, true),
+    };
+
+    DynamicPrintConfig config = pillar_connection_config(slapcmZigZag, 0.0, 8.0,
+                                                          max_bridge_length);
+    SlaCubeFixture fixture(std::move(config), std::move(model), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA max bridge length validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    TriangleMesh pipeline_support = object->support_mesh();
+    REQUIRE_FALSE(pipeline_support.empty());
+    const double pipeline_volume = std::abs(static_cast<double>(pipeline_support.volume()));
+    REQUIRE(std::isfinite(pipeline_volume));
+    REQUIRE(pipeline_volume > 0.0);
+
+    // Lock the adjacent setting so this test observes max_bridge_length's head
+    // clustering and routed head-to-pillar bridge, not inter-pillar links.
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.max_bridge_length_mm,
+               Catch::Matchers::WithinAbs(max_bridge_length.value_or(15.0), 1e-8));
+    CHECK_THAT(tree_config.max_pillar_link_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-8));
+    const sla::SupportableMesh tree_input(object->transformed_mesh().its,
+                                          object->get_support_points(), tree_config);
+    sla::SupportTreeBuilder tree;
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, tree_input));
+    REQUIRE(tree.heads().size() == 2);
+    for (const sla::Head &head : tree.heads())
+        CHECK(head.is_valid());
+
+    MaxBridgeLengthRun result;
+    result.support_volume = pipeline_volume;
+    result.pillar_count = tree.pillars().size();
+    result.bridge_count = tree.bridges().size();
+    for (const sla::Pillar &pillar : tree.pillars())
+        if (pillar.links > 0)
+            ++result.linked_pillar_count;
+    TriangleMesh rebuilt_support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(rebuilt_support.empty());
+    CHECK_THAT(std::abs(static_cast<double>(rebuilt_support.volume())),
+               Catch::Matchers::WithinRel(pipeline_volume, 1e-5));
+    return result;
 }
 
 std::size_t process_auto_support_point_count(std::optional<int> density_percent)
@@ -2437,6 +2511,37 @@ TEST_CASE("SLA maximum pillar link distance controls inter-pillar bridges",
     CHECK(default_distance.linked_pillars == 2);
     CHECK(above_spacing.support_volume > below_spacing.support_volume + 1e-6);
     CHECK_THAT(default_distance.support_volume,
+               Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
+}
+
+TEST_CASE("SLA maximum bridge length controls support head clustering and routed bridges",
+          "[SLAPrint][SLAPipeline][SettingsVariance][SLASupportMaxBridgeLength]")
+{
+    const MaxBridgeLengthRun minimum = process_max_bridge_length(0.0);
+    const MaxBridgeLengthRun below_spacing = process_max_bridge_length(2.9);
+    const MaxBridgeLengthRun above_spacing = process_max_bridge_length(3.1);
+    const MaxBridgeLengthRun default_length = process_max_bridge_length(std::nullopt);
+
+    // At 0 and 2.9 mm, the 3 mm 3D head separation leaves two unclustered pillars.
+    // At 3.1 mm and the implicit 15 mm default, routing joins the lower head to the
+    // upper center pillar with one actual bridge. The 0 mm pillar-link control keeps
+    // inter-pillar linking disabled in every row.
+    CHECK(minimum.pillar_count == 2);
+    CHECK(below_spacing.pillar_count == 2);
+    CHECK(above_spacing.pillar_count == 1);
+    CHECK(default_length.pillar_count == 1);
+    CHECK(minimum.bridge_count == 0);
+    CHECK(below_spacing.bridge_count == 0);
+    CHECK(above_spacing.bridge_count == 1);
+    CHECK(default_length.bridge_count == 1);
+    CHECK(minimum.linked_pillar_count == 0);
+    CHECK(below_spacing.linked_pillar_count == 0);
+    CHECK(above_spacing.linked_pillar_count == 0);
+    CHECK(default_length.linked_pillar_count == 0);
+    CHECK(std::abs(above_spacing.support_volume - below_spacing.support_volume) > 1e-6);
+    CHECK_THAT(minimum.support_volume,
+               Catch::Matchers::WithinRel(below_spacing.support_volume, 1e-6));
+    CHECK_THAT(default_length.support_volume,
                Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
 }
 

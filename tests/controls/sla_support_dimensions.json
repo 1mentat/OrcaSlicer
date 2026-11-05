@@ -40,6 +40,7 @@
     "FocusedSLA::SLA layer-height changes invalidate slicing and alter layer count",
     "FocusedSLA::SLA manual supports elevate the object and emit support slices",
     "FocusedSLA::SLA material correction scales transformed slice geometry",
+    "FocusedSLA::SLA maximum bridge length controls support head clustering and routed bridges",
     "FocusedSLA::SLA maximum bridges per pillar bounds support head clustering",
     "FocusedSLA::SLA maximum pillar link distance controls inter-pillar bridges",
     "FocusedSLA::SLA mesh getters expose only completed support and pad products",

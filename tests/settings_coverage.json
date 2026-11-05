@@ -23,6 +23,16 @@
       ],
       "reason": "PrintConfig.cpp registers 0..50 with default 3. Six manual heads on a 2\u00d73 grid stay within the configured bridge-length and base-radius predicates while avoiding head overlap. The test applies and validates 0, 3, and 50 through SLAPrint, builds the production SupportTreeConfig from the object config, and compares the completed SLAPrint support-mesh volume with the direct public SupportTreeBuildsteps output. Builder graph assertions check valid heads, head-to-pillar routing, per-pillar bridge caps, and the observed bridge clusters: zero permits an unbounded cluster but the bridge gate prevents links, default 3 forms two three-head clusters, and 50 forms one six-head cluster."
     },
+    "support_max_bridge_length": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportMaxBridgeLength]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0, default 15.0, and no maximum. The public SLAPrint fixture has two ground-facing manual heads exactly 3 mm apart in 3D, with the lower point first and a clear downward route from the higher head to that pillar. support_max_pillar_link_distance is fixed at 0 to disable inter-pillar links. At 0 and 2.9 mm the points remain separate and form two pillars with no routed bridge; at 3.1 mm and the implicit default 15 mm they cluster and form one pillar plus one routed bridge. Direct SupportTreeBuildsteps topology and support mesh volume must agree with completed SLAPrint support geometry. No upper-bound claim is made because none is registered."
+    },
     "support_max_pillar_link_distance": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
       "tag": "[SLASupportMaxPillarLinkDistance]",

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "SLA support point spacing, head dimensions, and maximum pillar link distance pipeline/consumer probes. Mutants are selected by their sole settings-variance test and must fail through ordinary assertions.",
+  "description": "SLA support point spacing, head dimensions, and support-tree bridge/link-distance pipeline/consumer probes. Mutants are selected by their sole settings-variance test and must fail through ordinary assertions.",
   "mutants": [
     {
       "id": "sla-support-minimal-distance-mapping-ignored",
@@ -61,6 +61,18 @@
       "expected_test_count": 1,
       "ordinary_assertion_only": true,
       "expected_oracle": "The ordinary linked_pillars assertions fail for the minimum and below-spacing rows when the mapping forces a 10 mm link limit."
+    },
+    {
+      "id": "sla-support-max-bridge-length-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.max_bridge_length_mm = c.support_max_bridge_length.getFloat();",
+      "new": "    scfg.max_bridge_length_mm = 15.0;",
+      "description": "Ignore the registered maximum bridge length and force its 15 mm default. The minimum and below-spacing rows must retain two independent pillars; the above-spacing and implicit-default rows must join the lower head to the upper center pillar through one routed bridge.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportMaxBridgeLength$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary pillar_count and bridge_count assertions fail for the minimum and below-spacing rows when the mapping forces the default 15 mm value."
     }
   ]
 }
