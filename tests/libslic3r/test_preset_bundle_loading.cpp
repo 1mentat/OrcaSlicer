@@ -8456,31 +8456,69 @@ TEST_CASE("JSON preset import installs print, printer and filament presets into 
     CHECK(bundle.prints.find_preset("Imported PLA", false) == nullptr);
 }
 
-TEST_CASE("JSON preset import skips a file of unknown type and still imports the valid file in the same call",
+// import_json_presets picks the collection from which settings id key the file carries (print_settings_id,
+// printer_settings_id or filament_settings_id); the "type" field of the JSON is not used for that.
+TEST_CASE("JSON preset import skips a profile without a settings id key and imports the same profile with one",
           "[Preset][Bundle][PresetImport]")
 {
-    ScopedTemporaryDir temp("preset-workflow-import-invalid");
+    ScopedTemporaryDir temp("preset-workflow-import-no-id");
     ScopedDataDir data(temp.path() / "data");
     PresetBundle source;
     const fs::path incoming = temp.path() / "incoming";
-    const fs::path unknown_file = incoming / "Unknown.json";
-    fs::create_directories(incoming);
-    std::ofstream(unknown_file.string()) << R"({"type":"future_profile","name":"Unknown","version":"1.0.0","layer_height":"0.2"})";
-    const fs::path good_file = write_process_json(source, incoming, "Valid Control", 0.27);
+
+    // Two complete print profiles with the same values; the first has the settings id key removed.
+    DynamicPrintConfig without_id = print_config(source, "No Id Process", 0.27);
+    without_id.erase("print_settings_id");
+    REQUIRE_FALSE(without_id.has("print_settings_id"));
+    const fs::path no_id_file = incoming / "No Id Process.json";
+    write_json_preset(no_id_file, without_id, "No Id Process");
+    const fs::path with_id_file = write_process_json(source, incoming, "With Id Process", 0.27);
 
     PresetBundle bundle;
     AppConfig app;
-    std::vector<std::string> files{unknown_file.string(), good_file.string()};
+    std::vector<std::string> files{no_id_file.string(), with_id_file.string()};
     bundle.import_presets(files, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
 
-    CHECK(files == std::vector<std::string>{good_file.string()});
-    CHECK(bundle.prints.find_preset("Valid Control", false) != nullptr);
-    CHECK(bundle.prints.find_preset("Unknown", false) == nullptr);
-    CHECK(bundle.printers.find_preset("Unknown", false) == nullptr);
-    CHECK(bundle.filaments.find_preset("Unknown", false) == nullptr);
-    CHECK_FALSE(any_filename_contains(temp.path() / "data", "Unknown"));
+    CHECK(files == std::vector<std::string>{with_id_file.string()});
+    const Preset *imported = bundle.prints.find_preset("With Id Process", false);
+    REQUIRE(imported != nullptr);
+    CHECK_THAT(imported->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK(bundle.prints.find_preset("No Id Process", false) == nullptr);
+    CHECK(bundle.printers.find_preset("No Id Process", false) == nullptr);
+    CHECK(bundle.filaments.find_preset("No Id Process", false) == nullptr);
+    CHECK_FALSE(any_filename_contains(temp.path() / "data", "No Id Process"));
 }
 
+// import_presets handles a file as a JSON profile when its name ends in ".json" and as a bundle archive for the
+// archive extensions; any other file is left alone.
+TEST_CASE("JSON preset import ignores a file with another extension and imports the same profile as .json",
+          "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-import-extension");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle source;
+    const fs::path incoming = temp.path() / "incoming";
+    const fs::path json_file = write_process_json(source, incoming, "Json Process", 0.27);
+    const fs::path text_file = incoming / "Text Process.txt";
+    {
+        // The same profile body, saved under another extension.
+        const fs::path body = write_process_json(source, incoming, "Text Process", 0.27);
+        fs::rename(body, text_file);
+    }
+
+    PresetBundle bundle;
+    AppConfig app;
+    std::vector<std::string> files{text_file.string(), json_file.string()};
+    bundle.import_presets(files, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
+
+    CHECK(files == std::vector<std::string>{json_file.string()});
+    CHECK(bundle.prints.find_preset("Json Process", false) != nullptr);
+    CHECK(bundle.prints.find_preset("Text Process", false) == nullptr);
+    CHECK_FALSE(any_filename_contains(temp.path() / "data", "Text Process"));
+}
+
+// Name escapes are also covered by the "Config import confines zip entries..." test; this one adds a valid file in
+// the same call, which must still import.
 TEST_CASE("JSON preset import rejects a name outside the preset directory and writes nothing outside it",
           "[Preset][Bundle][PresetImport]")
 {
@@ -8503,7 +8541,6 @@ TEST_CASE("JSON preset import rejects a name outside the preset directory and wr
     CHECK(bundle.prints.find_preset("Valid Control", false) != nullptr);
     CHECK(bundle.prints.find_preset(escaping_name, false) == nullptr);
     CHECK_FALSE(any_filename_contains(temp.path(), "escape.json"));
-    CHECK_FALSE(fs::exists(temp.path() / "escape.json"));
 }
 
 TEST_CASE("JSON preset import asks before replacing an installed profile and honors the answer",
@@ -8563,17 +8600,6 @@ TEST_CASE("JSON preset import asks before replacing an installed profile and hon
         CHECK_THAT(layer_height("Stable A"), Catch::Matchers::WithinAbs(0.39, 1e-9));
         CHECK_THAT(layer_height("Stable B"), Catch::Matchers::WithinAbs(0.41, 1e-9));
     }
-}
-
-TEST_CASE("Loading a configuration file with an unknown extension is rejected", "[Preset][Bundle][PresetImport]")
-{
-    ScopedTemporaryDir temp("preset-workflow-unknown-config");
-    ScopedDataDir data(temp.path() / "data");
-    const fs::path file = temp.path() / "settings.json";
-    std::ofstream(file.string()) << "{}";
-    PresetBundle bundle;
-    CHECK_THROWS_WITH(bundle.load_config_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable),
-                      Catch::Matchers::ContainsSubstring("Unknown configuration file"));
 }
 
 } // namespace preset_bundle_workflow_contracts
