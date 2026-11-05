@@ -9775,3 +9775,38 @@ TEST_CASE("Subscribed refresh preserves bundle identity while replacing metadata
 }
 
 } // namespace preset_persistence_contracts
+
+TEST_CASE("Preset types preserve their storage names and cloud aliases", "[Preset][PresetTypeNames]")
+{
+    const auto [type, storage, cloud] = GENERATE(table<Preset::Type, std::string, std::string>({
+        {Preset::TYPE_PRINT, "process", "print"},
+        {Preset::TYPE_FILAMENT, "filament", "filament"},
+        {Preset::TYPE_PRINTER, "machine", "printer"},
+    }));
+    CAPTURE(storage, cloud);
+    CHECK(Preset::get_type_string(type) == storage);
+    CHECK(Preset::get_iot_type_string(type) == cloud);
+    CHECK(Preset::get_type_from_string(storage) == type);
+    CHECK(Preset::get_type_from_string(cloud) == type);
+}
+
+TEST_CASE("Unsupported preset types and unknown names retain invalid mappings", "[Preset][PresetTypeNames]")
+{
+    CHECK(Preset::get_type_string(Preset::TYPE_INVALID) == "invalid");
+    CHECK(Preset::get_type_string(Preset::TYPE_SLA_PRINT) == "invalid");
+    CHECK(Preset::get_iot_type_string(Preset::TYPE_INVALID) == "invalid");
+    CHECK(Preset::get_iot_type_string(Preset::TYPE_SLA_PRINT) == "invalid");
+    CHECK(Preset::get_type_from_string("unknown") == Preset::TYPE_INVALID);
+    CHECK(Preset::get_type_from_string("") == Preset::TYPE_INVALID);
+}
+
+TEST_CASE("Collection names and section names identify their preset type", "[Preset][PresetTypeNames]")
+{
+    PresetBundle bundle;
+    CHECK(bundle.prints.name() == "process");
+    CHECK(bundle.prints.section_name() == "process");
+    CHECK(bundle.filaments.name() == "filament");
+    CHECK(bundle.filaments.section_name() == "filament");
+    CHECK(bundle.printers.name() == "machine");
+    CHECK(bundle.printers.section_name() == "machine");
+}
