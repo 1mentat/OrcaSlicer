@@ -10172,3 +10172,37 @@ TEST_CASE("User preset names colliding with system presets are skipped while dis
         return preset.name == "System Collision";
     }) == 1);
 }
+
+TEST_CASE("Physical printer membership serializes typed and legacy preset names", "[PresetBundleLoading][PhysicalPrinterMembership]")
+{
+    PhysicalPrinterCollection defaults(PhysicalPrinter::printer_options());
+    PhysicalPrinter printer("Office", defaults.default_config());
+    CHECK(printer.add_preset("0.4"));
+    CHECK_FALSE(printer.add_preset("0.4"));
+    CHECK(printer.add_preset("0.6"));
+    printer.update_preset_names_in_config();
+    CHECK(printer.config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"0.4", "0.6"});
+    CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
+    CHECK(printer.delete_preset("0.4"));
+    CHECK_FALSE(printer.delete_preset("missing"));
+    CHECK(printer.get_preset_names() == std::set<std::string>{"0.6"});
+    printer.reset_presets();
+    CHECK(printer.get_preset_names().empty());
+}
+
+TEST_CASE("Physical printer config updates preserve typed fields and membership serialization", "[PresetBundleLoading][PhysicalPrinterMembership]")
+{
+    PhysicalPrinterCollection defaults(PhysicalPrinter::printer_options());
+    PhysicalPrinter printer("Office", defaults.default_config());
+    REQUIRE(printer.add_preset("0.4"));
+    printer.config.opt<ConfigOptionString>("print_host")->value = "old-host";
+    DynamicPrintConfig update = printer.config;
+    update.opt<ConfigOptionString>("print_host")->value = "new-host";
+    update.opt<ConfigOptionStrings>("preset_names")->values = {"0.6"};
+    printer.update_from_config(update);
+    CHECK(printer.config.opt_string("print_host") == "new-host");
+    CHECK(printer.preset_names == std::set<std::string>{"0.4", "0.6"});
+    printer.update_preset_names_in_config();
+    CHECK(printer.config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"0.4", "0.6"});
+    CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
+}
