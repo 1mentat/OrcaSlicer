@@ -723,7 +723,8 @@ DynamicPrintConfig retraction_config()
         {"machine_end_gcode", ""},
     });
     config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{zhtNormal});
-    config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric{rletAllSurfaces});
+    config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric(
+        &ConfigOptionEnum<RetractLiftEnforceType>::get_enum_values(), 1, rletAllSurfaces));
     return config;
 }
 
@@ -744,8 +745,8 @@ TriangleMesh separated_cubes()
 
 std::string export_mesh(TriangleMesh mesh, const DynamicPrintConfig &config)
 {
-    Print print;
     Model model;
+    Print print;
     init_print({std::move(mesh)}, print, model, config);
     const auto validation = print.validate();
     INFO(validation.string);
@@ -1366,6 +1367,66 @@ std::set<double> lift_height_deltas(const std::string &output, const DynamicPrin
         }
     });
     return heights;
+}
+
+TEST_CASE("Nullable filament lift enforcement inherits and selects surface policies",
+          "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct PolicyCase {
+        const char *label;
+        const char *filament_policy;
+        const char *machine_policy;
+    };
+    const std::vector<PolicyCase> cases{
+        {"nil inherits Bottom Only", "nil", "Bottom Only"},
+        {"All Surfaces", "All Surfaces", "Bottom Only"},
+        {"Top Only", "Top Only", "Bottom Only"},
+        {"Bottom Only", "Bottom Only", "Top Only"},
+        {"Top and Bottom", "Top and Bottom", "All Surfaces"},
+    };
+
+    std::map<std::string, std::set<double>> lifts_by_policy;
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const PolicyCase &test : cases) {
+        CAPTURE(test.label, test.filament_policy, test.machine_policy);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retract_lift_enforce", test.filament_policy,
+            "retract_lift_enforce", test.machine_policy);
+        const std::string output = bounded_retraction_export(short_cube(1.0), config);
+        require_layer_marker_count(output, config, 5);
+
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        lifts_by_policy.emplace(test.label, retraction_stats(output, config).lift_zs);
+    }
+
+    const std::set<double> &inherited = lifts_by_policy.at("nil inherits Bottom Only");
+    const std::set<double> &all_surfaces = lifts_by_policy.at("All Surfaces");
+    const std::set<double> &top_only = lifts_by_policy.at("Top Only");
+    const std::set<double> &bottom_only = lifts_by_policy.at("Bottom Only");
+    const std::set<double> &top_and_bottom = lifts_by_policy.at("Top and Bottom");
+    REQUIRE_FALSE(all_surfaces.empty());
+    REQUIRE_FALSE(top_only.empty());
+    REQUIRE_FALSE(bottom_only.empty());
+    CHECK(inherited == bottom_only);
+
+    for (const double z : top_only)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(1.4, 0.001));
+    for (const double z : bottom_only)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(0.6, 0.001));
+
+    std::set<double> top_bottom_union = top_only;
+    top_bottom_union.insert(bottom_only.begin(), bottom_only.end());
+    CHECK(top_and_bottom == top_bottom_union);
+    CHECK(std::includes(all_surfaces.begin(), all_surfaces.end(), top_only.begin(), top_only.end()));
+    CHECK(std::includes(all_surfaces.begin(), all_surfaces.end(), bottom_only.begin(), bottom_only.end()));
+    CHECK(all_surfaces.size() > top_bottom_union.size());
 }
 
 TEST_CASE("Zero machine and filament retraction lengths suppress emitted retracts", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")

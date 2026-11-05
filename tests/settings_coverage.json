@@ -4331,6 +4331,16 @@
       ],
       "reason": "Nil machine-bound inheritance and explicit filament values traverse Print::apply into emitted lifts. Explicit 0.4 mm includes the 0.8 mm target; 0.3999 mm overrides machine equality and suppresses it, preserving the earlier 0.6 mm target and deposition. Existing nil/zero and 0.1 mm suppression cases remain."
     },
+    "filament_retract_lift_enforce": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "One five-layer cube is exported for typed nil plus all four enum values through Print::apply. Nil inherits machine Bottom Only; each explicit policy overrides a deliberately different machine policy. Top Only emits only 1.4 mm lift targets, Bottom Only emits only 0.6 mm targets, Top and Bottom equals their union, and All Surfaces includes both plus intermediate lifts. Deposited motion remains equal across rows. Multiple-filament and variant combinations are not claimed."
+    },
     "reduce_crossing_wall": {
       "test": "tests/fff_print/test_wipe.cpp",
       "tag": "[ReduceCrossingWall]",
