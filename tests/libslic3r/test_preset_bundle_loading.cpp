@@ -10438,3 +10438,32 @@ TEST_CASE("Preset hardware capabilities distinguish vendor and model identity", 
     bundle.vendors.at("Acme").models.front().model_id = "OTHER";
     CHECK_FALSE(process.has_cali_lines(&bundle));
 }
+
+TEST_CASE("Preset bed metadata parses legacy numbers before model fallback", "[PresetBundleLoading][PresetBedMetadata]")
+{
+    PresetBundle bundle;
+    VendorProfile vendor("BBL");
+    vendor.name = "BBL";
+    VendorProfile::PrinterModel model;
+    model.name = "X1";
+    model.model_id = "BL-P001";
+    vendor.models.push_back(model);
+    bundle.vendors.emplace(vendor.id, vendor);
+    auto &edited_config = bundle.printers.get_edited_preset().config;
+    edited_config.option<ConfigOptionString>("printer_model", true)->value = "X1";
+    Preset process(Preset::TYPE_PRINT, "Process");
+    process.config = DynamicPrintConfig::full_print_config();
+    process.config.option<ConfigOptionString>("printer_model", true)->value = "Other Model";
+    process.config.option<ConfigOptionString>("default_bed_type", true)->value = "1";
+    CHECK(process.get_default_bed_type(&bundle) == btPC);
+    process.config.option<ConfigOptionString>("default_bed_type", true)->value = "3";
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    process.config.option<ConfigOptionString>("default_bed_type", true)->value = "0";
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    process.config.option<ConfigOptionString>("default_bed_type", true)->value = "bad-bed";
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+    process.config.option<ConfigOptionString>("default_bed_type", true)->value = "";
+    CHECK(process.get_default_bed_type(&bundle) == btPC);
+    edited_config.option<ConfigOptionString>("printer_model", true)->value = "Unknown";
+    CHECK(process.get_default_bed_type(&bundle) == btPEI);
+}
