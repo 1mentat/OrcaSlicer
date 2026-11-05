@@ -10122,3 +10122,53 @@ TEST_CASE("Preset configuration trees select their public file type", "[Preset][
 }
 
 } // namespace preset_file_type_contracts
+
+TEST_CASE("User preset names colliding with system presets are skipped while distinct files load", "[PresetBundleLoading][PresetCanonicalCollision]")
+{
+    ScopedTemporaryDir temp("preset-collision");
+    ScopedDataDir data(temp.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig system_config = collection.default_preset().config;
+    system_config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.19;
+    Preset &system = collection.load_preset({}, "System Collision", system_config, false);
+    system.is_system = true;
+
+    const fs::path dir = temp.path() / PRESET_PRINT_NAME;
+    fs::create_directories(dir);
+    DynamicPrintConfig collision_config = collection.default_preset().config;
+    collision_config.opt<ConfigOptionString>("print_settings_id", true)->value = "System Collision";
+    collision_config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.47;
+    const fs::path collision_file = dir / "System Collision.json";
+    collision_config.save_to_json(collision_file.string(), "System Collision", "User", "1.0.0");
+    REQUIRE(fs::exists(collision_file));
+    std::string collision_before;
+    load_string_file(collision_file.string(), collision_before);
+    REQUIRE_FALSE(collision_before.empty());
+
+    DynamicPrintConfig distinct_config = collection.default_preset().config;
+    distinct_config.opt<ConfigOptionString>("print_settings_id", true)->value = "Distinct User";
+    distinct_config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.26;
+    const fs::path distinct_file = dir / "Distinct User.json";
+    distinct_config.save_to_json(distinct_file.string(), "Distinct User", "User", "1.0.0");
+    REQUIRE(fs::exists(distinct_file));
+    PresetsConfigSubstitutions substitutions;
+    collection.load_presets(temp.string(), PRESET_PRINT_NAME, substitutions,
+                            ForwardCompatibilitySubstitutionRule::Disable);
+
+    const Preset *retained = collection.find_preset("System Collision");
+    const Preset *distinct = collection.find_preset("Distinct User");
+    REQUIRE(retained != nullptr);
+    REQUIRE(distinct != nullptr);
+    CHECK(retained->is_system);
+    CHECK_THAT(retained->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.19, 1e-9));
+    CHECK_FALSE(distinct->is_system);
+    CHECK_THAT(distinct->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK(fs::exists(collision_file));
+    std::string collision_after;
+    load_string_file(collision_file.string(), collision_after);
+    CHECK(collision_after == collision_before);
+    CHECK(std::count_if(collection.begin(), collection.end(), [](const Preset &preset) {
+        return preset.name == "System Collision";
+    }) == 1);
+}
