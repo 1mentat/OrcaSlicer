@@ -9403,3 +9403,76 @@ TEST_CASE("local bundle metadata and preset identity survive user loading", "[Pr
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_bundle_workflow_contracts {
+
+TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
+          "[PresetBundle][SubscribedBundleReload]")
+{
+    const bool read_only = GENERATE(false, true);
+    CAPTURE(read_only);
+    ScopedTemporaryDir temp("subscribed-reload");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path directory = temp.path() / "data" / PRESET_USER_DIR / "default" /
+                               PRESET_SUBSCRIBED_DIR / "remote-reload";
+    fs::create_directories(directory);
+    const std::string prefix = "_subscribed/remote-reload/";
+    BundleMetadata metadata = bundle_metadata("remote-reload");
+    // Cached membership from the last session is stale; files are authoritative on reload.
+    metadata.print_presets = { "Stale Process" };
+    metadata.filament_presets = { "Stale Filament" };
+    metadata.printer_presets = { "Stale Printer" };
+    const fs::path metadata_file = directory / PRESET_BUNDLE_METADATA;
+    REQUIRE(metadata.save_to_json(metadata_file.string()));
+    const std::string metadata_before = read_file(metadata_file);
+    REQUIRE_FALSE(metadata_before.empty());
+
+    PresetBundle writer;
+    write_json_preset(directory / PRESET_PRINT_NAME / "Reload Process.json",
+                      print_config(writer, "Reload Process", 0.24), "Reload Process");
+    DynamicPrintConfig material = filament_config(writer, "Reload PLA", prefix + "Reload Printer");
+    material.option<ConfigOptionFloats>("filament_density", true)->values = { 1.27 };
+    write_json_preset(directory / PRESET_FILAMENT_NAME / "Reload PLA.json", material, "Reload PLA");
+    DynamicPrintConfig machine = printer_config(writer, "Reload Printer");
+    machine.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4 };
+    write_json_preset(directory / PRESET_PRINTER_NAME / "Reload Printer.json", machine, "Reload Printer");
+
+    PresetBundle loaded;
+    REQUIRE(loaded.load_user_presets("default", ForwardCompatibilitySubstitutionRule::Disable,
+                                    read_only).empty());
+    const Preset *process = loaded.prints.find_preset(prefix + "Reload Process", false);
+    const Preset *filament = loaded.filaments.find_preset(prefix + "Reload PLA", false);
+    const Preset *printer = loaded.printers.find_preset(prefix + "Reload Printer", false);
+    REQUIRE(process != nullptr);
+    REQUIRE(filament != nullptr);
+    REQUIRE(printer != nullptr);
+    for (const Preset *preset : { process, filament, printer }) {
+        CHECK(preset->is_from_bundle());
+        CHECK(preset->bundle_id == "remote-reload");
+    }
+    CHECK_THAT(process->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_density") != nullptr);
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_density")->values.size() == 1);
+    CHECK_THAT(filament->config.option<ConfigOptionFloats>("filament_density")->values.front(),
+               Catch::Matchers::WithinAbs(1.27, 1e-9));
+    CHECK(printer->config.opt_string("printer_model") == "Workflow Printer");
+
+    REQUIRE(loaded.bundles.m_bundles.size() == 1);
+    const auto found = loaded.bundles.m_bundles.find("remote-reload");
+    REQUIRE(found != loaded.bundles.m_bundles.end());
+    const BundleMetadata &reloaded = found->second;
+    CHECK(reloaded.is_subscribed);
+    CHECK(reloaded.bundle_type == BundleType::Subscribed);
+    CHECK_FALSE(reloaded.update_available);
+    CHECK(reloaded.name == metadata.name);
+    CHECK(reloaded.version == metadata.version);
+    CHECK(reloaded.updated_time == metadata.updated_time);
+    CHECK(fs::equivalent(reloaded.path, metadata_file));
+    CHECK(reloaded.print_presets == std::vector<std::string>{ prefix + "Reload Process" });
+    CHECK(reloaded.filament_presets == std::vector<std::string>{ prefix + "Reload PLA" });
+    CHECK(reloaded.printer_presets == std::vector<std::string>{ prefix + "Reload Printer" });
+    if (read_only)
+        CHECK(read_file(metadata_file) == metadata_before);
+}
+
+} // namespace preset_bundle_workflow_contracts
