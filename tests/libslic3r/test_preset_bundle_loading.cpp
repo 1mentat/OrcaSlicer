@@ -10467,3 +10467,41 @@ TEST_CASE("Preset bed metadata parses legacy numbers before model fallback", "[P
     edited_config.option<ConfigOptionString>("printer_model", true)->value = "Unknown";
     CHECK(process.get_default_bed_type(&bundle) == btPEI);
 }
+
+TEST_CASE("Preset extruder keyset selection is explicit for supported and unknown types", "[PresetBundleLoading][PresetExtruderKeysets]")
+{
+    for (const auto type : {Preset::TYPE_PRINT, Preset::TYPE_PRINTER, Preset::TYPE_FILAMENT, Preset::TYPE_INVALID}) {
+        CAPTURE(type);
+        std::string id, variant;
+        std::set<std::string> *one = nullptr, *two = nullptr;
+        Preset::get_extruder_names_and_keysets(type, id, variant, &one, &two);
+        REQUIRE(one != nullptr);
+        REQUIRE(two != nullptr);
+        if (type == Preset::TYPE_PRINT) {
+            CHECK(id == "print_extruder_id");
+            CHECK(variant == "print_extruder_variant");
+            CHECK(one->count("outer_wall_speed") == 1);
+            CHECK(two->empty());
+        } else if (type == Preset::TYPE_PRINTER) {
+            CHECK(id == "printer_extruder_id");
+            CHECK(variant == "printer_extruder_variant");
+            CHECK_FALSE(one->empty());
+            CHECK_FALSE(two->empty());
+            CHECK(one->count("retraction_length") == 1);
+            CHECK(two->count("machine_max_speed_x") == 1);
+            CHECK(one->count("machine_max_speed_x") == 0);
+            CHECK(two->count("retraction_length") == 0);
+        } else if (type == Preset::TYPE_FILAMENT) {
+            CHECK(id.empty());
+            CHECK(variant == "filament_extruder_variant");
+            CHECK(one->count("filament_flow_ratio") == 1);
+            CHECK(two->empty());
+        } else {
+            CHECK(id.empty());
+            CHECK(variant.empty());
+            CHECK(one->empty());
+            CHECK(two->empty());
+        }
+    }
+}
+
