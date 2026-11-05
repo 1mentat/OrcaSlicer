@@ -10348,3 +10348,33 @@ TEST_CASE("Deleting a printer preset updates physical printer membership and fil
     CHECK(persisted_unrelated->preset_names == std::set<std::string>{"Keep"});
     CHECK(persisted_unrelated->config.opt_string("print_host") == "keep.local");
 }
+
+TEST_CASE("Preset visibility follows installed printer variants and renamed filament entries", "[PresetBundleLoading][PresetVisibility]")
+{
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme Display";
+    Preset printer(Preset::TYPE_PRINTER, "Acme Profile");
+    printer.vendor = &vendor;
+    printer.is_visible = false;
+    printer.config = DynamicPrintConfig::full_print_config();
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "Acme One";
+    printer.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    AppConfig app;
+    app.set_variant("Acme", "Acme One", "0.4", true);
+    printer.set_visible_from_appconfig(app);
+    CHECK(printer.is_visible);
+    app.set_variant("Acme", "Acme One", "0.4", false);
+    printer.set_visible_from_appconfig(app);
+    CHECK_FALSE(printer.is_visible);
+
+    Preset filament(Preset::TYPE_FILAMENT, "New PLA");
+    filament.vendor = &vendor;
+    filament.config = DynamicPrintConfig::full_print_config();
+    filament.renamed_from = {"Old PLA"};
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "1"}});
+    filament.set_visible_from_appconfig(app);
+    CHECK(filament.is_visible);
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", ""}});
+    filament.set_visible_from_appconfig(app);
+    CHECK_FALSE(filament.is_visible);
+}
