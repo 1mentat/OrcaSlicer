@@ -9554,6 +9554,7 @@ TEST_CASE("Subscribed bundle reconciliation installs all supported preset types 
         REQUIRE(fs::exists(fs::path(preset->file)));
     }
     CHECK(process_child->inherits() == process_prefix + "A Remote Process Base");
+    CHECK(process_base->setting_id == "remote-process-base-id");
     CHECK(process_child->base_id == process_base->setting_id);
     CHECK_THAT(process_base->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
     CHECK_THAT(process_child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
