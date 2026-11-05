@@ -3,6 +3,26 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
+    "support_points_density_relative": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportPointDensity]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 with default 100 and no maximum. On an elevated cube, source tracing shows 0% yields no generated points and an empty support mesh; SLAPrint then rejects the object with SlicingError for an unprintable empty elevated support slice. The test asserts that typed rejection, unfinished print state, completed support-point/tree steps, and empty products at 0. At representative 25% and the implicit default 100%, the same public fixture must finish with nonempty generated points, more points at default than 25, and finite new-island points whose coordinates stay within the transformed mesh bounds and whose head radius matches configuration. A separate deterministic projection test seeds the public generator with 5 using real SLAPrint model slices/heights, checks parallel boundary-ray hit/miss behavior, and requires generated points to remain on the mesh. No upper-bound claim is made because none is registered."
+    },
+    "support_max_bridges_on_pillar": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportMaxBridges]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..50 with default 3. Six manual heads on a 2\u00d73 grid stay within the configured bridge-length and base-radius predicates while avoiding head overlap. The test applies and validates 0, 3, and 50 through SLAPrint, builds the production SupportTreeConfig from the object config, and compares the completed SLAPrint support-mesh volume with the direct public SupportTreeBuildsteps output. Builder graph assertions check valid heads, head-to-pillar routing, per-pillar bridge caps, and the observed bridge clusters: zero permits an unbounded cluster but the bridge gate prevents links, default 3 forms two three-head clusters, and 50 forms one six-head cluster."
+    },
     "bottle_cost": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
       "tag": "[SLABottleMetadata]",
