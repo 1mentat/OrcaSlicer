@@ -9900,6 +9900,7 @@ TEST_CASE("Preset parent save writes a diff that reload restores over the parent
     ScopedDataDir data(data_path);
     Preset parent(Preset::TYPE_PRINT, "Base", false);
     parent.config = DynamicPrintConfig::full_print_config();
+    parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.20;
     parent.config.opt<ConfigOptionInt>("wall_loops")->value = 7;
     Preset child(Preset::TYPE_PRINT, "Child", false);
     child.config = parent.config;
@@ -9915,6 +9916,8 @@ TEST_CASE("Preset parent save writes a diff that reload restores over the parent
     CHECK_FALSE(saved.contains("wall_loops"));
     parent.config.opt<ConfigOptionInt>("wall_loops")->value = 9;
     child.config = DynamicPrintConfig::full_print_config();
+    child.config.opt<ConfigOptionFloat>("layer_height")->value = 0.12;
+    child.config.opt<ConfigOptionInt>("wall_loops")->value = 3;
     child.reload(parent);
     CHECK_THAT(child.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
     CHECK(child.config.opt_int("wall_loops") == 9);
