@@ -9999,3 +9999,29 @@ TEST_CASE("A material alias resolves to its distinct stored preset name", "[Pres
     CHECK(bundle.filaments.get_preset_name_by_alias("Material") == "Material @Printer");
     CHECK(bundle.filaments.get_preset_name_by_alias("Missing") == "Missing");
 }
+
+TEST_CASE("Bundle default suppression reaches every collection and changes the first visible preset", "[PresetBundleLoading][PresetDefaultSuppression]")
+{
+    PresetBundle bundle;
+    VendorProfile &library = bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+    library.id = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    bundle.prints.default_preset().vendor = &library;
+    const DynamicPrintConfig config = bundle.prints.default_preset().config;
+    Preset &visible = bundle.prints.load_preset({}, "Visible Process", config, false);
+    visible.vendor = &library;
+    CHECK(bundle.prints.first_visible().is_default);
+
+    for (bool suppressed : {true, false}) {
+        CAPTURE(suppressed);
+        bundle.set_default_suppressed(suppressed);
+        CHECK(bundle.prints.is_default_suppressed() == suppressed);
+        CHECK(bundle.filaments.is_default_suppressed() == suppressed);
+        CHECK(bundle.printers.is_default_suppressed() == suppressed);
+        CHECK(bundle.sla_prints.is_default_suppressed() == suppressed);
+        CHECK(bundle.sla_materials.is_default_suppressed() == suppressed);
+        if (suppressed)
+            CHECK(bundle.prints.first_visible().name == "Visible Process");
+        else
+            CHECK(bundle.prints.first_visible().is_default);
+    }
+}
