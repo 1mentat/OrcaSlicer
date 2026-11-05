@@ -9648,6 +9648,7 @@ TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets"
     const Preset *remote = bundle.prints.find_preset("_subscribed/remote-id/Remote Process");
     REQUIRE(remote != nullptr);
     const fs::path remote_file(remote->file);
+    REQUIRE(fs::exists(remote_file));
     CHECK(remote->is_from_bundle());
     CHECK(remote->bundle_id == "remote-id");
     CHECK_THAT(remote->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
