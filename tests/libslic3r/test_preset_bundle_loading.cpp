@@ -9106,3 +9106,22 @@ TEST_CASE("External config preserves project settings but filters print-host cre
         CHECK_FALSE(contains_key(applied_keys, key));
     }
 }
+
+
+TEST_CASE("External config refreshes non-different values from its named parent", "[Preset][ExternalConfigParent]")
+{
+    DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    defaults.set_key_value("inherits", new ConfigOptionString(""));
+    DynamicPrintConfig parent = defaults;
+    parent.opt<ConfigOptionFloat>("layer_height")->value = 0.30;
+    DynamicPrintConfig project = defaults;
+    project.opt_string("inherits", true) = "Base";
+    project.opt<ConfigOptionFloat>("layer_height")->value = 0.20;
+    project.opt<ConfigOptionInt>("wall_loops")->value = 7;
+    std::set<std::string> different{"wall_loops"};
+    DynamicPrintConfig loaded = Preset::load_external_config(
+        Preset::TYPE_PRINT, defaults, project, different,
+        [&](const std::string &name) { return name == "Base" ? &parent : nullptr; }, nullptr);
+    CHECK_THAT(loaded.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.30, 1e-6));
+    CHECK(loaded.opt_int("wall_loops") == 7);
+}
