@@ -8380,3 +8380,198 @@ TEST_CASE("current config export omits built-in default selections", "[Preset][B
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_bundle_workflow_contracts {
+
+namespace {
+
+void write_json_preset(const fs::path &file, const DynamicPrintConfig &config, const std::string &name)
+{
+    fs::create_directories(file.parent_path());
+    config.save_to_json(file.string(), name, "User", "1.0.0");
+    REQUIRE(fs::exists(file));
+}
+
+// Writes a print preset whose only distinguishing value is its layer height.
+fs::path write_process_json(PresetBundle &source, const fs::path &dir, const std::string &name, double layer_height)
+{
+    const fs::path file = dir / (name + ".json");
+    write_json_preset(file, print_config(source, name, layer_height), name);
+    return file;
+}
+
+} // namespace
+
+TEST_CASE("JSON preset import installs print, printer and filament presets into their own collections",
+          "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-import");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle source;
+    const fs::path incoming = temp.path() / "incoming";
+    const fs::path process_file = incoming / "Imported Process.json";
+    const fs::path printer_file = incoming / "Imported Printer.json";
+    const fs::path filament_file = incoming / "Imported PLA.json";
+    write_json_preset(process_file, print_config(source, "Imported Process", 0.27), "Imported Process");
+    write_json_preset(printer_file, printer_config(source, "Imported Printer", "0.8"), "Imported Printer");
+    write_json_preset(filament_file, filament_config(source, "Imported PLA", "Imported Printer", "Imported Vendor"),
+                      "Imported PLA");
+
+    PresetBundle bundle;
+    AppConfig app;
+    std::vector<std::string> files{process_file.string(), printer_file.string(), filament_file.string()};
+    const PresetsConfigSubstitutions substitutions = bundle.import_presets(
+        files, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
+
+    CHECK(substitutions.empty());
+    CHECK(files == std::vector<std::string>{process_file.string(), printer_file.string(), filament_file.string()});
+
+    const Preset *process = bundle.prints.find_preset("Imported Process", false);
+    const Preset *printer = bundle.printers.find_preset("Imported Printer", false);
+    const Preset *filament = bundle.filaments.find_preset("Imported PLA", false);
+    REQUIRE(process != nullptr);
+    REQUIRE(printer != nullptr);
+    REQUIRE(filament != nullptr);
+    CHECK(process->type == Preset::TYPE_PRINT);
+    CHECK(printer->type == Preset::TYPE_PRINTER);
+    CHECK(filament->type == Preset::TYPE_FILAMENT);
+    for (const Preset *preset : {process, printer, filament})
+        CHECK(preset->is_external);
+    CHECK_THAT(process->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK(printer->config.opt_string("printer_variant") == "0.8");
+    CHECK(filament->config.opt_string("filament_vendor", 0u) == "Imported Vendor");
+
+    // Each preset was saved as a user profile of its own type under the data directory (presets without a parent
+    // go to the "base" subdirectory of their type; printers live in "machine").
+    const fs::path user_dir = temp.path() / "data" / "user" / "default";
+    CHECK(fs::equivalent(fs::path(process->file), user_dir / "process" / "base" / "Imported Process.json"));
+    CHECK(fs::equivalent(fs::path(printer->file), user_dir / "machine" / "base" / "Imported Printer.json"));
+    CHECK(fs::equivalent(fs::path(filament->file), user_dir / "filament" / "base" / "Imported PLA.json"));
+
+    // ... and only in its own collection.
+    CHECK(bundle.printers.find_preset("Imported Process", false) == nullptr);
+    CHECK(bundle.prints.find_preset("Imported Printer", false) == nullptr);
+    CHECK(bundle.prints.find_preset("Imported PLA", false) == nullptr);
+}
+
+TEST_CASE("JSON preset import skips a file of unknown type and still imports the valid file in the same call",
+          "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-import-invalid");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle source;
+    const fs::path incoming = temp.path() / "incoming";
+    const fs::path unknown_file = incoming / "Unknown.json";
+    fs::create_directories(incoming);
+    std::ofstream(unknown_file.string()) << R"({"type":"future_profile","name":"Unknown","version":"1.0.0","layer_height":"0.2"})";
+    const fs::path good_file = write_process_json(source, incoming, "Valid Control", 0.27);
+
+    PresetBundle bundle;
+    AppConfig app;
+    std::vector<std::string> files{unknown_file.string(), good_file.string()};
+    bundle.import_presets(files, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
+
+    CHECK(files == std::vector<std::string>{good_file.string()});
+    CHECK(bundle.prints.find_preset("Valid Control", false) != nullptr);
+    CHECK(bundle.prints.find_preset("Unknown", false) == nullptr);
+    CHECK(bundle.printers.find_preset("Unknown", false) == nullptr);
+    CHECK(bundle.filaments.find_preset("Unknown", false) == nullptr);
+    CHECK_FALSE(any_filename_contains(temp.path() / "data", "Unknown"));
+}
+
+TEST_CASE("JSON preset import rejects a name outside the preset directory and writes nothing outside it",
+          "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-import-confinement");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle source;
+    const fs::path incoming = temp.path() / "incoming";
+    // Four levels up from <data>/user/default/process is the temporary directory itself.
+    const std::string escaping_name = "../../../../escape";
+    const fs::path escape_file = incoming / "Escape.json";
+    write_json_preset(escape_file, print_config(source, escaping_name, 0.28), escaping_name);
+    const fs::path good_file = write_process_json(source, incoming, "Valid Control", 0.27);
+
+    PresetBundle bundle;
+    AppConfig app;
+    std::vector<std::string> files{escape_file.string(), good_file.string()};
+    bundle.import_presets(files, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
+
+    CHECK(files == std::vector<std::string>{good_file.string()});
+    CHECK(bundle.prints.find_preset("Valid Control", false) != nullptr);
+    CHECK(bundle.prints.find_preset(escaping_name, false) == nullptr);
+    CHECK_FALSE(any_filename_contains(temp.path(), "escape.json"));
+    CHECK_FALSE(fs::exists(temp.path() / "escape.json"));
+}
+
+TEST_CASE("JSON preset import asks before replacing an installed profile and honors the answer",
+          "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-import-overwrite");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle source;
+    const fs::path incoming = temp.path() / "incoming";
+
+    // Installs "Stable A" (0.26) and "Stable B" (0.28), then offers new versions (0.39, 0.41) of both.
+    PresetBundle bundle;
+    AppConfig app;
+    const fs::path file_a = write_process_json(source, incoming, "Stable A", 0.26);
+    const fs::path file_b = write_process_json(source, incoming, "Stable B", 0.28);
+    {
+        std::vector<std::string> first{file_a.string(), file_b.string()};
+        bundle.import_presets(first, confirm_all, ForwardCompatibilitySubstitutionRule::Disable, app);
+        REQUIRE(first.size() == 2);
+    }
+    write_process_json(source, incoming, "Stable A", 0.39);
+    write_process_json(source, incoming, "Stable B", 0.41);
+
+    const auto layer_height = [&bundle](const char *name) {
+        const Preset *preset = bundle.prints.find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        return preset->config.opt_float("layer_height");
+    };
+    std::vector<std::string> asked;
+    const auto import_again = [&](std::function<int(std::string const &)> answer) {
+        std::vector<std::string> files{file_a.string(), file_b.string()};
+        bundle.import_presets(files, [&](std::string const &name) { asked.push_back(name); return answer(name); },
+                              ForwardCompatibilitySubstitutionRule::Disable, app);
+        return files;
+    };
+
+    // The answers are keyed by preset name, and the callback is asked about each existing profile in file order.
+    SECTION("an answer of 0 keeps one profile while 1 replaces the other") {
+        const std::vector<std::string> imported = import_again(
+            [](std::string const &name) { return name == "Stable A" ? 0 : 1; });
+        CHECK(asked == std::vector<std::string>{"Stable A", "Stable B"});
+        CHECK(imported == std::vector<std::string>{file_b.string()});
+        CHECK_THAT(layer_height("Stable A"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+        CHECK_THAT(layer_height("Stable B"), Catch::Matchers::WithinAbs(0.41, 1e-9));
+    }
+    SECTION("an answer of 2 (no to all) skips the rest of the call without asking again") {
+        const std::vector<std::string> imported = import_again([](std::string const &) { return 2; });
+        CHECK(asked == std::vector<std::string>{"Stable A"});
+        CHECK(imported.empty());
+        CHECK_THAT(layer_height("Stable A"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+        CHECK_THAT(layer_height("Stable B"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+    }
+    SECTION("an answer of 3 (yes to all) replaces the rest of the call without asking again") {
+        const std::vector<std::string> imported = import_again([](std::string const &) { return 3; });
+        CHECK(asked == std::vector<std::string>{"Stable A"});
+        CHECK(imported == std::vector<std::string>{file_a.string(), file_b.string()});
+        CHECK_THAT(layer_height("Stable A"), Catch::Matchers::WithinAbs(0.39, 1e-9));
+        CHECK_THAT(layer_height("Stable B"), Catch::Matchers::WithinAbs(0.41, 1e-9));
+    }
+}
+
+TEST_CASE("Loading a configuration file with an unknown extension is rejected", "[Preset][Bundle][PresetImport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-unknown-config");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path file = temp.path() / "settings.json";
+    std::ofstream(file.string()) << "{}";
+    PresetBundle bundle;
+    CHECK_THROWS_WITH(bundle.load_config_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable),
+                      Catch::Matchers::ContainsSubstring("Unknown configuration file"));
+}
+
+} // namespace preset_bundle_workflow_contracts
