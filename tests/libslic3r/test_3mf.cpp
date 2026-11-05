@@ -9562,3 +9562,89 @@ TEST_CASE("BBS import refuses meshes with non-finite vertices or out-of-range tr
 }
 
 } // namespace bbs_mesh_data_contracts
+
+namespace bbs_skip_model_contracts {
+using namespace Slic3r;
+
+namespace {
+
+boost::property_tree::ptree parse_entry(const std::string& path, const std::string& entry)
+{
+    std::string xml;
+    REQUIRE(read_3mf_entry(path, xml, entry));
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    return tree;
+}
+
+size_t count_children(const boost::property_tree::ptree& parent, const std::string& name)
+{
+    size_t count = 0;
+    for (const auto& child : parent)
+        if (child.first == name)
+            ++count;
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("BBS SkipModel export writes the project shell without object resources, build items, or object settings", "[3MF][Bbs3mfSkipModel]")
+{
+    ScopedTemporaryDir backup("orca_bbs_skip_model_store");
+    Model source;
+    source.set_backup_path(backup.string());
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    bbs_archive_contracts::make_model(source, true, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    bbs_archive_contracts::make_plate(plate, 0, {{0, 0}, {0, 1}, {1, 0}});
+    PlateDataPtrs plates{&plate};
+
+    const auto store = [&](const std::string& path, SaveStrategy extra) {
+        StoreParams params;
+        params.path            = path;
+        params.model           = &source;
+        params.config          = &config;
+        params.plate_data_list = plates;
+        params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | extra;
+        REQUIRE(store_bbs_3mf(params));
+    };
+
+    // The same project stored normally has what SkipModel removes, so each absence below is the strategy's doing.
+    ScopedTemporaryFile full(".3mf");
+    store(full.string(), SaveStrategy::Default);
+    {
+        const auto model = parse_entry(full.string(), "3D/3dmodel.model");
+        CHECK(count_children(model.get_child("model.resources"), "object") == 4);
+        CHECK(count_children(model.get_child("model.build"), "item") == 3);
+        const auto settings = parse_entry(full.string(), "Metadata/model_settings.config");
+        CHECK(count_children(settings.get_child("config"), "object") == 2);
+        CHECK(count_children(settings.get_child("config"), "assemble") == 1);
+        CHECK(count_children(settings.get_child("config.plate"), "model_instance") == 3);
+    }
+
+    ScopedTemporaryFile skipped(".3mf");
+    store(skipped.string(), SaveStrategy::SkipModel);
+
+    const auto model = parse_entry(skipped.string(), "3D/3dmodel.model");
+    const auto& resources = model.get_child("model.resources");
+    CHECK(resources.empty());
+    CHECK(count_children(model.get_child("model.build"), "item") == 0);
+
+    const auto settings = parse_entry(skipped.string(), "Metadata/model_settings.config");
+    const auto& config_node = settings.get_child("config");
+    CHECK(count_children(config_node, "object") == 0);
+    CHECK(count_children(config_node, "assemble") == 0);
+    // The plate record is still written, but without its instance list.
+    REQUIRE(count_children(config_node, "plate") == 1);
+    const auto& plate_node = config_node.get_child("plate");
+    CHECK(count_children(plate_node, "model_instance") == 0);
+    std::vector<std::string> plate_keys;
+    for (const auto& child : plate_node)
+        if (child.first == "metadata")
+            plate_keys.push_back(child.second.get<std::string>("<xmlattr>.key"));
+    CHECK(std::find(plate_keys.begin(), plate_keys.end(), "plater_id") != plate_keys.end());
+}
+
+} // namespace bbs_skip_model_contracts
