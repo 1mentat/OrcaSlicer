@@ -10892,3 +10892,47 @@ TEST_CASE("User preset export filters cloud state and unresolved inherited ident
         names.insert(preset.name);
     CHECK(names == std::set<std::string>{"Child", "Root"});
 }
+
+TEST_CASE("Saving cloud user presets writes root and inherited values and clears save state", "[PresetBundleLoading][PresetCloudExportSave]")
+{
+    ScopedTemporaryDir dir("preset-cloud-export-save");
+    ScopedDataDir data(dir.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    add_inmemory_preset(collection, "Base").setting_id = "base-id";
+    Preset &root = add_inmemory_preset(collection, "Root");
+    root.sync_info = "save";
+    root.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.24;
+    Preset &child = add_inmemory_preset(collection, "Child", "Base");
+    child.sync_info = "save";
+    child.base_id = "base-id";
+    child.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.29;
+    Preset *base = collection.find_preset("Base", false, true);
+    REQUIRE(base != nullptr);
+    base->config.option<ConfigOptionFloat>("layer_height", true)->value = 0.20;
+    base->file = collection.path_for_preset(*base);
+    REQUIRE(base->save(nullptr));
+
+    std::map<std::string, std::string> deletes;
+    collection.save_user_presets(dir.path().string(), PRESET_PRINT_NAME, deletes);
+    const Preset *saved_root = collection.find_preset("Root", false, true);
+    const Preset *saved_child = collection.find_preset("Child", false, true);
+    REQUIRE(saved_root != nullptr);
+    REQUIRE(saved_child != nullptr);
+    REQUIRE(fs::exists(saved_root->file));
+    REQUIRE(fs::exists(saved_child->file));
+    CHECK(saved_child->base_id == "base-id");
+    CHECK(saved_root->sync_info.empty());
+    CHECK(saved_child->sync_info.empty());
+    std::string contents;
+    load_string_file(saved_root->file, contents);
+    const nlohmann::json root_json = nlohmann::json::parse(contents);
+    REQUIRE(root_json.contains("layer_height"));
+    CHECK_THAT(std::stod(root_json.at("layer_height").get<std::string>()), Catch::Matchers::WithinAbs(0.24, 1e-6));
+    load_string_file(saved_child->file, contents);
+    const nlohmann::json child_json = nlohmann::json::parse(contents);
+    REQUIRE(child_json.contains("layer_height"));
+    CHECK_THAT(std::stod(child_json.at("layer_height").get<std::string>()), Catch::Matchers::WithinAbs(0.29, 1e-6));
+    CHECK(child_json.at("inherits") == "Base");
+}
