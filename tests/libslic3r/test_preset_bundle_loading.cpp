@@ -8686,4 +8686,68 @@ TEST_CASE("Preset bundle ZIP import preserves bundle identity and per-type files
     CHECK(fs::equivalent(fs::path(printer->file), bundle_root / PRESET_PRINTER_NAME / "Bundle Printer.json"));
 }
 
+TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved parent",
+          "[Preset][Bundle][PresetBundleImportInheritance]")
+{
+    ScopedTemporaryDir temp("preset-persistence-json-inheritance");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+
+    Preset &parent = add_inmemory_preset(bundle.prints, "Import Parent");
+    parent.is_system = true;
+    parent.setting_id = "import-parent-id";
+    parent.config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.31;
+    parent.config.opt<ConfigOptionInt>("wall_loops", true)->value = 4;
+
+    const auto write_child = [](const fs::path &file, const std::string &name,
+                                const std::string &inherits, double layer_height) {
+        DynamicPrintConfig config;
+        config.option<ConfigOptionString>("print_settings_id", true)->value = name;
+        config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value = inherits;
+        config.option<ConfigOptionFloat>("layer_height", true)->value = layer_height;
+        write_json_preset(file, config, name);
+    };
+
+    const fs::path child_file = temp.path() / "incoming" / "Imported Child.json";
+    write_child(child_file, "Imported Child", "Import Parent", 0.27);
+
+    AppConfig app;
+    std::vector<std::string> files{child_file.string()};
+    REQUIRE_NOTHROW(bundle.import_presets(
+        files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app));
+    REQUIRE(files.size() == 1);
+    CHECK(files.front() == child_file.string());
+
+    const Preset *child = bundle.prints.find_preset("Imported Child", false);
+    REQUIRE(child != nullptr);
+    CHECK(child->is_external);
+    CHECK(child->inherits() == "Import Parent");
+    CHECK(child->base_id == "import-parent-id");
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK(child->config.opt_int("wall_loops") == 4);
+
+    const fs::path saved_child(child->file);
+    REQUIRE(fs::exists(saved_child));
+    CHECK(fs::equivalent(saved_child, temp.path() / "data" / "user" / "default" / "process" / "Imported Child.json"));
+    const nlohmann::json saved_child_json = nlohmann::json::parse(read_file(saved_child));
+    CHECK(saved_child_json.at(BBL_JSON_KEY_INHERITS).get<std::string>() == "Import Parent");
+    CHECK_THAT(std::stod(saved_child_json.at("layer_height").get<std::string>()),
+               Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK_FALSE(saved_child_json.contains("wall_loops"));
+
+    const size_t before_orphan = bundle.prints.size();
+    const fs::path orphan_file = temp.path() / "incoming" / "Orphan Child.json";
+    write_child(orphan_file, "Orphan Child", "No Such Parent", 0.29);
+    std::vector<std::string> orphan_files{orphan_file.string()};
+    REQUIRE_NOTHROW(bundle.import_presets(
+        orphan_files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app));
+    CHECK(orphan_files.empty());
+    CHECK(bundle.prints.size() == before_orphan);
+    CHECK(bundle.prints.find_preset("Orphan Child", false) == nullptr);
+    CHECK_FALSE(any_filename_contains(temp.path() / "data", "Orphan Child"));
+}
+
+
 } // namespace preset_bundle_workflow_contracts
