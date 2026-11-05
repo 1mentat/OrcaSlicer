@@ -10254,6 +10254,8 @@ TEST_CASE("Physical printer collection selection and preset filters are consiste
     add("A", {"0.4", "0.6"});
     add("B", {"0.4"});
     add("C", {"0.8", "0.4"});
+    add("D", {"0.6", "0.8"});
+    add("E", {"0.8"});
     CHECK(collection.get_printers_with_preset("0.4") == std::vector<std::string>{"A", "C"});
     CHECK(collection.get_printers_with_only_preset("0.4") == std::vector<std::string>{"B"});
     collection.select_printer("A", "0.6");
