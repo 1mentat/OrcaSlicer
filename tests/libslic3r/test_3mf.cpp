@@ -9388,3 +9388,75 @@ TEST_CASE("BBS LoadModel does not read the project settings that LoadConfig read
 }
 
 } // namespace bbs_model_settings_policy_contracts
+
+namespace bbs_layer_profile_record_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("BBS import takes valid layer height profile records and skips malformed ones", "[3MF][Bbs3mfMetadata][LayerProfile]")
+{
+    ScopedTemporaryDir backup("orca_bbs_profile_record_store");
+    Model source;
+    source.set_backup_path(backup.string());
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    for (size_t i = 0; i < 4; ++i) {
+        ModelObject* object = source.add_object();
+        object->name        = "profile-object-" + std::to_string(i + 1);
+        object->add_volume(make_cube(10. + double(i), 10., 2.));
+        object->add_instance();
+    }
+    // A stored profile makes the exporter write the profile entry, which the test then replaces.
+    source.objects[1]->layer_height_profile.set({0., 0.05, 0.8, 0.06, 1.6, 0.07});
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    bbs_archive_contracts::make_plate(plate, 0, {{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    bbs_archive_contracts::store_model(archive.string(), source, config, plates);
+
+    // One-based object ids. Valid records for objects 2 and 4 (different values); the rest are damaged.
+    // A record of exactly four values is deliberately not used: the writer stores such a profile while
+    // the reader here refuses it, an unresolved asymmetry that is not pinned.
+    const std::string records =
+        "malformed-row\n"                                  // no "|"
+        "not_an_id|0;0.12;0.8;0.2;1.6;0.28\n"              // id field without "="
+        "object_id=0|0;0.12;0.8;0.2;1.6;0.28\n"            // ids are one-based: 0 matches no object
+        "object_id=2|0;0.12;0.8;0.2;1.6;0.28\n"            // valid
+        "object_id=2|0;0.22;0.8;0.3;1.6;0.38\n"            // repeated id: the first record stays
+        "object_id=4|0;0.42;0.8;0.5;1.6;0.58\n"            // valid
+        "object_id=1|0;0.1\n"                              // too short
+        "object_id=3|0;0.1;0.2;0.3;0.4\n"                  // odd count
+        "object_id=9|0;0.12;0.8;0.2;1.6;0.28\n";           // no such object
+    bool replaced = false;
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string& name, std::string& data) {
+        if (name != "Metadata/layer_heights_profile.txt")
+            return false;
+        data     = records;
+        replaced = true;
+        return true;
+    }));
+    REQUIRE(replaced);
+
+    Model loaded;
+    bbs_archive_contracts::LoadedProject state;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded, state));
+    REQUIRE(loaded.objects.size() == 4);
+
+    const std::map<std::string, std::vector<double>> expected = {
+        {"profile-object-1", {}},
+        {"profile-object-2", {0., 0.12, 0.8, 0.2, 1.6, 0.28}},
+        {"profile-object-3", {}},
+        {"profile-object-4", {0., 0.42, 0.8, 0.5, 1.6, 0.58}},
+    };
+    for (const auto& [name, profile] : expected) {
+        INFO(name);
+        const auto found = std::find_if(loaded.objects.begin(), loaded.objects.end(), [&](const ModelObject* object) { return object->name == name; });
+        REQUIRE(found != loaded.objects.end());
+        const auto& actual = (*found)->layer_height_profile.get();
+        REQUIRE(actual.size() == profile.size());
+        for (size_t i = 0; i < profile.size(); ++i)
+            CHECK_THAT(actual[i], WithinAbs(profile[i], 1e-6));
+    }
+}
+
+} // namespace bbs_layer_profile_record_contracts
