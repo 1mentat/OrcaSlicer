@@ -9975,3 +9975,27 @@ TEST_CASE("Detached names are unique and embedded file operations preserve owned
     load_string_file(stored->file, contents);
     CHECK(contents == "owned");
 }
+
+TEST_CASE("Preset alias generation registers a plain process name", "[PresetBundleLoading][PresetCollectionAliases]")
+{
+    PresetBundle bundle;
+    const DynamicPrintConfig config = bundle.prints.default_preset().config;
+    Preset &preset = bundle.prints.load_preset({}, "One", config, false);
+    preset.alias.clear();
+    CHECK(bundle.prints.get_preset_alias(preset, true) == "One");
+    CHECK(preset.alias == "One");
+    CHECK(bundle.prints.is_alias_exist("One"));
+    CHECK_FALSE(bundle.prints.is_alias_exist("Missing"));
+}
+
+TEST_CASE("A material alias resolves to its distinct stored preset name", "[PresetBundleLoading][PresetCollectionAliases]")
+{
+    PresetBundle bundle;
+    DynamicPrintConfig config = bundle.filaments.default_preset().config;
+    config.option<ConfigOptionString>("inherits", true)->value.clear();
+    Preset &preset = bundle.filaments.load_preset({}, "Material @Printer", config, false);
+    CHECK(bundle.filaments.get_preset_alias(preset, true) == "Material");
+    CHECK(bundle.filaments.is_alias_exist("Material"));
+    CHECK(bundle.filaments.get_preset_name_by_alias("Material") == "Material @Printer");
+    CHECK(bundle.filaments.get_preset_name_by_alias("Missing") == "Missing");
+}
