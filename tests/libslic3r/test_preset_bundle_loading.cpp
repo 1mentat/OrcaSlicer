@@ -6408,9 +6408,13 @@ TEST_CASE("A per-variant project value maps onto its base preset's variant layou
     check_double_vector(config.option<ConfigOptionFloats>("inner_wall_speed")->values, {250., 350.});
 }
 
-TEST_CASE("A project's different settings always keep the preset bookkeeping keys", "[Preset][ExternalPreset]")
+TEST_CASE("A project's different settings always keep the preset bookkeeping keys", "[Preset][ExternalPreset][PresetProjectKeys]")
 {
-    const std::set<std::string> keys = PresetBundle::project_different_keys(escape_strings_cstyle({"wall_loops", "top_shell_layers"}));
+    const std::string encoded_keys = GENERATE(
+        escape_strings_cstyle({"wall_loops", "top_shell_layers"}),
+        std::string("wall_loops;\"top_shell_layers\";wall_loops"));
+    CAPTURE(encoded_keys);
+    const std::set<std::string> keys = PresetBundle::project_different_keys(encoded_keys);
     for (const char *key : {"wall_loops", "top_shell_layers", "inherits", "print_settings_id", "filament_settings_id", "printer_settings_id"})
         CHECK(keys.count(key) == 1);
     CHECK(PresetBundle::project_different_keys(std::string()).count("inherits") == 1);
