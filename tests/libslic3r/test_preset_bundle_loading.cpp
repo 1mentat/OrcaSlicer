@@ -10523,3 +10523,33 @@ TEST_CASE("Preset validation distinguishes direct system trust from inheritance"
     inherit.clear();
     CHECK_FALSE(collection.validate_preset("Missing", inherit));
 }
+
+TEST_CASE("Filament type lookup skips ineligible matches before base-type fallback", "[PresetBundleLoading][PresetFilamentTypeLookup]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    auto add_filament = [&](const std::string &name, const std::string &type, const std::string &id) -> Preset & {
+        Preset &preset = add_inmemory_preset(collection, name);
+        preset.is_system = true;
+        preset.is_visible = true;
+        preset.is_compatible = true;
+        preset.filament_id = id;
+        preset.config.option<ConfigOptionStrings>("filament_type", true)->values = {type};
+        return preset;
+    };
+    add_filament("Z PLA Base", "PLA", "pla-id");
+    add_filament("Z PETG Base", "PETG", "petg-id");
+    add_filament("A Hidden", "PLA High Speed", "hidden-id").is_visible = false;
+    add_filament("B Incompatible", "PLA High Speed", "incompatible-id").is_compatible = false;
+    add_filament("C User", "PLA High Speed", "user-id").is_system = false;
+    const size_t fallback = collection.first_visible_idx_by_type("PLA High Speed");
+    REQUIRE(fallback < collection.size());
+    CHECK(collection.preset(fallback, true).name == "Z PLA Base");
+    CHECK(collection.filament_id_by_type("PLA High Speed") == "pla-id");
+
+    add_filament("Z High Speed", "PLA High Speed", "high-speed-id");
+    const size_t exact = collection.first_visible_idx_by_type("PLA High Speed");
+    REQUIRE(exact < collection.size());
+    CHECK(collection.preset(exact, true).name == "Z High Speed");
+    CHECK(collection.filament_id_by_type("PLA High Speed") == "high-speed-id");
+}
