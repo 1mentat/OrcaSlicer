@@ -9010,4 +9010,33 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
 }
 
 
+// Known bug: JSON technology is compared as a JSON sequence instead of a string; fixed by the follow-up fix PR.
+TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists",
+          "[Preset][Vendor][VendorJson][VendorJsonSla][!shouldfail]")
+{
+    ScopedTemporaryDir dir;
+    ScopedDataDir data(dir.path() / "json-vendor-data");
+    PresetBundle bundle;
+    const std::string vendor = "ResinVendor";
+    write_vendor_model_tree(boost::filesystem::path(data_dir()), vendor, "Resin One",
+        R"({"type":"machine_model","name":"Resin One","model_id":"SLA-1",
+"nozzle_diameter":"0.25","machine_tech":"SLA","family":"Resin",
+"bed_model":"resin_plate.stl","bed_texture":"resin_plate.png",
+"default_materials":"","not_support_bed_type":";;"})");
+
+    REQUIRE(load_json_vendor(bundle, boost::filesystem::path(data_dir()), vendor) == 0);
+    REQUIRE(bundle.error_count() == 0);
+    const VendorProfile::PrinterModel &model = only_model(bundle, vendor);
+    CHECK(model.technology == ptSLA);
+    CHECK(model.family == "Resin");
+    CHECK(model.model_id == "SLA-1");
+    REQUIRE(model.variants.size() == 1);
+    CHECK(model.variants.front().name == "0.25");
+    CHECK(model.default_materials.empty());
+    CHECK(model.not_support_bed_types.empty());
+    CHECK(model.bed_model == "resin_plate.stl");
+    CHECK(model.bed_texture == "resin_plate.png");
+}
+
+
 } // namespace preset_bundle_workflow_contracts
