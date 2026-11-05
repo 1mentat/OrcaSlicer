@@ -93,6 +93,42 @@ On Linux, `systemd-logind` can remove a user's shared-memory files after the
 last session closes; a disk-backed bind mount below `/dev/shm` does not protect
 its contents from this cleanup. Check free space on both the build volume and
 the root filesystem, which may still hold Git metadata and service logs.
+
+Before a confidence run, verify that the test service user's actual `TMPDIR`
+supports read-only memory mapping. Some tests use Boost mapped files, so a
+filesystem can accept writes while mapping a file fails. Run this probe with the
+same service user and environment that will run CTest:
+
+```sh
+python3 - <<'PY'
+import mmap
+import os
+import tempfile
+
+fd, path = tempfile.mkstemp(prefix="orca-mmap-check-", dir=os.environ["TMPDIR"])
+try:
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(b"OrcaSlicer mmap preflight\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        with mmap.mmap(fd, 0, access=mmap.ACCESS_READ) as mapped:
+            assert mapped[:] == b"OrcaSlicer mmap preflight\n"
+    finally:
+        os.close(fd)
+    print(f"mmap preflight passed: {path}")
+finally:
+    os.unlink(path)
+PY
+```
+
+Check the selected mount with `findmnt -T "$TMPDIR"` and confirm the probe
+passes under the service's `TMPDIR`. On one worker, its virtiofs temporary path
+allowed writes but returned `ENODEV` for `mmap`; ext4 passed the same probe.
+Treat that as a property of the tested mount, and use a private mmap-capable
+disk-backed temporary directory if the chosen path fails.
+
 Before a large build on a shared filesystem, compile and run a tiny executable
 from the intended runtime directory. A volume may permit compilation and linking
 while failing to execute the result. If needed, set
@@ -2217,9 +2253,11 @@ units. The report records source hashes and the matching GCC/gcov versions.
 Threshold status applies only to the gcov physical-line metric; a valid result
 below threshold is still a measurement, not an LLVM result.
 
-Catch test and reporter discovery uses temporary profile directories and
-removes those counters afterward. Registered test commands retain the caller's
-runtime profile environment.
+Catch listing runs use isolated preflight profile directories, and the receipts
+record each produced GCDA version and stamp against its matching GCNO before any
+native batch starts. The exporter checks measured profiles again before merging
+or exporting them, so mixed build epochs fail closed with a per-file receipt.
+Registered test commands retain the caller's runtime profile environment.
 
 Use `--gcov-data-dir /path/on/local-disk/unique-epoch` to place runtime counters
 on a separate filesystem while keeping reports, staged compiler notes, and gcov
@@ -2231,12 +2269,24 @@ the counter files there, so preserve that directory with the report evidence.
 For an explicit opt-in alternative to launching CTest once per case, add
 `--gcov-catch-batch` to a gcov run. CTest's live `--show-only=json-v1`
 discovery remains the exact selection source, and the adapter checks the
-selected Catch identities before executing them. Batches run serially; on
+selected Catch identities before executing them. It also runs the selected
+Catch binaries' listing preflight with isolated profile roots and verifies the
+GCDA header version and stamp against the matching build note. A stale binary
+epoch therefore stops before the selected native cases run. Batches run serially; on
 Linux, registrations with `PROCESSOR_AFFINITY` receive a verified CPU mask
 matching their CTest `PROCESSORS` count, and the caller must provide enough
 available CPUs. `--gcov-catch-batch-timeout` (or `--timeout` when no override
 is given) limits each whole batch process, not individual test cases. The
 default runner continues to execute the selected suite through CTest.
+
+To split the one-CPU `fff_print_tests` batch into two concurrent processes, add
+`--gcov-catch-batch-fff-shards 2`. This requires at least two available Linux
+CPUs and affinity-enabled CTest registrations. Each process receives a separate
+CPU and fresh profile directory; other batches remain serial. A matching
+`gcov-tool` (or explicit `--gcov-tool /path/to/gcov-tool`) merges the counters
+into a fresh directory before export, preserving the input profiles. The runner
+withholds coverage when either shard has incomplete results or merging fails.
+The default shard count is one.
 
 ## Nullable motion variants and boundaries
 

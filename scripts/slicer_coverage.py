@@ -1078,12 +1078,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--llvm-cov")
     run.add_argument("--llvm-profdata")
     run.add_argument("--gcov", help="matching GCC gcov executable for --backend gcov")
+    run.add_argument("--gcov-tool", help="matching GCC gcov-tool executable for parallel GCOV profile merging")
     run.add_argument("--gcov-data-dir",
                      help="GCC profile path created by the runner; must not already exist (default: OUT/gcov-data); relative to root")
     run.add_argument("--gcov-jobs", type=int, default=1,
                      help="maximum concurrent gcov processes for --backend gcov (default: 1)")
     run.add_argument("--gcov-catch-batch", action="store_true",
-                     help="opt in to serial Catch batches for GCC/gcov; CTest remains selection source")
+                     help="opt in to Catch batches for GCC/gcov; CTest remains selection source")
+    run.add_argument("--gcov-catch-batch-fff-shards", type=int, choices=(1, 2), default=1,
+                     help="opt in to two concurrent shards of the one-CPU fff_print_tests cohort (default: 1)")
     run.add_argument("--gcov-catch-batch-timeout", type=float,
                      help="whole Catch batch timeout in seconds (defaults to --timeout)")
     return parser
@@ -1096,6 +1099,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--gcov-catch-batch requires --backend gcov")
     if args.gcov_catch_batch_timeout is not None and not args.gcov_catch_batch:
         parser.error("--gcov-catch-batch-timeout requires --gcov-catch-batch")
+    if args.gcov_catch_batch_fff_shards != 1 and not args.gcov_catch_batch:
+        parser.error("--gcov-catch-batch-fff-shards requires --gcov-catch-batch")
+    if args.gcov_tool and args.gcov_catch_batch_fff_shards == 1:
+        parser.error("--gcov-tool is only used when --gcov-catch-batch-fff-shards=2")
     try:
         if args.action == "run" and args.backend == "gcov":
             from slicer_gcov_coverage import run_gcov_coverage

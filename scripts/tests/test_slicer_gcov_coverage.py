@@ -186,9 +186,13 @@ class GcovPhysicalLineTests(unittest.TestCase):
                 cwd.mkdir()
                 commands.append((["gcov", str(index)], cwd,
                                  cwd / "stdout.log", cwd / "stderr.log", f"source-{index}"))
-            with self.assertRaisesRegex(ValueError, "gcov failed or emitted ambiguous JSON"):
+            with self.assertRaises(ValueError) as failure:
                 gcov.run_gcov_commands(
                     commands, jobs=1, timeout=20, common=SimpleNamespace(_run=failing_gcov))
+            self.assertEqual(
+                str(failure.exception),
+                "gcov output validation failed for source-0: "
+                "returncode=9; emitted_json_count=0; stderr=bad")
             self.assertEqual(started, [0])
             self.assertTrue((root / "0" / "stdout.log").is_file())
             self.assertTrue((root / "0" / "stderr.log").is_file())
@@ -203,9 +207,13 @@ class GcovPhysicalLineTests(unittest.TestCase):
                 (cwd / "two.gcov.json.gz").touch()
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
-            with self.assertRaisesRegex(ValueError, "gcov failed or emitted ambiguous JSON"):
+            with self.assertRaises(ValueError) as failure:
                 gcov.run_gcov_commands(
                     commands, jobs=1, timeout=20, common=SimpleNamespace(_run=ambiguous_gcov))
+            self.assertEqual(
+                str(failure.exception),
+                "gcov output validation failed for source-0: "
+                "returncode=0; emitted_json_count=2")
             self.assertEqual(started, [0])
             self.assertTrue((root / "0" / "stdout.log").is_file())
             self.assertTrue((root / "0" / "stderr.log").is_file())

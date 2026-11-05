@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -36,10 +37,16 @@ def validate_gcov_jobs(value: Any) -> int:
     return value
 
 
-def validate_gcov_output(returncode: int, emitted_count: int, source: str) -> None:
+def validate_gcov_output(returncode: int, emitted_count: int, source: str, *,
+                         stderr: str = "") -> None:
     """Keep the existing fail-closed gcov process/output cardinality gate."""
-    if returncode != 0 or emitted_count > 1:
-        raise ValueError(f"gcov failed or emitted ambiguous JSON for {source}")
+    if returncode == 0 and emitted_count <= 1:
+        return
+    details = [f"returncode={returncode}", f"emitted_json_count={emitted_count}"]
+    diagnostic = stderr.strip()
+    if diagnostic:
+        details.append(f"stderr={diagnostic[:2000]}")
+    raise ValueError(f"gcov output validation failed for {source}: {'; '.join(details)}")
 
 
 def run_gcov_commands(
@@ -61,7 +68,7 @@ def run_gcov_commands(
         stdout_path.write_text(result.stdout or "", encoding="utf-8")
         stderr_path.write_text(result.stderr or "", encoding="utf-8")
         emitted_count = sum(path.is_file() for path in cwd.glob("*.gcov.json.gz"))
-        validate_gcov_output(result.returncode, emitted_count, source)
+        validate_gcov_output(result.returncode, emitted_count, source, stderr=result.stderr or "")
         return result
 
     if not commands:
@@ -301,6 +308,168 @@ def gcda_path_for_object(prefix: Path, object_path: Path) -> Path:
     return prefix / Path(str(gcda_source).lstrip(os.sep))
 
 
+def _read_gcov_header(path: Path, expected_kind: str) -> dict[str, Any]:
+    """Read only the portable GCOV magic, version, and stamp header fields."""
+    with path.open("rb") as stream:
+        header = stream.read(12)
+    if len(header) < 12:
+        raise ValueError(f"GCOV file header is truncated: {path}")
+    magic_kinds = {
+        b"oncg": ("gcno", "little"), b"adcg": ("gcda", "little"),
+        b"gcno": ("gcno", "big"), b"gcda": ("gcda", "big"),
+    }
+    detected = magic_kinds.get(header[:4])
+    if detected is None:
+        raise ValueError(f"GCOV file has an unknown magic header: {path}")
+    kind, byteorder = detected
+    if kind != expected_kind:
+        raise ValueError(f"GCOV file has {kind} magic; expected {expected_kind}: {path}")
+    version_bytes = header[4:8]
+    if byteorder == "little":
+        version_bytes = version_bytes[::-1]
+    try:
+        version = version_bytes.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"GCOV file version is not ASCII: {path}") from exc
+    return {
+        "kind": kind, "version": version,
+        "stamp": int.from_bytes(header[8:12], byteorder=byteorder),
+    }
+
+
+def inspect_gcov_profile_epochs(profile_roots: list[Path], *,
+                                expected_notes: set[Path],
+                                required_gcda_note_groups: dict[str, set[Path]] | None = None) -> dict[str, Any]:
+    """Check every GCDA header against the GCNO for its absolute object path.
+
+    GCOV_PREFIX with GCOV_PREFIX_STRIP=0 preserves the absolute object path
+    below the profile root, so removing the prefix reconstructs its .gcno path.
+    """
+    if not expected_notes:
+        raise ValueError("GCOV epoch validation requires a nonempty build-note allowset")
+    expected = {path.resolve(strict=True) for path in expected_notes}
+    required_groups = required_gcda_note_groups or {}
+    normalized_groups = {
+        name: {path.resolve(strict=True) for path in notes}
+        for name, notes in required_groups.items()
+    }
+    for name, notes in normalized_groups.items():
+        if not name or not notes or not notes <= expected:
+            raise ValueError(f"required GCDA note group is empty or outside the build-note allowset: {name!r}")
+    report: dict[str, Any] = {
+        "schema": "slicer-gcov-profile-epoch-v1", "status": "pass",
+        "profile_roots": [], "checked_gcda_count": 0, "mismatch_count": 0,
+        "entries": [], "mismatches": [],
+        "required_gcda_note_groups": {
+            name: {"notes": sorted(map(str, notes)), "matched_note": None}
+            for name, notes in sorted(normalized_groups.items())
+        },
+    }
+    for profile_root_value in profile_roots:
+        profile_root = Path(profile_root_value)
+        root_record: dict[str, Any] = {"path": str(profile_root), "gcda_count": 0}
+        report["profile_roots"].append(root_record)
+        if profile_root.is_symlink():
+            report["mismatches"].append({"profile_root": str(profile_root),
+                                         "status": "symlink_profile_root"})
+            continue
+        try:
+            profile_root = profile_root.resolve(strict=True)
+        except OSError as exc:
+            report["mismatches"].append({"profile_root": str(profile_root),
+                                         "status": "profile_root_unavailable",
+                                         "error": str(exc)})
+            continue
+        if not profile_root.is_dir():
+            report["mismatches"].append({"profile_root": str(profile_root),
+                                         "status": "profile_root_not_directory"})
+            continue
+        try:
+            gcda_paths = sorted(profile_root.rglob("*.gcda"))
+        except OSError as exc:
+            report["mismatches"].append({"profile_root": str(profile_root),
+                                         "status": "profile_scan_error", "error": str(exc)})
+            continue
+        for gcda_path in gcda_paths:
+            row: dict[str, Any] = {
+                "profile_root": str(profile_root), "gcda_path": str(gcda_path),
+            }
+            report["checked_gcda_count"] += 1
+            root_record["gcda_count"] += 1
+            try:
+                if gcda_path.is_symlink() or not gcda_path.is_file():
+                    raise ValueError("GCDA profile is not a regular file")
+                relative = gcda_path.relative_to(profile_root)
+                if any(part in {".", ".."} for part in relative.parts):
+                    raise ValueError("GCDA path escapes its profile root")
+                gcno_path = Path(os.sep, *relative.parts).with_suffix(".gcno")
+                row["gcno_path"] = str(gcno_path)
+                if gcno_path.is_symlink() or not gcno_path.is_file():
+                    raise ValueError(f"matching GCNO note is missing or unsafe: {gcno_path}")
+                resolved_note = gcno_path.resolve(strict=True)
+                if resolved_note not in expected:
+                    raise ValueError(f"GCDA maps to a GCNO outside the selected build notes: {gcno_path}")
+                for group_name, group_notes in normalized_groups.items():
+                    if resolved_note in group_notes:
+                        report["required_gcda_note_groups"][group_name]["matched_note"] = \
+                            str(resolved_note)
+                gcda_header = _read_gcov_header(gcda_path, "gcda")
+                gcno_header = _read_gcov_header(gcno_path, "gcno")
+                row.update({
+                    "gcda_version": gcda_header["version"],
+                    "gcno_version": gcno_header["version"],
+                    "gcda_stamp": gcda_header["stamp"],
+                    "gcno_stamp": gcno_header["stamp"],
+                    "gcda_size_bytes": gcda_path.stat().st_size,
+                    "gcno_size_bytes": gcno_path.stat().st_size,
+                })
+                if (gcda_header["version"] != gcno_header["version"] or
+                        gcda_header["stamp"] != gcno_header["stamp"]):
+                    row["status"] = "epoch_mismatch"
+                else:
+                    row["status"] = "match"
+            except (OSError, ValueError) as exc:
+                row["status"] = "invalid_profile_binding"
+                row["error"] = str(exc)
+            report["entries"].append(row)
+            if row["status"] != "match":
+                report["mismatches"].append(row)
+    for name, group in report["required_gcda_note_groups"].items():
+        if group["matched_note"] is None:
+            missing = {
+                "status": "required_gcda_missing", "required_group": name,
+                "profile_roots": [str(Path(value)) for value in profile_roots],
+                "error": "instrumented Catch listing emitted no GCDA for this executable's CDB notes",
+            }
+            report["mismatches"].append(missing)
+    report["mismatch_count"] = len(report["mismatches"])
+    if report["mismatch_count"]:
+        report["status"] = "mismatch"
+    return report
+
+
+def format_gcov_profile_epoch_failure(report: dict[str, Any], *, limit: int = 5) -> str:
+    """Return a concise diagnostic while the full per-file receipt stays saved."""
+    mismatches = report.get("mismatches", [])
+    descriptions: list[str] = []
+    for row in mismatches[:limit]:
+        if row.get("status") == "epoch_mismatch":
+            descriptions.append(
+                f"{row.get('gcda_path')} has version/stamp "
+                f"{row.get('gcda_version')}/{row.get('gcda_stamp')}, but "
+                f"{row.get('gcno_path')} has "
+                f"{row.get('gcno_version')}/{row.get('gcno_stamp')}")
+        else:
+            descriptions.append(
+                f"{row.get('gcda_path', row.get('profile_root'))}: {row.get('error', row.get('status'))}")
+    extra = len(mismatches) - len(descriptions)
+    if extra > 0:
+        descriptions.append(f"and {extra} more mismatched GCDA files")
+    return (f"GCOV profile epoch check found {report.get('mismatch_count', len(mismatches))} "
+            f"mismatched files after checking {report.get('checked_gcda_count', 0)} GCDA files: "
+            + "; ".join(descriptions))
+
+
 def create_gcov_data_dir(root: Path, out: Path, override: str | None) -> Path:
     """Create an exclusive profile epoch, optionally on a separate filesystem."""
     candidate = Path(override) if override is not None else out / "gcov-data"
@@ -430,6 +599,255 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+class GcovProfileMergeError(ValueError):
+    """A profile merge failed closed; no merged data may receive coverage credit."""
+
+    def __init__(self, message: str, report: dict[str, Any]):
+        super().__init__(message)
+        self.report = report
+
+
+def resolve_gcov_tool(gcov: str, explicit: str | None = None) -> Path:
+    """Find gcov-tool alongside the selected gcov, then verify it before use."""
+    candidate: str | None = explicit
+    if candidate is None:
+        gcov_path = Path(gcov)
+        if gcov_path.name.startswith("gcov"):
+            sibling_name = gcov_path.name.replace("gcov", "gcov-tool", 1)
+            sibling = gcov_path.with_name(sibling_name)
+            if sibling.is_file():
+                candidate = str(sibling)
+        if candidate is None:
+            candidate = shutil.which("gcov-tool")
+    if candidate is None:
+        raise ValueError("matching gcov-tool was not found; set --gcov-tool to the GCC versioned executable")
+    resolved = Path(candidate)
+    if not resolved.is_absolute():
+        found = shutil.which(candidate)
+        if found:
+            resolved = Path(found)
+    try:
+        resolved = resolved.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"gcov-tool executable does not exist: {candidate}") from exc
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise ValueError(f"gcov-tool is not an executable file: {resolved}")
+    return resolved
+
+
+def _gcda_profile_inventory(root: Path) -> dict[str, str]:
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"gcov profile root must be a real directory: {root}")
+    inventory: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"gcov profile tree must not contain symlinks: {path}")
+        if path.is_file() and path.suffix == ".gcda":
+            inventory[path.relative_to(root).as_posix()] = _hash_file(path)
+    return inventory
+
+
+def _gcda_inventory_digest(inventory: dict[str, str]) -> str:
+    encoded = "".join(f"{name}\0{digest}\n" for name, digest in sorted(inventory.items()))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _write_profile_merge_report(path: Path, report: dict[str, Any]) -> None:
+    if path.exists() or path.is_symlink():
+        raise ValueError(f"refusing to replace gcov profile merge report: {path}")
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def merge_gcov_profile_roots(profile_roots: list[Path], *, gcov_tool: Path,
+                              gcc_version: str, output_root: Path,
+                              report_path: Path, timeout: float,
+                              common: Any,
+                              expected_notes: set[Path]) -> dict[str, Any]:
+    """Merge independent GCOV_PREFIX roots without changing any input profile."""
+    roots: list[Path] = []
+    for value in profile_roots:
+        if value.is_symlink():
+            raise GcovProfileMergeError(
+                f"gcov profile input must not be a symlink: {value}",
+                {"status": "merge_failed", "error": "symlink profile input"})
+        try:
+            resolved = value.resolve(strict=True)
+        except OSError as exc:
+            raise GcovProfileMergeError(
+                f"gcov profile input is missing: {value}",
+                {"status": "merge_failed", "error": str(exc)}) from exc
+        if not resolved.is_dir() or resolved in roots:
+            raise GcovProfileMergeError(
+                f"gcov profile inputs must be distinct directories: {resolved}",
+                {"status": "merge_failed", "error": "invalid profile inputs"})
+        roots.append(resolved)
+    if len(roots) < 2:
+        raise GcovProfileMergeError(
+            "gcov profile merge needs at least two distinct roots",
+            {"status": "merge_failed", "error": "too few profile inputs"})
+    output_candidate = output_root.absolute()
+    if output_candidate.exists() or output_candidate.is_symlink():
+        raise GcovProfileMergeError(
+            f"gcov merged output must be a fresh path: {output_candidate}",
+            {"status": "merge_failed", "error": "output path already exists"})
+    output_root = output_candidate.resolve()
+    if report_path.exists() or report_path.is_symlink():
+        raise GcovProfileMergeError(
+            f"gcov profile merge report must be a fresh path: {report_path}",
+            {"status": "merge_failed", "error": "report path already exists"})
+    if any(output_root == root or root in output_root.parents or output_root in root.parents
+           for root in roots):
+        raise GcovProfileMergeError(
+            "gcov merged output must not be inside an input profile root",
+            {"status": "merge_failed", "error": "output nested in input"})
+    for left_index, left in enumerate(roots):
+        if any(left in right.parents or right in left.parents for right in roots[left_index + 1:]):
+            raise GcovProfileMergeError(
+                "gcov profile input roots must not overlap",
+                {"status": "merge_failed", "error": "overlapping profile inputs"})
+
+    report: dict[str, Any] = {
+        "schema": "slicer-gcov-profile-merge-v1", "status": "running",
+        "gcov_tool": str(gcov_tool), "gcc_version": gcc_version,
+        "input_profiles": [], "commands": [], "output_root": str(output_root),
+    }
+    input_inventories: list[dict[str, str]] = []
+    try:
+        report_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for root in roots:
+            inventory = _gcda_profile_inventory(root)
+            input_inventories.append(inventory)
+            report["input_profiles"].append({
+                "path": str(root), "gcda_count": len(inventory),
+                "inventory_sha256": _gcda_inventory_digest(inventory),
+                "gcda_inventory": inventory,
+            })
+        epoch_check = inspect_gcov_profile_epochs(roots, expected_notes=expected_notes)
+        report["profile_epoch_check"] = epoch_check
+        if epoch_check["status"] != "pass":
+            raise ValueError(format_gcov_profile_epoch_failure(epoch_check))
+        tool_sha_before = _hash_file(gcov_tool)
+        version_result = common._run([str(gcov_tool), "--version"], timeout=timeout)
+        version_matches = re.findall(r"\b\d+\.\d+(?:\.\d+)?\b", version_result.stdout or "")
+        if version_result.returncode != 0 or not any(
+                value == gcc_version or gcc_version.startswith(value + ".")
+                for value in version_matches):
+            report.update({
+                "status": "merge_failed", "tool_sha256": tool_sha_before,
+                "tool_version_argv": [str(gcov_tool), "--version"],
+                "tool_version_stdout": version_result.stdout,
+                "tool_version_stderr": version_result.stderr,
+                "tool_version_returncode": version_result.returncode,
+                "parsed_versions": version_matches,
+            })
+            _write_profile_merge_report(report_path, report)
+            raise GcovProfileMergeError(
+                f"gcov-tool version does not match GCC {gcc_version!r}", report)
+
+        report["tool_sha256"] = tool_sha_before
+        report["tool_version"] = version_result.stdout.strip()
+        report["tool_version_argv"] = [str(gcov_tool), "--version"]
+
+        output_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        active_roots = [(root, inventory) for root, inventory in zip(roots, input_inventories)
+                        if inventory]
+        if not active_roots:
+            output_root.mkdir(mode=0o700)
+            report["merge_strategy"] = "empty_profile_union"
+        elif len(active_roots) == 1:
+            output_root.mkdir(mode=0o700)
+            only_root, only_inventory = active_roots[0]
+            for relative_path in sorted(only_inventory):
+                source = only_root / relative_path
+                destination = output_root / relative_path
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            report["merge_strategy"] = "copy_single_nonempty_profile"
+        else:
+            report["merge_strategy"] = "gcov_tool_merge_weight_1_1"
+            current_input = active_roots[0][0]
+            current_paths = set(active_roots[0][1])
+            for merge_index, (right_input, right_inventory) in enumerate(active_roots[1:], 1):
+                current_paths.update(right_inventory)
+                destination = output_root if merge_index == len(active_roots) - 1 else \
+                    output_root.with_name(f"{output_root.name}.step-{merge_index:02d}")
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError(f"gcov merge destination is not fresh: {destination}")
+                argv = [str(gcov_tool), "merge", "--weight", "1,1", "--output",
+                        str(destination), str(current_input), str(right_input)]
+                started = time.monotonic()
+                result = common._run(argv, cwd=destination.parent, timeout=timeout)
+                command_record = {
+                    "argv": argv, "returncode": result.returncode,
+                    "stdout": result.stdout, "stderr": result.stderr,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "left_input": str(current_input), "right_input": str(right_input),
+                    "output": str(destination),
+                }
+                report["commands"].append(command_record)
+                if result.returncode != 0:
+                    raise ValueError(f"gcov-tool merge exited {result.returncode}")
+                if not destination.is_dir() or destination.is_symlink():
+                    raise ValueError("gcov-tool merge did not create a regular output directory")
+                output_inventory = _gcda_profile_inventory(destination)
+                command_record["output_gcda_count"] = len(output_inventory)
+                command_record["output_inventory_sha256"] = _gcda_inventory_digest(output_inventory)
+                if set(output_inventory) != current_paths:
+                    missing = sorted(current_paths - set(output_inventory))
+                    unexpected = sorted(set(output_inventory) - current_paths)
+                    command_record["identity_mismatch"] = {
+                        "missing": missing[:20], "unexpected": unexpected[:20],
+                        "missing_count": len(missing), "unexpected_count": len(unexpected),
+                    }
+                    raise ValueError("gcov-tool merge output GCDA inventory differs from input union")
+                current_input = destination
+
+        input_unchanged = True
+        for index, (root, before_inventory) in enumerate(zip(roots, input_inventories)):
+            after_inventory = _gcda_profile_inventory(root)
+            unchanged = after_inventory == before_inventory
+            report["input_profiles"][index]["unchanged_after_merge"] = unchanged
+            input_unchanged = input_unchanged and unchanged
+        if not input_unchanged:
+            raise ValueError("gcov-tool merge modified an input profile root")
+        if _hash_file(gcov_tool) != tool_sha_before:
+            raise ValueError("gcov-tool executable changed during profile merging")
+        final_inventory = _gcda_profile_inventory(output_root)
+        expected_paths = set().union(*(set(inventory) for inventory in input_inventories))
+        if set(final_inventory) != expected_paths:
+            raise ValueError("final gcov profile tree does not match the input GCDA path union")
+        report.update({
+            "status": "pass", "input_files_unchanged": True,
+            "output_gcda_count": len(final_inventory),
+            "output_gcda_inventory_sha256": _gcda_inventory_digest(final_inventory),
+        })
+        _write_profile_merge_report(report_path, report)
+        return report
+    except GcovProfileMergeError:
+        raise
+    except Exception as exc:
+        try:
+            before_inventories = locals().get("input_inventories")
+            if before_inventories is not None:
+                for index, (root, before_inventory) in enumerate(zip(roots, before_inventories)):
+                    after_inventory = _gcda_profile_inventory(root)
+                    report["input_profiles"][index]["unchanged_after_merge"] = \
+                        after_inventory == before_inventory
+            report["tool_sha256_after"] = _hash_file(gcov_tool)
+        except Exception as inventory_error:
+            report["input_recheck_error"] = {
+                "type": type(inventory_error).__name__, "message": str(inventory_error)}
+        report.update({"status": "merge_failed",
+                       "error": {"type": type(exc).__name__, "message": str(exc)}})
+        if not report_path.exists():
+            _write_profile_merge_report(report_path, report)
+        raise GcovProfileMergeError(f"gcov profile merge failed: {exc}", report) from exc
+
+
 def _read_gcov_json(path: Path, expected_gcc_version: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     with gzip.open(path, "rt", encoding="utf-8") as stream:
         payload = json.load(stream)
@@ -519,6 +937,11 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         gcov_jobs = validate_gcov_jobs(getattr(args, "gcov_jobs", 1))
     except (TypeError, ValueError) as exc:
         _fail(common, str(exc))
+    fff_shards = getattr(args, "gcov_catch_batch_fff_shards", 1)
+    if isinstance(fff_shards, bool) or not isinstance(fff_shards, int) or fff_shards not in {1, 2}:
+        _fail(common, "--gcov-catch-batch-fff-shards must be 1 or 2")
+    if fff_shards == 2 and not getattr(args, "gcov_catch_batch", False):
+        _fail(common, "two-way FFF sharding requires --gcov-catch-batch")
     if args.metrics is None:
         args.metrics = ["lines"]
     if any(metric != "lines" for metric in args.metrics):
@@ -623,6 +1046,7 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
 
     compile_rows: list[dict[str, Any]] = []
     expected_notes: set[Path] = set()
+    notes_by_target: dict[str, set[Path]] = {}
     for target, sources in source_by_target.items():
         try:
             validate_manifest_compile_sources(
@@ -645,6 +1069,7 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
             if not note.is_file():
                 _fail(common, f"missing gcov notes file for {target}:{source}: {note}")
             expected_notes.add(note.resolve())
+            notes_by_target.setdefault(target, set()).add(note.resolve())
             compile_rows.append({"target": target, "source": str(source),
                                  "object": str(row["object"]), "gcno": str(note),
                                  "compiler": argv[0],
@@ -667,6 +1092,21 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
                                                     for v in versions):
         _fail(common, f"gcov version does not match CMake GCC version {gcc_version!r}")
 
+    gcov_tool: Path | None = None
+    gcov_tool_version: str | None = None
+    if fff_shards == 2:
+        try:
+            gcov_tool = resolve_gcov_tool(gcov, getattr(args, "gcov_tool", None))
+        except ValueError as exc:
+            _fail(common, str(exc))
+        tool_version_result = common._run([str(gcov_tool), "--version"], timeout=args.timeout)
+        tool_versions = re.findall(r"\b\d+\.\d+(?:\.\d+)?\b", tool_version_result.stdout or "")
+        if tool_version_result.returncode != 0 or not any(
+                value == gcc_version or gcc_version.startswith(value + ".")
+                for value in tool_versions):
+            _fail(common, f"gcov-tool version does not match CMake GCC version {gcc_version!r}")
+        gcov_tool_version = tool_version_result.stdout.strip()
+
     command = common._expand_command(common.split_command(args.test_command), root=root,
                                      build=build_dir, filter_name=args.filter)
     if Path(command[0]).name != "ctest":
@@ -683,6 +1123,7 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
     catch_batch_enabled = bool(getattr(args, "gcov_catch_batch", False))
     catch_discovery_receipt: dict[str, Any] | None = None
     catch_discovery_raw: bytes | None = None
+    parallel_profile_dirs: list[Path] = []
     if catch_batch_enabled:
         from slicer_catch_batch import ctest_selection_argv, discover_ctest
         try:
@@ -741,13 +1182,23 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         if batch_timeout is None:
             batch_timeout = args.timeout
         batch_out = out / "catch-batch"
+        fff_profile_root = None
+        if fff_shards == 2:
+            fff_profile_root = gcov_prefix.parent / f"{gcov_prefix.name}-fff-shards"
         catch_batch_report = run_discovered_batches(
             discovery, ctest_argv=command, build_dir=build_dir, out_dir=batch_out,
             batch_timeout_seconds=batch_timeout,
             discovery_argv=catch_discovery_receipt["argv"],
             discovery_sha256=catch_discovery_receipt["ctest_json_sha256"],
             discovery_raw_json=catch_discovery_raw,
+            fff_shards=fff_shards, fff_profile_root=fff_profile_root,
+            expected_notes=expected_notes,
+            required_gcda_notes_by_executable={
+                target: notes_by_target[target] for target in FULL_TEST_TARGETS
+            },
             parent_env=env)
+        for batch_info in catch_batch_report.get("batches", []):
+            parallel_profile_dirs.extend(Path(path) for path in batch_info.get("parallel_profile_dirs", []))
         source_junit = catch_batch_report.get("junit")
         if source_junit:
             catch_junit_copy_receipt = _copy_catch_junit(
@@ -787,8 +1238,13 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         if catch_batch_report is None or catch_discovery_receipt is None:
             _fail(common, "Catch batch mode produced no run report")
         batch_report_path = out / "catch-batch" / "batch-report.json"
-        batch_argvs = [info["batch_argv"] for info in catch_batch_report.get("batches", [])
-                       if "batch_argv" in info]
+        batch_argvs = []
+        for info in catch_batch_report.get("batches", []):
+            if info.get("batch_process_launch_attempted") and "batch_argv" in info:
+                batch_argvs.append(info["batch_argv"])
+            batch_argvs.extend(
+                shard["batch_argv"] for shard in info.get("shards", [])
+                if shard.get("batch_process_launch_attempted") and "batch_argv" in shard)
         run_record = {
             "executor": "catch_batch",
             "requested_ctest_argv": requested_ctest_argv,
@@ -811,11 +1267,19 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
             "batch_status": catch_batch_report.get("status"),
             "batch_count": catch_batch_report.get("batch_count",
                                                    len(catch_batch_report.get("batches", []))),
-            "batch_argvs_started_count": len(batch_argvs), "batch_argvs": batch_argvs,
+            "batch_argvs_started_count": catch_batch_report.get(
+                "batch_process_launch_attempted_count", len(batch_argvs)),
+            "batch_argvs": batch_argvs,
             "batch_timeout_seconds": catch_batch_report.get("batch_timeout_seconds"),
             "batch_timeout_scope": catch_batch_report.get("timeout_semantics"),
             "gcov_prefix": str(gcov_prefix), "gcov_prefix_strip": 0,
             "gcov_jobs": gcov_jobs,
+            "fff_parallel_shards": fff_shards,
+            "gcov_parallel_profile_dirs": [str(path) for path in parallel_profile_dirs],
+            "gcov_tool": (None if gcov_tool is None else {
+                "path": str(gcov_tool), "sha256": _hash_file(gcov_tool),
+                "version": gcov_tool_version,
+            }),
         }
     else:
         run_record = {
@@ -832,7 +1296,14 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
             "gcov_jobs": gcov_jobs,
         }
     if test.returncode != 0 or not junit_path.is_file():
-        report = {"status": "test_failed" if test.returncode else "missing_junit",
+        raw_runtime_gcda = sorted({
+            path for profile_root in [gcov_prefix, *parallel_profile_dirs]
+            for path in profile_root.rglob("*.gcda") if path.is_file()
+        })
+        preflight_failed = (catch_batch_report is not None and
+                            catch_batch_report.get("status") == "incomplete_preflight")
+        report = {"status": "preflight_failed" if preflight_failed else
+                  ("test_failed" if test.returncode else "missing_junit"),
                   "backend": "gcc-gcov", "denominator": "gcc physical lines only",
                   "run": run_record, "notes": sorted(map(str, expected_notes)),
                   "extra_build_notes_unselected": extra_notes,
@@ -841,8 +1312,20 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
                   "input_artifact_hash_failures": artifact_hash_failures,
                   "source_tree_before": source_tree_before_meta,
                   "source_tree_after": source_tree_after_meta,
-                  "raw_gcda": [_sha_artifact(common, path)
-                               for path in sorted(gcov_prefix.rglob("*.gcda")) if path.is_file()]}
+                  "raw_gcda": [_sha_artifact(common, path) for path in raw_runtime_gcda]}
+        if preflight_failed:
+            report["preflight_failure"] = {
+                "reason": catch_batch_report.get("incomplete_reason"),
+                "failed_batches": [
+                    {key: info[key] for key in (
+                        "executable", "process_outcome", "preflight_error",
+                        "preflight_profile_epoch", "preflight_profile_epoch_receipt",
+                        "preflight_profile_epoch_receipt_sha256",
+                        "preflight_profile_files") if key in info}
+                    for info in catch_batch_report.get("batches", [])
+                    if info.get("process_outcome") == "preflight_epoch_mismatch"
+                ],
+            }
         (out / "coverage-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         return 2
     try:
@@ -862,9 +1345,60 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         }, indent=2) + "\n", encoding="utf-8")
         return 2
 
+    gcov_profile_root = gcov_prefix
+    if parallel_profile_dirs:
+        if gcov_tool is None:
+            _fail(common, "parallel FFF profiles have no version-checked gcov-tool")
+        merge_report_path = out / "gcov-profile-merge.json"
+        merge_output_root = out / "gcov-profile-merge" / "merged"
+        try:
+            merge_report = merge_gcov_profile_roots(
+                [gcov_prefix, *parallel_profile_dirs], gcov_tool=gcov_tool,
+                gcc_version=gcc_version, output_root=merge_output_root,
+                report_path=merge_report_path, timeout=args.timeout, common=common,
+                expected_notes=expected_notes)
+        except GcovProfileMergeError as exc:
+            run_record["gcov_profile_merge"] = _sha_artifact(common, merge_report_path)
+            failure = {
+                "status": "gcov_profile_merge_failed", "backend": "gcc-gcov",
+                "denominator": "gcc physical lines only", "run": run_record,
+                "profile_merge": exc.report,
+                "input_artifact_sha256_before": artifact_hashes_before,
+                "input_artifact_sha256_after": artifact_hashes_after,
+                "input_artifact_hash_failures": artifact_hash_failures,
+                "source_tree_before": source_tree_before_meta,
+                "source_tree_after": source_tree_after_meta,
+            }
+            (out / "coverage-report.json").write_text(
+                json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return 2
+        gcov_profile_root = merge_output_root
+        run_record["gcov_profile_merge"] = _sha_artifact(common, merge_report_path)
+        run_record["gcov_export_prefix"] = str(gcov_profile_root)
+    else:
+        epoch_report = inspect_gcov_profile_epochs(
+            [gcov_prefix], expected_notes=expected_notes)
+        epoch_report_path = out / "gcov-profile-epoch-check.json"
+        _write_profile_merge_report(epoch_report_path, epoch_report)
+        run_record["gcov_profile_epoch_check"] = _sha_artifact(common, epoch_report_path)
+        if epoch_report["status"] != "pass":
+            failure = {
+                "status": "gcov_profile_epoch_mismatch", "backend": "gcc-gcov",
+                "denominator": "gcc physical lines only", "run": run_record,
+                "profile_epoch_check": epoch_report,
+                "input_artifact_sha256_before": artifact_hashes_before,
+                "input_artifact_sha256_after": artifact_hashes_after,
+                "input_artifact_hash_failures": artifact_hash_failures,
+                "source_tree_before": source_tree_before_meta,
+                "source_tree_after": source_tree_after_meta,
+            }
+            (out / "coverage-report.json").write_text(
+                json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return 2
+
     raw_data_dir = out / "gcov-input"
     raw_data_dir.mkdir()
-    gcda_paths = {path.resolve() for path in gcov_prefix.rglob("*.gcda") if path.is_file()}
+    gcda_paths = {path.resolve() for path in gcov_profile_root.rglob("*.gcda") if path.is_file()}
     expected_gcda: set[Path] = set()
     expected_gcda_notes: dict[Path, Path] = {}
     records: list[dict[str, Any]] = []
@@ -878,7 +1412,7 @@ def _run_gcov_coverage(args: Any, *, common: Any) -> int:
         row = selected_note_to_row[note]
         object_path = Path(row["object"])
         # GCC preserves absolute object paths beneath GCOV_PREFIX when STRIP=0.
-        gcda = gcda_path_for_object(gcov_prefix, object_path)
+        gcda = gcda_path_for_object(gcov_profile_root, object_path)
         if gcda.is_file():
             expected_gcda.add(gcda.resolve())
             expected_gcda_notes[gcda.resolve()] = note

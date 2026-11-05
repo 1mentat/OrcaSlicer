@@ -9,6 +9,7 @@ not replace CTest or change the default coverage runner.
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
@@ -28,6 +29,15 @@ from slicer_process import run_recorded
 
 class BatchValidationError(ValueError):
     """CTest/Catch metadata cannot be represented without losing semantics."""
+
+
+class GcovProfileEpochError(BatchValidationError):
+    """A Catch-listing profile does not match its build GCNO note epoch."""
+
+    def __init__(self, message: str, report: dict[str, Any], receipt_path: Path):
+        super().__init__(message)
+        self.report = report
+        self.receipt_path = receipt_path
 
 
 @dataclass(frozen=True)
@@ -104,6 +114,28 @@ def validate_batch_timeout(timeout_seconds: float) -> float:
             not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise BatchValidationError("batch timeout must be a finite positive number")
     return float(timeout_seconds)
+
+
+def validate_fff_shards(value: Any) -> int:
+    """Allow only the explicit serial default or a two-way FFF split."""
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {1, 2}:
+        raise BatchValidationError("FFF Catch shard count must be 1 or 2")
+    return value
+
+
+def split_fff_cases(cases: Sequence[SelectedCase], shards: int = 2) -> list[list[SelectedCase]]:
+    """Partition FFF cases in stable discovery order without duplicates."""
+    shard_count = validate_fff_shards(shards)
+    if shard_count != 2:
+        raise BatchValidationError("split_fff_cases requires exactly two shards")
+    if len(cases) < shard_count:
+        raise BatchValidationError("the selected FFF cohort is too small to shard")
+    partitions = [list(cases[index::shard_count]) for index in range(shard_count)]
+    flattened = [case.name for partition in partitions for case in partition]
+    original = [case.name for case in cases]
+    if Counter(flattened) != Counter(original) or any(not partition for partition in partitions):
+        raise BatchValidationError("FFF shards did not preserve the exact selected identity multiset")
+    return partitions
 
 
 def validate_ctest_argv(argv: Sequence[str]) -> list[str]:
@@ -456,7 +488,7 @@ def _isolated_profile_env(parent_env: Mapping[str, str], profile_dir: Path) -> d
     llvm_dir.mkdir(mode=0o700)
     env = dict(parent_env)
     env["GCOV_PREFIX"] = str(gcov_dir)
-    env.setdefault("GCOV_PREFIX_STRIP", "0")
+    env["GCOV_PREFIX_STRIP"] = "0"
     env["LLVM_PROFILE_FILE"] = str(llvm_dir / "%p-%m.profraw")
     return env
 
@@ -479,7 +511,9 @@ def _listing_names(payload: Any) -> list[str]:
 def _verify_preflight(batch: Batch, *, env: dict[str, str], out_dir: Path,
                       timeout: float, executor: Callable[..., subprocess.CompletedProcess],
                       ordinal: int, binary_sha_before: str, cpu_mask: Sequence[int] | None,
-                      affinity_controller: Any) -> dict[str, Any]:
+                      affinity_controller: Any,
+                      expected_notes: set[Path] | None,
+                      required_gcda_notes: set[Path] | None) -> dict[str, Any]:
     batch_dir = out_dir / f"batch-{ordinal:02d}"
     batch_dir.mkdir(mode=0o700)
     input_path = batch_dir / "catch-input.txt"
@@ -514,6 +548,27 @@ def _verify_preflight(batch: Batch, *, env: dict[str, str], out_dir: Path,
     binary_sha_after = _sha256(batch.executable)
     if binary_sha_after != binary_sha_before:
         raise BatchValidationError(f"binary changed during list preflight: {batch.executable}")
+    epoch_report = None
+    epoch_receipt = None
+    epoch_receipt_sha256 = None
+    if expected_notes is not None:
+        if not required_gcda_notes:
+            raise BatchValidationError(
+                f"instrumented executable has no required CDB notes: {batch.executable.name}")
+        from slicer_gcov_coverage import (
+            format_gcov_profile_epoch_failure, inspect_gcov_profile_epochs,
+        )
+        profile_root = Path(env["GCOV_PREFIX"])
+        epoch_report = inspect_gcov_profile_epochs(
+            [profile_root], expected_notes=expected_notes,
+            required_gcda_note_groups={batch.executable.name: required_gcda_notes})
+        epoch_receipt = batch_dir / "gcov-profile-epoch.json"
+        epoch_bytes = (json.dumps(epoch_report, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        _write_exclusive(epoch_receipt, epoch_bytes)
+        epoch_receipt_sha256 = hashlib.sha256(epoch_bytes).hexdigest()
+        if epoch_report["status"] != "pass":
+            raise GcovProfileEpochError(
+                format_gcov_profile_epoch_failure(epoch_report), epoch_report, epoch_receipt)
     return {
         "batch_dir": str(batch_dir), "selected_count": len(selected_names),
         "selected_names": selected_names, "listed_count": len(listing),
@@ -523,6 +578,9 @@ def _verify_preflight(batch: Batch, *, env: dict[str, str], out_dir: Path,
         "catch_input_sha256": _sha256(input_path), "binary_sha256_before_preflight": binary_sha_before,
         "binary_sha256_after_preflight": binary_sha_after,
         "preflight_profile_files": _profile_file_inventory(Path(env["GCOV_PREFIX"]).parent),
+        "preflight_profile_epoch": epoch_report,
+        "preflight_profile_epoch_receipt": (str(epoch_receipt) if epoch_receipt else None),
+        "preflight_profile_epoch_receipt_sha256": epoch_receipt_sha256,
         "preflight_cpu_affinity": cpu_affinity,
     }
 
@@ -563,21 +621,148 @@ def _write_ctest_junit(path: Path, cases: Sequence[SelectedCase],
         os.fsync(stream.fileno())
 
 
+def _batch_process_launch_attempt_count(batch_infos: Sequence[Mapping[str, Any]]) -> int:
+    return sum(
+        int(bool(info.get("batch_process_launch_attempted")))
+        + sum(int(bool(shard.get("batch_process_launch_attempted")))
+              for shard in info.get("shards", []))
+        for info in batch_infos
+    )
+
+
+def _run_fff_shard(batch: Batch, cases: Sequence[SelectedCase], *, shard_index: int,
+                   shard_dir: Path, profile_dir: Path, cpu_mask: Sequence[int],
+                   parent_env: Mapping[str, str], timeout: float,
+                   executor: Callable[..., subprocess.CompletedProcess],
+                   affinity_controller: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """Run one disjoint FFF shard with private profile outputs and exact status parsing."""
+    shard_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+    profile_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+    gcov_dir = profile_dir / "gcov"
+    llvm_dir = profile_dir / "llvm"
+    gcov_dir.mkdir(mode=0o700)
+    llvm_dir.mkdir(mode=0o700)
+    env = dict(parent_env)
+    env["GCOV_PREFIX"] = str(gcov_dir)
+    env["GCOV_PREFIX_STRIP"] = "0"
+    env["LLVM_PROFILE_FILE"] = str(llvm_dir / "%p-%m.profraw")
+
+    input_path = shard_dir / "catch-input.txt"
+    input_bytes = ("\n".join(escape_catch_test_name(case.name) for case in cases) + "\n").encode("utf-8")
+    _write_exclusive(input_path, input_bytes)
+    raw_junit = shard_dir / "catch-raw.junit.xml"
+    automake_log = shard_dir / "catch-automake.log"
+    receipt = shard_dir / "catch-batch.receipt.json"
+    argv = [
+        str(batch.executable), "--input-file", str(input_path),
+        "--order", "rand", "--rng-seed", "5",
+        "--reporter", f"junit::out={raw_junit}",
+        "--reporter", "automake",
+    ]
+    binary_before = _sha256(batch.executable)
+    record: dict[str, Any] = {
+        "shard": shard_index,
+        "selected_count": len(cases),
+        "selected_names": [case.name for case in cases],
+        "catch_input": str(input_path), "catch_input_sha256": _sha256(input_path),
+        "executable": str(batch.executable), "working_directory": str(batch.working_directory),
+        "batch_argv": argv, "batch_timeout_seconds": timeout,
+        "timeout_scope": "whole Catch shard process",
+        "batch_log": str(automake_log), "batch_receipt": str(receipt),
+        "raw_catch_junit": str(raw_junit),
+        "gcov_prefix": str(gcov_dir), "gcov_prefix_strip": 0,
+        "llvm_profile_file": env["LLVM_PROFILE_FILE"],
+        "profile_dir": str(profile_dir), "batch_cpu_mask": list(cpu_mask),
+        "binary_sha256_before_run": binary_before,
+        "batch_process_launch_attempted": False,
+    }
+    cpu_info = None
+    try:
+        with affinity_controller.limit(cpu_mask) as cpu_info:
+            record["batch_process_launch_attempted"] = True
+            result = executor(argv, cwd=batch.working_directory, env=env,
+                              timeout=timeout, log_path=automake_log,
+                              receipt_path=receipt)
+        record["batch_cpu_affinity"] = cpu_info
+    except subprocess.TimeoutExpired as exc:
+        binary_after = _sha256(batch.executable)
+        record.update({
+            "process_outcome": "timed_out", "timed_out": True,
+            "batch_cpu_affinity": cpu_info,
+            "binary_sha256_after_timeout": binary_after,
+            "binary_unchanged_after_timeout": binary_after == binary_before,
+            "timeout_exception": str(exc),
+            "profile_files_after_timeout": _profile_file_inventory(gcov_dir),
+        })
+        return record, {}
+    except Exception as exc:
+        binary_after = _sha256(batch.executable)
+        record.update({
+            "process_outcome": "execution_error", "timed_out": False,
+            "batch_cpu_affinity": cpu_info,
+            "binary_sha256_after_error": binary_after,
+            "binary_unchanged_after_error": binary_after == binary_before,
+            "execution_exception": {"type": type(exc).__name__, "message": str(exc)},
+            "profile_files_after_error": _profile_file_inventory(gcov_dir),
+        })
+        return record, {}
+
+    binary_after = _sha256(batch.executable)
+    record.update({
+        "returncode": result.returncode, "timed_out": False,
+        "binary_sha256_after_run": binary_after,
+        "binary_unchanged_after_run": binary_after == binary_before,
+        "profile_files_after_run": _profile_file_inventory(gcov_dir),
+    })
+    if binary_after != binary_before:
+        record["process_outcome"] = "binary_changed"
+        return record, {}
+    if not raw_junit.is_file():
+        record["process_outcome"] = "missing_junit"
+        return record, {}
+    try:
+        ET.parse(raw_junit)
+        records = _parse_automake(automake_log)
+        normalized = validate_automake_records(cases, records, result.returncode)
+    except (OSError, ET.ParseError, BatchValidationError) as exc:
+        record["process_outcome"] = "invalid_result"
+        record["result_exception"] = {"type": type(exc).__name__, "message": str(exc)}
+        return record, {}
+    record.update({
+        "process_outcome": "exited",
+        "raw_catch_junit_sha256": _sha256(raw_junit),
+        "automake_rows": len(records),
+        "automake_status_counts": dict(Counter(status for status, _ in records)),
+        "normalized_status_counts": dict(Counter(normalized.values())),
+        "normalized_statuses": normalized,
+        "automake_log_sha256": _sha256(automake_log),
+    })
+    return record, normalized
+
+
 def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence[str],
                            build_dir: Path | str, out_dir: Path | str,
                            batch_timeout_seconds: float,
                            discovery_argv: Sequence[str], discovery_sha256: str,
                            discovery_raw_json: bytes | None = None,
                            parent_env: Mapping[str, str] | None = None,
+                           fff_shards: int = 1,
+                           fff_profile_root: Path | str | None = None,
+                           expected_notes: set[Path] | None = None,
+                           required_gcda_notes_by_executable: Mapping[str, set[Path]] | None = None,
                            executor: Callable[..., subprocess.CompletedProcess] | None = None,
                            affinity_controller: Any | None = None) -> dict[str, Any]:
-    """Preflight, then run each executable/cwd batch serially with exact names.
+    """Preflight, then run executable/cwd batches with exact names.
 
     The caller must supply discovery obtained by executing the same validated
     CTest argv plus ``--show-only=json-v1``. The CLI below provides that path;
-    the function is also the clean integration seam for the gcov backend.
+    the function is also the clean integration seam for the gcov backend. By
+    default every batch is serial. The only parallel option is an explicit
+    two-way split of the one-CPU ``fff_print_tests`` cohort; each shard gets a
+    separate profile prefix and CPU.
     """
     timeout = validate_batch_timeout(batch_timeout_seconds)
+    fff_shards = validate_fff_shards(fff_shards)
     ctest_command = validate_ctest_argv(ctest_argv)
     expected_discovery_argv = [*ctest_command, "--show-only=json-v1"]
     if list(discovery_argv) != expected_discovery_argv:
@@ -596,12 +781,83 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         raise BatchValidationError(f"discovery bytes are invalid JSON: {exc}") from exc
     root = Path(out_dir).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    if (expected_notes is None) != (required_gcda_notes_by_executable is None):
+        raise BatchValidationError(
+            "GCOV preflight needs both a build-note allowset and per-executable note groups")
+    normalized_expected_notes: set[Path] | None = None
+    normalized_required_notes: dict[str, set[Path]] = {}
+    if expected_notes is not None:
+        build_root = Path(build_dir).resolve(strict=True)
+        if not expected_notes:
+            raise BatchValidationError("GCOV preflight build-note allowset is empty")
+        normalized_expected_notes = set()
+        for note in expected_notes:
+            if not isinstance(note, Path) or not note.is_absolute():
+                raise BatchValidationError("GCOV preflight notes must be absolute pathlib paths")
+            try:
+                resolved_note = note.resolve(strict=True)
+            except OSError as exc:
+                raise BatchValidationError(f"GCOV preflight note does not exist: {note}") from exc
+            if not resolved_note.is_file() or not _is_beneath(resolved_note, build_root):
+                raise BatchValidationError(
+                    f"GCOV preflight note is outside the supplied build directory: {resolved_note}")
+            normalized_expected_notes.add(resolved_note)
+        for executable_name, notes in required_gcda_notes_by_executable.items():
+            if not isinstance(executable_name, str) or not executable_name or not notes:
+                raise BatchValidationError("GCOV preflight has an empty executable note group")
+            normalized: set[Path] = set()
+            for note in notes:
+                if not isinstance(note, Path) or not note.is_absolute():
+                    raise BatchValidationError(
+                        f"GCOV preflight notes for {executable_name} must be absolute pathlib paths")
+                try:
+                    resolved_note = note.resolve(strict=True)
+                except OSError as exc:
+                    raise BatchValidationError(
+                        f"GCOV preflight note does not exist for {executable_name}: {note}") from exc
+                if resolved_note not in normalized_expected_notes:
+                    raise BatchValidationError(
+                        f"GCOV preflight note for {executable_name} is outside the build-note allowset: {resolved_note}")
+                normalized.add(resolved_note)
+            normalized_required_notes[executable_name] = normalized
     active_executor = executor or run_recorded
     active_affinity = affinity_controller or LinuxAffinityController()
     env = dict(os.environ if parent_env is None else parent_env)
     batches = plan_batches(discovery, build_dir=build_dir, ctest_argv=ctest_command)
     affinity_batches = [item for item in batches if item.processor_affinity]
     caller_cpu_mask = sorted(active_affinity.available()) if affinity_batches else []
+    fff_batch_ordinal: int | None = None
+    parallel_profile_root: Path | None = None
+    if fff_shards == 2:
+        fff_matches = [
+            (index, item) for index, item in enumerate(batches, 1)
+            if item.executable.name == "fff_print_tests" and item.processors == 1
+            and item.processor_affinity
+        ]
+        if len(fff_matches) != 1:
+            raise BatchValidationError(
+                "two-way FFF sharding requires exactly one one-CPU fff_print_tests cohort")
+        fff_batch_ordinal, fff_batch = fff_matches[0]
+        split_fff_cases(fff_batch.cases, fff_shards)
+        if len(caller_cpu_mask) < 2:
+            raise BatchValidationError(
+                f"two-way FFF sharding needs two available CPUs; caller mask is {caller_cpu_mask!r}")
+        if fff_profile_root is None:
+            raise BatchValidationError("two-way FFF sharding requires a fresh profile-root path")
+        profile_candidate = Path(fff_profile_root).absolute()
+        if profile_candidate.exists() or profile_candidate.is_symlink():
+            raise BatchValidationError(
+                f"two-way FFF profile root must be absent: {profile_candidate}")
+        parallel_profile_root = profile_candidate.resolve()
+        measured_profile = Path(env.get("GCOV_PREFIX", ""))
+        if not measured_profile.is_absolute():
+            raise BatchValidationError("two-way FFF sharding requires an absolute measured GCOV_PREFIX")
+        measured_profile = measured_profile.resolve()
+        if (parallel_profile_root == measured_profile
+                or _is_beneath(parallel_profile_root, measured_profile)
+                or _is_beneath(measured_profile, parallel_profile_root)):
+            raise BatchValidationError(
+                "parallel FFF profile root must be separate from the measured GCOV_PREFIX tree")
     batch_cpu_masks: dict[tuple[Path, Path, int, bool], list[int] | None] = {}
     for item in batches:
         group_key = (item.executable, item.working_directory,
@@ -620,7 +876,30 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
     runs_root = root / "runs"
     runs_root.mkdir(mode=0o700)
 
+    all_cases = [case for batch in batches for case in batch.cases]
     batch_infos: list[dict[str, Any]] = []
+
+    def incomplete_report(status: str, *, reason: str) -> dict[str, Any]:
+        parallel_started = any(info.get("shards") for info in batch_infos)
+        report = {
+            "schema": "slicer-catch-batch-run-v1", "status": status,
+            "ctest_argv": ctest_command, "selected_count": len(all_cases),
+            "selected_names": [case.name for case in all_cases],
+            "discovery_argv": list(discovery_argv), "discovery_sha256": discovery_sha256,
+            "caller_cpu_mask": caller_cpu_mask,
+            "batch_count": len(batches), "sessions_are_serial": not parallel_started,
+            "fff_parallel_shards": fff_shards,
+            "batch_process_launch_attempted_count": _batch_process_launch_attempt_count(batch_infos),
+            "parallel_profile_root": (str(parallel_profile_root)
+                                      if parallel_profile_root is not None else None),
+            "batches": batch_infos, "batch_timeout_seconds": timeout,
+            "timeout_semantics": "one whole Catch process per executable/cwd batch; two FFF shards when opted in",
+            "incomplete_reason": reason, "junit": None,
+        }
+        _write_exclusive(root / "batch-report.json",
+                         (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        return report
+
     for ordinal, batch in enumerate(batches, 1):
         profile_dir = preflight_root / f"batch-{ordinal:02d}"
         profile_dir.mkdir(mode=0o700)
@@ -628,11 +907,48 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         binary_sha_before = _sha256(batch.executable)
         group_key = (batch.executable, batch.working_directory,
                      batch.processors, batch.processor_affinity)
-        info = _verify_preflight(batch, env=isolated_env, out_dir=runs_root,
-                                 timeout=timeout, executor=active_executor,
-                                 ordinal=ordinal, binary_sha_before=binary_sha_before,
-                                 cpu_mask=batch_cpu_masks[group_key],
-                                 affinity_controller=active_affinity)
+        try:
+            info = _verify_preflight(batch, env=isolated_env, out_dir=runs_root,
+                                     timeout=timeout, executor=active_executor,
+                                     ordinal=ordinal, binary_sha_before=binary_sha_before,
+                                     cpu_mask=batch_cpu_masks[group_key],
+                                     affinity_controller=active_affinity,
+                                     expected_notes=normalized_expected_notes,
+                                     required_gcda_notes=(normalized_required_notes.get(
+                                         batch.executable.name)
+                                         if normalized_expected_notes is not None else None))
+        except GcovProfileEpochError as exc:
+            batch_dir = runs_root / f"batch-{ordinal:02d}"
+            input_path = batch_dir / "catch-input.txt"
+            list_log = batch_dir / "catch-list.log"
+            list_receipt = batch_dir / "catch-list.receipt.json"
+            batch_infos.append({
+                "batch_dir": str(batch_dir), "selected_count": len(batch.cases),
+                "selected_names": [case.name for case in batch.cases],
+                "executable": str(batch.executable),
+                "original_executable_paths": sorted(
+                    {case.original_executable for case in batch.cases}),
+                "working_directory": str(batch.working_directory),
+                "labels": {case.name: list(case.labels) for case in batch.cases},
+                "processors": {case.name: case.processors for case in batch.cases},
+                "processor_affinity": batch.processor_affinity,
+                "batch_cpu_mask": batch_cpu_masks[group_key],
+                "preflight_profile_dir": str(profile_dir),
+                "preflight_gcov_prefix": isolated_env["GCOV_PREFIX"],
+                "preflight_llvm_profile_file": isolated_env["LLVM_PROFILE_FILE"],
+                "preflight_profile_files": _profile_file_inventory(profile_dir),
+                "preflight_profile_epoch": exc.report,
+                "preflight_profile_epoch_receipt": str(exc.receipt_path),
+                "preflight_profile_epoch_receipt_sha256": _sha256(exc.receipt_path),
+                "preflight_error": str(exc),
+                "preflight_list_log": str(list_log) if list_log.is_file() else None,
+                "preflight_list_receipt": str(list_receipt) if list_receipt.is_file() else None,
+                "catch_input": str(input_path) if input_path.is_file() else None,
+                "binary_sha256_before_preflight": binary_sha_before,
+                "binary_sha256_after_preflight": _sha256(batch.executable),
+                "process_outcome": "preflight_epoch_mismatch",
+            })
+            return incomplete_report("incomplete_preflight", reason=str(exc))
         info.update({
             "executable": str(batch.executable),
             "original_executable_paths": sorted({case.original_executable for case in batch.cases}),
@@ -647,17 +963,94 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         })
         batch_infos.append(info)
 
-    all_cases = [case for batch in batches for case in batch.cases]
+    if parallel_profile_root is not None:
+        parallel_profile_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+
     normalized: dict[str, str] = {}
     batch_names: dict[str, str] = {}
     execution_failed = False
+
     for ordinal, (batch, info) in enumerate(zip(batches, batch_infos), 1):
         batch_key = f"batch-{ordinal:02d}"
         group_key = (batch.executable, batch.working_directory,
                      batch.processors, batch.processor_affinity)
+        batch_dir = Path(info["batch_dir"])
+
+        if fff_shards == 2 and ordinal == fff_batch_ordinal:
+            if _sha256(batch.executable) != info["binary_sha256_after_preflight"]:
+                raise BatchValidationError(f"binary changed after list preflight: {batch.executable}")
+            partitions = split_fff_cases(batch.cases, fff_shards)
+            shard_masks = [[caller_cpu_mask[index]] for index in range(fff_shards)]
+            if len({cpu for mask in shard_masks for cpu in mask}) != fff_shards:
+                raise BatchValidationError("two-way FFF shards do not have distinct CPU masks")
+            info["fff_shards_requested"] = fff_shards
+            shard_specs: list[tuple[int, Sequence[SelectedCase], Path, Path, Sequence[int]]] = []
+            for shard_index, (cases, cpu_mask) in enumerate(zip(partitions, shard_masks), 1):
+                shard_dir = batch_dir / "shards" / f"shard-{shard_index:02d}"
+                shard_profile_dir = parallel_profile_root / f"shard-{shard_index:02d}"
+                shard_specs.append((shard_index, cases, shard_dir, shard_profile_dir, cpu_mask))
+
+            def run_shard(spec: tuple[int, Sequence[SelectedCase], Path, Path,
+                                     Sequence[int]]) -> tuple[dict[str, Any], dict[str, str]]:
+                shard_index, cases, shard_dir, profile_dir, cpu_mask = spec
+                try:
+                    return _run_fff_shard(
+                        batch, cases, shard_index=shard_index, shard_dir=shard_dir,
+                        profile_dir=profile_dir, cpu_mask=cpu_mask, parent_env=env,
+                        timeout=timeout, executor=active_executor,
+                        affinity_controller=active_affinity)
+                except Exception as exc:
+                    return ({
+                        "shard": shard_index, "selected_count": len(cases),
+                        "selected_names": [case.name for case in cases],
+                        "process_outcome": "execution_error", "timed_out": False,
+                        "batch_cpu_mask": list(cpu_mask),
+                        "profile_dir": str(profile_dir),
+                        "execution_exception": {"type": type(exc).__name__, "message": str(exc)},
+                    }, {})
+
+            shard_results: list[tuple[dict[str, Any], dict[str, str]] | None] = [None] * len(shard_specs)
+            with ThreadPoolExecutor(max_workers=fff_shards, thread_name_prefix="fff-catch-shard") as pool:
+                future_indexes = {pool.submit(run_shard, spec): spec[0] - 1
+                                  for spec in shard_specs}
+                for future in as_completed(future_indexes):
+                    shard_results[future_indexes[future]] = future.result()
+            completed_shards = [result for result in shard_results if result is not None]
+            info["shards"] = [record for record, _ in completed_shards]
+            info["parallel_profile_dirs"] = [
+                str(parallel_profile_root / f"shard-{index:02d}" / "gcov")
+                for index in range(1, fff_shards + 1)
+            ]
+            outcomes = [record.get("process_outcome") for record, _ in completed_shards]
+            if any(outcome == "timed_out" for outcome in outcomes):
+                info["process_outcome"] = "incomplete_timeout"
+                return incomplete_report("incomplete_timeout", reason="an FFF shard timed out")
+            if any(outcome != "exited" for outcome in outcomes) or len(completed_shards) != fff_shards:
+                info["process_outcome"] = "incomplete_execution_error"
+                return incomplete_report("incomplete_execution_error",
+                                         reason="an FFF shard failed to produce a validated result")
+            batch_normalized: dict[str, str] = {}
+            for shard_index, (record, shard_normalized) in enumerate(completed_shards, 1):
+                shard_key = f"{batch_key}/shard-{shard_index:02d}"
+                for case in partitions[shard_index - 1]:
+                    batch_names[case.name] = shard_key
+                batch_normalized.update(shard_normalized)
+            if Counter(batch_normalized.keys()) != Counter(case.name for case in batch.cases):
+                info["process_outcome"] = "incomplete_identity_mismatch"
+                return incomplete_report("incomplete_execution_error",
+                                         reason="the FFF shard results do not cover the selected identities")
+            info["normalized_statuses"] = batch_normalized
+            info["normalized_status_counts"] = dict(Counter(batch_normalized.values()))
+            info["process_outcome"] = "exited"
+            info["batch_cpu_masks"] = shard_masks
+            info["batch_timeout_seconds"] = timeout
+            normalized.update(batch_normalized)
+            execution_failed = execution_failed or any(
+                status in {"FAIL", "ERROR"} for status in batch_normalized.values())
+            continue
+
         for case in batch.cases:
             batch_names[case.name] = batch_key
-        batch_dir = Path(info["batch_dir"])
         input_path = Path(info["catch_input"])
         raw_junit = batch_dir / "catch-raw.junit.xml"
         automake_log = batch_dir / "catch-automake.log"
@@ -678,6 +1071,7 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         info["batch_log"] = str(automake_log)
         info["batch_receipt"] = str(receipt)
         info["raw_catch_junit"] = str(raw_junit)
+        info["batch_process_launch_attempted"] = False
         info["parent_profile_environment"] = {
             key: env.get(key) for key in ("GCOV_PREFIX", "GCOV_PREFIX_STRIP", "LLVM_PROFILE_FILE")
             if key in env
@@ -687,6 +1081,7 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
             if batch_cpu_masks[group_key] else nullcontext(None)
         try:
             with cpu_context as cpu_run_info:
+                info["batch_process_launch_attempted"] = True
                 result = active_executor(argv, cwd=batch.working_directory, env=env,
                                          timeout=timeout, log_path=automake_log,
                                          receipt_path=receipt)
@@ -698,18 +1093,7 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
                              binary_sha_after_timeout == info["binary_sha256_before_run"],
                          "batch_cpu_affinity": cpu_run_info,
                          "timeout_exception": str(exc)})
-            report = {
-                "schema": "slicer-catch-batch-run-v1", "status": "incomplete_timeout",
-                "ctest_argv": ctest_command, "selected_count": len(all_cases),
-                "discovery_argv": list(discovery_argv), "discovery_sha256": discovery_sha256,
-                "caller_cpu_mask": caller_cpu_mask,
-                "batches": batch_infos, "batch_timeout_seconds": timeout,
-                "timeout_semantics": "one whole batch process per executable, working directory, and CPU cohort",
-                "junit": None,
-            }
-            _write_exclusive(root / "batch-report.json",
-                             (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-            return report
+            return incomplete_report("incomplete_timeout", reason=f"{batch_key} timed out")
 
         binary_sha_after = _sha256(batch.executable)
         info["binary_sha256_after_run"] = binary_sha_after
@@ -744,6 +1128,22 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
     actual_names = Counter(node.get("name") for node in junit_root.iter("testcase"))
     if actual_names != expected_names:
         raise BatchValidationError("synthesized CTest JUnit identity inventory is not exact")
+    raw_catch_junit_paths = []
+    raw_automake_log_paths = []
+    for info in batch_infos:
+        raw_junit = info.get("raw_catch_junit")
+        batch_log = info.get("batch_log")
+        if raw_junit and Path(raw_junit).is_file():
+            raw_catch_junit_paths.append(raw_junit)
+        if batch_log and Path(batch_log).is_file():
+            raw_automake_log_paths.append(batch_log)
+        for shard in info.get("shards", []):
+            shard_junit = shard.get("raw_catch_junit")
+            shard_log = shard.get("batch_log")
+            if shard_junit and Path(shard_junit).is_file():
+                raw_catch_junit_paths.append(shard_junit)
+            if shard_log and Path(shard_log).is_file():
+                raw_automake_log_paths.append(shard_log)
     report = {
         "schema": "slicer-catch-batch-run-v1",
         "status": "completed_with_test_failures" if execution_failed else "pass",
@@ -751,7 +1151,9 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         "discovery_argv": list(discovery_argv), "discovery_sha256": discovery_sha256,
         "selection_source": "live CTest --show-only=json-v1 discovery passed by caller",
         "selected_count": len(all_cases), "selected_names": [case.name for case in all_cases],
-        "batch_count": len(batches), "sessions_are_serial": True,
+        "batch_count": len(batches), "sessions_are_serial": fff_shards == 1,
+        "fff_parallel_shards": fff_shards,
+        "batch_process_launch_attempted_count": _batch_process_launch_attempt_count(batch_infos),
         "order": "Catch randomized order", "rng_seed": 5,
         "batch_timeout_seconds": timeout,
         "timeout_semantics": "one whole batch process per executable, working directory, and CPU cohort; not per-test",
@@ -761,11 +1163,11 @@ def run_discovered_batches(discovery: Mapping[str, Any], *, ctest_argv: Sequence
         "batches": batch_infos,
         "normalized_status_counts": dict(Counter(normalized.values())),
         "junit": str(junit_path), "junit_sha256": _sha256(junit_path),
-        "raw_catch_junit_paths": [info["raw_catch_junit"] for info in batch_infos
-                                   if Path(info["raw_catch_junit"]).is_file()],
-        "raw_automake_log_paths": [info["batch_log"] for info in batch_infos
-                                   if Path(info["batch_log"]).is_file()],
+        "raw_catch_junit_paths": raw_catch_junit_paths,
+        "raw_automake_log_paths": raw_automake_log_paths,
     }
+    if parallel_profile_root is not None:
+        report["parallel_profile_root"] = str(parallel_profile_root)
     _write_exclusive(root / "batch-report.json",
                      (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return report
