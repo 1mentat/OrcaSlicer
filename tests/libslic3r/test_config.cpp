@@ -2384,9 +2384,7 @@ TEST_CASE("Registered numeric boundaries round-trip through strict serialization
     CHECK(boundary_values >= 550); // 654 today
 }
 
-// Known bug: coEnums defaults such as z_hop_types are built without a keys map, and static configs copy that
-// null map, so their enum lists serialize as "" (a deserialize would dereference it); fixed by the follow-up fix PR.
-TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config][StaticEnumDefaults][!shouldfail]")
+TEST_CASE("Static and dynamic print defaults retain named enum lists", "[Config][StaticEnumDefaults]")
 {
     const auto check_named_enums = [](ConfigBase &config) {
         REQUIRE(config.opt_serialize("z_hop_types") == "Slope Lift");
@@ -2772,10 +2770,7 @@ TEST_CASE("PrintConfig legacy enum spellings become current canonical values", "
             PrintConfigDef::handle_legacy(key, value);
             CHECK(key == conversion.key);
             CHECK(value == conversion.new_value);
-            // Known bug (see "Static and dynamic print defaults retain named enum lists"): coEnums defaults such as
-            // extruder_type have no keys map, so deserializing into full_print_config() dereferences null.
-            if (key != "extruder_type")
-                check_migrated_value_deserializes(key, value);
+            check_migrated_value_deserializes(key, value);
         }
     }
 
