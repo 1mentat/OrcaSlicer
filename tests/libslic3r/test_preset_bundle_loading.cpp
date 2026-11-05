@@ -8160,3 +8160,143 @@ TEST_CASE("Full FFF configuration records selected system filament changes", "[P
     REQUIRE(unescape_strings_cstyle(different->values[1], changed_keys));
     CHECK(changed_keys == std::vector<std::string>{"filament_max_volumetric_speed"});
 }
+
+namespace preset_bundle_workflow_contracts {
+
+namespace {
+
+DynamicPrintConfig print_config(PresetBundle &bundle, const std::string &name, double layer_height)
+{
+    DynamicPrintConfig config = bundle.prints.default_preset().config;
+    config.option<ConfigOptionString>("print_settings_id", true)->value = name;
+    config.option<ConfigOptionFloat>("layer_height", true)->value = layer_height;
+    return config;
+}
+
+DynamicPrintConfig printer_config(PresetBundle &bundle, const std::string &name)
+{
+    DynamicPrintConfig config = bundle.printers.default_preset().config;
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = name;
+    config.option<ConfigOptionString>("printer_model", true)->value = "Workflow Printer";
+    config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    return config;
+}
+
+DynamicPrintConfig filament_config(PresetBundle &bundle, const std::string &name,
+                                   const std::string &printer)
+{
+    DynamicPrintConfig config = bundle.filaments.default_preset().config;
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {name};
+    config.option<ConfigOptionStrings>("filament_vendor", true)->values = {"Workflow Vendor"};
+    config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    config.option<ConfigOptionStrings>("compatible_printers", true)->values = {printer};
+    config.option<ConfigOptionString>("compatible_printers_condition", true)->value.clear();
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("current config export writes selected user profiles and can be reloaded", "[Preset][Bundle][PresetExport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-export");
+    ScopedDataDir data(temp.path() / "data");
+
+    PresetBundle bundle;
+    bundle.printers.load_preset("", "Workflow Printer", printer_config(bundle, "Workflow Printer"), true);
+    bundle.prints.load_preset("", "Workflow Process", print_config(bundle, "Workflow Process", 0.23), true);
+    bundle.filaments.load_preset("", "Workflow PLA", filament_config(bundle, "Workflow PLA", "Workflow Printer"), true);
+    bundle.filament_presets = {"Workflow PLA"};
+
+    const fs::path out = temp.path() / "exported";
+    fs::create_directories(out);
+    const std::vector<std::string> files = bundle.export_current_configs(
+        out.string(), [](std::string const &) { return 1; }, false);
+
+    REQUIRE(files.size() == 3);
+    for (const std::string &file : files)
+        CHECK(fs::exists(file));
+
+    DynamicPrintConfig imported;
+    std::map<std::string, std::string> keys;
+    std::string reason;
+    REQUIRE_NOTHROW(imported.load_from_json((out / "Workflow Process.json").string(),
+                                             ForwardCompatibilitySubstitutionRule::Disable,
+                                             keys, reason));
+    CHECK_THAT(imported.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.23, 1e-9));
+    CHECK(keys.at(BBL_JSON_KEY_NAME) == "Workflow Process");
+    CHECK(read_file(out / "Workflow Process.json").find("Workflow Process") != std::string::npos);
+}
+
+TEST_CASE("current config export chooses edited values only when requested", "[Preset][Bundle][PresetExport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-export-edited");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.printers.load_preset("", "Edited Printer", printer_config(bundle, "Edited Printer"), true);
+    bundle.prints.load_preset("", "Edited Process", print_config(bundle, "Edited Process", 0.20), true);
+    bundle.filaments.load_preset("", "Edited PLA", filament_config(bundle, "Edited PLA", "Edited Printer"), true);
+    bundle.filament_presets = {"Edited PLA"};
+
+    bundle.prints.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.31;
+    const fs::path selected_dir = temp.path() / "selected";
+    const fs::path edited_dir = temp.path() / "edited";
+    fs::create_directories(selected_dir);
+    fs::create_directories(edited_dir);
+    bundle.export_current_configs(selected_dir.string(), [](std::string const &) { return 1; }, false);
+    bundle.export_current_configs(edited_dir.string(), [](std::string const &) { return 1; }, true);
+
+    DynamicPrintConfig selected;
+    DynamicPrintConfig edited;
+    std::map<std::string, std::string> selected_keys;
+    std::map<std::string, std::string> edited_keys;
+    std::string selected_reason;
+    std::string edited_reason;
+    selected.load_from_json((selected_dir / "Edited Process.json").string(),
+                            ForwardCompatibilitySubstitutionRule::Disable, selected_keys, selected_reason);
+    edited.load_from_json((edited_dir / "Edited Process.json").string(),
+                          ForwardCompatibilitySubstitutionRule::Disable, edited_keys, edited_reason);
+    CHECK_THAT(selected.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    CHECK_THAT(edited.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+}
+
+TEST_CASE("current config export honors a per-file overwrite decision", "[Preset][Bundle][PresetExport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-overwrite");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.printers.load_preset("", "Overwrite Printer", printer_config(bundle, "Overwrite Printer"), true);
+    bundle.prints.load_preset("", "Overwrite Process", print_config(bundle, "Overwrite Process", 0.19), true);
+    bundle.filaments.load_preset("", "Overwrite PLA", filament_config(bundle, "Overwrite PLA", "Overwrite Printer"), true);
+    bundle.filament_presets = {"Overwrite PLA"};
+    const fs::path out = temp.path() / "out";
+    fs::create_directories(out);
+    bundle.export_current_configs(out.string(), [](std::string const &) { return 1; }, false);
+
+    bundle.prints.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.37;
+    const std::vector<std::string> skipped = bundle.export_current_configs(
+        out.string(), [](std::string const &) { return 0; }, true);
+    CHECK(skipped.empty());
+
+    DynamicPrintConfig after_skip;
+    std::map<std::string, std::string> keys;
+    std::string reason;
+    after_skip.load_from_json((out / "Overwrite Process.json").string(),
+                              ForwardCompatibilitySubstitutionRule::Disable, keys, reason);
+    CHECK_THAT(after_skip.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.19, 1e-9));
+}
+
+TEST_CASE("current config export omits built-in default selections", "[Preset][Bundle][PresetExport]")
+{
+    ScopedTemporaryDir temp("preset-workflow-export-default");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.set_num_filaments(1, "#FFFFFF");
+    const fs::path out = temp.path() / "out";
+    fs::create_directories(out);
+    const std::vector<std::string> files = bundle.export_current_configs(
+        out.string(), [](std::string const &) { return 1; }, false);
+    CHECK(files.empty());
+    CHECK(fs::directory_iterator(out) == fs::directory_iterator());
+}
+
+} // namespace preset_bundle_workflow_contracts
