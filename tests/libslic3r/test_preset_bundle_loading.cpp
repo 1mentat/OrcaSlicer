@@ -10378,3 +10378,35 @@ TEST_CASE("Preset visibility follows installed printer variants and renamed fila
     filament.set_visible_from_appconfig(app);
     CHECK_FALSE(filament.is_visible);
 }
+
+TEST_CASE("Preset printer type lookups distinguish edited and preset models", "[PresetBundleLoading][PresetModelTypes]")
+{
+    PresetBundle bundle;
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    VendorProfile::PrinterModel edited_model;
+    edited_model.name = "Edited Model";
+    edited_model.model_id = "EDITED-ID";
+    VendorProfile::PrinterModel preset_model;
+    preset_model.name = "Preset Model";
+    preset_model.model_id = "PRESET-ID";
+    vendor.models = {edited_model, preset_model};
+    bundle.vendors.emplace(vendor.id, vendor);
+    auto &edited_config = bundle.printers.get_edited_preset().config;
+    edited_config.option<ConfigOptionString>("printer_model", true)->value = "Edited Model";
+    Preset process(Preset::TYPE_PRINT, "Process");
+    process.config = DynamicPrintConfig::full_print_config();
+    process.config.option<ConfigOptionString>("printer_model", true)->value = "Preset Model";
+    CHECK(process.get_printer_type(&bundle) == "EDITED-ID");
+    CHECK(process.get_current_printer_type(&bundle) == "PRESET-ID");
+
+    process.config.option<ConfigOptionString>("printer_model", true)->value = "Unknown";
+    CHECK(process.get_current_printer_type(&bundle).empty());
+    CHECK(process.get_printer_type(&bundle) == "EDITED-ID");
+    process.config.option<ConfigOptionString>("printer_model", true)->value = "Preset Model";
+    edited_config.option<ConfigOptionString>("printer_model", true)->value = "Unknown";
+    CHECK(process.get_printer_type(&bundle).empty());
+    CHECK(process.get_current_printer_type(&bundle) == "PRESET-ID");
+    CHECK(process.get_printer_type(nullptr).empty());
+    CHECK(process.get_current_printer_type(nullptr).empty());
+}
