@@ -58,6 +58,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -9187,3 +9188,203 @@ TEST_CASE("BBS plate sidecar thumbnails are stored and imported per plate", "[3M
 }
 
 } // namespace bbs_plate_sidecar_contracts
+
+namespace bbs_model_settings_policy_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+// Stores a one-plate project: one 10 mm cube object with two instances, the second scaled 1.1 x 0.9.
+// With `foreign` the model part's generator markers are renamed so the importer reads it as a
+// third-party archive. What clears the importer's "native" flag is the Application tag (a
+// BambuStudio- or OrcaSlicer- prefix) or a parseable OrcaSlicer version tag; the version-tag
+// renames are belt and braces. The layer height is set so that a loaded configuration is recognizable.
+void store_archive(const std::string& path, bool foreign)
+{
+    ScopedTemporaryDir backup("orca_bbs_model_settings_store");
+    Model source;
+    bbs_archive_contracts::make_model(source, false);
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.37));
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    bbs_archive_contracts::make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    bbs_archive_contracts::store_model(path, source, config, plates);
+    if (!foreign)
+        return;
+
+    size_t replacements = 0;
+    REQUIRE(rewrite_3mf_entries(path, [&replacements](std::string& name, std::string& data) {
+        if (name != "3D/3dmodel.model")
+            return false;
+        const std::array<std::pair<const char*, const char*>, 4> markers{{
+            {"<metadata name=\"Application\">BambuStudio-", "<metadata name=\"Application\">ThirdParty-"},
+            {"<metadata name=\"OrcaSlicer\">", "<metadata name=\"ThirdParty:Generator\">"},
+            {"<metadata name=\"BambuStudio:3mfVersion\">", "<metadata name=\"ThirdParty:Version3mf\">"},
+            {"<metadata name=\"bamboo_slicer:Version3mf\">", "<metadata name=\"ThirdParty:LegacyVersion3mf\">"},
+        }};
+        bool changed = false;
+        for (const auto& [from, to] : markers)
+            for (size_t offset = data.find(from); offset != std::string::npos; offset = data.find(from, offset)) {
+                data.replace(offset, std::strlen(from), to);
+                offset += std::strlen(to);
+                ++replacements;
+                changed = true;
+            }
+        for (const auto& marker : markers)
+            REQUIRE(data.find(marker.first) == std::string::npos);
+        return changed;
+    }));
+    REQUIRE(replacements >= 3);
+}
+
+enum Fault { CorruptXml, DuplicateObjectEntry, PartOutsideObject, MeshStatBeforeAnyPart, MeshStatBeforeAnyObject };
+
+const char* fault_name(Fault fault)
+{
+    switch (fault) {
+    case CorruptXml: return "corrupt XML";
+    case DuplicateObjectEntry: return "duplicate object entry";
+    case PartOutsideObject: return "part before any object";
+    case MeshStatBeforeAnyPart: return "mesh_stat inside an object before any part";
+    case MeshStatBeforeAnyObject: return "mesh_stat before any object";
+    }
+    return "";
+}
+
+void damage_model_settings(const std::string& path, Fault fault)
+{
+    bool changed = false;
+    const std::string mesh_stat = "<mesh_stat edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>";
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string& name, std::string& data) {
+        if (name != "Metadata/model_settings.config" || changed)
+            return false;
+        const size_t config     = data.find("<config");
+        const size_t config_end = data.find('>', config);
+        REQUIRE(config != std::string::npos);
+        REQUIRE(config_end != std::string::npos);
+        switch (fault) {
+        case CorruptXml: data = "<config><broken"; break;
+        case DuplicateObjectEntry: {
+            const std::string open = "<object id=\"";
+            const size_t object    = data.find(open);
+            const size_t end       = data.find("</object>", object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(end != std::string::npos);
+            const size_t id_end = data.find('"', object + open.size());
+            data.insert(end + std::string("</object>").size(), "<object id=\"" + data.substr(object + open.size(), id_end - object - open.size()) + "\"/>");
+            break;
+        }
+        case PartOutsideObject:
+            data.insert(config_end + 1, "<part id=\"1\" subtype=\"normal\" first_triangle_id=\"0\" last_triangle_id=\"1\"/>");
+            break;
+        case MeshStatBeforeAnyPart: {
+            const size_t object     = data.find("<object id=\"");
+            const size_t object_end = data.find('>', object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(object_end != std::string::npos);
+            data.insert(object_end + 1, mesh_stat);
+            break;
+        }
+        case MeshStatBeforeAnyObject:
+            data.insert(config_end + 1, mesh_stat);
+            break;
+        }
+        changed = true;
+        return true;
+    }));
+    REQUIRE(changed);
+}
+
+// The geometry of the undamaged archive: one 10 mm cube (12 facets, volume 1000) plus the second
+// instance scaled 1.1 x 0.9 x 1 (12 facets, volume 990), as one merged mesh.
+void check_control_geometry(const Model& model)
+{
+    CHECK(model.mesh().facets_count() == 24);
+    CHECK_THAT(its_volume(model.mesh().its), WithinAbs(1990., 1e-3));
+}
+
+} // namespace
+
+// The refuse-or-tolerate gate is `if (m_is_bbl_3mf)` around the model settings parse in the importer.
+TEST_CASE("BBS import refuses damaged model settings of its own archives", "[3MF][Bbs3mfModelSettingsPolicy]")
+{
+    const Fault fault = GENERATE(CorruptXml, DuplicateObjectEntry, PartOutsideObject, MeshStatBeforeAnyPart, MeshStatBeforeAnyObject);
+    CAPTURE(fault_name(fault));
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string(), false);
+    {
+        // Positive control: the undamaged archive loads as a native (Bambu) project.
+        Model valid;
+        bbs_archive_contracts::LoadedProject valid_loaded;
+        REQUIRE(bbs_archive_contracts::load_model(archive.string(), valid, valid_loaded));
+        CHECK(valid_loaded.is_bbl);
+        REQUIRE(valid.objects.size() == 1);
+        REQUIRE(valid.objects.front()->instances.size() == 2);
+        check_control_geometry(valid);
+    }
+    damage_model_settings(archive.string(), fault);
+    Model model;
+    bbs_archive_contracts::LoadedProject loaded;
+    bool result = true;
+    REQUIRE_NOTHROW(result = bbs_archive_contracts::load_model(archive.string(), model, loaded));
+    CHECK_FALSE(result);
+}
+
+// Pins only that the load succeeds and the geometry survives: for these archives the settings parse
+// stops at the first error, so parts and plates are dropped, and nothing here asserts settings are read.
+TEST_CASE("BBS import still loads foreign archives whose model settings are damaged", "[3MF][Bbs3mfModelSettingsPolicy]")
+{
+    const Fault fault = GENERATE(CorruptXml, DuplicateObjectEntry, PartOutsideObject, MeshStatBeforeAnyPart, MeshStatBeforeAnyObject);
+    CAPTURE(fault_name(fault));
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string(), true);
+
+    // The undamaged foreign archive: not a Bambu or Orca project, the two instances split into objects.
+    Model valid;
+    bbs_archive_contracts::LoadedProject valid_loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), valid, valid_loaded));
+    CHECK_FALSE(valid_loaded.is_bbl);
+    CHECK_FALSE(valid_loaded.is_orca);
+    REQUIRE(valid.objects.size() == 2);
+    check_control_geometry(valid);
+    const BoundingBoxf3 valid_box = valid.mesh().bounding_box();
+
+    damage_model_settings(archive.string(), fault);
+    Model model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), model, loaded));
+    CHECK_FALSE(loaded.is_bbl);
+    CHECK_FALSE(loaded.is_orca);
+    REQUIRE(model.objects.size() == valid.objects.size());
+    check_control_geometry(model);
+    CHECK((model.mesh().bounding_box().min.cast<double>() - valid_box.min.cast<double>()).norm() < 1e-5);
+    CHECK((model.mesh().bounding_box().max.cast<double>() - valid_box.max.cast<double>()).norm() < 1e-5);
+}
+
+TEST_CASE("BBS LoadModel does not read the project settings that LoadConfig reads", "[3MF][Bbs3mfModelSettingsPolicy]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string(), false);
+
+    // Control: the default strategy reads the stored layer height from the project settings.
+    {
+        Model model;
+        bbs_archive_contracts::LoadedProject loaded;
+        REQUIRE(bbs_archive_contracts::load_model(archive.string(), model, loaded));
+        REQUIRE(loaded.config.has("layer_height"));
+        CHECK_THAT(loaded.config.opt_float("layer_height"), WithinAbs(0.37, 1e-6));
+    }
+    // The model-only strategy leaves the configuration untouched and loads the model.
+    Model model;
+    bbs_archive_contracts::LoadedProject loaded;
+    REQUIRE(bbs_archive_contracts::load_model(archive.string(), model, loaded, nullptr, LoadStrategy::LoadModel));
+    CHECK(loaded.config.empty());
+    REQUIRE(model.objects.size() == 1);
+    check_control_geometry(model);
+}
+
+} // namespace bbs_model_settings_policy_contracts
