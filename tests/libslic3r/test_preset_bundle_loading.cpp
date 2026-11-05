@@ -10601,3 +10601,20 @@ TEST_CASE("Printer diameter lookup and forced selection use actual edited printe
     CHECK(collection.select_preset_by_name("B", true));
     CHECK(collection.diameters_of_selected_printer() == std::vector<std::string>{"0.4", "0.6"});
 }
+
+TEST_CASE("Preset vendor lookup inherits the parent vendor without changing child identity", "[PresetBundleLoading][PresetInheritedVendor]")
+{
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    add_inmemory_preset(collection, "Parent").vendor = &vendor;
+    add_inmemory_preset(collection, "Child", "Parent");
+    const Preset *child = collection.find_preset("Child", false, true);
+    REQUIRE(child != nullptr);
+    CHECK(child->vendor == nullptr);
+    const auto resolved = collection.get_preset_with_vendor_profile(*child);
+    CHECK(resolved.vendor == &vendor);
+    CHECK(&resolved.preset == child);
+    CHECK(collection.get_preset_with_vendor_profile(collection.default_preset()).vendor == nullptr);
+}
