@@ -10697,3 +10697,43 @@ TEST_CASE("Similar printer lookup respects requested model and variant with alia
     bundle.printers.get_selected_preset().alias = "Unmatched 0.4";
     CHECK(bundle.get_similar_printer_preset("Acme", "0.6") == expected);
 }
+
+TEST_CASE("Remote printer setting IDs fill matching entries without inserting missing names", "[PresetBundleLoading][PresetSystemPrinterIds]")
+{
+    PresetBundle bundle;
+    {
+        Preset &printer = add_inmemory_preset(bundle.printers, "System Printer");
+        printer.is_system = true;
+        printer.setting_id.clear();
+    }
+    {
+        Preset &printer = add_inmemory_preset(bundle.printers, "Untouched Printer");
+        printer.is_system = true;
+        printer.setting_id = "untouched-id";
+    }
+    {
+        Preset &printer = add_inmemory_preset(bundle.printers, "Unmatched Printer");
+        printer.is_system = true;
+        printer.setting_id.clear();
+    }
+    const size_t count = bundle.printers.size();
+    std::map<std::string, std::map<std::string, std::string>> remote;
+    remote["System Printer"] = {{BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE}, {BBL_JSON_KEY_SETTING_ID, "remote-id"}};
+    bundle.update_system_preset_setting_ids(remote);
+    const Preset *printer = bundle.printers.find_preset("System Printer", false, true);
+    const Preset *untouched = bundle.printers.find_preset("Untouched Printer", false, true);
+    REQUIRE(printer != nullptr);
+    REQUIRE(untouched != nullptr);
+    CHECK(printer->setting_id == "remote-id");
+    CHECK(untouched->setting_id == "untouched-id");
+    remote["Missing Remote"] = {{BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE}, {BBL_JSON_KEY_SETTING_ID, "other"}};
+    bundle.update_system_preset_setting_ids(remote);
+    CHECK(bundle.printers.size() == count);
+    CHECK(bundle.printers.find_preset("Missing Remote", false, true) == nullptr);
+    printer = bundle.printers.find_preset("System Printer", false, true);
+    REQUIRE(printer != nullptr);
+    CHECK(printer->setting_id == "remote-id");
+    const Preset *unmatched = bundle.printers.find_preset("Unmatched Printer", false, true);
+    REQUIRE(unmatched != nullptr);
+    CHECK(unmatched->setting_id.empty());
+}
