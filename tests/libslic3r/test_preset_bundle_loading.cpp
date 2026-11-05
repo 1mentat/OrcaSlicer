@@ -8784,6 +8784,70 @@ TEST_CASE("Config loading rejects a non-G-code extension even for loadable G-cod
                       Slic3r::RuntimeError);
 }
 
+TEST_CASE("Vendor validation checks nozzle diameters while preserving loadable profiles",
+          "[Preset][Vendor][VendorVariantValidation]")
+{
+    auto [variant, diameters, matches] = GENERATE(table<std::string, std::vector<double>, bool>({
+        { "0.4",     { 0.4 },      true },
+        { "0.8HF",   { 0.8 },      true },
+        { "0.4+0.6", { 0.4, 0.6 }, true },
+        { "0.4",     { 0.6 },      false },
+        { "0.4+0.6", { 0.4 },      false },
+        { "HF",      { 0.4 },      false },
+    }));
+    CAPTURE(variant, diameters, matches);
+    ScopedTemporaryDir temp("vendor-variant-validation");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path root = temp.path() / "profiles";
+    const fs::path machine_directory = root / "VariantVendor" / "machine";
+    fs::create_directories(machine_directory);
+    const auto write = [](const fs::path &path, const nlohmann::json &document) {
+        std::ofstream output(path.string());
+        REQUIRE(output.good());
+        output << document.dump();
+        REQUIRE(output.good());
+    };
+    write(root / "VariantVendor.json", {
+        { "version", "1.0.0" }, { "name", "VariantVendor" },
+        { "machine_model_list", {{{ "name", "Variant Machine" }, { "sub_path", "machine/model.json" }}} },
+        { "machine_list", {{{ "name", "Variant Printer" }, { "sub_path", "machine/printer.json" }}} },
+    });
+    write(machine_directory / "model.json", {
+        { "type", "machine_model" }, { "name", "Variant Machine" }, { "nozzle_diameter", variant },
+    });
+    nlohmann::json nozzle_values = nlohmann::json::array();
+    for (double diameter : diameters)
+        nozzle_values.push_back(std::to_string(diameter));
+    write(machine_directory / "printer.json", {
+        { "type", "machine" }, { "name", "Variant Printer" }, { "from", "system" },
+        { "instantiation", "true" }, { "printer_model", "Variant Machine" },
+        { "printer_variant", variant }, { "nozzle_diameter", nozzle_values },
+    });
+
+    for (bool validation_mode : { false, true }) {
+        DYNAMIC_SECTION("validation mode " << validation_mode) {
+            PresetBundle bundle;
+            bundle.set_is_validation_mode(validation_mode);
+            const auto loaded = bundle.load_vendor_configs_from_json(
+                root.string(), "VariantVendor", PresetBundle::LoadSystem,
+                ForwardCompatibilitySubstitutionRule::Disable, nullptr, false);
+            REQUIRE(loaded.second == 1);
+            const Preset *printer = bundle.printers.find_preset("Variant Printer", false);
+            REQUIRE(printer != nullptr);
+            CHECK(printer->is_system);
+            CHECK(printer->config.opt_string("printer_variant") == variant);
+            const auto *nozzles = printer->config.option<ConfigOptionFloats>("nozzle_diameter");
+            REQUIRE(nozzles != nullptr);
+            REQUIRE(nozzles->values.size() == diameters.size());
+            for (size_t i = 0; i < diameters.size(); ++i)
+                CHECK_THAT(nozzles->values[i], Catch::Matchers::WithinAbs(diameters[i], 1e-9));
+            const int expected_errors = validation_mode && !matches ? 1 : 0;
+            CHECK(bundle.error_count() == expected_errors);
+        }
+    }
+}
+
+
 } // namespace preset_bundle_workflow_contracts
 
 namespace preset_workflow_contracts {
