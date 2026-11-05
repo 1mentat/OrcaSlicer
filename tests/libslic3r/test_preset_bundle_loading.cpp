@@ -9478,3 +9478,112 @@ TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace presetbundle_subscribed_multitype_contracts {
+
+static std::map<std::string, std::map<std::string, std::string>> remote_values(bool include_printer)
+{
+    std::map<std::string, std::map<std::string, std::string>> values;
+
+    auto process_base = cloud_values(PRESET_IOT_PRINT_TYPE, "remote-process-base-id", "account-multi");
+    process_base.emplace("layer_height", "0.24");
+    values.emplace("A Remote Process Base", std::move(process_base));
+
+    auto process_child = cloud_values(PRESET_IOT_PRINT_TYPE, "remote-process-child-id", "account-multi",
+                                      "A Remote Process Base");
+    process_child.emplace("layer_height", "0.28");
+    values.emplace("Z Remote Process Child", std::move(process_child));
+
+    auto filament = cloud_values(PRESET_IOT_FILAMENT_TYPE, "remote-filament-id", "account-multi");
+    filament.emplace(BBL_JSON_KEY_FILAMENT_ID, "remote-filament-family");
+    filament.emplace("filament_diameter", "1.75,2.85");
+    values.emplace("Remote Filament", std::move(filament));
+
+    if (include_printer) {
+        auto printer = cloud_values(PRESET_IOT_PRINTER_TYPE, "remote-printer-id", "account-multi");
+        printer.emplace("printer_model", "Remote Printer Model");
+        printer.emplace("nozzle_diameter", "0.4,0.6");
+        values.emplace("Remote Printer", std::move(printer));
+    }
+
+    // These rows exercise the public skip behavior without pretending that unknown types are
+    // supported.  The missing-type row is also absent from every typed metadata list.
+    values.emplace("Missing Remote Type", std::map<std::string, std::string>{
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, "missing-type-id" },
+        { BBL_JSON_KEY_USER_ID, "account-multi" },
+    });
+    values.emplace("Unsupported Remote Type", cloud_values("future-profile", "future-id", "account-multi"));
+    return values;
+}
+
+static std::string prefix()
+{
+    return "_subscribed/remote-multi/";
+}
+
+} // namespace presetbundle_subscribed_multitype_contracts
+
+TEST_CASE("Subscribed bundle reconciliation installs all supported preset types and canonical inheritance",
+          "[PresetBundle][PresetBundleSubscribedMultiType]")
+{
+    using namespace presetbundle_subscribed_multitype_contracts;
+    ScopedTemporaryDir temp("preset-subscribed-multitype");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    AppConfig app;
+    BundleMetadata metadata = preset_bundle_workflow_contracts::bundle_metadata("remote-multi");
+
+    const auto values = remote_values(true);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, values, metadata, ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    const std::string process_prefix = prefix();
+    const Preset *process_base = bundle.prints.find_preset(process_prefix + "A Remote Process Base");
+    const Preset *process_child = bundle.prints.find_preset(process_prefix + "Z Remote Process Child");
+    const Preset *filament = bundle.filaments.find_preset(process_prefix + "Remote Filament");
+    const Preset *printer = bundle.printers.find_preset(process_prefix + "Remote Printer");
+    REQUIRE(process_base != nullptr);
+    REQUIRE(process_child != nullptr);
+    REQUIRE(filament != nullptr);
+    REQUIRE(printer != nullptr);
+
+    for (const Preset *preset : {process_base, process_child, filament, printer}) {
+        REQUIRE(preset->is_from_bundle());
+        REQUIRE(preset->bundle_id == "remote-multi");
+        REQUIRE(fs::exists(fs::path(preset->file)));
+    }
+    CHECK(process_child->inherits() == process_prefix + "A Remote Process Base");
+    CHECK(process_base->setting_id == "remote-process-base-id");
+    CHECK(process_child->base_id == process_base->setting_id);
+    CHECK_THAT(process_base->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK_THAT(process_child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+    CHECK(filament->filament_id == "remote-filament-family");
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    REQUIRE(filament->config.option<ConfigOptionFloats>("filament_diameter")->values.size() == 2);
+    CHECK_THAT(filament->config.option<ConfigOptionFloats>("filament_diameter")->values[0],
+               Catch::Matchers::WithinAbs(1.75, 1e-9));
+    CHECK_THAT(filament->config.option<ConfigOptionFloats>("filament_diameter")->values[1],
+               Catch::Matchers::WithinAbs(2.85, 1e-9));
+    CHECK(printer->config.opt_string("printer_model") == "Remote Printer Model");
+    REQUIRE(printer->config.option<ConfigOptionFloats>("nozzle_diameter") != nullptr);
+    REQUIRE(printer->config.option<ConfigOptionFloats>("nozzle_diameter")->values.size() == 2);
+    CHECK_THAT(printer->config.option<ConfigOptionFloats>("nozzle_diameter")->values[0],
+               Catch::Matchers::WithinAbs(0.4, 1e-9));
+    CHECK_THAT(printer->config.option<ConfigOptionFloats>("nozzle_diameter")->values[1],
+               Catch::Matchers::WithinAbs(0.6, 1e-9));
+
+    CHECK(bundle.prints.find_preset(process_prefix + "Missing Remote Type") == nullptr);
+    CHECK(bundle.filaments.find_preset(process_prefix + "Missing Remote Type") == nullptr);
+    CHECK(bundle.printers.find_preset(process_prefix + "Missing Remote Type") == nullptr);
+    CHECK(bundle.prints.find_preset(process_prefix + "Unsupported Remote Type") == nullptr);
+    CHECK(bundle.filaments.find_preset(process_prefix + "Unsupported Remote Type") == nullptr);
+    CHECK(bundle.printers.find_preset(process_prefix + "Unsupported Remote Type") == nullptr);
+
+    REQUIRE(bundle.bundles.m_bundles.find("remote-multi") != bundle.bundles.m_bundles.end());
+    const BundleMetadata &stored = bundle.bundles.m_bundles.at("remote-multi");
+    CHECK(stored.print_presets == std::vector<std::string>{
+        process_prefix + "A Remote Process Base", process_prefix + "Z Remote Process Child"});
+    CHECK(stored.filament_presets == std::vector<std::string>{process_prefix + "Remote Filament"});
+    CHECK(stored.printer_presets == std::vector<std::string>{process_prefix + "Remote Printer"});
+}
