@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "names": [
+    "FocusedAMF::An AMF object metadata element with no type attribute is rejected",
+    "FocusedAMF::AMF archives preserve named tetrahedron geometry and source identity",
+    "FocusedAMF::AMF text and compressed input agree on the declared inch flag",
+    "FocusedAMF::AMF archives reject malformed embedded XML",
+    "FocusedAMF::AMF archives reject empty model entries",
+    "FocusedAMF::AMF input rejects a damaged ZIP container",
+    "FocusedAMF::AMF archives stream model XML across extraction chunks",
+    "FocusedAMF::AMF constellation offsets retain all three coordinates",
+    "FocusedAMF::AMF constellation rotations retain independent axes",
+    "FocusedAMF::AMF constellation axis scales and mirrors remain distinct",
+    "FocusedAMF::AMF uniform scale expands to every axis",
+    "FocusedAMF::AMF constellation copies preserve independent placement and printability",
+    "FocusedAMF::AMF missing constellation targets do not duplicate known geometry",
+    "FocusedAMF::AMF empty constellation instances preserve uninstanced geometry",
+    "FocusedAMF::AMF material attributes retain Unicode and entity decoding",
+    "FocusedAMF::AMF archives reject triangle references outside the vertex list",
+    "FocusedAMF::AMF archives reject a volume without triangles",
+    "FocusedAMF::AMF archived metadata requires its type attribute",
+    "FocusedAMF::AMF normalizes inward triangle winding to positive volume"
+  ]
+}
