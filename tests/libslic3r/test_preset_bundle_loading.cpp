@@ -9587,3 +9587,86 @@ TEST_CASE("Subscribed bundle reconciliation installs all supported preset types 
     CHECK(stored.filament_presets == std::vector<std::string>{process_prefix + "Remote Filament"});
     CHECK(stored.printer_presets == std::vector<std::string>{process_prefix + "Remote Printer"});
 }
+
+TEST_CASE("Subscribed bundle reconciliation prunes obsolete typed entries while retaining metadata",
+          "[PresetBundle][PresetBundleSubscribedPrune]")
+{
+    using namespace presetbundle_subscribed_multitype_contracts;
+    ScopedTemporaryDir temp("preset-subscribed-prune-multitype");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    AppConfig app;
+    BundleMetadata metadata = preset_bundle_workflow_contracts::bundle_metadata("remote-multi");
+
+    const auto initial = remote_values(true);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, initial, metadata, ForwardCompatibilitySubstitutionRule::EnableSilent));
+    const Preset *initial_printer = bundle.printers.find_preset(prefix() + "Remote Printer");
+    REQUIRE(initial_printer != nullptr);
+    const fs::path printer_file(initial_printer->file);
+    REQUIRE(fs::exists(printer_file));
+
+    const auto replacement = remote_values(false);
+    REQUIRE_NOTHROW(bundle.update_subscribed_presets(
+        app, replacement, metadata, ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+    REQUIRE(bundle.prints.find_preset(prefix() + "A Remote Process Base") != nullptr);
+    const Preset *child = bundle.prints.find_preset(prefix() + "Z Remote Process Child");
+    const Preset *filament = bundle.filaments.find_preset(prefix() + "Remote Filament");
+    REQUIRE(child != nullptr);
+    REQUIRE(filament != nullptr);
+    CHECK(bundle.printers.find_preset(prefix() + "Remote Printer") == nullptr);
+    CHECK_FALSE(fs::exists(printer_file));
+    CHECK(child->inherits() == prefix() + "A Remote Process Base");
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+
+    REQUIRE(bundle.bundles.m_bundles.find("remote-multi") != bundle.bundles.m_bundles.end());
+    const BundleMetadata &stored = bundle.bundles.m_bundles.at("remote-multi");
+    CHECK(stored.print_presets == std::vector<std::string>{
+        prefix() + "A Remote Process Base", prefix() + "Z Remote Process Child"});
+    CHECK(stored.filament_presets == std::vector<std::string>{prefix() + "Remote Filament"});
+    CHECK(stored.printer_presets.empty());
+}
+
+
+namespace preset_bundle_workflow_contracts {
+
+TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets", "[PresetBundle][PresetBundleSubscribedPrune]")
+{
+    ScopedTemporaryDir temp("preset-workflow-subscribed");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+    AppConfig app;
+    BundleMetadata metadata = bundle_metadata("remote-id");
+
+    std::map<std::string, std::map<std::string, std::string>> first;
+    auto root = cloud_values(PRESET_IOT_PRINT_TYPE, "remote-process-id", "account");
+    root.emplace("layer_height", "0.26");
+    first.emplace("Remote Process", root);
+    bundle.update_subscribed_presets(app, first, metadata, ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    const Preset *remote = bundle.prints.find_preset("_subscribed/remote-id/Remote Process");
+    REQUIRE(remote != nullptr);
+    const fs::path remote_file(remote->file);
+    CHECK(remote->is_from_bundle());
+    CHECK(remote->bundle_id == "remote-id");
+    CHECK_THAT(remote->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.26, 1e-9));
+    CHECK(fs::exists(temp.path() / "data" / PRESET_USER_DIR / "default" / PRESET_SUBSCRIBED_DIR /
+                     "remote-id" / PRESET_BUNDLE_METADATA));
+
+    const std::map<std::string, std::map<std::string, std::string>> empty;
+    bundle.update_subscribed_presets(app, empty, metadata, ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(bundle.prints.find_preset("_subscribed/remote-id/Remote Process") == nullptr);
+    CHECK_FALSE(fs::exists(remote_file));
+    BundleMetadata persisted;
+    REQUIRE(persisted.load_from_json((temp.path() / "data" / PRESET_USER_DIR / "default" /
+                                     PRESET_SUBSCRIBED_DIR / metadata.id / PRESET_BUNDLE_METADATA).string()));
+    CHECK(persisted.id == metadata.id);
+    CHECK(persisted.name == metadata.name);
+    CHECK(persisted.version == metadata.version);
+    CHECK(persisted.print_presets.empty());
+    CHECK(persisted.filament_presets.empty());
+    CHECK(persisted.printer_presets.empty());
+}
+
+} // namespace preset_bundle_workflow_contracts
