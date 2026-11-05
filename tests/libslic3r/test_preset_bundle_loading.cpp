@@ -9345,3 +9345,61 @@ TEST_CASE("External G-code config splits each filament slot into its own source 
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_bundle_workflow_contracts {
+
+namespace {
+
+BundleMetadata bundle_metadata(const std::string &id)
+{
+    BundleMetadata metadata;
+    metadata.id = id;
+    metadata.name = "Workflow cloud bundle";
+    metadata.version = "1.0.0";
+    metadata.description = "native workflow fixture";
+    metadata.author = "test";
+    metadata.updated_time = 42;
+    return metadata;
+}
+
+
+} // namespace
+
+TEST_CASE("local bundle metadata and preset identity survive user loading", "[Preset][LocalBundleReload]")
+{
+    ScopedTemporaryDir temp("preset-workflow-local");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path local = temp.path() / "data" / PRESET_USER_DIR / "default" / PRESET_LOCAL_DIR / "local-id";
+    fs::create_directories(local);
+
+    BundleMetadata metadata = bundle_metadata("local-id");
+    metadata.name = "Local workflow bundle";
+    REQUIRE(metadata.save_to_json((local / PRESET_BUNDLE_METADATA).string()));
+    PresetBundle writer;
+    write_json_preset(local / PRESET_PRINT_NAME / "Local Process.json",
+                     print_config(writer, "Local Process", 0.24), "Local Process");
+
+    PresetBundle bundle;
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        "default", ForwardCompatibilitySubstitutionRule::Disable);
+    const Preset *loaded = bundle.prints.find_preset("_local/local-id/Local Process");
+    REQUIRE(loaded != nullptr);
+    CHECK(loaded->is_from_bundle());
+    CHECK(loaded->bundle_id == "local-id");
+    CHECK_THAT(loaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
+    CHECK(substitutions.empty());
+    const auto found = bundle.bundles.m_bundles.find(metadata.id);
+    REQUIRE(found != bundle.bundles.m_bundles.end());
+    const BundleMetadata &reloaded = found->second;
+    CHECK(reloaded.id == metadata.id);
+    CHECK(reloaded.bundle_type == BundleType::Local);
+    CHECK_FALSE(reloaded.is_subscribed);
+    CHECK(reloaded.name == metadata.name);
+    CHECK(reloaded.version == metadata.version);
+    CHECK(reloaded.description == metadata.description);
+    CHECK(reloaded.author == metadata.author);
+    CHECK(reloaded.updated_time == metadata.updated_time);
+    CHECK(fs::equivalent(reloaded.path, local / PRESET_BUNDLE_METADATA));
+}
+
+} // namespace preset_bundle_workflow_contracts
