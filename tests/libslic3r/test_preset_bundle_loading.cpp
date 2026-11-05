@@ -10238,3 +10238,32 @@ TEST_CASE("Physical printer save and collection load preserve typed settings", "
     CHECK(roundtrip.preset_names == std::set<std::string>{"0.4"});
     CHECK(roundtrip.config.opt_string("print_host") == "printer.local");
 }
+
+TEST_CASE("Physical printer collection selection and preset filters are consistent", "[PresetBundleLoading][PhysicalPrinterSelection]")
+{
+    ScopedTemporaryDir dir("preset-deep-printer-selection");
+    ScopedDataDir data(dir.path());
+    PhysicalPrinterCollection collection(PhysicalPrinter::printer_options());
+    auto add = [&](const std::string &name, std::initializer_list<const char*> presets) {
+        DynamicPrintConfig config = collection.default_config();
+        config.opt<ConfigOptionStrings>("preset_names")->values.clear();
+        for (const char *preset : presets)
+            config.opt<ConfigOptionStrings>("preset_names")->values.emplace_back(preset);
+        collection.load_printer((dir.path() / (name + ".json")).string(), name, std::move(config), false);
+    };
+    add("A", {"0.4", "0.6"});
+    add("B", {"0.4"});
+    add("C", {"0.8", "0.4"});
+    CHECK(collection.get_printers_with_preset("0.4") == std::vector<std::string>{"A", "C"});
+    CHECK(collection.get_printers_with_only_preset("0.4") == std::vector<std::string>{"B"});
+    collection.select_printer("A", "0.6");
+    CHECK(collection.has_selection());
+    CHECK(collection.get_selected_full_printer_name() == "A * 0.6");
+    collection.select_printer("missing", "0.4");
+    CHECK_FALSE(collection.has_selection());
+    collection.select_printer("A * 0.4");
+    REQUIRE(collection.has_selection());
+    CHECK(collection.is_selected(collection.begin(), "0.4"));
+    collection.unselect_printer();
+    CHECK_FALSE(collection.delete_selected_printer());
+}
