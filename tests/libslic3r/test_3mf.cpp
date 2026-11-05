@@ -9464,3 +9464,101 @@ TEST_CASE("BBS import applies valid layer height profile records and skips damag
 }
 
 } // namespace bbs_layer_profile_record_contracts
+
+namespace bbs_mesh_data_contracts {
+using namespace Slic3r;
+
+namespace {
+
+// Replaces the value of `attribute` inside the first `<tag ...>` element at or after `from`, touching nothing outside
+// that element's opening tag. Returns the position after the edited tag.
+size_t set_first_attribute(std::string& data, size_t from, const std::string& tag, const std::string& attribute, const std::string& value)
+{
+    const size_t open = data.find("<" + tag + " ", from);
+    REQUIRE(open != std::string::npos);
+    const size_t close = data.find('>', open);
+    REQUIRE(close != std::string::npos);
+    const std::string key = " " + attribute + "=\"";
+    const size_t attr = data.find(key, open);
+    REQUIRE(attr != std::string::npos);
+    REQUIRE(attr < close);
+    const size_t begin = attr + key.size();
+    const size_t end   = data.find('"', begin);
+    REQUIRE(end != std::string::npos);
+    REQUIRE(end < close);
+    data.replace(begin, end - begin, value);
+    return open;
+}
+
+struct Fault
+{
+    const char* tag;
+    const char* attribute;
+    const char* value;
+};
+
+// Edits one attribute of the first <vertex> or <triangle> in the archive's only mesh-carrying entry.
+void damage_mesh(const std::string& path, const Fault& fault)
+{
+    int edited = 0;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string& name, std::string& data) {
+        const size_t vertices = data.find("<vertices");
+        if (vertices == std::string::npos)
+            return false;
+        INFO(name);
+        const size_t triangles = data.find("<triangles", vertices);
+        REQUIRE(triangles != std::string::npos);
+        set_first_attribute(data, std::string(fault.tag) == "vertex" ? vertices : triangles, fault.tag, fault.attribute, fault.value);
+        ++edited;
+        return true;
+    }));
+    REQUIRE(edited == 1);
+}
+
+} // namespace
+
+TEST_CASE("BBS import refuses meshes with non-finite vertices or out-of-range triangle indices", "[3MF][Bbs3mfMesh][Errors]")
+{
+    ScopedTemporaryDir backup("orca_bbs_mesh_data_store");
+    Model source;
+    source.set_backup_path(backup.string());
+    ScopeGuard detach([&source] { source.set_backup_path("detach"); });
+    ModelObject* object = source.add_object();
+    object->name        = "mesh-object";
+    object->add_volume(make_cube(10., 20., 30.));
+    object->add_instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    bbs_archive_contracts::make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    const size_t vertex_count = object->volumes.front()->mesh().its.vertices.size();
+    REQUIRE(vertex_count == 8);
+
+    // The undamaged archive loads and carries the cube, so each refusal below comes from the injected fault.
+    {
+        ScopedTemporaryFile control(".3mf");
+        bbs_archive_contracts::store_model(control.string(), source, config, plates);
+        Model loaded;
+        bbs_archive_contracts::LoadedProject state;
+        REQUIRE(bbs_archive_contracts::load_model(control.string(), loaded, state));
+        REQUIRE(loaded.objects.size() == 1);
+        REQUIRE(loaded.objects.front()->volumes.front()->mesh().its.vertices.size() == 8);
+        REQUIRE(loaded.objects.front()->volumes.front()->mesh().its.indices.size() == 12);
+    }
+
+    // Each fault is refused, and nothing throws. A triangle index must satisfy 0 <= index < vertex count (8): both
+    // sides of the range and the exact boundary are covered, one per triangle slot; the three coordinates each get one non-finite value.
+    const Fault fault = GENERATE(Fault{"vertex", "x", "nan"}, Fault{"vertex", "y", "inf"}, Fault{"vertex", "z", "-inf"},
+                                 Fault{"triangle", "v1", "-1"}, Fault{"triangle", "v2", "8"}, Fault{"triangle", "v3", "999"});
+    CAPTURE(fault.tag, fault.attribute, fault.value);
+    ScopedTemporaryFile archive(".3mf");
+    bbs_archive_contracts::store_model(archive.string(), source, config, plates);
+    damage_mesh(archive.string(), fault);
+    Model loaded;
+    bbs_archive_contracts::LoadedProject state;
+    bool result = true;
+    REQUIRE_NOTHROW(result = bbs_archive_contracts::load_model(archive.string(), loaded, state));
+    CHECK_FALSE(result);
+}
+
+} // namespace bbs_mesh_data_contracts
