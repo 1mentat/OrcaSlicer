@@ -6752,6 +6752,7 @@ TEST_CASE("Cloud preset loading performs two-pass inheritance and forward substi
     CHECK(root_preset->base_id.empty());
     CHECK(root_preset->setting_id == "cloud-root-id");
     CHECK(root_preset->user_id == "account-1");
+    CHECK(root_preset->sync_info == "save");
     CHECK(root_preset->updated_time == 10);
     CHECK(root_preset->version == *Semver::parse("1.0.0"));
     CHECK_THAT(root_preset->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.24, 1e-9));
