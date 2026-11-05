@@ -9591,6 +9591,8 @@ size_t count_children(const boost::property_tree::ptree& parent, const std::stri
 
 TEST_CASE("BBS SkipModel export writes the project shell without object resources, build items, or object settings", "[3MF][Bbs3mfSkipModel]")
 {
+    const bool split = GENERATE(false, true);
+    CAPTURE(split);
     ScopedTemporaryDir backup("orca_bbs_skip_model_store");
     Model source;
     source.set_backup_path(backup.string());
@@ -9608,6 +9610,8 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
         params.config          = &config;
         params.plate_data_list = plates;
         params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | extra;
+        if (split)
+            params.strategy = params.strategy | SaveStrategy::SplitModel;
         REQUIRE(store_bbs_3mf(params));
     };
 
@@ -9616,7 +9620,10 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
     store(full.string(), SaveStrategy::Default);
     {
         const auto model = parse_entry(full.string(), "3D/3dmodel.model");
-        CHECK(count_children(model.get_child("model.resources"), "object") == 4);
+        // Two component wrappers, plus two mesh objects when geometry is stored in the main model.
+        CHECK(count_children(model.get_child("model.resources"), "object") == (split ? 2 : 4));
+        const auto names = bbs_calibration_thumbnail_contracts::entry_names(full.string());
+        CHECK(std::count_if(names.begin(), names.end(), split_model_contracts::is_part) == (split ? 2 : 0));
         CHECK(count_children(model.get_child("model.build"), "item") == 3);
         const auto settings = parse_entry(full.string(), "Metadata/model_settings.config");
         CHECK(count_children(settings.get_child("config"), "object") == 2);
@@ -9627,6 +9634,8 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
     ScopedTemporaryFile skipped(".3mf");
     store(skipped.string(), SaveStrategy::SkipModel);
 
+    const auto names = bbs_calibration_thumbnail_contracts::entry_names(skipped.string());
+    CHECK(std::none_of(names.begin(), names.end(), split_model_contracts::is_part));
     const auto model = parse_entry(skipped.string(), "3D/3dmodel.model");
     const auto& resources = model.get_child("model.resources");
     CHECK(resources.empty());
@@ -9640,11 +9649,13 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
     REQUIRE(count_children(config_node, "plate") == 1);
     const auto& plate_node = config_node.get_child("plate");
     CHECK(count_children(plate_node, "model_instance") == 0);
-    std::vector<std::string> plate_keys;
+    bool has_plate_id = false;
     for (const auto& child : plate_node)
-        if (child.first == "metadata")
-            plate_keys.push_back(child.second.get<std::string>("<xmlattr>.key"));
-    CHECK(std::find(plate_keys.begin(), plate_keys.end(), "plater_id") != plate_keys.end());
+        if (child.first == "metadata" && child.second.get<std::string>("<xmlattr>.key") == "plater_id") {
+            has_plate_id = true;
+            CHECK(child.second.get<std::string>("<xmlattr>.value") == "1");
+        }
+    CHECK(has_plate_id);
 }
 
 } // namespace bbs_skip_model_contracts
