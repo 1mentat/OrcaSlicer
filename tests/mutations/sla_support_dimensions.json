@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Combined SLA support point spacing, front-head diameter, and head-width pipeline/consumer probes. Each mutant is selected by the sole SLASupportDimensions test and must fail through ordinary assertions.",
+  "mutants": [
+    {
+      "id": "sla-support-minimal-distance-mapping-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        config.minimal_distance = float(cfg.support_points_minimal_distance);",
+      "new": "        config.minimal_distance = 1.f;",
+      "description": "Ignore the configured support point spacing and force 1 mm. The active 8 mm generated-point profile must retain its public pairwise distance floor.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportDimensions$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The generated support points include a pair closer than the configured 8 mm spacing, so the ordinary pairwise spacing assertion fails."
+    },
+    {
+      "id": "sla-support-head-diameter-mapping-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        config.head_diameter    = float(cfg.support_head_front_diameter);",
+      "new": "        config.head_diameter    = 0.4f;",
+      "description": "Ignore the configured support front diameter during automatic point generation and force its default. The 1.2 mm profile must emit 0.6 mm-radius support points.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportDimensions$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary support-point radius assertion observes 0.2 mm instead of the configured 0.6 mm."
+    },
+    {
+      "id": "sla-support-head-width-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.head_width_mm = c.support_head_width.getFloat();",
+      "new": "    scfg.head_width_mm = 1.0;",
+      "description": "Ignore the configured SLA support head width and force the default. The active 0.5 mm config mapping assertion and independent wider-head geometry oracle must detect the change.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportDimensions$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary assertion comparing make_support_cfg output with the configured 0.5 mm head width fails."
+    },
+    {
+      "id": "sla-support-head-width-consumer-forced-default",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "old": "        double lmin = m_cfg.head_width_mm, lmax = lmin;",
+      "new": "        double lmin = 1.0, lmax = lmin;",
+      "description": "Ignore the configured head width in the actual support-head filter and force the default width. The same-points 0.5-to-1.5 mm comparison measures valid-head width and head-only mesh volume, independent of pillar length or volume.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportDimensions$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary aggregate head-only mesh-volume assertion no longer increases for the 1.5 mm head, and the valid-head width assertion may also fail; total support volume is deliberately not used as a monotonic width oracle."
+    }
+  ]
+}

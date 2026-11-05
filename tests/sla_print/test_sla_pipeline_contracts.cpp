@@ -45,6 +45,7 @@
 #include "libslic3r/SLA/SupportTree.hpp"
 #include "libslic3r/SLA/SupportTreeBuilder.hpp"
 #include "libslic3r/SLA/SupportTreeBuildsteps.hpp"
+#include "libslic3r/SLA/SupportTreeMesher.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -417,6 +418,175 @@ std::size_t process_auto_support_point_count(std::optional<int> density_percent)
         CHECK_THAT(point.head_front_radius, Catch::Matchers::WithinAbs(0.5, 1e-6));
     }
     return points.size();
+}
+
+struct SupportDimensionsRun
+{
+    sla::SupportPoints points;
+    indexed_triangle_set transformed_mesh;
+    sla::SupportTreeConfig tree_config;
+    double pipeline_support_volume = 0.0;
+};
+
+SupportDimensionsRun process_auto_support_dimensions(const double minimal_distance,
+                                                      const double head_diameter,
+                                                      const double head_width)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_points_density_relative", new ConfigOptionInt(100));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(minimal_distance));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(head_diameter));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(head_width));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-dimension validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.head_front_radius_mm,
+               Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-6));
+    CHECK_THAT(tree_config.head_width_mm, Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportPoints &points = object->get_support_points();
+    REQUIRE(points.size() >= 2);
+    CHECK(std::all_of(points.begin(), points.end(), [](const sla::SupportPoint &point) {
+        return point.is_new_island;
+    }));
+
+    CHECK_THAT(object->config().support_points_minimal_distance.getFloat(),
+               Catch::Matchers::WithinAbs(minimal_distance, 1e-6));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    for (const sla::SupportPoint &point : points) {
+        REQUIRE(point.pos.allFinite());
+        CHECK_THAT(point.head_front_radius,
+                   Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-5));
+    }
+    for (std::size_t i = 0; i < points.size(); ++i)
+        for (std::size_t j = i + 1; j < points.size(); ++j)
+            CHECK((points[i].pos - points[j].pos).norm() >= minimal_distance - 1e-4);
+
+    TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+    const double support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(support_volume));
+    REQUIRE(support_volume > 0.0);
+
+    SupportDimensionsRun result;
+    result.points = points;
+    result.transformed_mesh = object->transformed_mesh().its;
+    result.tree_config = make_support_cfg(object->config());
+    result.pipeline_support_volume = support_volume;
+    return result;
+}
+
+struct SupportDimensionsTreeRun
+{
+    double support_volume = 0.0;
+    double head_volume = 0.0;
+    double widest_head = 0.0;
+    std::size_t valid_heads = 0;
+};
+
+SupportDimensionsTreeRun build_support_dimensions_tree(const SupportDimensionsRun &run,
+                                                        const sla::SupportTreeConfig &config)
+{
+    const sla::SupportableMesh input(run.transformed_mesh, run.points, config);
+    sla::SupportTreeBuilder tree;
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+    REQUIRE(tree.heads().size() == run.points.size());
+
+    SupportDimensionsTreeRun result;
+    for (const sla::Head &head : tree.heads()) {
+        if (!head.is_valid())
+            continue;
+        ++result.valid_heads;
+        CHECK(std::isfinite(head.width_mm));
+        result.widest_head = std::max(result.widest_head, head.width_mm);
+        TriangleMesh head_mesh{sla::get_mesh(head, 45)};
+        const double head_volume = std::abs(static_cast<double>(head_mesh.volume()));
+        CHECK(std::isfinite(head_volume));
+        CHECK(head_volume > 0.0);
+        result.head_volume += head_volume;
+    }
+    REQUIRE(result.valid_heads > 0);
+    TriangleMesh support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(support.empty());
+    result.support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(result.support_volume));
+    REQUIRE(result.support_volume > 0.0);
+    return result;
+}
+
+void process_support_dimension_boundary(const double head_diameter, const double head_width)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    // SLAPrint validates elevation against the full head width. Add 1 mm of
+    // clearance so the registered 20 mm width reaches support-tree processing.
+    const double head_width_elevation = head_width + head_diameter + 2.0 - 0.2 + 1.0;
+    config.set_key_value("support_object_elevation",
+                         new ConfigOptionFloat(std::max(5.0, head_width_elevation)));
+    config.set_key_value("support_points_density_relative", new ConfigOptionInt(100));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(head_diameter));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(head_width));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA boundary head-dimension validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.head_front_radius_mm,
+               Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-6));
+    CHECK_THAT(tree_config.head_width_mm, Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportPoints &points = object->get_support_points();
+    REQUIRE_FALSE(points.empty());
+    for (const sla::SupportPoint &point : points) {
+        CHECK(point.pos.allFinite());
+        CHECK(std::isfinite(point.head_front_radius));
+        CHECK_THAT(point.head_front_radius,
+                   Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-5));
+    }
+
+    const TriangleMesh support = object->support_mesh();
+    for (const Vec3f &vertex : support.its.vertices)
+        CHECK(vertex.allFinite());
 }
 
 void check_support_point_projection_contract()
@@ -2320,6 +2490,75 @@ TEST_CASE("SLA support point density spans its minimum, representative, and defa
     INFO("default density support points: " << default_point_count);
     CHECK(minimum_point_count == 0);
     CHECK(default_point_count > representative_point_count);
+}
+
+TEST_CASE("SLA automatic point spacing and head dimensions reach generated tree geometry",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SettingsVariance][SLAAutoSupports][SLASupportDimensions]")
+{
+    const DynamicPrintConfig defaults = sla_config(1.0);
+    CHECK_THAT(defaults.option("support_points_minimal_distance")->getFloat(),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(defaults.option("support_head_front_diameter")->getFloat(),
+               Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(defaults.option("support_head_width")->getFloat(),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+
+    const SupportDimensionsRun minimum_spacing =
+        process_auto_support_dimensions(0.0, 0.4, 1.0);
+    const SupportDimensionsRun default_spacing =
+        process_auto_support_dimensions(1.0, 0.4, 1.0);
+    REQUIRE(minimum_spacing.points.size() >= 2);
+    REQUIRE(default_spacing.points.size() >= 2);
+
+    DynamicPrintConfig minimum_config = sla_config(1.0);
+    minimum_config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    minimum_config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(0.0));
+    minimum_config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(0.0));
+    minimum_config.set_key_value("support_head_width", new ConfigOptionFloat(0.0));
+    SlaCubeFixture minimum(std::move(minimum_config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(minimum.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-dimension minimum validation: " << minimum.print.validate().string);
+    REQUIRE(minimum.print.validate().string.empty());
+    REQUIRE(minimum.print.objects().size() == 1);
+    CHECK(minimum.print.objects().front()->config().support_points_minimal_distance.getFloat() == 0.0);
+    CHECK(minimum.print.objects().front()->config().support_head_front_diameter.getFloat() == 0.0);
+    CHECK(minimum.print.objects().front()->config().support_head_width.getFloat() == 0.0);
+
+    DynamicPrintConfig maximum_width_config = sla_config(1.0);
+    maximum_width_config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    maximum_width_config.set_key_value("support_head_width", new ConfigOptionFloat(20.0));
+    SlaCubeFixture maximum_width(std::move(maximum_width_config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(maximum_width.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-head-width maximum validation: " << maximum_width.print.validate().string);
+    const StringObjectException low_elevation = maximum_width.print.validate();
+    CHECK(low_elevation.string.find("Elevation is too low for object.") != std::string::npos);
+    CHECK(maximum_width.print.objects().front()->config().support_head_width.getFloat() == 20.0);
+    process_support_dimension_boundary(0.4, 20.0);
+    process_support_dimension_boundary(0.0, 1.0);
+
+    // Eight millimeters activates the generator's spacing floor for this
+    // density. The wider head is observed separately below while holding these
+    // generated points and their front radii fixed.
+    const SupportDimensionsRun active = process_auto_support_dimensions(8.0, 1.2, 0.5);
+    CHECK_THAT(active.tree_config.head_front_radius_mm, Catch::Matchers::WithinAbs(0.6, 1e-6));
+    CHECK_THAT(active.tree_config.head_width_mm, Catch::Matchers::WithinAbs(0.5, 1e-6));
+
+    const SupportDimensionsTreeRun configured_tree =
+        build_support_dimensions_tree(active, active.tree_config);
+    CHECK_THAT(configured_tree.support_volume,
+               Catch::Matchers::WithinRel(active.pipeline_support_volume, 1e-4));
+
+    sla::SupportTreeConfig wider_config = active.tree_config;
+    wider_config.head_width_mm = 1.5;
+    const SupportDimensionsTreeRun wider_tree = build_support_dimensions_tree(active, wider_config);
+    CHECK(wider_tree.widest_head > configured_tree.widest_head + 0.5);
+    CHECK(wider_tree.head_volume > configured_tree.head_volume + 1e-6);
+
+    sla::SupportTreeConfig zero_width_config = active.tree_config;
+    zero_width_config.head_width_mm = 0.0;
+    const SupportDimensionsTreeRun zero_width_tree =
+        build_support_dimensions_tree(active, zero_width_config);
+    CHECK_THAT(zero_width_tree.widest_head, Catch::Matchers::WithinAbs(0.0, 1e-6));
 }
 
 TEST_CASE("SLA generated support points project onto model surfaces",

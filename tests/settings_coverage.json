@@ -6489,6 +6489,36 @@
         "pipeline_oracle"
       ],
       "reason": "The direct WallToolPaths fixture checks registered 0 and 25 endpoints on a 2.0 by 0.1 mm rectangle. At 0 the output contains one finite open odd path with positive length and width at least 0.199 mm; at 25 it removes the path, while top/bottom mode retains identical positive path output for both values. The zero endpoint is passed unconditionally through the non-nullable setting to avoid treating numeric zero as absence. Other geometries and full Print export are not claimed."
+    },
+    "support_points_minimal_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0 mm as the minimum and 1 mm as the default. The public SLAPrint fixture processes 0, default 1, and representative 8 mm profiles; each must emit at least two finite new-island support points whose pairwise 3D spacing respects the configured minimum. The 8 mm profile activates the production spacing floor at density 100. This claims no upper bound."
+    },
+    "support_head_front_diameter": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0 mm as the minimum and 0.4 mm as the default. The test processes the 0 mm boundary and requires finite points with exactly zero radius plus finite support output if any is produced; default 0.4 and representative 1.2 mm profiles are processed, with 1.2 mm producing 0.6 mm-radius points. make_support_cfg must map the same diameter to a 0.6 mm tree front radius, and the public SupportTreeBuildsteps support mesh must match the completed pipeline mesh for the representative profile. No upper bound is registered."
+    },
+    "support_head_width": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..20 mm with default 1 mm. The minimum 0 is exercised through public SupportTreeBuildsteps head/mesh geometry using fixed generated points. The maximum 20 is first confirmed to fail SLAPrint validation when elevation is too low, then processed with elevation derived from the registered head dimensions plus 1 mm; completed steps, mapped config, finite support points and finite support-mesh vertices are required, without assuming positive support volume. At representative 0.5 mm, the public builder support mesh matches SLAPrint output. Holding points, model mesh and radii fixed, increasing width to 1.5 mm must increase valid-head width and aggregate head-only mesh volume from `sla::get_mesh`; total support volume is not assumed to increase because wider heads shorten pillars."
     }
   }
 }

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "names": [
+    "FocusedSLA::SLA automatic point spacing and head dimensions reach generated tree geometry",
+    "FocusedSLA::SLA generated support points project onto model surfaces",
+    "FocusedSLA::SLA maximum bridges per pillar bounds support head clustering",
+    "FocusedSLA::SLA support point density spans its minimum, representative, and default"
+  ]
+}
