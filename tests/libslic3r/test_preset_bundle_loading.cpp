@@ -10215,3 +10215,26 @@ TEST_CASE("Physical printer display names preserve printer and preset identities
     CHECK(PhysicalPrinter::get_short_name("Office * 0.4") == "Office");
     CHECK(PhysicalPrinter::get_preset_name("Office * 0.4") == "0.4");
 }
+
+TEST_CASE("Physical printer save and collection load preserve typed settings", "[PresetBundleLoading][PhysicalPrinterPersistence]")
+{
+    ScopedTemporaryDir dir("preset-deep-printer-files");
+    ScopedDataDir data(dir.path());
+    PhysicalPrinterCollection defaults(PhysicalPrinter::printer_options());
+    PhysicalPrinter printer("Office", defaults.default_config());
+    printer.file = (dir.path() / "Office.json").string();
+    REQUIRE(printer.add_preset("0.4"));
+    printer.config.opt<ConfigOptionString>("print_host")->value = "printer.local";
+    printer.update_preset_names_in_config();
+    printer.save(nullptr);
+    REQUIRE(fs::exists(printer.file));
+
+    PhysicalPrinterCollection loaded(PhysicalPrinter::printer_options());
+    PresetsConfigSubstitutions substitutions;
+    loaded.load_printers(dir.path().string(), "", substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(std::distance(loaded.begin(), loaded.end()) == 1);
+    const PhysicalPrinter &roundtrip = loaded.printer(0);
+    CHECK(roundtrip.name == "Office");
+    CHECK(roundtrip.preset_names == std::set<std::string>{"0.4"});
+    CHECK(roundtrip.config.opt_string("print_host") == "printer.local");
+}
