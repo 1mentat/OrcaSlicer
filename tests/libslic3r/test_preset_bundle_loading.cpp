@@ -10206,3 +10206,12 @@ TEST_CASE("Physical printer config updates preserve typed fields and membership 
     CHECK(printer.config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"0.4", "0.6"});
     CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
 }
+
+TEST_CASE("Physical printer display names preserve printer and preset identities", "[PresetBundleLoading][PhysicalPrinterNames]")
+{
+    PhysicalPrinterCollection defaults(PhysicalPrinter::printer_options());
+    PhysicalPrinter printer("Office", defaults.default_config());
+    CHECK(printer.get_full_name("0.4") == "Office * 0.4");
+    CHECK(PhysicalPrinter::get_short_name("Office * 0.4") == "Office");
+    CHECK(PhysicalPrinter::get_preset_name("Office * 0.4") == "0.4");
+}
