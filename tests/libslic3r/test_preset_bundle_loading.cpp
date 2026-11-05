@@ -10505,3 +10505,21 @@ TEST_CASE("Preset extruder keyset selection is explicit for supported and unknow
     }
 }
 
+
+TEST_CASE("Preset validation distinguishes direct system trust from inheritance", "[PresetBundleLoading][PresetValidationTrust]")
+{
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    add_inmemory_preset(collection, "System").is_system = true;
+    add_inmemory_preset(collection, "Child", "System");
+    std::string inherit = "Missing";
+    CHECK(collection.validate_preset("System", inherit));
+    inherit = "System";
+    CHECK(collection.validate_preset("Child", inherit));
+    inherit = "Missing";
+    CHECK_FALSE(collection.validate_preset("Child", inherit));
+    inherit = "System";
+    CHECK(collection.validate_preset("Missing", inherit));
+    inherit.clear();
+    CHECK_FALSE(collection.validate_preset("Missing", inherit));
+}
