@@ -10812,3 +10812,52 @@ TEST_CASE("Root filament aliases keep names whose vendor suffix has no prefix", 
     root.alias.clear();
     CHECK(collection.get_preset_alias(root, true) == "@Vendor");
 }
+
+TEST_CASE("Cloud sync metadata updates a base and inherited child and reports freshness", "[PresetBundleLoading][PresetCloudSync]")
+{
+    ScopedTemporaryDir dir("preset-cloud-sync");
+    ScopedDataDir data(dir.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    add_inmemory_preset(collection, "Base");
+    add_inmemory_preset(collection, "Child", "Base");
+    Preset *base = collection.find_preset("Base", false, true);
+    Preset *child = collection.find_preset("Child", false, true);
+    REQUIRE(base != nullptr);
+    REQUIRE(child != nullptr);
+    base->file = collection.path_for_preset(*base);
+    base->setting_id = "old-base";
+    base->updated_time = 0;
+    REQUIRE(base->save(nullptr));
+    child->file = collection.path_for_preset(*child);
+    child->setting_id = "child-id";
+    child->base_id = "old-base";
+    child->updated_time = 0;
+    REQUIRE(child->save(&base->config));
+
+    CHECK(collection.need_sync("Child", "child-id", 1));
+    collection.set_sync_info_and_save("Base", "new-base", "update", 12, "user-7");
+    CHECK(base->setting_id == "new-base");
+    CHECK(base->sync_info == "update");
+    CHECK(base->user_id == "user-7");
+    CHECK(base->updated_time == 12);
+    CHECK(child->base_id == "new-base");
+    CHECK_FALSE(collection.need_sync("Child", "child-id", 0));
+    CHECK_FALSE(collection.need_sync("Base", "new-base", 12));
+
+    const fs::path base_info = fs::path(base->file).replace_extension(".info");
+    const fs::path child_info = fs::path(child->file).replace_extension(".info");
+    REQUIRE(fs::exists(base_info));
+    REQUIRE(fs::exists(child_info));
+    Preset saved_base(Preset::TYPE_PRINT, "Base");
+    saved_base.load_info(base_info.string());
+    CHECK(saved_base.setting_id == "new-base");
+    CHECK(saved_base.sync_info == "update");
+    CHECK(saved_base.user_id == "user-7");
+    CHECK(saved_base.updated_time == 12);
+    Preset saved_child(Preset::TYPE_PRINT, "Child");
+    saved_child.load_info(child_info.string());
+    CHECK(saved_child.base_id == "new-base");
+    CHECK(saved_child.setting_id == "child-id");
+}
