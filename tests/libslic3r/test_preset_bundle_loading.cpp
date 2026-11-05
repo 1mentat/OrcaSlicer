@@ -9834,3 +9834,16 @@ TEST_CASE("Preset modified labels preserve aliases and remove only the leading m
     preset.set_dirty(false);
     CHECK(preset.label(false) == "Process");
 }
+
+TEST_CASE("Preset invalid-key removal reports and removes only unknown options", "[PresetBundleLoading][PresetInvalidKeys]")
+{
+    const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config = defaults;
+    config.set_key_value("preset_deep_unknown", new ConfigOptionString("x"));
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    REQUIRE(config.has("preset_deep_unknown"));
+    CHECK(Preset::remove_invalid_keys(config, defaults) == "preset_deep_unknown");
+    CHECK_FALSE(config.has("preset_deep_unknown"));
+    CHECK_THAT(config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+    CHECK(Preset::remove_invalid_keys(config, defaults).empty());
+}
