@@ -148,6 +148,17 @@ find_package(Draco REQUIRED)
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
+# Older production revisions resolve this header relative to the library root.
+# Keep the PR validation compatibility path limited to its consuming test TU.
+file(READ "${CMAKE_SOURCE_DIR}/src/libslic3r/Algorithm/LineSplit.hpp" _line_split_header)
+string(FIND "${_line_split_header}" "#include \"ClipperZUtils.hpp\"" _line_split_legacy_clipperz_include)
+if (_line_split_legacy_clipperz_include GREATER -1)
+    set_property(SOURCE test_geometry.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+        "${CMAKE_SOURCE_DIR}/src/libslic3r")
+endif ()
+unset(_line_split_header)
+unset(_line_split_legacy_clipperz_include)
+
 # TextShape tests require the matching public production API.
 if (EXISTS "${CMAKE_SOURCE_DIR}/src/libslic3r/Shape/TextShape.hpp")
     target_sources(${_TEST_NAME}_tests PRIVATE test_text_shape.cpp)
