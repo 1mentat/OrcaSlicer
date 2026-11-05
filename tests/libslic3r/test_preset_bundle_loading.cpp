@@ -9074,3 +9074,35 @@ TEST_CASE("JSON vendor malformed lists return normally and retain models with va
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+
+TEST_CASE("External config preserves project settings but filters print-host credentials",
+          "[Preset][ExternalConfigCredentials]")
+{
+    const std::vector<std::string> connection_keys{
+        "print_host", "print_host_webui", "printhost_apikey", "printhost_cafile",
+        "printhost_user", "printhost_password", "printhost_port",
+    };
+    DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    defaults.opt_float("layer_height") = 0.20;
+    for (const std::string &key : connection_keys)
+        defaults.set_key_value(key, new ConfigOptionString("local-" + key));
+    DynamicPrintConfig project = defaults;
+    project.opt_float("layer_height") = 0.31;
+    for (const std::string &key : connection_keys)
+        project.opt_string(key) = "project-" + key;
+
+    t_config_option_keys applied_keys;
+    const DynamicPrintConfig loaded = Preset::load_external_config(
+        Preset::TYPE_PRINT, defaults, project, {},
+        [](const std::string &) { return static_cast<DynamicPrintConfig *>(nullptr); }, &applied_keys);
+
+    CHECK_THAT(loaded.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+    CHECK(contains_key(applied_keys, "layer_height"));
+    for (const std::string &key : connection_keys) {
+        CAPTURE(key);
+        REQUIRE(loaded.option(key) != nullptr);
+        CHECK(loaded.opt_string(key) == defaults.opt_string(key));
+        CHECK_FALSE(contains_key(applied_keys, key));
+    }
+}
