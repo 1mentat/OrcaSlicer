@@ -8785,3 +8785,71 @@ TEST_CASE("Config loading rejects a non-G-code extension even for loadable G-cod
 }
 
 } // namespace preset_bundle_workflow_contracts
+
+namespace preset_workflow_contracts {
+
+void write_text(const fs::path &path, const std::string &text)
+{
+    fs::create_directories(path.parent_path());
+    std::ofstream output(path.string());
+    REQUIRE(output.good());
+    output << text;
+    REQUIRE(output.good());
+}
+
+TEST_CASE("Vendor profile INI header and model fields are parsed semantically", "[Preset][Vendor][VendorIni]")
+{
+    ScopedTemporaryDir dir("preset-deep-vendor");
+    const fs::path file = dir.path() / "Acme.ini";
+    write_text(file,
+        "[vendor]\nname=Acme\nconfig_version=1.2.3\nconfig_update_url=https://example.invalid/update\n"
+        "changelog_url=https://example.invalid/changelog\n"
+        "[printer_model:Alpha]\nname=Alpha Prime\ntechnology=FFF\nfamily=AlphaFamily\n"
+        "variants=0.4;0.6\ndefault_materials=PLA;PETG;PLA\n"
+        "[printer_model:Resin]\nname=Resin\ntechnology=SLA\nvariants=0.05\n"
+        "[default_filaments]\nPLA=1\nPETG=0\n[default_sla_materials]\nResin=1\n");
+
+    const VendorProfile header = VendorProfile::from_ini(file, false);
+    CHECK(header.id == "Acme");
+    CHECK(header.name == "Acme");
+    CHECK(header.config_version == *Semver::parse("1.2.3"));
+    CHECK(header.config_update_url == "https://example.invalid/update");
+    CHECK(header.changelog_url == "https://example.invalid/changelog");
+    CHECK(header.models.empty());
+
+    const VendorProfile full = VendorProfile::from_ini(file, true);
+    REQUIRE(full.models.size() == 2);
+    CHECK(full.models[0].id == "Alpha");
+    CHECK(full.models[0].technology == ptFFF);
+    CHECK(full.models[0].name == "Alpha Prime");
+    CHECK(full.models[0].family == "AlphaFamily");
+    REQUIRE(full.models[0].variants.size() == 2);
+    CHECK(full.models[0].variants[0].name == "0.4");
+    CHECK(full.models[0].variants[1].name == "0.6");
+    CHECK(full.models[0].default_materials == std::vector<std::string>{"PETG", "PLA"});
+    CHECK(full.models[1].technology == ptSLA);
+    CHECK(full.default_filaments == std::set<std::string>{"PLA"});
+    CHECK(full.default_sla_materials == std::set<std::string>{"Resin"});
+}
+
+TEST_CASE("Vendor INI parsing infers BBL families and rejects a missing version", "[Preset][Vendor][VendorIni]")
+{
+    ScopedTemporaryDir dir("preset-deep-vendor-invalid");
+    const fs::path file = dir.path() / "BBL.ini";
+    write_text(file,
+        "[vendor]\nname=BBL\nconfig_version=2.0.0\n"
+        "[printer_model:MK3]\nvariants=0.4\n"
+        "[printer_model:MK3MMU2]\nvariants=0.4\nfamily=Shared\n"
+        "[printer_model:Other]\nvariants=0.4\nfamily=Other\n");
+    const VendorProfile profile = VendorProfile::from_ini(file, true);
+    REQUIRE(profile.models.size() == 3);
+    CHECK(profile.models[0].family == "MK3");
+    CHECK(profile.models[1].family == "Shared");
+    CHECK(profile.families() == std::vector<std::string>{"MK3", "Shared", "Other"});
+
+    const fs::path malformed = dir.path() / "bad.ini";
+    write_text(malformed, "[vendor]\nname=Bad\n");
+    CHECK_THROWS_AS(VendorProfile::from_ini(malformed, false), Slic3r::RuntimeError);
+}
+
+} // namespace preset_workflow_contracts
