@@ -10030,3 +10030,16 @@ TEST_CASE("Bundle default suppression reaches every collection and changes the f
             CHECK(bundle.prints.first_visible().is_default);
     }
 }
+
+TEST_CASE("Legacy material names convert only for a recognized machine and material", "[PresetBundleLoading][PresetLegacyNames]")
+{
+    std::string known = "Bambu PLA Basic @BBL H2D";
+    PresetBundle::convert_filament_preset_name("Bambu Lab H2D 0.6 nozzle", known);
+    CHECK(known == "Bambu PLA Basic @BBL H2D 0.6 nozzle");
+    std::string custom = "Never Mapped";
+    PresetBundle::convert_filament_preset_name("Bambu Lab H2D 0.6 nozzle", custom);
+    CHECK(custom == "Never Mapped");
+    std::string unknown_machine = "Bambu PLA Basic @BBL H2D";
+    PresetBundle::convert_filament_preset_name("Unknown Machine", unknown_machine);
+    CHECK(unknown_machine == "Bambu PLA Basic @BBL H2D");
+}
