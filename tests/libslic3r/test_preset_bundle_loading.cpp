@@ -9922,3 +9922,56 @@ TEST_CASE("Preset parent save writes a diff that reload restores over the parent
     CHECK_THAT(child.config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
     CHECK(child.config.opt_int("wall_loops") == 9);
 }
+
+TEST_CASE("Detached preset creation rejects empty names and deletes only in memory", "[PresetBundleLoading][PresetDetached]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    const std::size_t before = collection.size();
+    CHECK(collection.add_detached_preset("", collection.default_preset().config).empty());
+    CHECK(collection.size() == before);
+
+    DynamicPrintConfig config = collection.default_preset().config;
+    config.option<ConfigOptionString>("inherits", true)->value = "Library Parent";
+    const std::string name = collection.add_detached_preset("Detached", config);
+    CHECK(name == "Detached");
+    const Preset *stored = collection.find_preset(name);
+    REQUIRE(stored != nullptr);
+    CHECK(stored->inherits().empty());
+    CHECK(stored->is_project_embedded);
+    REQUIRE_FALSE(stored->file.empty());
+    CHECK_FALSE(fs::exists(stored->file));
+    collection.select_preset_by_name(name, true);
+    REQUIRE(collection.delete_current_preset());
+    CHECK(collection.find_preset(name) == nullptr);
+    CHECK(collection.has_defaults_only());
+}
+
+TEST_CASE("Detached names are unique and embedded file operations preserve owned bytes", "[PresetBundleLoading][PresetDetached]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.filaments;
+    const DynamicPrintConfig config = collection.default_preset().config;
+    const std::string first = collection.add_detached_preset("Published Filament", config, "fid");
+    const std::string second = collection.add_detached_preset("Published Filament", config, "fid");
+    const std::string third = collection.add_detached_preset("Published Filament", config, "fid");
+    CHECK(first == "Published Filament");
+    CHECK(second == "Published Filament (Published)");
+    CHECK(third == "Published Filament (Published 2)");
+    Preset *stored = collection.find_preset(second);
+    REQUIRE(stored != nullptr);
+    CHECK(stored->is_project_embedded);
+    CHECK(stored->filament_id == "fid");
+    REQUIRE_FALSE(stored->file.empty());
+    CHECK_FALSE(fs::exists(stored->file));
+
+    stored->file = (scoped.directory.path() / "embedded-owned.json").string();
+    preset_workflow_contracts::write_text(stored->file, "owned");
+    REQUIRE(fs::exists(stored->file));
+    stored->remove_files();
+    CHECK(fs::exists(stored->file));
+    CHECK(stored->save(nullptr));
+    std::string contents;
+    load_string_file(stored->file, contents);
+    CHECK(contents == "owned");
+}
