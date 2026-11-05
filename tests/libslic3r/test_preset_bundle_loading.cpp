@@ -9125,3 +9125,137 @@ TEST_CASE("External config refreshes non-different values from its named parent"
     CHECK_THAT(loaded.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.30, 1e-6));
     CHECK(loaded.opt_int("wall_loops") == 7);
 }
+
+namespace preset_external_match_contracts {
+
+TEST_CASE("External preset loading selects the imported profile", "[Preset][ExternalPresetSelection]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    DynamicPrintConfig config                                           = bundle.prints.default_preset().config;
+    config.option<ConfigOptionFloat>("layer_height", true)->value       = 0.31;
+    config.option<ConfigOptionString>("print_settings_id", true)->value = "Imported";
+    ScopedTemporaryFile source(".gcode");
+    const auto loaded = bundle.prints.load_external_preset(source.string(), "Imported", "", config, {"layer_height"},
+                                                              PresetCollection::LoadAndSelect::Always);
+    REQUIRE(loaded.first != nullptr);
+    CHECK(loaded.first->is_external);
+    CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK(bundle.prints.get_selected_preset_name() == "(Imported)");
+}
+
+TEST_CASE("External preset matches preserve identity and selection policy", "[Preset][ExternalPresetSelection]")
+{
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig config = collection.default_preset().config;
+    auto *config_layer_height = config.opt<ConfigOptionFloat>("layer_height");
+    REQUIRE(config_layer_height != nullptr);
+    config_layer_height->value = 0.22;
+    Preset &stored = collection.load_preset({}, "Stored Process", config, false);
+    const std::string default_name = collection.default_preset().name;
+    ScopedTemporaryFile source(".gcode");
+
+    REQUIRE(collection.select_preset_by_name("Stored Process", true));
+    const auto retained = collection.load_external_preset(
+        source.string(), "Imported", "Stored Process", config, {}, PresetCollection::LoadAndSelect::Never);
+    REQUIRE(retained.first == &stored);
+    CHECK_FALSE(retained.second);
+    CHECK(collection.get_selected_preset_name() == "Stored Process");
+    CHECK_FALSE(collection.get_edited_preset().is_dirty);
+
+    REQUIRE(collection.select_preset(0).is_default);
+    const auto retained_from_default = collection.load_external_preset(
+        source.string(), "Imported", "Stored Process", config, {}, PresetCollection::LoadAndSelect::Never);
+    REQUIRE(retained_from_default.first == &stored);
+    CHECK_FALSE(retained_from_default.second);
+    CHECK(collection.get_selected_preset_name() == default_name);
+    CHECK_FALSE(collection.get_edited_preset().is_dirty);
+
+    const auto selected = collection.load_external_preset(
+        source.string(), "Imported", "Stored Process", config, {}, PresetCollection::LoadAndSelect::Always);
+    REQUIRE(selected.first == &stored);
+    CHECK_FALSE(selected.second);
+    CHECK(collection.get_selected_preset_name() == "Stored Process");
+    CHECK_FALSE(collection.get_edited_preset().is_dirty);
+}
+
+TEST_CASE("External preset resolves an unchanged inherited system profile", "[Preset][ExternalPresetSelection]")
+{
+    ScopedTemporaryDir temp("preset-external-inherited-match");
+    ScopedDataDir data(temp.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
+
+    DynamicPrintConfig parent_config = collection.default_preset().config;
+    auto *parent_layer_height = parent_config.opt<ConfigOptionFloat>("layer_height");
+    REQUIRE(parent_layer_height != nullptr);
+    parent_layer_height->value = 0.25;
+    Preset &parent = collection.load_preset({}, "System Parent", parent_config, false);
+    parent.is_system = true;
+    const std::string parent_name = parent.name;
+
+    // Start from the config actually stored by load_preset.  This keeps the
+    // imported profile byte-for-byte equivalent to the system parent apart from
+    // bookkeeping fields, which is the identity-resolution contract under test.
+    DynamicPrintConfig external = parent.config;
+    auto *inherits = external.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true);
+    REQUIRE(inherits != nullptr);
+    inherits->value = parent_name;
+    auto *external_id = external.option<ConfigOptionString>("print_settings_id", true);
+    REQUIRE(external_id != nullptr);
+    external_id->value = "Imported Child";
+    ScopedTemporaryFile source(".gcode");
+    const size_t before = collection.size();
+    // Match the production PresetBundle path: its helper retains the bookkeeping
+    // keys (including inherits) while listing only layer_height as a differing setting.
+    const std::set<std::string> different = PresetBundle::project_different_keys("layer_height");
+    const auto loaded = collection.load_external_preset(
+        source.string(), "Imported", "Unknown Original", external, different,
+        PresetCollection::LoadAndSelect::Always);
+
+    REQUIRE(loaded.first != nullptr);
+    // load_external_preset returns the stored profile, so request that same lookup.
+    const Preset *resolved = collection.find_preset(parent_name, false, true);
+    REQUIRE(resolved != nullptr);
+    CHECK(loaded.first == resolved);
+    CHECK_FALSE(loaded.second);
+    CHECK(collection.size() == before);
+    CHECK(collection.get_selected_preset_name() == parent_name);
+    CHECK(collection.find_preset("Unknown Original") == nullptr);
+    CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.25, 1e-9));
+}
+
+TEST_CASE("External preset override marks an existing profile dirty", "[Preset][ExternalPresetSelection]")
+{
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    DynamicPrintConfig stored_config = collection.default_preset().config;
+    auto *stored_layer_height = stored_config.opt<ConfigOptionFloat>("layer_height");
+    REQUIRE(stored_layer_height != nullptr);
+    stored_layer_height->value = 0.20;
+    Preset &stored = collection.load_preset({}, "Stored Process", stored_config, false);
+    REQUIRE(collection.select_preset_by_name("Stored Process", true));
+
+    DynamicPrintConfig external = collection.default_preset().config;
+    auto *external_layer_height = external.opt<ConfigOptionFloat>("layer_height");
+    REQUIRE(external_layer_height != nullptr);
+    external_layer_height->value = 0.31;
+    auto *external_id = external.option<ConfigOptionString>("print_settings_id", true);
+    REQUIRE(external_id != nullptr);
+    external_id->value = stored.name;
+    ScopedTemporaryFile source(".gcode");
+    const auto loaded = collection.load_external_preset(
+        source.string(), "Imported", stored.name, external, {"layer_height"},
+        PresetCollection::LoadAndSelect::Always);
+
+    REQUIRE(loaded.first == &stored);
+    REQUIRE(loaded.second);
+    CHECK(collection.get_selected_preset_name() == stored.name);
+    CHECK(collection.get_edited_preset().is_dirty);
+    CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    CHECK_THAT(collection.get_edited_preset().config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+}
+
+} // namespace preset_external_match_contracts
