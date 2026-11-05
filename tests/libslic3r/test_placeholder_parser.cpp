@@ -1562,16 +1562,25 @@ TEST_CASE("Placeholder relational, equality and logical operators bind in order"
     CHECK(parser.process("{1 == 1.0}") == "true");
     // Numeric equality tolerates rounding error.
     CHECK(parser.process("{0.1 + 0.2 == 0.3}") == "true");
+    // ... but only for differences below the tolerance.
+    CHECK(parser.process("{0.1 + 0.2 == 0.4}") == "false");
 }
 
 // Known bug: equality_expression lists "<>" as an alias of "!=", but relational_expression is tried first and
 // consumes the '<' of "<>", then fails on the '>' ("Parsing error ... Expecting an expression."), so the alias
-// can never match.
-TEST_CASE("Placeholder inequality operator also accepts the <> spelling",
+// can never match. The parse error is an exception that ends the test case, so each input has its own case.
+TEST_CASE("Placeholder inequality operator <> accepts unequal operands",
           "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
 {
     PlaceholderParser parser;
     CHECK(parser.process("{1 <> 2}") == "true");
+}
+
+// Known bug: see the previous test case; the same parse error hides the result for equal operands.
+TEST_CASE("Placeholder inequality operator <> rejects equal operands",
+          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+{
+    PlaceholderParser parser;
     CHECK(parser.process("{2 <> 2}") == "false");
 }
 
