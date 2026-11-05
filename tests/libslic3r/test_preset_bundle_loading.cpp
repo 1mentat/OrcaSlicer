@@ -9810,3 +9810,27 @@ TEST_CASE("Collection names and section names identify their preset type", "[Pre
     CHECK(bundle.printers.name() == "machine");
     CHECK(bundle.printers.section_name() == "machine");
 }
+
+TEST_CASE("Preset modified labels preserve aliases and remove only the leading marker", "[PresetBundleLoading][PresetModifiedLabels]")
+{
+    const std::string old_suffix = Preset::suffix_modified();
+    const ScopeGuard restore_suffix([&old_suffix] { Preset::update_suffix_modified(old_suffix); });
+    Preset::update_suffix_modified(" [dirty]");
+
+    Preset preset(Preset::TYPE_PRINT, "Process");
+    preset.alias = "Friendly";
+    CHECK(preset.label(false) == "Friendly");
+    CHECK(preset.label(true) == "Process");
+
+    preset.set_dirty(true);
+    CHECK(preset.label(false) == " [dirty]Friendly");
+    CHECK(preset.label(true) == " [dirty]Process");
+    CHECK(Preset::remove_suffix_modified(" [dirty]Process") == "Process");
+    CHECK(Preset::remove_suffix_modified("Process") == "Process");
+    CHECK(Preset::remove_suffix_modified("Process [dirty]") == "Process [dirty]");
+
+    preset.alias.clear();
+    CHECK(preset.label(false) == " [dirty]Process");
+    preset.set_dirty(false);
+    CHECK(preset.label(false) == "Process");
+}
