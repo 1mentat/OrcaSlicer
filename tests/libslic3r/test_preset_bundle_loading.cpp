@@ -10577,3 +10577,27 @@ TEST_CASE("Filament grouping retains system and user roots without user children
     REQUIRE(grouped.at("user-id").size() == 1);
     CHECK(grouped.at("user-id").front()->name == "User Root");
 }
+
+TEST_CASE("Printer diameter lookup and forced selection use actual edited printer state", "[PresetBundleLoading][PresetPrinterDiameters]")
+{
+    PresetCollection collection(Preset::TYPE_PRINTER, Preset::printer_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &a = add_inmemory_preset(collection, "A");
+    a.config.option<ConfigOptionString>("printer_model", true)->value = "Model";
+    a.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    Preset &b = add_inmemory_preset(collection, "B");
+    b.config.option<ConfigOptionString>("printer_model", true)->value = "Model";
+    b.config.option<ConfigOptionString>("printer_variant", true)->value = "0.6";
+    Preset &other = add_inmemory_preset(collection, "Other");
+    other.config.option<ConfigOptionString>("printer_model", true)->value = "Other";
+    other.config.option<ConfigOptionString>("printer_variant", true)->value = "1.0";
+    REQUIRE(collection.select_preset_by_name("A", true));
+    CHECK(collection.diameters_of_selected_printer() == std::vector<std::string>{"0.4", "0.6"});
+    collection.get_edited_preset().config.option<ConfigOptionString>("printer_model", true)->value = "Other";
+    CHECK(collection.diameters_of_selected_printer() == std::vector<std::string>{"1.0"});
+    CHECK(collection.select_preset_by_name("B", false));
+    CHECK_FALSE(collection.select_preset_by_name("B", false));
+    collection.get_edited_preset().config.option<ConfigOptionString>("printer_model", true)->value = "Other";
+    CHECK(collection.select_preset_by_name("B", true));
+    CHECK(collection.diameters_of_selected_printer() == std::vector<std::string>{"0.4", "0.6"});
+}
