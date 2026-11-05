@@ -3732,3 +3732,55 @@ TEST_CASE("SLA around-object connector boundaries change pad geometry",
     sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, no_width);
     sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, zero_penetration);
 }
+TEST_CASE("SLA zero critical angle links equal-height support pillars once",
+          "[SLAPrint][SLASupportCriticalAngleZero][SettingsVariance]")
+{
+    const TriangleMesh model = make_cube(10.0, 10.0, 1.0);
+    sla::SupportTreeConfig config;
+    config.object_elevation_mm = 5.0;
+    config.bridge_slope = 0.0;
+    config.head_front_radius_mm = 0.5;
+    config.head_back_radius_mm = 0.5;
+    config.head_fallback_radius_mm = 0.25;
+    config.head_width_mm = 1.0;
+    config.head_penetration_mm = 0.2;
+    config.base_radius_mm = 1.0;
+    config.base_height_mm = 1.0;
+    // Keep these 6 mm-separated heads out of one ground cluster; pillar
+    // interconnection is governed independently by the 10 mm link limit.
+    config.max_bridge_length_mm = 2.5;
+    config.max_pillar_link_distance_mm = 10.0;
+    const sla::SupportPoints points{
+        sla::SupportPoint(2.f, 5.f, 0.f, 0.5f, true),
+        sla::SupportPoint(8.f, 5.f, 0.f, 0.5f, true),
+    };
+    const std::array<std::pair<const char *, sla::PillarConnectionMode>, 3> modes{{
+        {"zigzag", sla::PillarConnectionMode::zigzag},
+        {"cross", sla::PillarConnectionMode::cross},
+        {"dynamic", sla::PillarConnectionMode::dynamic},
+    }};
+
+    // Both support points lie on the cube's bottom face. Their equal-height,
+    // 6 mm-separated pillars have a clear horizontal route below the model.
+    // At zero slope, every mode must emit the same single horizontal bridge;
+    // the shared-height case is handled before the normal zig-zag/cross loop.
+    for (const auto &[name, mode] : modes) {
+        INFO("pillar connection mode: " << name);
+        config.pillar_connection_mode = mode;
+        const sla::SupportableMesh input(model.its, points, config);
+        sla::SupportTreeBuilder tree;
+
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+        REQUIRE(tree.heads().size() == 2);
+        REQUIRE(tree.pillars().size() == 2);
+        REQUIRE(tree.crossbridges().size() == 1);
+        CHECK(tree.heads()[0].is_valid());
+        CHECK(tree.heads()[1].is_valid());
+        CHECK(tree.pillars()[0].links == 1);
+        CHECK(tree.pillars()[1].links == 1);
+
+        const sla::Bridge &bridge = tree.crossbridges().front();
+        CHECK_THAT(bridge.get_length(), Catch::Matchers::WithinAbs(6.0, 1e-6));
+        CHECK_THAT(bridge.startp.z(), Catch::Matchers::WithinAbs(bridge.endp.z(), 1e-9));
+    }
+}

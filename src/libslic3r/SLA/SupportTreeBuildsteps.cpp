@@ -347,6 +347,20 @@ bool SupportTreeBuildsteps::interconnect(const Pillar &pillar,
     if(supper(Z) < slower(Z)) supper.swap(slower);
     if(eupper(Z) < elower(Z)) eupper.swap(elower);
 
+    const double common_top = std::min(supper(Z), slower(Z));
+    const double common_bottom = std::max(eupper(Z), elower(Z));
+    if (!(common_top + zstep < common_top)) {
+        if (common_top >= common_bottom) {
+            Vec3d sj = supper, ej = slower;
+            sj(Z) = ej(Z) = common_top;
+            if (bridge_mesh_distance(sj, dirv(sj, ej), pillar.r) >= bridge_distance) {
+                m_builder.add_crossbridge(sj, ej, pillar.r);
+                was_connected = true;
+            }
+        }
+        return was_connected;
+    }
+
     double startz = 0, endz = 0;
 
     startz = slower(Z) - zstep < supper(Z) ? slower(Z) - zstep : slower(Z);
@@ -399,7 +413,9 @@ bool SupportTreeBuildsteps::interconnect(const Pillar &pillar,
         }
 
         sj.swap(ej);
-        ej(Z) = sj(Z) + zstep;
+        const double next_z = sj(Z) + zstep;
+        if (!(next_z < sj(Z))) break;
+        ej(Z) = next_z;
     }
 
     return was_connected;

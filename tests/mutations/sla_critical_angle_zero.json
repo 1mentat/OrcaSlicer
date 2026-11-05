@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "SLA zero-angle pillar interconnection consumer probe",
+  "mutants": [
+    {
+      "id": "sla-zero-angle-horizontal-bridge-suppressed",
+      "path": "src/libslic3r/SLA/SupportTreeBuildsteps.cpp",
+      "old": "                m_builder.add_crossbridge(sj, ej, pillar.r);\n                was_connected = true;",
+      "new": "                // Mutation probe: suppress the shared-height bridge.",
+      "description": "Keep the zero-step termination branch but suppress its only horizontal bridge; the deterministic two-pillar test must reject the missing geometric connection in zigzag, cross, and dynamic modes.",
+      "test_filter": "^SLASupportCriticalAngleZero$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "expected_oracle": "The bridge count becomes zero, so the ordinary assertion expecting exactly one bridge fails."
+    }
+  ]
+}

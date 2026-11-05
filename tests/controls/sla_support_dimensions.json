@@ -67,6 +67,7 @@
     "FocusedSLA::SLA supports_enable controls manual support production on one fixture",
     "FocusedSLA::SLA tall isolated pillars acquire two printable neighbors",
     "FocusedSLA::SLA task limits are reversible after finalize",
-    "FocusedSLA::SLA transformed support points follow the print transformation"
+    "FocusedSLA::SLA transformed support points follow the print transformation",
+    "FocusedSLA::SLA zero critical angle links equal-height support pillars once"
   ]
 }

@@ -4,6 +4,7 @@
     "FocusedSLA::SLA automatic point spacing and head dimensions reach generated tree geometry",
     "FocusedSLA::SLA generated support points project onto model surfaces",
     "FocusedSLA::SLA maximum bridges per pillar bounds support head clustering",
-    "FocusedSLA::SLA support point density spans its minimum, representative, and default"
+    "FocusedSLA::SLA support point density spans its minimum, representative, and default",
+    "FocusedSLA::SLA zero critical angle links equal-height support pillars once"
   ]
 }

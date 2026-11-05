@@ -1760,6 +1760,15 @@ to retain the pipeline source-file controls. The mutation label is
 `SLAHollowingVariance`. These are bounded box/sphere contracts; drain-hole
 behavior is outside scope because that step is disabled.
 
+The `[SLASupportCriticalAngleZero]` case checks pillar interconnection at the
+registered zero-degree minimum. Two separate, equal-height support pillars
+must form one horizontal bridge in zigzag, cross, and dynamic modes. Use
+`tests/mutations/sla_critical_angle_zero.json` with `sla_print_tests`, the
+`SLASupportCriticalAngleZero` label, and exact control inventory
+`tests/controls/sla_critical_angle_zero.json`. The bridge-suppression mutant
+must fail the bridge-count assertion. The case establishes direct support-tree
+behavior at zero degrees; it does not claim the full 0–90 degree setting range.
+
 SLA support diameter, base height, and head penetration in
 `sla_supptgen_tests.cpp` are checked through public support-mesh sections and
 bounds. Use `tests/mutations/sla_support_geometry_settings.json` with

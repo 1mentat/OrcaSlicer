@@ -23,6 +23,14 @@
       ],
       "reason": "PrintConfig.cpp registers 0..50 with default 3. Six manual heads on a 2\u00d73 grid stay within the configured bridge-length and base-radius predicates while avoiding head overlap. The test applies and validates 0, 3, and 50 through SLAPrint, builds the production SupportTreeConfig from the object config, and compares the completed SLAPrint support-mesh volume with the direct public SupportTreeBuildsteps output. Builder graph assertions check valid heads, head-to-pillar routing, per-pillar bridge caps, and the observed bridge clusters: zero permits an unbounded cluster but the bridge gate prevents links, default 3 forms two three-head clusters, and 50 forms one six-head cluster."
     },
+    "support_critical_angle": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportCriticalAngleZero]",
+      "dimensions": [
+        "fixture_only"
+      ],
+      "reason": "At the registered 0 degree minimum, a direct public SupportTreeBuildsteps fixture with two equal-height support pillars 6 mm apart must emit exactly one clear horizontal bridge and one link per pillar in zigzag, cross, and dynamic modes. The previous zero-step loop did not descend and timed out under a bounded test. This is a minimum-boundary consumer contract; the default 45 degree and maximum 90 degree values and PrintConfig-to-tree mapping are outside this claim."
+    },
     "bottle_cost": {
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
       "tag": "[SLABottleMetadata]",
