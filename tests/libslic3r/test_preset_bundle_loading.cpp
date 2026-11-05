@@ -10270,8 +10270,7 @@ TEST_CASE("Physical printer collection selection and preset filters are consiste
     CHECK_FALSE(collection.delete_selected_printer());
 }
 
-// Known bug: saving an existing collection printer self-moves and clears its config.
-TEST_CASE("Deleting a printer preset updates physical printer membership and files", "[PresetBundleLoading][PhysicalPrinterDeletion][!shouldfail]")
+TEST_CASE("Deleting a printer preset updates physical printer membership and files", "[PresetBundleLoading][PhysicalPrinterDeletion]")
 {
     ScopedTemporaryDir dir("preset-deep-printer-delete");
     ScopedDataDir data(dir.path());
