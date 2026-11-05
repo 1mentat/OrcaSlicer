@@ -9125,4 +9125,3 @@ TEST_CASE("External config refreshes non-different values from its named parent"
     CHECK_THAT(loaded.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.30, 1e-6));
     CHECK(loaded.opt_int("wall_loops") == 7);
 }
-
