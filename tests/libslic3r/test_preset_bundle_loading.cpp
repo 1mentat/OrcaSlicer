@@ -10644,3 +10644,21 @@ TEST_CASE("Printer-held aliases register and remove without changing preset iden
     compatible = {"Printer A"};
     CHECK_FALSE(collection.is_alias_exist("PLA", &filament));
 }
+
+TEST_CASE("Compatibility conditions evaluate predicates and preserve malformed fallback", "[PresetBundleLoading][PresetCompatibilityConditions]")
+{
+    Preset filament(Preset::TYPE_FILAMENT, "PLA");
+    filament.config = DynamicPrintConfig::full_print_config();
+    filament.config.option<ConfigOptionStrings>("compatible_printers", true)->values.clear();
+    filament.config.option<ConfigOptionString>("compatible_printers_condition", true)->value = R"(printer_model == "X1")";
+    Preset printer(Preset::TYPE_PRINTER, "X1");
+    printer.config = DynamicPrintConfig::full_print_config();
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "X1";
+    CHECK(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "Other";
+    CHECK_FALSE(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "X1";
+    filament.config.option<ConfigOptionString>("compatible_printers_condition", true)->value = "(";
+    CHECK(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
+    CHECK(is_compatible_with_printer(filament.config, Preset::TYPE_FILAMENT, printer.config, "X1"));
+}
