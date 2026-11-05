@@ -3893,7 +3893,7 @@ TEST_CASE("Scalar apply_override reports whether the value differs and leaves th
     CHECK(default_index == initial_index);
 }
 
-TEST_CASE("Representative scalar options copy through the virtual override setter", "[Config][ConfigContracts][ConfigScalarOverride][!shouldfail]")
+TEST_CASE("Representative scalar options copy through the virtual override setter", "[Config][ConfigContracts][ConfigScalarOverride]")
 {
     std::vector<int> default_index{7, -1};
 
@@ -3922,8 +3922,6 @@ TEST_CASE("Representative scalar options copy through the virtual override sette
     ConfigOption &point_base = point;
     point_base.apply_override(&replacement_point, default_index);
 
-    // Known bug: the base ConfigOption::apply_override assigns through the base class (slicing) and
-    // reports a change without copying the value; fixed by the follow-up fix PR
     CHECK(text.value == "right");
     CHECK(number.value == 7);
     CHECK_THAT(decimal.value, WithinAbs(2.5, 1e-12));
@@ -3935,7 +3933,7 @@ TEST_CASE("Representative scalar options copy through the virtual override sette
     CHECK_FALSE(number_base.apply_override(&replacement_number, default_index));
 }
 
-TEST_CASE("Derived scalar options preserve subtype state through override", "[Config][ConfigContracts][ConfigScalarOverride][!shouldfail]")
+TEST_CASE("Derived scalar options preserve subtype state through override", "[Config][ConfigContracts][ConfigScalarOverride]")
 {
     std::vector<int> default_index{3, 1};
 
@@ -3957,8 +3955,6 @@ TEST_CASE("Derived scalar options preserve subtype state through override", "[Co
     ConfigOption &specialized_base = specialized_target;
     specialized_base.apply_override(&generic_source, default_index);
 
-    // Known bug: the base ConfigOption::apply_override reports a change without copying any value
-    // or subtype state; fixed by the follow-up fix PR
     CHECK_THAT(absolute.value, WithinAbs(25., 1e-12));
     CHECK(absolute.percent);
     CHECK(absolute.serialize() == "25%");

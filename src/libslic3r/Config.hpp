@@ -313,7 +313,7 @@ public:
     virtual bool 				apply_override(const ConfigOption *rhs, std::vector<int>& default_index) {
     	if (*this == *rhs)
     		return false;
-    	*this = *rhs;
+        this->set(rhs);
     	return true;
     }
 };
