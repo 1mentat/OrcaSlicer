@@ -9393,7 +9393,7 @@ namespace bbs_layer_profile_record_contracts {
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
-TEST_CASE("BBS import takes valid layer height profile records and skips malformed ones", "[3MF][Bbs3mfMetadata][LayerProfile]")
+TEST_CASE("BBS import applies valid layer height profile records and skips damaged ones", "[3MF][Bbs3mfMetadata][LayerProfile]")
 {
     ScopedTemporaryDir backup("orca_bbs_profile_record_store");
     Model source;
@@ -9415,7 +9415,9 @@ TEST_CASE("BBS import takes valid layer height profile records and skips malform
     bbs_archive_contracts::store_model(archive.string(), source, config, plates);
 
     // One-based object ids. Valid records for objects 2 and 4 (different values); the rest are damaged.
-    // A record of exactly four values is deliberately not used: the writer stores such a profile while
+    // The record for id 9 is not a skip rule: the reader keeps it in its id map and nothing looks it up.
+    // The repeated-id guard runs before the size/parity checks, so an invalid first record does not reserve
+    // its id (not pinned). A record of exactly four values is deliberately not used: the writer stores one while
     // the reader here refuses it, an unresolved asymmetry that is not pinned.
     const std::string records =
         "malformed-row\n"                                  // no "|"
@@ -9424,9 +9426,9 @@ TEST_CASE("BBS import takes valid layer height profile records and skips malform
         "object_id=2|0;0.12;0.8;0.2;1.6;0.28\n"            // valid
         "object_id=2|0;0.22;0.8;0.3;1.6;0.38\n"            // repeated id: the first record stays
         "object_id=4|0;0.42;0.8;0.5;1.6;0.58\n"            // valid
-        "object_id=1|0;0.1\n"                              // too short
+        "object_id=1|0;0.1\n"                              // too short (2 values; kills a <2 or <=0 size check, not <4 or <=3)
         "object_id=3|0;0.1;0.2;0.3;0.4\n"                  // odd count
-        "object_id=9|0;0.12;0.8;0.2;1.6;0.28\n";           // no such object
+        "object_id=9|0;0.12;0.8;0.2;1.6;0.28\n";           // no object has this id: stored by the reader, never consumed
     bool replaced = false;
     REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string& name, std::string& data) {
         if (name != "Metadata/layer_heights_profile.txt")
