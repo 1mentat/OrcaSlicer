@@ -10861,3 +10861,34 @@ TEST_CASE("Cloud sync metadata updates a base and inherited child and reports fr
     CHECK(saved_child.base_id == "new-base");
     CHECK(saved_child.setting_id == "child-id");
 }
+
+TEST_CASE("User preset export filters cloud state and unresolved inherited identities", "[PresetBundleLoading][PresetCloudExportFilter]")
+{
+    ScopedTemporaryDir dir("preset-cloud-export-filter");
+    ScopedDataDir data(dir.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &base = add_inmemory_preset(collection, "Base");
+    base.setting_id = "base-id";
+    base.sync_info.clear();
+    add_inmemory_preset(collection, "Root").sync_info = "save";
+    Preset &child = add_inmemory_preset(collection, "Child", "Base");
+    child.sync_info = "save";
+    child.base_id = "base-id";
+    Preset &hold = add_inmemory_preset(collection, "Hold");
+    hold.setting_id = "hold-id";
+    hold.sync_info = "hold";
+    Preset &orphan = add_inmemory_preset(collection, "Orphan", "Base");
+    orphan.base_id.clear();
+    orphan.sync_info = "save";
+    Preset &system = add_inmemory_preset(collection, "System");
+    system.is_system = true;
+    system.sync_info = "save";
+
+    std::vector<Preset> users;
+    CHECK(collection.get_user_presets(nullptr, users) == 2);
+    std::set<std::string> names;
+    for (const Preset &preset : users)
+        names.insert(preset.name);
+    CHECK(names == std::set<std::string>{"Child", "Root"});
+}
