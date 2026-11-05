@@ -7509,7 +7509,7 @@ TEST_CASE("Deleting a user preset removes its own files and leaves the others", 
     CHECK(fs::exists(kept_info));
 }
 
-TEST_CASE("Deleting a cloud-synced user preset keeps its info file marked for deletion", "[Preset][Bundle][PresetLifecycle][Delete]")
+TEST_CASE("Deleting a cloud-synced user preset keeps its info file marked for deletion", "[Preset][Bundle][PresetLifecycle][Delete][PresetInfoFiles]")
 {
     ScopedPresetBundle scoped;
     PresetBundle &bundle = scoped.bundle;
@@ -7534,6 +7534,9 @@ TEST_CASE("Deleting a cloud-synced user preset keeps its info file marked for de
     CHECK(content.find("sync_info = delete") != std::string::npos);
     CHECK(content.find("setting_id = cloud-setting-id") != std::string::npos);
     CHECK(content.find("user_id = cloud-user") != std::string::npos);
+    Preset reloaded(Preset::TYPE_PRINT, "Cloud Process");
+    reloaded.load_info(info.string());
+    CHECK(reloaded.sync_info == "delete");
 }
 
 namespace {
@@ -9846,4 +9849,45 @@ TEST_CASE("Preset invalid-key removal reports and removes only unknown options",
     CHECK_FALSE(config.has("preset_deep_unknown"));
     CHECK_THAT(config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
     CHECK(Preset::remove_invalid_keys(config, defaults).empty());
+}
+
+TEST_CASE("Preset info metadata round-trips null normalization and timestamps", "[PresetBundleLoading][PresetInfoFiles]")
+{
+    ScopedTemporaryDir dir("preset-info");
+    const fs::path data_path = dir.path() / "data";
+    fs::create_directories(data_path);
+    ScopedDataDir data(data_path);
+
+    Preset saved(Preset::TYPE_PRINT, "User");
+    saved.file = (dir.path() / "User.json").string();
+    saved.sync_info = "update";
+    saved.user_id = "u-1";
+    saved.setting_id = "s-1";
+    saved.base_id = "b-1";
+    saved.updated_time = 123456;
+    saved.save_info();
+    REQUIRE(fs::exists(dir.path() / "User.info"));
+    Preset loaded(Preset::TYPE_PRINT, "User");
+    loaded.load_info((dir.path() / "User.info").string());
+    CHECK(loaded.sync_info == "update");
+    CHECK(loaded.user_id == "u-1");
+    CHECK(loaded.setting_id == "s-1");
+    CHECK(loaded.base_id == "b-1");
+    CHECK(loaded.updated_time == 123456);
+
+    Preset bundled(Preset::TYPE_PRINT, "Bundled");
+    bundled.bundle_id = "bundle-1";
+    bundled.file = (dir.path() / "Bundled.json").string();
+    bundled.save_info();
+    CHECK_FALSE(fs::exists(dir.path() / "Bundled.info"));
+
+    preset_workflow_contracts::write_text(dir.path() / "Null.info",
+        "setting_id = null\nbase_id = null\nupdated_time = 4\n");
+    Preset nulls(Preset::TYPE_PRINT, "Null");
+    nulls.setting_id = "old-setting";
+    nulls.base_id = "old-base";
+    nulls.load_info((dir.path() / "Null.info").string());
+    CHECK(nulls.setting_id.empty());
+    CHECK(nulls.base_id.empty());
+    CHECK(nulls.updated_time == 4);
 }
