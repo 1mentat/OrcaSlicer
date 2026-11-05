@@ -9430,11 +9430,11 @@ TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
     PresetBundle writer;
     write_json_preset(directory / PRESET_PRINT_NAME / "Reload Process.json",
                       print_config(writer, "Reload Process", 0.24), "Reload Process");
-    DynamicPrintConfig material = filament_config(writer, "Reload PLA", prefix + "Reload Printer");
+    DynamicPrintConfig material = filament_config(writer, "Reload PLA", prefix + "Reload Printer", "Reload Vendor");
     material.option<ConfigOptionFloats>("filament_density", true)->values = { 1.27 };
     write_json_preset(directory / PRESET_FILAMENT_NAME / "Reload PLA.json", material, "Reload PLA");
-    DynamicPrintConfig machine = printer_config(writer, "Reload Printer");
-    machine.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4 };
+    DynamicPrintConfig machine = printer_config(writer, "Reload Printer", "0.8");
+    machine.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.8 };
     write_json_preset(directory / PRESET_PRINTER_NAME / "Reload Printer.json", machine, "Reload Printer");
 
     PresetBundle loaded;
@@ -9455,7 +9455,9 @@ TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
     REQUIRE(filament->config.option<ConfigOptionFloats>("filament_density")->values.size() == 1);
     CHECK_THAT(filament->config.option<ConfigOptionFloats>("filament_density")->values.front(),
                Catch::Matchers::WithinAbs(1.27, 1e-9));
+    CHECK(filament->config.opt_string("filament_vendor", 0u) == "Reload Vendor");
     CHECK(printer->config.opt_string("printer_model") == "Workflow Printer");
+    CHECK(printer->config.opt_string("printer_variant") == "0.8");
 
     REQUIRE(loaded.bundles.m_bundles.size() == 1);
     const auto found = loaded.bundles.m_bundles.find("remote-reload");
