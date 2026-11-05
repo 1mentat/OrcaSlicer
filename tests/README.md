@@ -1769,6 +1769,15 @@ must form one horizontal bridge in zigzag, cross, and dynamic modes. Use
 must fail the bridge-count assertion. The case establishes direct support-tree
 behavior at zero degrees; it does not claim the full 0–90 degree setting range.
 
+The `[SLASupportMaxPillarLinkDistance]` case runs the public SLA pipeline with
+two support heads 3 mm apart. The 0 and 2.9 mm settings leave both pillars
+unlinked; 3.1 mm and the implicit 10 mm default link both. It checks the
+resolved support-tree graph and support-mesh volume against the completed
+SLAPrint result. The setting has no registered upper bound. Use
+`tests/mutations/sla_support_dimensions.json` with `sla_print_tests` and the
+exact `tests/controls/sla_support_dimensions.json` inventory. The mapping
+mutant forces the default distance and must fail ordinary link-count checks.
+
 SLA support diameter, base height, and head penetration in
 `sla_supptgen_tests.cpp` are checked through public support-mesh sections and
 bounds. Use `tests/mutations/sla_support_geometry_settings.json` with

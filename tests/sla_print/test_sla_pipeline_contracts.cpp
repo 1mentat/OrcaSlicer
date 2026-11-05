@@ -271,15 +271,18 @@ struct PillarConnectionRun
     std::size_t support_faces = 0;
     std::size_t separated_support_slices = 0;
     double max_support_centroid_spacing_mm = 0.0;
+    std::size_t linked_pillars = 0;
 };
 
-DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode)
+DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode,
+                                            const std::optional<double> max_pillar_link_distance = 10.0,
+                                            const double object_elevation = 15.0)
 {
     DynamicPrintConfig config = sla_config(1.0);
     config.set_deserialize_strict({
         { "supports_enable",                 true },
         { "support_buildplate_only",         false },
-        { "support_object_elevation",        15.0 },
+        { "support_object_elevation",        object_elevation },
         { "support_head_front_diameter",     1.0 },
         { "support_head_penetration",        0.2 },
         { "support_head_width",              1.0 },
@@ -292,19 +295,24 @@ DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode)
         // 3D separation must exceed this clustering limit, while interconnect() still
         // accepts the pair through support_max_pillar_link_distance below.
         { "support_max_bridge_length",       2.5 },
-        { "support_max_pillar_link_distance", 10.0 },
         { "support_max_bridges_on_pillar",   8 },
         { "support_pillar_widening_factor",  0.0 },
     });
+    if (max_pillar_link_distance.has_value())
+        config.set_key_value("support_max_pillar_link_distance",
+                             new ConfigOptionFloat(*max_pillar_link_distance));
     config.set_key_value("support_pillar_connection_mode",
                          new ConfigOptionEnum<SLAPillarConnectionMode>(mode));
     return config;
 }
 
 PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode,
-                                               const double                    spacing)
+                                               const double                    spacing,
+                                               const std::optional<double>     max_pillar_link_distance = 10.0,
+                                               const double                    object_elevation = 15.0,
+                                               const bool                      rebuild_tree_for_link_count = false)
 {
-    DynamicPrintConfig config = pillar_connection_config(mode);
+    DynamicPrintConfig config = pillar_connection_config(mode, max_pillar_link_distance, object_elevation);
     sla::SupportPoints points{
         sla::SupportPoint(float(5.0 - spacing / 2.0), 5.f, 0.f, 0.5f, true),
         sla::SupportPoint(float(5.0 + spacing / 2.0), 5.f, 0.f, 0.5f, false),
@@ -327,6 +335,25 @@ PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode
     REQUIRE(std::isfinite(model_volume));
     REQUIRE(support_volume > 0.0);
     REQUIRE(model_volume > 0.0);
+
+    std::size_t linked_pillars = 0;
+    if (rebuild_tree_for_link_count) {
+        // Rebuild from the public SLAPrint object's transformed mesh and resolved config.
+        // This makes the link count an oracle for PrintConfig-to-SupportTreeConfig mapping
+        // and for SupportTreeBuildsteps::interconnect_pillars(), not for config storage.
+        const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+        const sla::SupportableMesh tree_input(object->transformed_mesh().its,
+                                              object->get_support_points(), tree_config);
+        sla::SupportTreeBuilder tree;
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, tree_input));
+        for (const sla::Pillar &pillar : tree.pillars())
+            if (pillar.links > 0)
+                ++linked_pillars;
+        TriangleMesh rebuilt_support{tree.retrieve_mesh(sla::MeshType::Support)};
+        REQUIRE_FALSE(rebuilt_support.empty());
+        CHECK_THAT(std::abs(static_cast<double>(rebuilt_support.volume())),
+                   Catch::Matchers::WithinRel(support_volume, 1e-5));
+    }
 
     // A public slice-level witness that the two heads stayed separate.  Base polygons
     // may overlap at the bottom, so search every support slice and use the largest
@@ -353,7 +380,7 @@ PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode
     REQUIRE(separated_support_slices > 0);
     REQUIRE(max_support_centroid_spacing_mm > 2.0);
     return {support_volume, model_volume, support.its.vertices.size(), support.its.indices.size(),
-            separated_support_slices, max_support_centroid_spacing_mm};
+            separated_support_slices, max_support_centroid_spacing_mm, linked_pillars};
 }
 
 std::size_t process_auto_support_point_count(std::optional<int> density_percent)
@@ -2388,6 +2415,29 @@ TEST_CASE("SLA pillar connection modes preserve intended near and far bridge top
                Catch::Matchers::WithinRel(near_zigzag.support_volume, 1e-6));
     CHECK_THAT(far_dynamic.support_volume,
                Catch::Matchers::WithinRel(far_cross.support_volume, 1e-6));
+}
+
+TEST_CASE("SLA maximum pillar link distance controls inter-pillar bridges",
+          "[SLAPrint][SLAPipeline][SettingsVariance][SLASupportMaxPillarLinkDistance]")
+{
+    constexpr double head_spacing = 3.0;
+    constexpr double short_elevation = 8.0;
+    const PillarConnectionRun disabled =
+        process_pillar_connection(slapcmZigZag, head_spacing, 0.0, short_elevation, true);
+    const PillarConnectionRun below_spacing =
+        process_pillar_connection(slapcmZigZag, head_spacing, 2.9, short_elevation, true);
+    const PillarConnectionRun above_spacing =
+        process_pillar_connection(slapcmZigZag, head_spacing, 3.1, short_elevation, true);
+    const PillarConnectionRun default_distance =
+        process_pillar_connection(slapcmZigZag, head_spacing, std::nullopt, short_elevation, true);
+
+    CHECK(disabled.linked_pillars == 0);
+    CHECK(below_spacing.linked_pillars == 0);
+    CHECK(above_spacing.linked_pillars == 2);
+    CHECK(default_distance.linked_pillars == 2);
+    CHECK(above_spacing.support_volume > below_spacing.support_volume + 1e-6);
+    CHECK_THAT(default_distance.support_volume,
+               Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
 }
 
 namespace sla_active_next_contracts {

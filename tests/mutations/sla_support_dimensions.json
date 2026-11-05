@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Combined SLA support point spacing, front-head diameter, and head-width pipeline/consumer probes. Each mutant is selected by the sole SLASupportDimensions test and must fail through ordinary assertions.",
+  "description": "SLA support point spacing, head dimensions, and maximum pillar link distance pipeline/consumer probes. Mutants are selected by their sole settings-variance test and must fail through ordinary assertions.",
   "mutants": [
     {
       "id": "sla-support-minimal-distance-mapping-ignored",
@@ -49,6 +49,18 @@
       "expected_test_count": 1,
       "ordinary_assertion_only": true,
       "expected_oracle": "The ordinary aggregate head-only mesh-volume assertion no longer increases for the 1.5 mm head, and the valid-head width assertion may also fail; total support volume is deliberately not used as a monotonic width oracle."
+    },
+    {
+      "id": "sla-support-max-pillar-link-distance-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.max_pillar_link_distance_mm = c.support_max_pillar_link_distance.getFloat();",
+      "new": "    scfg.max_pillar_link_distance_mm = 10.0;",
+      "description": "Ignore the registered maximum pillar link distance and force its default. With an 8 mm object elevation below the 15 mm solo-pillar threshold, the minimum 0 and below-spacing 2.9 mm rows must have no links between the two 3 mm-spaced pillars; 3.1 mm and the implicit default 10 mm must link both pillars.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportMaxPillarLinkDistance$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary linked_pillars assertions fail for the minimum and below-spacing rows when the mapping forces a 10 mm link limit."
     }
   ]
 }

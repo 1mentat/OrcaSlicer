@@ -41,6 +41,7 @@
     "FocusedSLA::SLA manual supports elevate the object and emit support slices",
     "FocusedSLA::SLA material correction scales transformed slice geometry",
     "FocusedSLA::SLA maximum bridges per pillar bounds support head clustering",
+    "FocusedSLA::SLA maximum pillar link distance controls inter-pillar bridges",
     "FocusedSLA::SLA mesh getters expose only completed support and pad products",
     "FocusedSLA::SLA model extension and deletion synchronize print objects by ID",
     "FocusedSLA::SLA overlapping objects are unioned before material statistics",
