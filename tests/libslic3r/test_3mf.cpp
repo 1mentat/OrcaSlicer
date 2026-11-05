@@ -9454,7 +9454,7 @@ TEST_CASE("BBS import applies valid layer height profile records and skips damag
     };
     for (const auto& [name, profile] : expected) {
         INFO(name);
-        const auto found = std::find_if(loaded.objects.begin(), loaded.objects.end(), [&](const ModelObject* object) { return object->name == name; });
+        const auto found = std::find_if(loaded.objects.begin(), loaded.objects.end(), [&object_name = name](const ModelObject* object) { return object->name == object_name; });
         REQUIRE(found != loaded.objects.end());
         const auto& actual = (*found)->layer_height_profile.get();
         REQUIRE(actual.size() == profile.size());
