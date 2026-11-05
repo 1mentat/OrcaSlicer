@@ -10802,3 +10802,13 @@ TEST_CASE("Calibration printer selection follows filament compatibility profiles
     CHECK(bundle.calibrate_filaments.empty());
 }
 
+
+TEST_CASE("Root filament aliases keep names whose vendor suffix has no prefix", "[PresetBundleLoading][PresetEmptyPrefixAlias]")
+{
+    PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    Preset &root = add_inmemory_preset(collection, "@Vendor");
+    REQUIRE(root.inherits().empty());
+    root.alias.clear();
+    CHECK(collection.get_preset_alias(root, true) == "@Vendor");
+}
