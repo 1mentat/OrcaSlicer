@@ -10410,3 +10410,31 @@ TEST_CASE("Preset printer type lookups distinguish edited and preset models", "[
     CHECK(process.get_printer_type(nullptr).empty());
     CHECK(process.get_current_printer_type(nullptr).empty());
 }
+
+TEST_CASE("Preset hardware capabilities distinguish vendor and model identity", "[PresetBundleLoading][PresetHardwareMetadata]")
+{
+    PresetBundle bundle;
+    VendorProfile vendor("BBL");
+    vendor.name = "BBL";
+    VendorProfile::PrinterModel model;
+    model.name = "X1";
+    model.model_id = "BL-P001";
+    vendor.models.push_back(model);
+    bundle.vendors.emplace(vendor.id, vendor);
+    bundle.printers.get_edited_preset().config.option<ConfigOptionString>("printer_model", true)->value = "X1";
+    Preset process(Preset::TYPE_PRINT, "Process");
+    process.config = DynamicPrintConfig::full_print_config();
+    process.config.option<ConfigOptionString>("printer_model", true)->value = "Other Model";
+    CHECK(process.has_lidar(&bundle));
+    CHECK(process.has_cali_lines(&bundle));
+
+    bundle.vendors.clear();
+    VendorProfile other("Acme");
+    other.name = "Acme";
+    other.models.push_back(model);
+    bundle.vendors.emplace(other.id, other);
+    CHECK_FALSE(process.has_lidar(&bundle));
+    CHECK(process.has_cali_lines(&bundle));
+    bundle.vendors.at("Acme").models.front().model_id = "OTHER";
+    CHECK_FALSE(process.has_cali_lines(&bundle));
+}
