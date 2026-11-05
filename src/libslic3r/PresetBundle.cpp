@@ -7314,7 +7314,7 @@ void PresetBundle::parse_vendor_json(VendorRead& read)
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_PRINTER_TECH)) {
                     //get printer tech
-                    if (boost::algorithm::starts_with(it.value(), "SL"))
+                    if (it.value().is_string() && boost::algorithm::starts_with(it.value().get<std::string>(), "SL"))
                         model.technology = ptSLA;
                     else
                         model.technology = ptFFF;

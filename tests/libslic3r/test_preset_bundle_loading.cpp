@@ -9010,9 +9010,8 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
 }
 
 
-// Known bug: JSON technology is compared as a JSON sequence instead of a string; fixed by the follow-up fix PR.
 TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists",
-          "[Preset][Vendor][VendorJson][VendorJsonSla][!shouldfail]")
+          "[Preset][Vendor][VendorJson][VendorJsonSla]")
 {
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
