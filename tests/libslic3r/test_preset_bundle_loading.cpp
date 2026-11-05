@@ -10009,6 +10009,7 @@ TEST_CASE("Bundle default suppression reaches every collection and changes the f
     const DynamicPrintConfig config = bundle.prints.default_preset().config;
     Preset &visible = bundle.prints.load_preset({}, "Visible Process", config, false);
     visible.vendor = &library;
+    bundle.set_default_suppressed(false);
     CHECK(bundle.prints.first_visible().is_default);
 
     for (bool suppressed : {true, false}) {
