@@ -9079,3 +9079,111 @@ TEST_CASE("BBS export skips a calibration thumbnail it does not store", "[3MF][B
 }
 
 } // namespace bbs_calibration_thumbnail_contracts
+
+namespace bbs_plate_sidecar_contracts {
+using namespace Slic3r;
+
+namespace {
+
+void write_file(const boost::filesystem::path& path, const std::string& bytes)
+{
+    boost::nowide::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << bytes;
+    output.flush();
+    REQUIRE(output.good());
+}
+
+std::string read_file_bytes(const boost::filesystem::path& path)
+{
+    boost::nowide::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("BBS plate sidecar thumbnails are stored and imported per plate", "[3MF][Bbs3mfSidecars]")
+{
+    // Two plates, each with its own four sidecar files (plate image, no-light image, top view, pick
+    // image) holding bytes of their own. The exporter only reads these as files on disk.
+    const std::array<std::string, 4> kinds    = {"plate", "no_light", "top", "pick"};
+    const std::array<std::string, 4> archived = {"Metadata/plate_%d.png", "Metadata/plate_no_light_%d.png", "Metadata/top_%d.png",
+                                                 "Metadata/pick_%d.png"};
+    const auto archived_name = [&](size_t kind, int plate_number) {
+        std::string name = archived[kind];
+        name.replace(name.find("%d"), 2, std::to_string(plate_number));
+        return name;
+    };
+    const auto payload = [&](size_t kind, int plate_number) { return "sidecar-" + kinds[kind] + "-of-plate-" + std::to_string(plate_number); };
+
+    ScopedTemporaryDir sources("orca_bbs_sidecar_sources");
+    ScopedTemporaryDir store_backup("orca_bbs_sidecar_store");
+    Model model;
+    model.set_backup_path(store_backup.string());
+    ScopeGuard detach_source([&model] { model.set_backup_path("detach"); });
+    model.add_object("sidecar-first", "first.stl", make_cube(4., 5., 6.))->add_instance();
+    model.add_object("sidecar-second", "second.stl", make_cube(6., 5., 4.))->add_instance();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plates_data[2];
+    for (int index = 0; index < 2; ++index) {
+        PlateData& plate = plates_data[index];
+        plate.config                = config;
+        plate.plate_index           = index;
+        plate.objects_and_instances = {{index, 0}};
+        std::string* fields[4]      = {&plate.thumbnail_file, &plate.no_light_thumbnail_file, &plate.top_file, &plate.pick_file};
+        for (size_t kind = 0; kind < 4; ++kind) {
+            const boost::filesystem::path source = sources.path() / (kinds[kind] + "-" + std::to_string(index + 1) + ".bin");
+            write_file(source, payload(kind, index + 1));
+            *fields[kind] = source.string();
+        }
+    }
+
+    ScopedTemporaryFile archive(".3mf");
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &model;
+    params.config          = &config;
+    params.plate_data_list = {&plates_data[0], &plates_data[1]};
+    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    // Archive level: each sidecar is stored under its plate's name with its own bytes.
+    for (int plate_number = 1; plate_number <= 2; ++plate_number)
+        for (size_t kind = 0; kind < 4; ++kind) {
+            std::string stored;
+            INFO(archived_name(kind, plate_number));
+            REQUIRE(read_3mf_entry(archive.string(), stored, archived_name(kind, plate_number)));
+            CHECK(stored == payload(kind, plate_number));
+        }
+
+    // Import: the importer extracts the Metadata payloads below the backup root (which must already
+    // hold a Metadata folder) and points each plate at its own extracted files.
+    ScopedTemporaryDir load_backup("orca_bbs_sidecar_load");
+    boost::filesystem::create_directories(load_backup.path() / "Metadata");
+    Model loaded_model;
+    loaded_model.set_backup_path(load_backup.string());
+    ScopeGuard detach_loaded([&loaded_model] { loaded_model.set_backup_path("detach"); });
+    bbs_archive_contracts::LoadedProject loaded;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &loaded.config, &substitutions, &loaded_model, &loaded.plates, &loaded.presets,
+                         &loaded.is_bbl, &loaded.is_orca, &loaded.version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                         nullptr, 0));
+    REQUIRE(loaded.plates.size() == 2);
+    for (int index = 0; index < 2; ++index) {
+        const PlateData& plate = *loaded.plates[index];
+        const std::string* fields[4] = {&plate.thumbnail_file, &plate.no_light_thumbnail_file, &plate.top_file, &plate.pick_file};
+        for (size_t kind = 0; kind < 4; ++kind) {
+            INFO("plate " << index + 1 << " " << kinds[kind]);
+            const boost::filesystem::path expected_path = load_backup.path() / archived_name(kind, index + 1);
+            REQUIRE_FALSE(fields[kind]->empty());
+            CHECK(boost::filesystem::path(*fields[kind]).lexically_normal().generic_string() == expected_path.lexically_normal().generic_string());
+            REQUIRE(boost::filesystem::exists(*fields[kind]));
+            CHECK(read_file_bytes(*fields[kind]) == payload(kind, index + 1));
+        }
+    }
+    REQUIRE(loaded_model.objects.size() == 2);
+}
+
+} // namespace bbs_plate_sidecar_contracts
