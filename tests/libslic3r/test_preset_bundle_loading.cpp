@@ -10352,9 +10352,10 @@ TEST_CASE("Deleting a printer preset updates physical printer membership and fil
 TEST_CASE("Preset visibility follows installed printer variants and renamed filament entries", "[PresetBundleLoading][PresetVisibility]")
 {
     VendorProfile vendor("Acme");
-    vendor.name = "Acme";
-    Preset printer(Preset::TYPE_PRINTER, "Acme One");
+    vendor.name = "Acme Display";
+    Preset printer(Preset::TYPE_PRINTER, "Acme Profile");
     printer.vendor = &vendor;
+    printer.is_visible = false;
     printer.config = DynamicPrintConfig::full_print_config();
     printer.config.option<ConfigOptionString>("printer_model", true)->value = "Acme One";
     printer.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
