@@ -19,6 +19,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/ParallelResolve.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Model.hpp"
@@ -8749,5 +8750,24 @@ TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved pa
     CHECK_FALSE(any_filename_contains(temp.path() / "data", "Orphan Child"));
 }
 
+
+TEST_CASE("Config loading rejects a non-G-code file path", "[Preset][Bundle][ConfigFileRejection]")
+{
+    ScopedTemporaryDir temp("preset-workflow-unsupported-config");
+    ScopedDataDir data(temp.path() / "data");
+    const std::string extension = GENERATE(".json", ".ini", ".txt");
+    CAPTURE(extension);
+    const fs::path file = temp.path() / ("settings" + extension);
+    {
+        std::ofstream output(file.string());
+        REQUIRE(output.good());
+        output << "{}";
+    }
+    REQUIRE(fs::exists(file));
+
+    PresetBundle bundle;
+    REQUIRE_THROWS_AS(bundle.load_config_file(file.string(), ForwardCompatibilitySubstitutionRule::Disable),
+                      Slic3r::RuntimeError);
+}
 
 } // namespace preset_bundle_workflow_contracts
