@@ -10662,3 +10662,18 @@ TEST_CASE("Compatibility conditions evaluate predicates and preserve malformed f
     CHECK(is_compatible_with_printer(PresetWithVendorProfile(filament, nullptr), PresetWithVendorProfile(printer, nullptr)));
     CHECK(is_compatible_with_printer(filament.config, Preset::TYPE_FILAMENT, printer.config, "X1"));
 }
+
+TEST_CASE("Preset paths use configured user and base directories with one JSON extension", "[PresetBundleLoading][PresetPaths]")
+{
+    ScopedTemporaryDir dir("preset-extended-paths");
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    const fs::path user_file = dir.path() / PRESET_PRINT_NAME / "Fine.json";
+    const fs::path base_file = dir.path() / PRESET_PRINT_NAME / "base" / "Fine.json";
+    CHECK(collection.path_from_name("Fine") == user_file.string());
+    CHECK(collection.path_from_name("Fine.json") == user_file.string());
+    CHECK(collection.path_from_name("Fine", true) == base_file.string());
+    Preset &preset = add_inmemory_preset(collection, "Fine");
+    CHECK(collection.path_for_preset(preset) == base_file.string());
+}
