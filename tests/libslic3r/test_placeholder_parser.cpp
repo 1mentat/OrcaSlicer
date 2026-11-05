@@ -1491,3 +1491,119 @@ TEST_CASE("Placeholder parser skips floor and ceil in inactive branches",
     CHECK_THROWS_WITH(parser.process(R"({if true}{ceil("x")}{endif})"),
                       Catch::Matchers::ContainsSubstring("Cannot ceil a non-numeric value"));
 }
+
+TEST_CASE("Placeholder arithmetic operators follow precedence and associate to the left",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    // Each row is chosen so that the intended grouping and the plausible wrong grouping give different results.
+    CHECK(parser.process("{2+3*4}") == "14");       // * before +  (wrong: 20)
+    CHECK(parser.process("{(2+3)*4}") == "20");
+    CHECK(parser.process("{10-2*3}") == "4");       // * before -  (wrong: 24)
+    CHECK(parser.process("{10-4-3}") == "3");       // left to right (wrong: 9)
+    CHECK(parser.process("{100/10/5}") == "2");     // left to right (wrong: 50)
+    CHECK(parser.process("{2*3%4}") == "2");        // (2*3)%4      (wrong: 6)
+    CHECK(parser.process("{10%4*2}") == "4");       // (10%4)*2     (wrong: 2)
+    CHECK(parser.process("{2+3*4-5}") == "9");
+    // Integer division truncates at each step, so the order of * and / is visible.
+    CHECK(parser.process("{1/2*4}") == "0");        // (1/2)*4
+    CHECK(parser.process("{4*1/2}") == "2");        // (4*1)/2
+}
+
+TEST_CASE("Placeholder integer division truncates and a floating operand makes the quotient floating",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{7/2}") == "3");
+    CHECK(parser.process("{7%2}") == "1");
+    CHECK(parser.process("{9/3}") == "3");
+    CHECK_THAT(std::stod(parser.process("{7/2.}")), Catch::Matchers::WithinAbs(3.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{7./2}")), Catch::Matchers::WithinAbs(3.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{1/4.}")), Catch::Matchers::WithinAbs(0.25, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{7.5%2}")), Catch::Matchers::WithinAbs(1.5, 1e-12));
+    // Negative operands whose quotient is exact, so the rounding direction of inexact divisions is not pinned.
+    CHECK(parser.process("{-8/4}") == "-2");
+    CHECK(parser.process("{8/-4}") == "-2");
+    CHECK(parser.process("{-8%4}") == "0");
+    CHECK_THAT(std::stod(parser.process("{-9/3.}")), Catch::Matchers::WithinAbs(-3., 1e-12));
+}
+
+TEST_CASE("Placeholder unary operators bind tighter than the binary operators",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{2*-3}") == "-6");
+    CHECK(parser.process("{7 - -2}") == "9");
+    CHECK(parser.process("{- -5}") == "5");
+    CHECK(parser.process("{+4}") == "4");
+    CHECK(parser.process("{-(2+3)*2}") == "-10");
+    CHECK(parser.process("{!true}") == "false");
+    CHECK(parser.process("{!(1 == 2)}") == "true");
+    CHECK(parser.process("{not not true}") == "true");
+    // not applies to the operand before and: (not false) and false  (wrong: not (false and false))
+    CHECK(parser.process("{not false and false}") == "false");
+    CHECK(parser.process("{not (false and false)}") == "true");
+}
+
+TEST_CASE("Placeholder relational, equality and logical operators bind in order",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    // Arithmetic binds tighter than comparison, comparison tighter than and, and tighter than or.
+    CHECK(parser.process("{1 + 1 == 2}") == "true");
+    CHECK(parser.process("{1 + 1 < 3}") == "true");
+    CHECK(parser.process("{2 * 3 == 6 and 4 / 2 == 2}") == "true");
+    CHECK(parser.process("{1 < 2 == true}") == "true");              // (1 < 2) == true
+    CHECK(parser.process("{true or false and false}") == "true");    // true or (false and false)  (wrong: false)
+    CHECK(parser.process("{(true or false) and false}") == "false");
+    CHECK(parser.process("{false and false or true}") == "true");    // (false and false) or true  (wrong: false)
+    CHECK(parser.process("{1 != 2}") == "true");
+    CHECK(parser.process("{2 != 2}") == "false");
+    CHECK(parser.process("{1 == 1.0}") == "true");
+    // Numeric equality tolerates rounding error.
+    CHECK(parser.process("{0.1 + 0.2 == 0.3}") == "true");
+    // ... but only for differences below the tolerance.
+    CHECK(parser.process("{0.1 + 0.2 == 0.4}") == "false");
+}
+
+// Known bug: equality_expression lists "<>" as an alias of "!=", but relational_expression is tried first and
+// consumes the '<' of "<>", then fails on the '>' ("Parsing error ... Expecting an expression."), so the alias
+// can never match. The parse error is an exception that ends the test case, so each input has its own case.
+TEST_CASE("Placeholder inequality operator <> accepts unequal operands",
+          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 <> 2}") == "true");
+}
+
+// Known bug: see the previous test case; the same parse error hides the result for equal operands.
+TEST_CASE("Placeholder inequality operator <> rejects equal operands",
+          "[PlaceholderParser][PlaceholderParserExpressions][!shouldfail]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{2 <> 2}") == "false");
+}
+
+TEST_CASE("Placeholder ternary operator is right associative, lowest in precedence and lazy",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 < 2 ? 10 : 20}") == "10");
+    CHECK(parser.process("{2 < 1 ? 10 : 20}") == "20");
+    CHECK(parser.process("{false or true ? 1 : 2}") == "1");
+    CHECK(parser.process("{true ? 1 : false ? 2 : 3}") == "1");
+    CHECK(parser.process("{false ? 1 : true ? 2 : 3}") == "2");
+    CHECK(parser.process("{false ? 1 : false ? 2 : 3}") == "3");
+    // The branch that is not taken is parsed but not evaluated.
+    CHECK(parser.process("{true ? 1 : 1 / 0}") == "1");
+    CHECK(parser.process("{false ? 1 / 0 : 2}") == "2");
+}
+
+TEST_CASE("Placeholder string concatenation groups with the additive operators",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({"a" + 1 + 2})") == "a12");          // ("a" + 1) + 2
+    CHECK(parser.process(R"({1 + 2 + "a"})") == "3a");           // (1 + 2) + "a"
+    CHECK(parser.process(R"({"n=" + 1 + 2 * 3})") == "n=16");    // * before +
+}
