@@ -11082,3 +11082,76 @@ TEST_CASE("Cloud user loading routes printer and filament profiles through typed
     CHECK(bundle.printers.find_preset("Unsupported Cloud") == nullptr);
     CHECK(substitutions.empty());
 }
+
+TEST_CASE("Printer snapshot restores filament colors and replaces unavailable slots",
+          "[PresetBundleLoading][PresetPrinterSnapshot]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+
+    DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
+    printer_config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.4, 0.4};
+    bundle.printers.load_preset("", "Snapshot Printer", printer_config, false);
+    bundle.prints.load_preset("", "Snapshot Process", bundle.prints.default_preset().config, false);
+
+    DynamicPrintConfig filament_config = bundle.filaments.default_preset().config;
+    filament_config.option<ConfigOptionStrings>("compatible_printers", true)->values.clear();
+    bundle.filaments.load_preset("", "Visible PLA", filament_config, false);
+    Preset &hidden = bundle.filaments.load_preset("", "Hidden PLA", filament_config, false);
+    hidden.is_visible = false;
+    bundle.filaments.set_default_suppressed(true);
+
+    bundle.printers.select_preset_by_name("Snapshot Printer", true);
+    bundle.prints.select_preset_by_name("Snapshot Process", true);
+    bundle.filaments.select_preset_by_name("Visible PLA", true);
+
+    AppConfig app_config;
+    app_config.set_printer_setting("Snapshot Printer", PRESET_PRINT_NAME, "Snapshot Process");
+    app_config.set_printer_setting("Snapshot Printer", PRESET_FILAMENT_NAME, "Visible PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_01", "Missing PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_02", "Hidden PLA");
+    app_config.set_printer_setting("Snapshot Printer", "filament_colors", "#111111,#222222,#333333");
+    app_config.set_printer_setting("Snapshot Printer", "filament_multi_colors", "#AAAAAA,#BBBBBB");
+    app_config.set_printer_setting("Snapshot Printer", "filament_color_types", "2");
+    // Three nozzles and three filament slots use the public normalized shapes:
+    // 3*3*3 matrix entries, two vector entries per filament, and one multiplier per nozzle.
+    app_config.set_printer_setting("Snapshot Printer", "flush_volumes_matrix",
+                                   "10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|32|33|34|35|36");
+    app_config.set_printer_setting("Snapshot Printer", "flush_volumes_vector", "100|101|102|103|104|105");
+    app_config.set_printer_setting("Snapshot Printer", "flush_multiplier", "0.5|0.75|1.0");
+
+    REQUIRE_FALSE(hidden.is_visible);
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#ABABAB"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour", true)->values = {"#CDCDCD"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values = {"9"};
+    bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values.assign(27, 901.);
+    bundle.project_config.option<ConfigOptionFloats>("flush_volumes_vector", true)->values.assign(6, 902.);
+    bundle.project_config.option<ConfigOptionFloats>("flush_multiplier", true)->values.assign(3, 3.);
+
+    bundle.update_selections(app_config);
+
+    REQUIRE(bundle.filaments.find_preset("Visible PLA") != nullptr);
+    CHECK(bundle.filaments.find_preset("Visible PLA")->is_compatible);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Visible PLA", "Visible PLA", "Visible PLA"});
+    auto *snapshot_colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    auto *snapshot_multi_colours = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour");
+    auto *snapshot_colour_types = bundle.project_config.option<ConfigOptionStrings>("filament_colour_type");
+    REQUIRE(snapshot_colours != nullptr);
+    REQUIRE(snapshot_multi_colours != nullptr);
+    REQUIRE(snapshot_colour_types != nullptr);
+    CHECK(snapshot_colours->values == std::vector<std::string>{"#111111", "#222222", "#333333"});
+    CHECK(snapshot_multi_colours->values == std::vector<std::string>{"#AAAAAA", "#BBBBBB"});
+    CHECK(snapshot_colour_types->values == std::vector<std::string>{"2", "1", "1"});
+    auto *flush_matrix = bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix");
+    auto *flush_vector = bundle.project_config.option<ConfigOptionFloats>("flush_volumes_vector");
+    auto *flush_multiplier = bundle.project_config.option<ConfigOptionFloats>("flush_multiplier");
+    REQUIRE(flush_matrix != nullptr);
+    REQUIRE(flush_vector != nullptr);
+    REQUIRE(flush_multiplier != nullptr);
+    check_double_vector(flush_matrix->values,
+                        {10., 11., 12., 13., 14., 15., 16., 17., 18., 19., 20., 21., 22., 23., 24., 25., 26., 27., 28., 29., 30., 31., 32., 33., 34., 35., 36.});
+    check_double_vector(flush_vector->values,
+                        {100., 101., 102., 103., 104., 105.});
+    check_double_vector(flush_multiplier->values,
+                        {0.5, 0.75, 1.0});
+}
