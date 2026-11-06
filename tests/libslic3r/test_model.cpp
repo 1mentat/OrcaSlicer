@@ -216,6 +216,7 @@ namespace model_bounds_contracts {
 
 // Known bug: grid duplication clears instances before measuring their bounds,
 // so the copies are spaced only by the requested gap. Both initial states must expose it.
+// Fixed by the separate follow-up Model grid-spacing fix (M118).
 TEST_CASE("Model grid duplication uses mesh dimensions for spacing", "[Model][ModelGridSpacing][!shouldfail]")
 {
     const bool has_initial_instance = GENERATE(false, true);
