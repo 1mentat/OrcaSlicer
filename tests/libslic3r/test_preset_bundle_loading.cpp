@@ -7415,7 +7415,9 @@ TEST_CASE("Saving a preset into the project embeds a child of its parent and res
     REQUIRE(retained_parent != nullptr);
     REQUIRE(retained_parent->config.option<ConfigOptionFloat>("layer_height") != nullptr);
     CHECK_THAT(retained_parent->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.18, 1e-9));
-    CHECK(bundle.prints.find_preset("Library Process") != nullptr);
+    const Preset *retained_library = bundle.prints.find_preset("Library Process");
+    REQUIRE(retained_library != nullptr);
+    CHECK(fs::exists(retained_library->file));
     CHECK(bundle.prints.get_selected_preset().name == "Library Process");
 }
 
