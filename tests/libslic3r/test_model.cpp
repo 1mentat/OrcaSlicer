@@ -1,3 +1,5 @@
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/ObjectID.hpp"
 #include <catch2/catch_all.hpp>
 #include <algorithm>
@@ -188,6 +190,50 @@ TEST_CASE("Model instance centering and bed placement retain projected dimension
     const Polygon instance_hull = instance->convex_hull_2d();
     CHECK(instance_hull.bounding_box().size().x() == scaled(20.));
     CHECK(instance_hull.bounding_box().size().y() == scaled(10.));
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model grid duplication rejects empty and multiple-object models", "[Model][ModelGridRejection]")
+{
+    Model empty_model;
+    CHECK_THROWS(empty_model.duplicate_objects_grid(1, 1, 1.));
+
+    Model two_objects;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = two_objects.add_object();
+        REQUIRE(object != nullptr);
+        REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false) != nullptr);
+    }
+    REQUIRE(two_objects.objects.size() == 2);
+    CHECK_THROWS(two_objects.duplicate_objects_grid(1, 1, 1.));
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+// Known bug: grid duplication clears instances before measuring their bounds,
+// so the copies are spaced only by the requested gap. Both initial states must expose it.
+// Fixed by the separate follow-up Model grid-spacing fix (M118).
+TEST_CASE("Model grid duplication uses mesh dimensions for spacing", "[Model][ModelGridSpacing][!shouldfail]")
+{
+    const bool has_initial_instance = GENERATE(false, true);
+    CAPTURE(has_initial_instance);
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(10, 20, 7), ModelVolumeType::MODEL_PART, false) != nullptr);
+    if (has_initial_instance)
+        REQUIRE(object->add_instance() != nullptr);
+
+    model.duplicate_objects_grid(2, 2, 5.);
+    REQUIRE(object->instances.size() == 4);
+    for (const ModelInstance *instance : object->instances)
+        REQUIRE(instance != nullptr);
+    check_vec3d(model.bounding_box_exact().size(), Vec3d(25, 45, 7), 1e-5);
 }
 
 } // namespace model_bounds_contracts
