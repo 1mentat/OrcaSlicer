@@ -11551,3 +11551,127 @@ TEST_CASE("Root filament preset export includes changed and default configuratio
     CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "123");
     CHECK(values.find(BBL_JSON_KEY_BASE_ID) == values.end());
 }
+
+namespace preset_ams_sync_contracts {
+namespace {
+
+DynamicPrintConfig tray(const std::string &filament_id, const std::string &color,
+                        const std::string &type, const std::string &ams_id,
+                        const std::string &slot_id, bool changed = true,
+                        bool placeholder = false,
+                        std::vector<std::string> multi = {})
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_id", new ConfigOptionStrings({filament_id}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({color}));
+    config.set_key_value("filament_colour_type", new ConfigOptionStrings({"1"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({type}));
+    config.set_key_value("filament_multi_colour", new ConfigOptionStrings(std::move(multi)));
+    config.set_key_value("ams_id", new ConfigOptionStrings({ams_id}));
+    config.set_key_value("slot_id", new ConfigOptionStrings({slot_id}));
+    config.set_key_value("filament_changed", new ConfigOptionBool(changed));
+    config.set_key_value("filament_slot_placeholder", new ConfigOptionBools({placeholder}));
+    return config;
+}
+
+Preset &system_filament(PresetBundle &bundle, const std::string &name,
+                        const std::string &id, const std::string &type)
+{
+    Preset &preset = add_inmemory_preset(bundle.filaments, name);
+    preset.is_system = true;
+    preset.is_visible = true;
+    preset.is_compatible = true;
+    preset.filament_id = id;
+    preset.config.option<ConfigOptionStrings>("filament_type", true)->values = { type };
+    return preset;
+}
+
+void project_slots(PresetBundle &bundle, std::vector<std::string> names,
+                   std::vector<std::string> colors)
+{
+    REQUIRE(names.size() == colors.size());
+    bundle.project_config.apply(FullPrintConfig::defaults());
+    bundle.prints.get_edited_preset().config.apply(FullPrintConfig::defaults());
+    bundle.filament_presets = std::move(names);
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = colors;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values.assign(colors.size(), "1");
+    bundle.project_config.option<ConfigOptionInts>("filament_map", true)->values.assign(colors.size(), 1);
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values.assign(colors.size(), 0);
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour", true)->values = colors;
+}
+
+
+} // namespace
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metadata",
+          "[PresetBundleLoading][PresetAmsMatched]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Old A", "Old B"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#112233", "PLA", "0", "0", true, false, {"#112233"}));
+    bundle.filament_ams_list.emplace(1, tray("PETG-ID", "#445566", "PETG", "0", "1", true, false, {"#445566"}));
+    bundle.filament_ams_list.at(0).set_key_value("filament_colour_type", new ConfigOptionStrings({"2"}));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PETG"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#112233", "#445566"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour_type")->values ==
+          std::vector<std::string>{"2", "1"});
+    CHECK(unknowns.empty());
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS overwrite serializes multi-color vectors into project configuration", "[PresetBundleLoading][PresetAmsOverwriteMultiColors]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#AABBCC", "PLA", "A", "0", true, false,
+                             {"#AABBCC", "#CCDDEE", "#EEFF00"}));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.ams_multi_color_filment ==
+          std::vector<std::vector<std::string>>{{"#AABBCC", "#CCDDEE", "#EEFF00"}});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colour")->values ==
+          std::vector<std::string>{"#AABBCC #CCDDEE #EEFF00"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS synchronization keeps left and right physical trays in map order", "[PresetBundleLoading][PresetAmsPhysicalOrder]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    system_filament(bundle, "Generic PETG", "petg-id", "PETG");
+    bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
+    project_slots(bundle, {"Old left", "Old right"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0x10000, tray("petg-id", "#001100", "PETG", "right", "0"));
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#110000", "PLA", "left", "0"));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PETG"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#110000", "#001100"});
+    CHECK(unknowns.empty());
+}
+
+} // namespace preset_ams_sync_contracts
