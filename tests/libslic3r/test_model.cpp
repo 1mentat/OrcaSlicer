@@ -1,3 +1,5 @@
+#include <set>
+#include "libslic3r/Arrange.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Config.hpp"
@@ -1520,6 +1522,31 @@ TEST_CASE("Print-volume classification distinguishes inside, outside, and mixed 
     second->set_offset(Vec3d(0, 0, 0));
     object->invalidate_bounding_box();
     CHECK(instance->calc_print_volume_state(bed) == ModelInstancePVS_Inside);
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Arrange polygon reports transformed footprint and material support assignments", "[Model][ModelArrangeFootprint]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10.);
+    object->volumes.front()->config.set("extruder", 2);
+    DynamicPrintConfig global;
+    global.set_key_value("enable_support", new ConfigOptionBool(true));
+    global.set_key_value("support_filament", new ConfigOptionInt(3));
+    global.set_key_value("support_interface_filament", new ConfigOptionInt(2));
+    arrangement::ArrangePolygon arranged;
+    object->instances.front()->set_offset(Vec3d(12, 15, 4));
+    object->instances.front()->set_rotation(Z, 0.25);
+    REQUIRE(object->volumes.front()->get_convex_hull_shared_ptr() != nullptr);
+    object->instances.front()->get_arrange_polygon(&arranged, global);
+    CHECK(arranged.poly.contour.size() == 4);
+    CHECK(arranged.translation == Vec2crd(scaled(12.), scaled(15.)));
+    CHECK_THAT(arranged.rotation, Catch::Matchers::WithinAbs(0.25, 1e-9));
+    const std::set<int> extruders(arranged.extrude_ids.begin(), arranged.extrude_ids.end());
+    CHECK(extruders == std::set<int>{2, 3});
 }
 
 } // namespace model_extended_contracts
