@@ -13196,3 +13196,16 @@ TEST_CASE("filament nozzle volume defaults follow valid maps and standard-fallba
     REQUIRE(result.size() == maps.size());
     CHECK(result == std::vector<int>{int(nvtHighFlow), int(nvtStandard), int(nvtStandard)});
 }
+
+
+TEST_CASE("PresetBundle different-extruder support uses the edited printer variant list",
+          "[PresetBundleLoading][PresetBundleDifferentExtruders]")
+{
+    PresetBundle bundle;
+    auto &printer = bundle.printers.get_edited_preset().config;
+    printer.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
+    printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard", "HighFlow"};
+    CHECK(bundle.support_different_extruders());
+    printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard", "Standard"};
+    CHECK_FALSE(bundle.support_different_extruders());
+}
