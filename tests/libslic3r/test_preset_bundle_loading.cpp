@@ -12806,3 +12806,29 @@ TEST_CASE("PresetBundle custom vendor models retain distinct variants", "[Preset
     CHECK(custom.models.front().variant("0.4") != nullptr);
     CHECK(custom.models.front().variant("0.6") != nullptr);
 }
+
+TEST_CASE("PresetBundle filament lookup returns typed compatibility metadata", "[PresetBundleLoading][PresetFilamentMetadata]")
+{
+    PresetBundle bundle;
+    Preset &filament = add_inmemory_preset(bundle.filaments, "Acme PLA");
+    filament.filament_id = "fil-42";
+    filament.alias = "PLA alias";
+    auto &config = filament.config;
+    config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    config.option<ConfigOptionStrings>("filament_vendor", true)->values = {"Acme"};
+    config.option<ConfigOptionStrings>("compatible_printers", true)->values = {"X1"};
+    config.option<ConfigOptionInts>("filament_printable", true)->values = {2};
+    config.option<ConfigOptionInts>("filament_extruder_compatibility", true)->values = {17};
+    CHECK_FALSE(bundle.get_filament_by_filament_id("").has_value());
+    CHECK_FALSE(bundle.get_filament_by_filament_id("missing").has_value());
+    auto any_printer = bundle.get_filament_by_filament_id("fil-42");
+    REQUIRE(any_printer.has_value());
+    CHECK(any_printer->filament_name == "PLA alias");
+    CHECK(any_printer->filament_type == "PLA");
+    CHECK(any_printer->vendor == "Acme");
+    auto compatible = bundle.get_filament_by_filament_id("fil-42", "X1");
+    REQUIRE(compatible.has_value());
+    CHECK(compatible->filament_printable == 2);
+    CHECK(compatible->get_filament_extruder_compatibility() == 17);
+    CHECK_FALSE(bundle.get_filament_by_filament_id("fil-42", "Other").has_value());
+}
