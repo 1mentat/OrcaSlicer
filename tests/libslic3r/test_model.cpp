@@ -1112,3 +1112,54 @@ TEST_CASE("Instance Z queries follow scaling and translation of printable volume
 }
 
 } // namespace model_extended_contracts
+
+TEST_CASE("Volume type names round-trip every persisted model category", "[Model][ModelPersistedTypes]")
+{
+    const std::vector<std::pair<ModelVolumeType, std::string>> types{
+        {ModelVolumeType::MODEL_PART, "normal_part"},
+        {ModelVolumeType::NEGATIVE_VOLUME, "negative_part"},
+        {ModelVolumeType::PARAMETER_MODIFIER, "modifier_part"},
+        {ModelVolumeType::SUPPORT_ENFORCER, "support_enforcer"},
+        {ModelVolumeType::SUPPORT_BLOCKER, "support_blocker"},
+        {ModelVolumeType::PRECISE_SEAM_CENTER, "precise_seam_center"},
+        {ModelVolumeType::PRECISE_SEAM_LEFT, "precise_seam_left"},
+        {ModelVolumeType::PRECISE_SEAM_RIGHT, "precise_seam_right"},
+        {ModelVolumeType::PRECISE_SEAM_ENFORCED, "precise_seam_enforced"},
+        {ModelVolumeType::PRECISE_SEAM_BLOCKED, "precise_seam_blocked"},
+        {ModelVolumeType::PRECISE_SEAM_NEUTRAL, "precise_seam_neutral"},
+    };
+    for (const auto &[type, name] : types) {
+        CHECK(ModelVolume::type_to_string(type) == name);
+        CHECK(ModelVolume::type_from_string(name) == type);
+    }
+    CHECK(ModelVolume::type_from_string("unrecognized") == ModelVolumeType::MODEL_PART);
+}
+
+namespace model_extended_contracts {
+
+TEST_CASE("Volume sorting orders precise seam strength and semantic volume types", "[Model][ModelVolumeSorting]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::SUPPORT_ENFORCER, false) != nullptr);
+    REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PRECISE_SEAM_NEUTRAL, false) != nullptr);
+    REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PRECISE_SEAM_CENTER, false) != nullptr);
+    REQUIRE(object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PARAMETER_MODIFIER, false) != nullptr);
+    object->sort_volumes(true);
+    REQUIRE(object->volumes.size() == 5);
+    for (const ModelVolume *volume : object->volumes)
+        REQUIRE(volume != nullptr);
+    CHECK(object->volumes[0]->is_model_part());
+    CHECK(object->volumes[1]->is_modifier());
+    CHECK(object->volumes[2]->is_support_enforcer());
+    CHECK(object->volumes[3]->is_precise_seam_strong());
+    CHECK(object->volumes[4]->is_precise_seam_weak());
+    object->sort_volumes(false);
+    REQUIRE(object->volumes.size() == 5);
+    REQUIRE(object->volumes.front() != nullptr);
+    CHECK(object->volumes.front()->is_model_part());
+}
+
+} // namespace model_extended_contracts
