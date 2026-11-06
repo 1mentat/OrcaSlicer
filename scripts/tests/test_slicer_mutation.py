@@ -694,6 +694,15 @@ class MutationResultTests(unittest.TestCase):
                 command = slicer_mutation._test_command([executable], mutant)
                 self.assertIn("--output-on-failure", command)
 
+    def test_target_mode_filters_ctest_even_when_executable_is_a_wrapper(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "CADRecipePrecedence")
+        argv = ["/tmp/gcov-phase-tool.sh", "--test-dir", "/tmp/build", "-R", "^Control$",
+                "-LE", "NotWorking|RequiresApp", "--output-on-failure"]
+        command = slicer_mutation._test_command(argv, mutant, ctest_target_mode=True)
+        self.assertEqual(command, [*argv, "-L", "CADRecipePrecedence"])
+        self.assertEqual(command.count("--output-on-failure"), 1)
+        self.assertEqual(slicer_mutation._test_command(argv, mutant), argv)
+
     def test_ctest_preserves_existing_label_options(self):
         mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
         for options in (["-L", "Other"], ["-LOther"], ["--label-regex", "Other"],

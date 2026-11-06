@@ -879,9 +879,11 @@ def _validate_target_junit(path: Path, expected_names: Sequence[str]) -> dict[st
     return evidence
 
 
-def _test_command(argv: Sequence[str], mutant: Mutant) -> list[str]:
+def _test_command(argv: Sequence[str], mutant: Mutant, *, ctest_target_mode: bool = False) -> list[str]:
     result = [value.replace("{filter}", mutant.test_filter) for value in argv]
-    if _is_ctest(result[0]):
+    # Target mode uses CTest semantics even when --ctest names a wrapper.
+    is_ctest = ctest_target_mode or _is_ctest(result[0])
+    if is_ctest:
         # Catch2's assertion summary is needed to distinguish a test failure
         # from a CTest child crash or another infrastructure failure.
         if "--output-on-failure" not in result:
@@ -890,7 +892,7 @@ def _test_command(argv: Sequence[str], mutant: Mutant) -> list[str]:
         has_label = any(value == "--label-regex" or value.startswith("--label-regex=")
                         or (value.startswith("-L") and not value.startswith("-LE"))
                         for value in result[1:])
-        if _is_ctest(result[0]) and not has_label:
+        if is_ctest and not has_label:
             result.extend(["-L", mutant.test_filter])
     return result
 
@@ -2008,7 +2010,7 @@ def run_mutation(args: argparse.Namespace) -> int:
         baseline_counts: dict[str, int] = {}
         for test_filter in filters:
             baseline_mutant = Mutant("baseline", "", "x", "y", "", test_filter)
-            selected = _test_command(test_argv, baseline_mutant)
+            selected = _test_command(test_argv, baseline_mutant, ctest_target_mode=target_mode)
             baseline_log = next_log("baseline-test", test_filter)
             baseline_junit = junit_for_log(baseline_log)
             baseline_test = execute(_expand(selected, root=worktree,
@@ -2095,7 +2097,7 @@ def run_mutation(args: argparse.Namespace) -> int:
                         out, mutant.id, target_spec["target"], mutant_artifact)
                     entry["executable"] = mutant_artifact
                     _checkpoint(report_path, report, f"mutant:{mutant.id}:executable_preserved")
-                selected_test = _test_command(test_argv, mutant)
+                selected_test = _test_command(test_argv, mutant, ctest_target_mode=target_mode)
                 mutant_log = next_log("mutant-test", mutant.id)
                 mutant_junit = junit_for_log(mutant_log)
                 mutant_test = execute(_expand(selected_test, root=worktree,
