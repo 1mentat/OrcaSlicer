@@ -12432,3 +12432,111 @@ TEST_CASE("AMS duplicate validation scopes material identifiers by compatible sy
 }
 
 } // namespace preset_ams_validation_contracts
+
+TEST_CASE("Vendor configuration overwrite replaces AppConfig selections and filament values",
+          "[PresetBundleLoading][PresetVendorConfig1]")
+{
+    AppConfig app;
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "#000000"}});
+    app.set_vendors({{"OldVendor", {{"Old Model", {"0.4"}}}}});
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{{"Custom", {}}};
+    const std::map<std::string, std::string> filaments{{"New PLA", "#123456"}};
+    ScopedTemporaryDir temporary("preset-bundle-vendor-overwrite");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR);
+    PresetBundle bundle;
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS) ==
+          std::map<std::string, std::string>{{"New PLA", "#123456"}});
+    CHECK(app.vendors() == vendors);
+}
+TEST_CASE("Vendor configuration merge preserves old selections while adding new values",
+          "[PresetBundleLoading][PresetVendorConfig2]")
+{
+    AppConfig app;
+    app.set_section(AppConfig::SECTION_FILAMENTS, {{"Old PLA", "#000000"}});
+    app.set_vendors({{"OldVendor", {{"Old Model", {"0.4"}}}}});
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{{"Custom", {}}};
+    const std::map<std::string, std::string> filaments{{"New PLA", "#123456"}};
+    ScopedTemporaryDir temporary("preset-bundle-vendor-merge");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    fs::create_directories(temporary.path() / "data" / PRESET_SYSTEM_DIR);
+    PresetBundle bundle;
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, false));
+    CHECK(app.get_section(AppConfig::SECTION_FILAMENTS) ==
+          std::map<std::string, std::string>{{"Old PLA", "#000000"}, {"New PLA", "#123456"}});
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> expected_vendors{
+        {"OldVendor", {{"Old Model", {"0.4"}}}}, {"Custom", {}}};
+    CHECK(app.vendors() == expected_vendors);
+}
+
+TEST_CASE("Vendor configuration forwards a system filament to the vendor's default alias",
+          "[PresetBundleLoading][PresetVendorConfigAlias]")
+{
+    ScopedTemporaryDir temporary("preset-bundle-vendor");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    const fs::path system = temporary.path() / "data" / PRESET_SYSTEM_DIR;
+    fs::create_directories(system);
+    preset_workflow_contracts::write_text(system / "Acme.json",
+        R"({"version":"1.0.0","name":"Acme","machine_model_list":[{"name":"Acme One","sub_path":"machine/model.json"}],"machine_list":[],"filament_list":[{"name":"Acme PLA","sub_path":"filament/pla.json"}]})");
+    preset_workflow_contracts::write_text(system / "Acme" / "machine" / "model.json",
+        R"({"type":"machine_model","name":"Acme One","nozzle_diameter":"0.4","default_materials":"Acme PLA"})");
+    preset_workflow_contracts::write_text(system / "Acme" / "filament" / "pla.json",
+        R"({"type":"filament","name":"Acme PLA","from":"system","instantiation":"true","filament_id":"ACME-PLA","filament_type":"PLA"})");
+    REQUIRE(fs::exists(system / "Acme.json"));
+    REQUIRE(fs::exists(system / "Acme" / "machine" / "model.json"));
+    REQUIRE(fs::exists(system / "Acme" / "filament" / "pla.json"));
+    AppConfig app;
+    PresetBundle bundle;
+    // Supplementation uses the preloaded vendor before apply_vendor_config reloads it.
+    bundle.vendors["Acme"].default_filaments.insert("Generic PLA");
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{
+        {"Acme", {{"Acme One", {"0.4"}}}}};
+    const std::map<std::string, std::string> filaments{{"Generic PLA @System", "#101010"}};
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    const auto &selected = app.get_section(AppConfig::SECTION_FILAMENTS);
+    CHECK(selected.count("Generic PLA @System") == 0);
+    REQUIRE(selected.count("Generic PLA") == 1);
+    CHECK(selected.at("Generic PLA") == "#101010");
+}
+
+TEST_CASE("Vendor configuration retains the system filament when the default bundle is selected",
+          "[PresetBundleLoading][PresetVendorConfigDefaultBundle]")
+{
+    ScopedTemporaryDir temporary("preset-bundle-vendor-default");
+    ScopedDataDir data(temporary.path() / "data");
+    ScopedResourcesDir resources(temporary.path() / "resources");
+    fs::create_directories(temporary.path() / "resources" / PRESET_PROFILES_DIR);
+    const fs::path system = temporary.path() / "data" / PRESET_SYSTEM_DIR;
+    fs::create_directories(system);
+    for (const std::string &vendor : {std::string("Acme"), std::string(PresetBundle::ORCA_DEFAULT_BUNDLE)}) {
+        const nlohmann::json index{
+            {"version", "1.0.0"}, {"name", vendor},
+            {"machine_model_list", {{{"name", vendor + " One"}, {"sub_path", "machine/model.json"}}}}};
+        const nlohmann::json model{
+            {"type", "machine_model"}, {"name", vendor + " One"}, {"nozzle_diameter", "0.4"}};
+        preset_workflow_contracts::write_text(system / (vendor + ".json"), index.dump());
+        preset_workflow_contracts::write_text(system / vendor / "machine" / "model.json", model.dump());
+        REQUIRE(fs::exists(system / (vendor + ".json")));
+        REQUIRE(fs::exists(system / vendor / "machine" / "model.json"));
+    }
+    AppConfig app;
+    PresetBundle bundle;
+    bundle.vendors["Acme"].default_filaments.insert("Generic PLA");
+    const std::map<std::string, std::map<std::string, std::set<std::string>>> vendors{
+        {"Acme", {{"Acme One", {"0.4"}}}},
+        {PresetBundle::ORCA_DEFAULT_BUNDLE, {{std::string(PresetBundle::ORCA_DEFAULT_BUNDLE) + " One", {"0.4"}}}}};
+    const std::map<std::string, std::string> filaments{{"Generic PLA @System", "#101010"}};
+    REQUIRE(bundle.apply_vendor_config(vendors, filaments, &app, true));
+    const auto &selected = app.get_section(AppConfig::SECTION_FILAMENTS);
+    REQUIRE(selected.count("Generic PLA @System") == 1);
+    REQUIRE(selected.count("Generic PLA") == 1);
+    CHECK(selected.at("Generic PLA @System") == "#101010");
+    CHECK(selected.at("Generic PLA") == "#101010");
+}
