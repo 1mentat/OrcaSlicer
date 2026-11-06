@@ -1,3 +1,4 @@
+#include "libslic3r/BuildVolume.hpp"
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/ObjectID.hpp"
@@ -234,6 +235,31 @@ TEST_CASE("Model grid duplication uses mesh dimensions for spacing", "[Model][Mo
     for (const ModelInstance *instance : object->instances)
         REQUIRE(instance != nullptr);
     check_vec3d(model.bounding_box_exact().size(), Vec3d(25, 45, 7), 1e-5);
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model print-volume classification follows instance movement", "[Model][ModelPrintVolumeState]")
+{
+    Model state_model;
+    ModelObject *state_object = state_model.add_object();
+    REQUIRE(state_object != nullptr);
+    REQUIRE(state_object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelInstance *state_instance = state_object->add_instance();
+    REQUIRE(state_instance != nullptr);
+    const BuildVolume bed({Vec2d(0, 0), Vec2d(100, 0), Vec2d(100, 100), Vec2d(0, 100)}, 100., {}, {});
+    CHECK(state_model.update_print_volume_state(bed) == 1);
+    CHECK(state_instance->print_volume_state == ModelInstancePVS_Inside);
+    state_instance->set_offset(Vec3d(95, 0, 0));
+    state_object->invalidate_bounding_box();
+    CHECK(state_model.update_print_volume_state(bed) == 0);
+    CHECK(state_instance->print_volume_state == ModelInstancePVS_Partly_Outside);
+    state_instance->set_offset(Vec3d(200, 0, 0));
+    state_object->invalidate_bounding_box();
+    CHECK(state_model.update_print_volume_state(bed) == 0);
+    CHECK(state_instance->print_volume_state == ModelInstancePVS_Fully_Outside);
 }
 
 } // namespace model_bounds_contracts
