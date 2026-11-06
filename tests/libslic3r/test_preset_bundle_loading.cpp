@@ -13227,3 +13227,223 @@ TEST_CASE("Only one occurrence of the edited filament qualifies as a unique slot
     bundle.filament_presets = {"TPU", "PLA", "TPU"};
     CHECK_FALSE(bundle.is_the_only_edited_filament(0));
 }
+
+namespace preset_project_reset_followup_contracts {
+
+size_t embedded_preset_count(PresetBundle &bundle)
+{
+    auto presets = bundle.get_current_project_embedded_presets();
+    ScopeGuard cleanup([&presets] { for (Preset *preset : presets) delete preset; });
+    return presets.size();
+}
+
+void add_embedded(std::vector<std::unique_ptr<Preset>> &owners, std::vector<Preset *> &project,
+                  Preset::Type type, const std::string &name,
+                  const DynamicPrintConfig &base_config, const std::string &parent_name)
+{
+    auto preset = std::make_unique<Preset>(type, name);
+    preset->is_project_embedded = true;
+    preset->config = base_config;
+    preset->inherits() = parent_name;
+    project.push_back(preset.get());
+    owners.emplace_back(std::move(preset));
+}
+
+struct ResetNames {
+    std::string printer = "Reset Base Printer";
+    std::string print = "Reset Base Print";
+    std::string filament = "Reset Base Filament";
+    std::string embedded_printer = "Project Printer";
+    std::string embedded_print = "Project Print";
+    std::string embedded_filament = "Project Filament";
+    std::string fallback = "Fallback PLA";
+    std::string preferred = "Preferred PLA";
+};
+
+ResetNames add_base_profiles(PresetBundle &bundle, const std::string &default_filament)
+{
+    ResetNames names;
+    auto &library = bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+    library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+
+    Preset &printer = add_inmemory_preset(bundle.printers, names.printer);
+    printer.is_system = true;
+    printer.config.option<ConfigOptionString>("default_print_profile", true)->value = names.print;
+    printer.config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {default_filament};
+
+    Preset &print = add_inmemory_preset(bundle.prints, names.print);
+    print.is_system = true;
+    compatible_list(bundle.prints, names.print, "compatible_printers") = {names.printer};
+
+    Preset &filament = add_inmemory_preset(bundle.filaments, names.filament);
+    filament.is_system = true;
+    filament.vendor = &library;
+    filament.config.opt_string("filament_type", 0u) = "PLA";
+    compatible_list(bundle.filaments, names.filament, "compatible_printers") = {names.printer};
+    compatible_list(bundle.filaments, names.filament, "compatible_prints") = {names.print};
+
+    Preset &fallback = add_inmemory_preset(bundle.filaments, names.fallback);
+    fallback.is_system = true;
+    fallback.vendor = &library;
+    fallback.config.opt_string("filament_type", 0u) = "PLA";
+    compatible_list(bundle.filaments, names.fallback, "compatible_printers") = {names.printer};
+    compatible_list(bundle.filaments, names.fallback, "compatible_prints") = {names.print};
+    return names;
+}
+
+void select_base_profiles(PresetBundle &bundle, const ResetNames &names)
+{
+    REQUIRE(bundle.printers.select_preset_by_name(names.printer, true));
+    REQUIRE(bundle.prints.select_preset_by_name(names.print, true));
+    REQUIRE(bundle.filaments.select_preset_by_name(names.filament, true));
+}
+
+} // namespace preset_project_reset_followup_contracts
+TEST_CASE("PresetBundle reset restores inherited printer and compatible selections",
+          "[PresetBundleLoading][PresetProjectReset1]")
+{
+    ScopedTemporaryDir temp("preset-project-reset-inherited");
+    ScopedDataDir data(temp.path());
+    PresetBundle bundle;
+    using namespace preset_project_reset_followup_contracts;
+    Preset &other_printer = add_inmemory_preset(bundle.printers, "A Other Printer");
+    other_printer.is_system = true;
+    other_printer.is_visible = true;
+    other_printer.is_compatible = true;
+    const ResetNames names = add_base_profiles(bundle, "Reset Base Filament");
+    bundle.printers.set_default_suppressed(true);
+    REQUIRE(bundle.printers.first_visible().name == "A Other Printer");
+    select_base_profiles(bundle, names);
+
+    std::vector<std::unique_ptr<Preset>> owners;
+    std::vector<Preset *> project;
+    const Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+    const Preset *base_print = bundle.prints.find_preset(names.print, false, true);
+    const Preset *base_filament = bundle.filaments.find_preset(names.filament, false, true);
+    REQUIRE(base_printer != nullptr);
+    REQUIRE(base_print != nullptr);
+    REQUIRE(base_filament != nullptr);
+    add_embedded(owners, project, Preset::TYPE_PRINTER, names.embedded_printer,
+                 base_printer->config, names.printer);
+    add_embedded(owners, project, Preset::TYPE_PRINT, names.embedded_print,
+                 base_print->config, names.print);
+    add_embedded(owners, project, Preset::TYPE_FILAMENT, names.embedded_filament,
+                 base_filament->config, names.filament);
+    REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+
+    REQUIRE(bundle.printers.select_preset_by_name(names.embedded_printer, true));
+    REQUIRE(bundle.printers.get_selected_preset_name() == names.embedded_printer);
+    REQUIRE(bundle.prints.select_preset_by_name(names.embedded_print, true));
+    REQUIRE(bundle.prints.get_selected_preset_name() == names.embedded_print);
+    REQUIRE(bundle.filaments.select_preset_by_name(names.embedded_filament, true));
+    REQUIRE(bundle.filaments.get_selected_preset_name() == names.embedded_filament);
+    bundle.filament_presets = {names.embedded_filament};
+    REQUIRE(embedded_preset_count(bundle) == 3);
+
+    bundle.reset_project_embedded_presets();
+
+    CHECK(embedded_preset_count(bundle) == 0);
+    CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+    CHECK(bundle.printers.get_edited_preset().name == names.printer);
+    CHECK(bundle.prints.get_selected_preset_name() == names.print);
+    CHECK(bundle.prints.get_edited_preset().name == names.print);
+    CHECK(bundle.filaments.get_selected_preset_name() == names.filament);
+    CHECK(bundle.filaments.get_edited_preset().name == names.filament);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == names.filament);
+}
+TEST_CASE("PresetBundle reset updates compatible selections without an embedded printer",
+          "[PresetBundleLoading][PresetProjectReset2]")
+{
+    ScopedTemporaryDir temp("preset-project-reset-compatible");
+    ScopedDataDir data(temp.path());
+    PresetBundle bundle;
+    using namespace preset_project_reset_followup_contracts;
+    const ResetNames names = add_base_profiles(bundle, "Reset Base Filament");
+    select_base_profiles(bundle, names);
+
+    std::vector<std::unique_ptr<Preset>> owners;
+    std::vector<Preset *> project;
+    const Preset *base_print = bundle.prints.find_preset(names.print, false, true);
+    const Preset *base_filament = bundle.filaments.find_preset(names.filament, false, true);
+    REQUIRE(base_print != nullptr);
+    REQUIRE(base_filament != nullptr);
+    add_embedded(owners, project, Preset::TYPE_PRINT, names.embedded_print,
+                 base_print->config, names.print);
+    add_embedded(owners, project, Preset::TYPE_FILAMENT, names.embedded_filament,
+                 base_filament->config, names.filament);
+    REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+
+    REQUIRE(bundle.printers.get_selected_preset_name() == names.printer);
+    REQUIRE(bundle.prints.select_preset_by_name(names.embedded_print, true));
+    REQUIRE(bundle.prints.get_selected_preset_name() == names.embedded_print);
+    REQUIRE(bundle.filaments.select_preset_by_name(names.embedded_filament, true));
+    REQUIRE(bundle.filaments.get_selected_preset_name() == names.embedded_filament);
+    bundle.filament_presets = {names.embedded_filament};
+    REQUIRE(embedded_preset_count(bundle) == 2);
+
+    bundle.reset_project_embedded_presets();
+
+    CHECK(embedded_preset_count(bundle) == 0);
+    CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+    CHECK(bundle.printers.get_edited_preset().name == names.printer);
+    CHECK(bundle.prints.get_selected_preset_name() == names.print);
+    CHECK(bundle.prints.get_edited_preset().name == names.print);
+    CHECK(bundle.filaments.get_selected_preset_name() == names.filament);
+    CHECK(bundle.filaments.get_edited_preset().name == names.filament);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == names.filament);
+}
+TEST_CASE("PresetBundle reset maps unavailable filament slots to visible fallbacks",
+          "[PresetBundleLoading][PresetProjectReset3]")
+{
+    const int fallback_mode = GENERATE(0, 1, 2);
+    DYNAMIC_SECTION("fallback mode " << fallback_mode) {
+        ScopedTemporaryDir temp("preset-project-reset-filament-fallback");
+        ScopedDataDir data(temp.path());
+        PresetBundle bundle;
+        using namespace preset_project_reset_followup_contracts;
+        const std::string default_filament = "Missing Preferred";
+        const ResetNames names = add_base_profiles(bundle, default_filament);
+        // The helper creates a fresh bundle for every generated row; configure the
+        // optional preferred profile only for the visible/hidden rows.
+        if (fallback_mode != 0) {
+            Preset &preferred = add_inmemory_preset(bundle.filaments, names.preferred);
+            preferred.is_system = true;
+            preferred.vendor = &bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+            preferred.is_visible = fallback_mode == 1;
+            preferred.config.opt_string("filament_type", 0u) = "PLA";
+            compatible_list(bundle.filaments, names.preferred, "compatible_printers") = {names.printer};
+            compatible_list(bundle.filaments, names.preferred, "compatible_prints") = {names.print};
+            Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+            REQUIRE(base_printer != nullptr);
+            base_printer->config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {names.preferred};
+        }
+        select_base_profiles(bundle, names);
+
+        std::vector<std::unique_ptr<Preset>> owners;
+        std::vector<Preset *> project;
+        const Preset *base_printer = bundle.printers.find_preset(names.printer, false, true);
+        REQUIRE(base_printer != nullptr);
+        add_embedded(owners, project, Preset::TYPE_PRINTER, names.embedded_printer,
+                     base_printer->config, names.printer);
+        REQUIRE(bundle.load_project_embedded_presets(project, ForwardCompatibilitySubstitutionRule::Disable).empty());
+        REQUIRE(bundle.printers.select_preset_by_name(names.embedded_printer, true));
+        bundle.filament_presets = {"Missing Slot"};
+
+        bundle.reset_project_embedded_presets();
+
+        const std::string expected = fallback_mode == 1 ? names.preferred : names.fallback;
+        CHECK(bundle.printers.get_selected_preset_name() == names.printer);
+        REQUIRE(bundle.filament_presets.size() == 1);
+        CHECK(bundle.filament_presets.front() == expected);
+        const Preset *resolved = bundle.filaments.find_preset(expected, false, true);
+        REQUIRE(resolved != nullptr);
+        CHECK(resolved->is_visible);
+        if (fallback_mode == 2) {
+            const Preset *hidden = bundle.filaments.find_preset(names.preferred, false, true);
+            REQUIRE(hidden != nullptr);
+            CHECK_FALSE(hidden->is_visible);
+        }
+    }
+}
