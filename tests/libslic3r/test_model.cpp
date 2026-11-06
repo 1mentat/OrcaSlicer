@@ -1,3 +1,4 @@
+#include "libslic3r/ObjectID.hpp"
 #include <catch2/catch_all.hpp>
 #include <algorithm>
 #include <utility>
@@ -71,3 +72,53 @@ TEST_CASE("An object's raw mesh keeps the triangles of each part on its own vert
     CHECK_THAT(min_x.front(), Catch::Matchers::WithinAbs(0., 1e-4));
     CHECK_THAT(min_x.back(), Catch::Matchers::WithinAbs(30., 1e-4));
 }
+
+TEST_CASE("Model lifecycle preserves material identity and mesh sharing", "[Model][ModelLifecycleSharing]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name = "Lifecycle part";
+    object->input_file = "lifecycle.stl";
+    ModelVolume *part = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(part != nullptr);
+    const ObjectID object_id = object->id();
+    const ObjectID volume_id = part->id();
+
+    CHECK(model.add_default_instances());
+    REQUIRE(object->instances.size() == 1);
+    CHECK(model.add_default_instances());
+    CHECK(object->instances.size() == 1);
+
+    ModelMaterial *material = model.add_material("red");
+    REQUIRE(material != nullptr);
+    material->apply({ { "color", "#ff0000" } });
+    part->set_material_id("red");
+    CHECK(part->material() == material);
+    CHECK(material->attributes.at("color") == "#ff0000");
+    CHECK(object->materials_count() == 1);
+
+    ModelVolume *shared = object->add_volume_with_shared_mesh(*part, ModelVolumeType::NEGATIVE_VOLUME);
+    REQUIRE(shared != nullptr);
+    REQUIRE(object->volumes.size() == 2);
+    CHECK(shared->mesh_ptr() == part->mesh_ptr());
+    CHECK(shared->is_negative_volume());
+    CHECK(object->parts_count() == 1);
+    CHECK(object->facets_count() == 12);
+
+    ModelObject *clone = model.add_object(*object);
+    REQUIRE(clone != nullptr);
+    REQUIRE(clone->volumes.size() == object->volumes.size());
+    REQUIRE(clone->volumes.size() == 2);
+    REQUIRE(clone->volumes.front() != nullptr);
+    CHECK(clone->id() != object_id);
+    CHECK(clone->volumes.front()->id() != volume_id);
+    CHECK(clone->volumes.front()->mesh_ptr() == part->mesh_ptr());
+    CHECK(clone->instances.size() == 1);
+
+    CHECK(model.delete_object(clone));
+    CHECK_FALSE(model.delete_object(ObjectID()));
+    CHECK(model.delete_object(object_id));
+    CHECK(model.objects.empty());
+}
+
