@@ -13209,3 +13209,21 @@ TEST_CASE("PresetBundle different-extruder support uses the edited printer varia
     printer.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard", "Standard"};
     CHECK_FALSE(bundle.support_different_extruders());
 }
+
+
+TEST_CASE("Only one occurrence of the edited filament qualifies as a unique slot",
+          "[PresetBundleLoading][PresetUniqueEditedSlot]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.filaments, "TPU").config.option<ConfigOptionStrings>("filament_type", true)->values = {"TPU"};
+    add_inmemory_preset(bundle.filaments, "PLA").config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    REQUIRE(bundle.filaments.select_preset_by_name("TPU", true));
+    bundle.filament_presets = {"TPU", "PLA"};
+    CHECK(bundle.is_the_only_edited_filament(0));
+    CHECK_FALSE(bundle.is_the_only_edited_filament(1));
+    CHECK_FALSE(bundle.is_the_only_edited_filament(4));
+    bundle.filament_presets = {"TPU", "TPU"};
+    CHECK_FALSE(bundle.is_the_only_edited_filament(0));
+    bundle.filament_presets = {"TPU", "PLA", "TPU"};
+    CHECK_FALSE(bundle.is_the_only_edited_filament(0));
+}
