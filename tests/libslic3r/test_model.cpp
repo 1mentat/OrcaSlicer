@@ -1,3 +1,4 @@
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Config.hpp"
 #include <boost/filesystem/path.hpp>
 #include <memory>
@@ -1230,3 +1231,18 @@ TEST_CASE("Backup IDs remain stable and advance independently of object IDs", "[
 }
 
 } // namespace model_extended_contracts
+
+TEST_CASE("Model metadata and plate custom code have explicit current-plate selection", "[Model][ModelPlateMetadata]")
+{
+    Model model;
+    model.SetDesigner("Ada", "user-7");
+    REQUIRE(model.design_info != nullptr);
+    CHECK(model.design_info->Designer == "Ada");
+    CHECK(model.design_info->DesignerUserId == "user-7");
+    model.plates_custom_gcodes[2].gcodes.push_back(CustomGCode::Item{1., CustomGCode::Custom, 1, "", "plate2"});
+    model.curr_plate_index = 2;
+    REQUIRE(model.get_curr_plate_custom_gcodes().gcodes.size() == 1);
+    CHECK(model.get_curr_plate_custom_gcodes().gcodes.front().extra == "plate2");
+    model.curr_plate_index = 9;
+    CHECK(model.get_curr_plate_custom_gcodes().gcodes.empty());
+}
