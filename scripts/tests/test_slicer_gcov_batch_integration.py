@@ -11,6 +11,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -140,6 +141,134 @@ class CatchBatchGcovIntegrationTests(unittest.TestCase):
                       for path in profile.rglob("*.gcda")} for profile in inputs]
             self.assertEqual(before, after)
 
+    def test_profile_copy_checks_source_and_destination_sha256(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source_file = source / "build" / "src" / "unit.gcda"
+            source_file.parent.mkdir(parents=True)
+            payload = b"gcda profile bytes"
+            source_file.write_bytes(payload)
+            relative_path = "build/src/unit.gcda"
+            digest = hashlib.sha256(payload).hexdigest()
+
+            with self.assertRaisesRegex(ValueError, "source hash changed"):
+                gcov._copy_profile_inventory(source, {relative_path: "0" * 64},
+                                             root / "wrong-hash")
+            self.assertFalse((root / "wrong-hash" / relative_path).exists())
+
+            destination = root / "copy"
+            gcov._copy_profile_inventory(source, {relative_path: digest}, destination)
+            self.assertEqual((destination / relative_path).read_bytes(), payload)
+            self.assertEqual(gcov._hash_file(destination / relative_path), digest)
+
+    def test_failed_full_tree_merge_recovers_from_verified_src_and_tests_partitions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            build = root / "build"
+            tool = root / "gcov-tool-13"
+            tool.write_bytes(b"test executable bytes")
+            tool.chmod(0o700)
+            inputs = [root / f"profile-{index}" for index in range(3)]
+            for profile in inputs:
+                profile.mkdir()
+
+            production_note = build / "src" / "CMakeFiles" / "libslic3r.dir" / "production.cpp.gcno"
+            shared_test_note = build / "tests" / "CMakeFiles" / "fff_print_tests.dir" / "shared.cpp.gcno"
+            shard_one_note = build / "tests" / "CMakeFiles" / "fff_print_tests.dir" / "one.cpp.gcno"
+            shard_two_note = build / "tests" / "CMakeFiles" / "fff_print_tests.dir" / "two.cpp.gcno"
+            _write_gcov_pair(inputs[0], production_note, 101, payload=b"1")
+            _write_gcov_pair(inputs[0], shared_test_note, 202, payload=b"2")
+            _write_gcov_pair(inputs[1], shared_test_note, 202, payload=b"3")
+            _write_gcov_pair(inputs[1], shard_one_note, 303, payload=b"7")
+            _write_gcov_pair(inputs[2], shared_test_note, 202, payload=b"5")
+            _write_gcov_pair(inputs[2], shard_two_note, 404, payload=b"11")
+            notes = {production_note, shared_test_note, shard_one_note, shard_two_note}
+            before = [gcov._gcda_profile_inventory(profile) for profile in inputs]
+
+            class CrashThenPartitionCommon:
+                calls = []
+
+                def _run(self, argv, *, cwd=None, env=None, timeout=None):
+                    self.calls.append(list(argv))
+                    if argv[-1] == "--version":
+                        return subprocess.CompletedProcess(argv, 0, "gcov-tool (GCC) 13.3.0\n", "")
+                    left, right = Path(argv[-2]), Path(argv[-1])
+                    destination = Path(argv[argv.index("--output") + 1])
+                    # The primary attempt receives full original trees and reproduces
+                    # the observed allocator crash. Recovery receives category-only copies.
+                    if left in inputs or right in inputs:
+                        return subprocess.CompletedProcess(
+                            argv, -6, "", "free(): invalid pointer")
+                    destination.mkdir(parents=True)
+                    for source in (left, right):
+                        for gcda in source.rglob("*.gcda"):
+                            target = destination / gcda.relative_to(source)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            incoming = gcda.read_bytes()
+                            if target.exists():
+                                existing = target.read_bytes()
+                                if existing[:16] != incoming[:16]:
+                                    raise AssertionError("fake merge encountered mismatched GCDA headers")
+                                target.write_bytes(
+                                    existing[:16] + str(int(existing[16:]) + int(incoming[16:])).encode())
+                            else:
+                                shutil.copy2(gcda, target)
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+
+            common = CrashThenPartitionCommon()
+            output = root / "output" / "merged"
+            report_path = root / "output" / "merge-report.json"
+            report = gcov.merge_gcov_profile_roots(
+                inputs, gcov_tool=tool, gcc_version="13.3.0", output_root=output,
+                report_path=report_path, timeout=30, common=common,
+                expected_notes=notes, build_dir=build)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["merge_strategy"], "verified_build_src_tests_split_recovery")
+            self.assertIn("invalid pointer", report["primary_merge_failure"]["command"]["stderr"])
+            self.assertEqual(report["primary_merge_failure"]["command"]["returncode"], -6)
+            self.assertEqual(len(report["recovery_commands"]), 2)
+            self.assertTrue(all("tests" in command[-2] for command in report["recovery_commands"]))
+            self.assertEqual(report["recovery"]["categories"]["src"]["strategy"],
+                             "copy_single_nonempty_profile")
+            self.assertEqual(report["recovery"]["categories"]["tests"]["strategy"],
+                             "gcov_tool_merge_weight_1_1")
+            expected_paths = set().union(*(set(value) for value in before))
+            output_inventory = gcov._gcda_profile_inventory(output)
+            self.assertEqual(set(output_inventory), expected_paths)
+            shared_output = output / str(shared_test_note.with_suffix(".gcda")).lstrip("/")
+            self.assertEqual(shared_output.read_bytes()[16:], b"10")
+            self.assertEqual([gcov._gcda_profile_inventory(profile) for profile in inputs], before)
+            self.assertTrue(all(row["unchanged_after_merge"] for row in report["input_profiles"]))
+            receipt = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["primary_merge_failure"]["command"]["returncode"], -6)
+            self.assertEqual(receipt["recovery_commands"], report["recovery_commands"])
+
+            failed_output = root / "output" / "merged-after-failure"
+            failed_report = root / "output" / "merge-report-after-failure.json"
+            original_copy = gcov._copy_profile_inventory
+
+            def fail_while_assembling_union(source_root, inventory, destination_root):
+                if destination_root.name == "assembled-output" and any(
+                        "/build/tests/" in f"/{relative_path}" for relative_path in inventory):
+                    raise OSError("synthetic final union copy failure")
+                return original_copy(source_root, inventory, destination_root)
+
+            with patch.object(gcov, "_copy_profile_inventory", side_effect=fail_while_assembling_union):
+                with self.assertRaisesRegex(gcov.GcovProfileMergeError, "split recovery failed"):
+                    gcov.merge_gcov_profile_roots(
+                        inputs, gcov_tool=tool, gcc_version="13.3.0", output_root=failed_output,
+                        report_path=failed_report, timeout=30, common=CrashThenPartitionCommon(),
+                        expected_notes=notes, build_dir=build)
+            self.assertFalse(failed_output.exists())
+            self.assertFalse(any(root.joinpath("output").glob(
+                ".merged-after-failure.gcov-merge-*")))
+            failed_receipt = json.loads(failed_report.read_text(encoding="utf-8"))
+            self.assertIn("synthetic final union copy failure",
+                          failed_receipt["recovery_failure"]["message"])
+            self.assertEqual([gcov._gcda_profile_inventory(profile) for profile in inputs], before)
+
     def test_gcov_profile_merge_failure_writes_failure_receipt_without_merged_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -180,6 +309,8 @@ class CatchBatchGcovIntegrationTests(unittest.TestCase):
             inputs = [root / "one", root / "two"]
             note_one = root / "build" / "one.gcno"
             note_two = root / "build" / "two.gcno"
+            (root / "build" / "src").mkdir(parents=True)
+            (root / "build" / "tests").mkdir(parents=True)
             for profile in inputs:
                 profile.mkdir()
             _write_gcov_pair(inputs[0], note_one, 111, payload=b"one")
@@ -203,10 +334,12 @@ class CatchBatchGcovIntegrationTests(unittest.TestCase):
                 gcov.merge_gcov_profile_roots(
                     inputs, gcov_tool=tool, gcc_version="13.3.0", output_root=root / "merged",
                     report_path=report_path, timeout=30, common=IncompleteCommon(),
-                    expected_notes={note_one, note_two})
+                    expected_notes={note_one, note_two}, build_dir=root / "build")
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "merge_failed")
             self.assertEqual(report["commands"][0]["identity_mismatch"]["missing_count"], 1)
+            self.assertIn("exactly one verified build src/tests tree",
+                          report["recovery_failure"]["message"])
             self.assertTrue(all(row["unchanged_after_merge"] for row in report["input_profiles"]))
 
     def test_gcov_profile_epoch_check_matches_versions_and_stamps(self):
