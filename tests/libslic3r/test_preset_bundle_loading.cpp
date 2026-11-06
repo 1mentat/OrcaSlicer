@@ -13467,3 +13467,26 @@ TEST_CASE("Selected preset parent resolves an inherited base and rejects a missi
     REQUIRE(collection.select_preset_by_name("Orphan Process", true));
     CHECK(collection.get_selected_preset_parent() == nullptr);
 }
+
+
+TEST_CASE("Collection reset removes loaded entries and optionally their files",
+          "[PresetBundleLoading][PresetCollectionResetFiles]")
+{
+    const bool delete_files = GENERATE(false, true);
+    ScopedTemporaryDir temp("preset-reset-followup");
+    ScopedDataDir data(temp.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
+    Preset &user = add_inmemory_preset(collection, "Transient Process");
+    user.file = collection.path_for_preset(user);
+    REQUIRE(user.save(nullptr));
+    const fs::path saved_file = user.file;
+    REQUIRE(fs::exists(saved_file));
+    REQUIRE(collection.select_preset_by_name("Transient Process", true));
+    collection.reset(delete_files);
+    CHECK(collection.size() == collection.num_default_presets());
+    CHECK(collection.get_selected_preset().is_default);
+    CHECK(collection.find_preset("Transient Process", false, true) == nullptr);
+    CHECK(fs::exists(saved_file) == !delete_files);
+}
