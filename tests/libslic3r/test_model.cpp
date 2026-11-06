@@ -1075,3 +1075,40 @@ TEST_CASE("Filament deletion preserves mixed assignments and removes stale expli
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Adjusting minimum Z preserves instance spacing while moving a sinking object", "[Model][ModelAdjustMinimumZ]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->instances.front()->set_offset(Vec3d(2, 3, -6));
+    ModelInstance *fixed = object->add_instance();
+    REQUIRE(fixed != nullptr);
+    REQUIRE(object->instances.size() == 2);
+    fixed->set_offset(Vec3d(40, 3, 2));
+    fixed->auto_drop = false;
+    const double fixed_z = fixed->get_offset(Z);
+    model.adjust_min_z();
+    CHECK_THAT(object->instances.front()->get_offset(Z), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(fixed->get_offset(Z), Catch::Matchers::WithinAbs(fixed_z + 6., 1e-6));
+    CHECK_THAT(model.bounding_box_exact().min.z(), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Instance Z queries follow scaling and translation of printable volumes", "[Model][ModelInstanceZ]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10.);
+    ModelInstance *instance = object->instances.front();
+    instance->set_scaling_factor(Vec3d(1, 1, 2));
+    instance->set_offset(Vec3d(0, 0, 3));
+    CHECK_THAT(object->get_instance_min_z(0), Catch::Matchers::WithinAbs(3., 1e-5));
+    CHECK_THAT(object->get_instance_max_z(0), Catch::Matchers::WithinAbs(23., 1e-5));
+}
+
+} // namespace model_extended_contracts
