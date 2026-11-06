@@ -1,3 +1,4 @@
+#include "libslic3r/Config.hpp"
 #include <boost/filesystem/path.hpp>
 #include <memory>
 #include <string>
@@ -967,6 +968,63 @@ TEST_CASE("Baking rotated instances preserves world bounds and removes unsupport
     CHECK(first->get_scaling_factor().x() > 0.);
     CHECK(first->get_mirror().isApprox(Vec3d::Ones(), 1e-6));
     CHECK(object->volumes.front()->source.input_file.empty());
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model predicates distinguish ordinary, multipart, and advanced features", "[Model][ModelPredicates]")
+{
+    Model ordinary;
+    ModelObject *ordinary_object = cube_object(ordinary);
+    CHECK_FALSE(model_has_multi_part_objects(ordinary));
+    CHECK_FALSE(model_has_advanced_features(ordinary));
+
+    Model multipart;
+    ModelObject *multipart_object = cube_object(multipart);
+    REQUIRE(multipart_object->add_volume(make_cube(2, 2, 2), ModelVolumeType::PARAMETER_MODIFIER, false) != nullptr);
+    REQUIRE(multipart_object->add_instance() != nullptr);
+    CHECK(model_has_multi_part_objects(multipart));
+    CHECK(model_has_advanced_features(multipart));
+
+    Model configured;
+    ModelObject *configured_object = cube_object(configured);
+    configured_object->config.set("extruder", 1);
+    CHECK_FALSE(model_has_advanced_features(configured));
+    configured_object->config.set_key_value("custom_model_setting", new ConfigOptionInt(3));
+    CHECK(model_has_advanced_features(configured));
+    CHECK(ordinary_object->has_solid_mesh());
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model volume change predicates ignore filtered modifiers and detect transforms", "[Model][ModelChangePredicates]")
+{
+    Model source;
+    ModelObject *source_object = cube_object(source);
+    REQUIRE(source_object->add_volume(make_cube(2, 2, 2), ModelVolumeType::PARAMETER_MODIFIER, false) != nullptr);
+    Model changed(source);
+    REQUIRE(changed.objects.size() == 1);
+    REQUIRE(changed.objects.front() != nullptr);
+    REQUIRE(changed.objects.front()->volumes.size() == 2);
+    REQUIRE(changed.objects.front()->volumes[0] != nullptr);
+    REQUIRE(changed.objects.front()->volumes[1] != nullptr);
+    REQUIRE(model_object_list_equal(source, changed));
+    CHECK_FALSE(model_volume_list_changed(*source_object, *changed.objects.front(), ModelVolumeType::MODEL_PART));
+    CHECK_FALSE(model_volume_list_changed(*source_object, *changed.objects.front(), { ModelVolumeType::MODEL_PART }));
+
+    changed.objects.front()->volumes.front()->set_offset(Vec3d(2, 0, 0));
+    CHECK(model_volume_list_changed(*source_object, *changed.objects.front(), ModelVolumeType::MODEL_PART));
+    CHECK_FALSE(model_volume_list_changed(*source_object, *changed.objects.front(), ModelVolumeType::PARAMETER_MODIFIER));
+    changed.objects.front()->volumes.front()->set_offset(Vec3d::Zero());
+    changed.objects.front()->delete_volume(1);
+    CHECK(model_volume_list_changed(*source_object, *changed.objects.front(), ModelVolumeType::PARAMETER_MODIFIER));
+    CHECK(model_object_list_extended(source, changed) == false);
+    changed.add_object();
+    CHECK(model_object_list_extended(source, changed));
 }
 
 } // namespace model_extended_contracts
