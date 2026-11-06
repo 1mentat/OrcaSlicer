@@ -1732,3 +1732,54 @@ TEST_CASE("Model import accepts the repository ASCII STL fixture variants", "[Mo
 }
 
 } // namespace model_import_contracts
+
+namespace model_import_contracts {
+namespace {
+
+void write_text(const std::string &path, const std::string &contents)
+{
+    boost::nowide::ofstream out(path, std::ios::binary);
+    REQUIRE(out.good());
+    out << contents;
+    out.close();
+    REQUIRE(out.good());
+}
+
+} // namespace
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import rejects malformed STL and unknown extensions", "[Model][ModelImport][Errors][ModelStlFormatErrors]")
+{
+    SECTION("malformed STL") {
+        ScopedTemporaryFile malformed(".stl");
+        write_text(malformed.string(), "solid incomplete\n facet normal 0 0 1\n");
+        CHECK_THROWS_AS(Model::read_from_file(malformed.string()), Slic3r::RuntimeError);
+    }
+
+    SECTION("valid STL bytes under an unsupported suffix") {
+        ScopedTemporaryFile recognized(".stl");
+        ScopedTemporaryFile unknown(".model");
+        write_cube_binary_stl(recognized.string());
+        Model model;
+        REQUIRE_NOTHROW(model = Model::read_from_file(recognized.string()));
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front() != nullptr);
+        REQUIRE(boost::filesystem::copy_file(recognized.path(), unknown.path()));
+        CHECK_THROWS_AS(Model::read_from_file(unknown.string()), Slic3r::RuntimeError);
+    }
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import reports malformed OBJ files", "[Model][ModelImport][OBJ][Errors][ModelObjFormatErrors]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 99\n");
+    CHECK_THROWS_AS(Model::read_from_file(obj.string()), Slic3r::RuntimeError);
+}
+
+} // namespace model_import_contracts
