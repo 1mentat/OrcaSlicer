@@ -13493,3 +13493,92 @@ TEST_CASE("Collection reset removes loaded entries and optionally their files",
     CHECK(collection.find_preset("Transient Process", false, true) == nullptr);
     CHECK(fs::exists(saved_file) == !delete_files);
 }
+
+TEST_CASE("external .3mf presets retain source identity and distinct configs",
+          "[PresetBundleLoading][PresetExternalSave1]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    const size_t before = collection.size();
+    const fs::path source_a = scoped.directory.path() / "Model-A.3mf";
+    const fs::path source_b = scoped.directory.path() / "Model-B.3mf";
+    preset_workflow_contracts::write_text(source_a, "");
+    preset_workflow_contracts::write_text(source_b, "");
+    REQUIRE(fs::exists(source_a));
+    REQUIRE(fs::exists(source_b));
+
+    const auto first = collection.load_external_preset(
+        source_a.string(), "Model-A.3mf", "Project Process", preset_lifecycle_contracts::print_config(scoped.bundle, 0.27), {},
+        PresetCollection::LoadAndSelect::Always);
+    REQUIRE(first.first != nullptr);
+    const Preset *first_ptr = first.first;
+    const std::string first_name = "Project Process(Model-A.3mf)";
+    const std::string second_name = "Project Process(Model-B.3mf)";
+
+    const auto second = collection.load_external_preset(
+        source_b.string(), "Model-B.3mf", "Project Process", preset_lifecycle_contracts::print_config(scoped.bundle, 0.31), {},
+        PresetCollection::LoadAndSelect::Always);
+    REQUIRE(second.first != nullptr);
+    const Preset *second_ptr = second.first;
+    REQUIRE(first_ptr != second_ptr);
+
+    // This authored A-before-B order checks the returned identities; fresh lookups drive field reads.
+    Preset *first_after = collection.find_preset(first_name, false, true);
+    Preset *second_after = collection.find_preset(second_name, false, true);
+    REQUIRE(first_after != nullptr);
+    REQUIRE(second_after != nullptr);
+    CHECK(first_ptr == first_after);
+    CHECK(second_ptr == second_after);
+    CHECK(first_after->name == first_name);
+    CHECK(second_after->name == second_name);
+    CHECK(first_after->is_external);
+    CHECK(second_after->is_external);
+    CHECK(first_after->is_project_embedded);
+    CHECK(second_after->is_project_embedded);
+    CHECK(first_after->file == source_a.string());
+    CHECK(second_after->file == source_b.string());
+    CHECK(collection.size() == before + 2);
+    CHECK(collection.get_selected_preset_name() == second_name);
+    REQUIRE(first_after->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE(second_after->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(first_after->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK_THAT(second_after->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    const fs::path preset_tree = scoped.directory.path() / PRESET_PRINT_NAME;
+    REQUIRE(fs::is_directory(preset_tree));
+    size_t json_files = 0;
+    for (const auto &entry : fs::recursive_directory_iterator(preset_tree))
+        if (entry.path().extension() == ".json")
+            ++json_files;
+    CHECK(json_files == 0);
+}
+TEST_CASE("project embedded external preset refreshes stored config without dirtying it",
+          "[PresetBundleLoading][PresetExternalSave2]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    const size_t before = collection.size();
+    Preset &stored = collection.load_preset({}, "Embedded Process", preset_lifecycle_contracts::print_config(scoped.bundle, 0.20), true);
+    stored.is_project_embedded = true;
+    collection.select_preset(0);
+    const std::string default_name = collection.default_preset().name;
+    REQUIRE(collection.get_selected_preset_name() == default_name);
+    REQUIRE_FALSE(stored.is_dirty);
+    const Preset *stored_before = &stored;
+
+    DynamicPrintConfig external = preset_lifecycle_contracts::print_config(scoped.bundle, 0.31);
+    const fs::path source = scoped.directory.path() / "Model.3mf";
+    preset_workflow_contracts::write_text(source, "");
+    REQUIRE(fs::exists(source));
+    const auto loaded = collection.load_external_preset(
+        source.string(), "Model.3mf", "Embedded Process", external, {"layer_height"}, PresetCollection::LoadAndSelect::Never);
+    const Preset *live = collection.find_preset("Embedded Process", false, true);
+    REQUIRE(live != nullptr);
+    REQUIRE(loaded.first == live);
+    CHECK(live == stored_before);
+    CHECK_FALSE(loaded.second);
+    REQUIRE(live->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(live->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-9));
+    CHECK_FALSE(live->is_dirty);
+    CHECK(collection.get_selected_preset_name() == default_name);
+    CHECK(collection.size() == before + 1);
+}
