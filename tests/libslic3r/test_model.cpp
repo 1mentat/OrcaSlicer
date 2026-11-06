@@ -122,3 +122,72 @@ TEST_CASE("Model lifecycle preserves material identity and mesh sharing", "[Mode
     CHECK(model.objects.empty());
 }
 
+
+
+namespace model_bounds_contracts {
+namespace {
+
+void check_vec3d(const Vec3d &actual, const Vec3d &expected, double epsilon = 1e-5)
+{
+    CHECK_THAT(actual.x(), Catch::Matchers::WithinAbs(expected.x(), epsilon));
+    CHECK_THAT(actual.y(), Catch::Matchers::WithinAbs(expected.y(), epsilon));
+    CHECK_THAT(actual.z(), Catch::Matchers::WithinAbs(expected.z(), epsilon));
+}
+
+
+} // namespace
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model instance transforms have analytic world and local bounds", "[Model][ModelInstanceBounds]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelInstance *instance = object->add_instance(Vec3d(20, 30, -5), Vec3d(2, 1, 1), Vec3d::Zero(), Vec3d::Ones());
+    REQUIRE(instance != nullptr);
+
+    const BoundingBoxf3 world_box = object->instance_bounding_box(*instance);
+    check_vec3d(world_box.min, Vec3d(20, 30, -5), 1e-5);
+    check_vec3d(world_box.max, Vec3d(40, 40, 5), 1e-5);
+    const BoundingBoxf3 no_offset_box = object->instance_bounding_box(*instance, true);
+    check_vec3d(no_offset_box.min, Vec3d(0, 0, 0), 1e-5);
+    check_vec3d(no_offset_box.max, Vec3d(20, 10, 10), 1e-5);
+    check_vec3d(object->raw_mesh_bounding_box().min, Vec3d(0, 0, 0), 1e-5);
+    check_vec3d(object->raw_mesh_bounding_box().max, Vec3d(10, 10, 10), 1e-5);
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-5., 1e-6));
+    CHECK_THAT(object->max_z(), Catch::Matchers::WithinAbs(5., 1e-6));
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model instance centering and bed placement retain projected dimensions", "[Model][ModelInstancePlacement]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelInstance *instance = object->add_instance(Vec3d(20, 30, -5), Vec3d(2, 1, 1), Vec3d::Zero(), Vec3d::Ones());
+    REQUIRE(instance != nullptr);
+
+    CHECK(model.center_instances_around_point(Vec2d(0, 0)));
+    CHECK_FALSE(model.center_instances_around_point(Vec2d(0, 0)));
+    const Vec3d centered = object->bounding_box_exact().center();
+    CHECK_THAT(centered.x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(centered.y(), Catch::Matchers::WithinAbs(0., 1e-5));
+
+    object->translate_instances(Vec3d(0, 0, -10));
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-15., 1e-6));
+    object->ensure_on_bed();
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(0., 1e-6));
+
+    const Polygon instance_hull = instance->convex_hull_2d();
+    CHECK(instance_hull.bounding_box().size().x() == scaled(20.));
+    CHECK(instance_hull.bounding_box().size().y() == scaled(10.));
+}
+
+} // namespace model_bounds_contracts
