@@ -13582,3 +13582,65 @@ TEST_CASE("project embedded external preset refreshes stored config without dirt
     CHECK(collection.get_selected_preset_name() == default_name);
     CHECK(collection.size() == before + 1);
 }
+
+TEST_CASE("Saving an inherited preset keeps its parent",
+          "[PresetBundleLoading][PresetExternalSave3]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    collection.load_preset({}, "Save Parent", preset_lifecycle_contracts::print_config(scoped.bundle, 0.20), true);
+    collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.28;
+
+    collection.save_current_preset("Saved Child", false, false);
+    Preset *saved = collection.find_preset("Saved Child", false, true);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->inherits() == "Save Parent");
+    CHECK_FALSE(saved->is_project_embedded);
+    CHECK(collection.get_selected_preset_name() == "Saved Child");
+    REQUIRE(fs::exists(saved->file));
+
+    DynamicPrintConfig serialized;
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE_NOTHROW(serialized.load_from_json(saved->file,
+                                              ForwardCompatibilitySubstitutionRule::Disable,
+                                              key_values, reason));
+    REQUIRE(reason.empty());
+    REQUIRE(serialized.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE(serialized.option<ConfigOptionString>("inherits") != nullptr);
+    CHECK(serialized.opt_string("inherits") == "Save Parent");
+    CHECK_THAT(serialized.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.28, 1e-9));
+}
+TEST_CASE("Saving a detached preset writes a standalone base",
+          "[PresetBundleLoading][PresetExternalSave4]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    DynamicPrintConfig parent_config = preset_lifecycle_contracts::print_config(scoped.bundle, 0.20);
+    parent_config.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    collection.load_preset({}, "Detach Parent", parent_config, true);
+    collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.29;
+
+    collection.save_current_preset("Detached Child", true, false);
+    Preset *saved = collection.find_preset("Detached Child", false, true);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->inherits().empty());
+    CHECK_FALSE(saved->is_project_embedded);
+    CHECK(collection.get_selected_preset_name() == "Detached Child");
+    REQUIRE(fs::exists(saved->file));
+    const fs::path expected_file = scoped.directory.path() / PRESET_PRINT_NAME / "base" / "Detached Child.json";
+    REQUIRE(fs::exists(expected_file));
+    CHECK(fs::equivalent(fs::path(saved->file), expected_file));
+
+    DynamicPrintConfig serialized;
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    REQUIRE_NOTHROW(serialized.load_from_json(saved->file,
+                                              ForwardCompatibilitySubstitutionRule::Disable,
+                                              key_values, reason));
+    REQUIRE(reason.empty());
+    REQUIRE(serialized.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE(serialized.option<ConfigOptionInt>("wall_loops") != nullptr);
+    CHECK(serialized.opt_int("wall_loops") == 7);
+    CHECK_THAT(serialized.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.29, 1e-9));
+}
