@@ -2973,19 +2973,21 @@
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsFamilyVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Changing the first band from 180 to 25 mm/s changes emitted outer-wall feeds while preserving nonempty finite motion on normal and severe caged slopes."
+      "reason": "On normal and severe caged slopes, configured 25 mm/s changes emitted outer-wall feeds. Setting both first and second band speeds to their registered minimum 0 produces the same observed feed-rate range as explicit 100% values for both fixtures, exercising the first band's zero fallback on real G-code. The third and fourth overlap bands remain outside the claim."
     },
     "overhang_2_4_speed": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsFamilyVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Changing the second band from 140 to 25 mm/s changes emitted outer-wall feeds on the bounded caged-slope fixtures."
+      "reason": "On normal and severe caged slopes, configured 25 mm/s changes emitted outer-wall feeds. Setting both first and second band speeds to their registered minimum 0 produces the same observed feed-rate range as explicit 100% values for both fixtures, exercising the second band's zero fallback on real G-code. The third and fourth overlap bands remain outside the claim."
     },
     "ironing_pattern": {
       "test": "tests/fff_print/test_settings_variance.cpp",

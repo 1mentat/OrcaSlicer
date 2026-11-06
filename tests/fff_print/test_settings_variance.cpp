@@ -2383,6 +2383,38 @@ TEST_CASE("Overhang speed gate and two configured bands affect the caged slope",
         CHECK(emitted_feeds_changed);
         CHECK(std::any_of(feeds.begin(), feeds.end(), [](double f) { return f < caged_outer_wall_speed * 60. - 1e-3; }));
     }
+
+    // Zero is the registered minimum and resolves to the same 100% speed
+    // fallback as an explicit 100% value in both configured bands.
+    DynamicPrintConfig zero_speed_bands = enabled;
+    zero_speed_bands.set_deserialize_strict({
+        {"overhang_1_4_speed", 0.0},
+        {"overhang_2_4_speed", 0.0},
+    });
+    DynamicPrintConfig full_speed_bands = enabled;
+    full_speed_bands.set_deserialize_strict({
+        {"overhang_1_4_speed", "100%"},
+        {"overhang_2_4_speed", "100%"},
+    });
+    auto check_same_feed_range = [](const std::vector<double> &expected, const std::vector<double> &actual) {
+        REQUIRE_FALSE(expected.empty());
+        REQUIRE_FALSE(actual.empty());
+        const auto expected_range = std::minmax_element(expected.begin(), expected.end());
+        const auto actual_range = std::minmax_element(actual.begin(), actual.end());
+        CHECK_THAT(*actual_range.first, Catch::Matchers::WithinAbs(*expected_range.first, 1e-3));
+        CHECK_THAT(*actual_range.second, Catch::Matchers::WithinAbs(*expected_range.second, 1e-3));
+    };
+    const std::vector<double> zero_normal =
+        caged_slope_feeds(export_mesh(caged_overhang_mesh(), zero_speed_bands), zero_speed_bands);
+    const std::vector<double> explicit_normal =
+        caged_slope_feeds(export_mesh(caged_overhang_mesh(), full_speed_bands), full_speed_bands);
+    check_same_feed_range(explicit_normal, zero_normal);
+
+    const std::vector<double> explicit_severe =
+        severe_caged_slope_feeds(export_mesh(severe_caged_overhang_mesh(), full_speed_bands), full_speed_bands);
+    const std::vector<double> zero_severe =
+        severe_caged_slope_feeds(export_mesh(severe_caged_overhang_mesh(), zero_speed_bands), zero_speed_bands);
+    check_same_feed_range(explicit_severe, zero_severe);
 }
 
 TEST_CASE("Ironing settings control path topology extrusion and speed", "[SettingsFamilyVariance][IroningMotion]")

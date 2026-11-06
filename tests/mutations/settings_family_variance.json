@@ -1,5 +1,5 @@
 {
-  "scope": "Twelve assertion-killed settings-family mutations. The two retained known survivors do not substantiate an infill_anchor length or clamp coverage claim.",
+  "scope": "Fourteen assertion-killed settings-family mutations. The two retained known survivors do not substantiate an infill_anchor length or clamp coverage claim.",
   "mutants": [
     {
       "id": "gc-support-base-speed",
@@ -58,6 +58,14 @@
       "test_filter": "SettingsFamilyVariance"
     },
     {
+      "id": "gc-overhang-first-band-zero-fallback",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (NOZZLE_CONFIG(slowdown_for_curled_perimeters)){\n                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :",
+      "new": "if (NOZZLE_CONFIG(slowdown_for_curled_perimeters)){\n                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{25, true} :",
+      "description": "The registered zero minimum preserves ordinary wall speed in the first caged overhang band",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
       "id": "gc-filament-ironing-speed",
       "path": "src/libslic3r/GCode.cpp",
       "old": "            speed = m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx);",
@@ -95,6 +103,14 @@
       "old": "ironing_params.height = default_layer_height * 0.01 * (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_flow);",
       "new": "ironing_params.height = default_layer_height * 0.01 * (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: ConfigOptionPercent(100));",
       "description": "Process ironing flow controls emitted ironing E",
+      "test_filter": "SettingsFamilyVariance"
+    },
+    {
+      "id": "gc-overhang-second-band-zero-fallback",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            if (NOZZLE_CONFIG(slowdown_for_curled_perimeters)){\n                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},\n                     (NOZZLE_CONFIG(overhang_2_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :",
+      "new": "            if (NOZZLE_CONFIG(slowdown_for_curled_perimeters)){\n                ConfigOptionFloatsOrPercents dynamic_overhang_speeds(\n                    {FloatOrPercent{100, true},\n                     (NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{100, true} :\n                         FloatOrPercent{NOZZLE_CONFIG(overhang_1_4_speed).get_abs_value(ref_speed) * 100 / ref_speed, true},\n                     (NOZZLE_CONFIG(overhang_2_4_speed).get_abs_value(ref_speed) < 0.5) ?\n                         FloatOrPercent{40, true} :",
+      "description": "The registered zero minimum preserves ordinary wall speed in the second caged overhang band.",
       "test_filter": "SettingsFamilyVariance"
     }
   ],
