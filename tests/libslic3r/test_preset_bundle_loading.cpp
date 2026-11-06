@@ -12174,3 +12174,18 @@ TEST_CASE("Single-extruder configuration returns no AMS extruder groups", "[Pres
 }
 
 } // namespace preset_ams_sync_contracts
+
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots", "[PresetBundleLoading][PresetAmsCombo3]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.filaments, "TPU").config.option<ConfigOptionStrings>("filament_type", true)->values = {"TPU"};
+    add_inmemory_preset(bundle.filaments, "PLA").config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    bundle.filament_presets = {"TPU", "PLA"};
+    CHECK(bundle.get_used_tpu_filaments({1, 99}) == std::vector<int>{0});
+    CHECK(bundle.get_used_tpu_filaments({2}) == std::vector<int>{});
+}
+
+} // namespace preset_ams_sync_contracts
