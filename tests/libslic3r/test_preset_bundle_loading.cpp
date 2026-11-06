@@ -11353,3 +11353,42 @@ TEST_CASE("Filament differed value export carries changed density and cloud meta
     CHECK(values.at(BBL_JSON_KEY_TYPE) == PRESET_IOT_FILAMENT_TYPE);
     CHECK(values.at(BBL_JSON_KEY_BASE_ID) == "base-id");
 }
+
+TEST_CASE("Project embedded loading resolves parent-only values and rejects duplicate or unrelated entries", "[PresetBundleLoading][PresetEmbeddedLoading]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    Preset &parent = add_inmemory_preset(collection, "Parent");
+    parent.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.20;
+    parent.config.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    auto embedded = std::make_unique<Preset>(Preset::TYPE_PRINT, "Embedded");
+    embedded->is_project_embedded = true;
+    embedded->inherits() = "Parent";
+    embedded->config.option<ConfigOptionFloat>("layer_height", true)->value = 0.33;
+    REQUIRE_FALSE(embedded->config.has("wall_loops"));
+    auto duplicate = std::make_unique<Preset>(*embedded);
+    duplicate->name = "Parent";
+    auto other = std::make_unique<Preset>(Preset::TYPE_FILAMENT, "Other");
+    other->is_project_embedded = true;
+    other->config = embedded->config;
+    REQUIRE(other->inherits() == "Parent");
+    std::vector<Preset *> project{embedded.get(), duplicate.get(), other.get()};
+    PresetsConfigSubstitutions substitutions;
+    collection.load_project_embedded_presets(project, PRESET_PRINT_NAME, substitutions,
+                                             ForwardCompatibilitySubstitutionRule::Disable);
+    const Preset *loaded = collection.find_preset("Embedded", false, true);
+    const Preset *retained_parent = collection.find_preset("Parent", false, true);
+    REQUIRE(loaded != nullptr);
+    REQUIRE(retained_parent != nullptr);
+    REQUIRE(loaded->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE(loaded->config.option<ConfigOptionInt>("wall_loops") != nullptr);
+    REQUIRE(retained_parent->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE(retained_parent->config.option<ConfigOptionInt>("wall_loops") != nullptr);
+    CHECK(loaded->is_project_embedded);
+    CHECK_THAT(loaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(loaded->config.opt_int("wall_loops") == 7);
+    CHECK_THAT(retained_parent->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+    CHECK(retained_parent->config.opt_int("wall_loops") == 7);
+    CHECK(collection.find_preset("Other", false, true) == nullptr);
+    CHECK(collection.size() == collection.num_default_presets() + 2);
+}
