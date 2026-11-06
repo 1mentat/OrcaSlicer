@@ -1490,3 +1490,36 @@ TEST_CASE("OBJ face and vertex filament imports reject malformed cardinality and
 }
 
 } // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Print-volume classification distinguishes inside, outside, and mixed model parts", "[Model][ModelMixedPrintVolume]")
+{
+    Model model;
+    const BuildVolume bed({Vec2d(0, 0), Vec2d(100, 0), Vec2d(100, 100), Vec2d(0, 100)}, 100., {}, {});
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelVolume *second = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(second != nullptr);
+    second->set_offset(Vec3d(200, 0, 0));
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+    object->invalidate_bounding_box();
+    REQUIRE(object->volumes.size() == 2);
+    for (const ModelVolume *volume : object->volumes) {
+        REQUIRE(volume != nullptr);
+        REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    }
+    CHECK(instance->calc_print_volume_state(bed) == ModelInstancePVS_Partly_Outside);
+    second->set_offset(Vec3d(200, 0, 0));
+    instance->set_offset(Vec3d(200, 0, 0));
+    object->invalidate_bounding_box();
+    CHECK(instance->calc_print_volume_state(bed) == ModelInstancePVS_Fully_Outside);
+    instance->set_offset(Vec3d(10, 10, 0));
+    second->set_offset(Vec3d(0, 0, 0));
+    object->invalidate_bounding_box();
+    CHECK(instance->calc_print_volume_state(bed) == ModelInstancePVS_Inside);
+}
+
+} // namespace model_extended_contracts
