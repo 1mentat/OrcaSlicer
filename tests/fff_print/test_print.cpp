@@ -35,6 +35,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -2415,6 +2416,120 @@ TEST_CASE("XY size compensation adjusts object contours and cavities independent
                Catch::Matchers::WithinAbs(-0.4, 0.05));
     CHECK_THAT(reduced.hole_width - baseline.hole_width,
                Catch::Matchers::WithinAbs(-1.0, 0.05));
+}
+
+TEST_CASE("XY compensation is suppressed on multi-material painted geometry",
+          "[Print][PrintPipelineWorkflows][XYSizeCompensation]")
+{
+    struct SliceBounds {
+        double contour_width = 0.0;
+        double hole_width = 0.0;
+    };
+
+    const auto observe = [](double contour_compensation, double hole_compensation, bool painted) {
+        DynamicPrintConfig config = multifilament_config(2, {
+            { "nozzle_diameter",                  "0.4,0.4" },
+            { "printer_extruder_id",              "1,2" },
+            { "printer_extruder_variant",         "Direct Drive Standard,Direct Drive Standard" },
+            { "single_extruder_multi_material",   false },
+            { "xy_contour_compensation",          contour_compensation },
+            { "xy_hole_compensation",             hole_compensation },
+            { "layer_height",                     0.2 },
+            { "initial_layer_print_height",       0.2 },
+            { "wall_loops",                       2 },
+            { "top_shell_layers",                 2 },
+            { "bottom_shell_layers",              2 },
+            { "skirt_loops",                      0 },
+            { "brim_type",                        "no_brim" },
+            { "raft_layers",                      0 },
+            { "sparse_infill_density",            "0%" },
+            { "elefant_foot_compensation",         0.0 },
+            { "machine_start_gcode",              "" },
+            { "machine_end_gcode",                "" },
+            { "use_relative_e_distances",         true },
+            { "layer_change_gcode",               "G92 E0\n" },
+        });
+
+        CAPTURE(contour_compensation, hole_compensation, painted);
+
+        Model model;
+        ModelObject *model_object = model.add_object();
+        REQUIRE(model_object != nullptr);
+        ModelVolume *volume = model_object->add_volume(mesh(TestMesh::cube_with_hole));
+        REQUIRE(volume != nullptr);
+
+        if (painted) {
+            const TriangleMesh &paint_mesh = volume->mesh();
+            const BoundingBoxf3 paint_bounds = paint_mesh.bounding_box();
+            const float split_x = (paint_bounds.min.x() + paint_bounds.max.x()) * 0.5f;
+            TriangleSelector selector(paint_mesh);
+            size_t extruder_one_facets = 0;
+            size_t extruder_two_facets = 0;
+            for (size_t facet_idx = 0; facet_idx < paint_mesh.its.indices.size(); ++facet_idx) {
+                const stl_triangle_vertex_indices &triangle = paint_mesh.its.indices[facet_idx];
+                const Vec3f centroid = (paint_mesh.its.vertices[triangle[0]] +
+                                        paint_mesh.its.vertices[triangle[1]] +
+                                        paint_mesh.its.vertices[triangle[2]]) / 3.f;
+                const EnforcerBlockerType state = centroid.x() < split_x ?
+                    EnforcerBlockerType::Extruder1 : EnforcerBlockerType::Extruder2;
+                selector.set_facet(static_cast<int>(facet_idx), state);
+                if (state == EnforcerBlockerType::Extruder1)
+                    ++extruder_one_facets;
+                else
+                    ++extruder_two_facets;
+            }
+            REQUIRE(extruder_one_facets > 0);
+            REQUIRE(extruder_two_facets > 0);
+            REQUIRE(volume->mmu_segmentation_facets.set(selector));
+            REQUIRE(volume->is_mm_painted());
+        }
+
+        model_object->add_instance();
+        model_object->ensure_on_bed();
+
+        Print print;
+        print.auto_assign_extruders(model_object);
+        print.apply(model, config);
+        REQUIRE(print.objects().size() == 1);
+        REQUIRE(print.config().nozzle_diameter.size() == 2);
+        REQUIRE(print.config().filament_diameter.size() == 2);
+        REQUIRE(print.objects().front()->is_mm_painted() == painted);
+
+        const StringObjectException validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        print.process();
+
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.layer_count() >= 3);
+        const Layer *layer = object.get_layer(static_cast<int>(object.layer_count() / 2));
+        REQUIRE(layer != nullptr);
+        REQUIRE(layer->lslices.size() == 1);
+        const ExPolygon &slice = layer->lslices.front();
+        REQUIRE(slice.holes.size() == 1);
+
+        const BoundingBox contour_bounds = slice.contour.bounding_box();
+        const BoundingBox hole_bounds = slice.holes.front().bounding_box();
+        return SliceBounds{
+            double(contour_bounds.max.x() - contour_bounds.min.x()) * SCALING_FACTOR,
+            double(hole_bounds.max.x() - hole_bounds.min.x()) * SCALING_FACTOR,
+        };
+    };
+
+    const SliceBounds baseline = observe(0.0, 0.0, false);
+    const SliceBounds compensated = observe(0.2, 0.5, false);
+    const SliceBounds painted = observe(0.2, 0.5, true);
+
+    CHECK_THAT(baseline.contour_width, Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(baseline.hole_width, Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(compensated.contour_width - baseline.contour_width,
+               Catch::Matchers::WithinAbs(0.4, 0.05));
+    CHECK_THAT(compensated.hole_width - baseline.hole_width,
+               Catch::Matchers::WithinAbs(1.0, 0.05));
+    CHECK_THAT(painted.contour_width - baseline.contour_width,
+               Catch::Matchers::WithinAbs(0.0, 0.05));
+    CHECK_THAT(painted.hole_width - baseline.hole_width,
+               Catch::Matchers::WithinAbs(0.0, 0.05));
 }
 
 TEST_CASE("Support preview generates support layers without requiring full G-code export", "[Print][PrintPipelineWorkflows]")
