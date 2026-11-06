@@ -1,3 +1,5 @@
+#include "libslic3r/Exception.hpp"
+#include <admesh/stl.h>
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include <limits>
 #include <ios>
@@ -1655,6 +1657,56 @@ TEST_CASE("OLTP import uses the STL path while preserving geometry", "[Model][Mo
     REQUIRE(model.objects.front()->volumes.front() != nullptr);
     REQUIRE(model.objects.front()->instances.size() == 1);
     model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("STL import reports nonempty bounded progress callbacks", "[Model][ModelImport][STL][ModelStlProgress]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    int callbacks                = 0;
+    int last_current             = -1;
+    int last_total               = -1;
+    bool invalid_progress        = false;
+    ImportstlProgressFn progress = [&](int current, int total, bool& cancel, std::string& id, std::string& stage) {
+        cancel = false;
+        ++callbacks;
+        last_current = current;
+        last_total   = total;
+        if (current < 0 || total <= 0 || current > total || !id.empty() || !stage.empty())
+            invalid_progress = true;
+    };
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, nullptr, nullptr,
+                                                  nullptr, progress));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    CHECK(callbacks > 0);
+    CHECK(last_total > 0);
+    CHECK(last_current >= 0);
+    CHECK_FALSE(invalid_progress);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("STL cancellation is surfaced as an import failure", "[Model][ModelImport][STL][ModelStlCancel]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    bool callback_called         = false;
+    ImportstlProgressFn progress = [&](int, int, bool& cancel, std::string&, std::string&) {
+        callback_called = true;
+        cancel          = true;
+    };
+    CHECK_THROWS_AS(Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, nullptr, nullptr,
+                                          nullptr, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
 }
 
 } // namespace model_import_contracts
