@@ -12101,3 +12101,34 @@ TEST_CASE("AMS overwrite re-appends mixed slots without changing their metadata"
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament types", "[PresetBundleLoading][PresetBblHrc]")
+{
+    PresetBundle bundle;
+    VendorProfile& bbl = bundle.vendors["BBL"];
+    bbl.id = "BBL";
+    VendorProfile& other = bundle.vendors["Other"];
+    other.id = "Other";
+
+    Preset& pla = system_filament(bundle, "BBL PLA", "bbl-pla", "PLA");
+    pla.vendor = &bbl;
+    pla.config.option<ConfigOptionInts>("required_nozzle_HRC", true)->values = {58};
+    Preset& cf = system_filament(bundle, "BBL PA-CF", "bbl-pa-cf", "PA-CF");
+    cf.vendor = &bbl;
+    cf.config.option<ConfigOptionInts>("required_nozzle_HRC", true)->values = {72};
+    Preset& without_hrc = system_filament(bundle, "BBL TPU", "bbl-tpu", "TPU");
+    without_hrc.vendor = &bbl;
+    without_hrc.config.erase("required_nozzle_HRC");
+    Preset& foreign = system_filament(bundle, "Other PLA", "other-pla", "PLA");
+    foreign.vendor = &other;
+    foreign.config.option<ConfigOptionInts>("required_nozzle_HRC", true)->values = {99};
+
+    CHECK(bundle.get_required_hrc_by_filament_type("PLA") == 58);
+    CHECK(bundle.get_required_hrc_by_filament_type("PA-CF") == 72);
+    CHECK(bundle.get_required_hrc_by_filament_type("TPU") == 0);
+    CHECK(bundle.get_required_hrc_by_filament_type("ABS") == 0);
+}
+
+} // namespace preset_ams_sync_contracts
