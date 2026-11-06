@@ -11262,3 +11262,63 @@ TEST_CASE("Removing selected cloud printer and filament restores configured defa
     CHECK(bundle.filaments.get_edited_preset().name == "Z Fallback PLA");
     CHECK(bundle.filament_presets == std::vector<std::string>{"Z Fallback PLA", "Z Fallback PLA"});
 }
+
+TEST_CASE("Removing cloud presets preserves live metadata and clears a dirty setting id", "[PresetBundleLoading][PresetCloudRetention]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+
+    auto persist_user_print = [&](const std::string &name, const std::string &setting_id,
+                                  const std::string &sync_info) {
+        Preset &preset = add_inmemory_preset(bundle.prints, name);
+        preset.user_id = "alice";
+        preset.setting_id = setting_id;
+        preset.sync_info = sync_info;
+        preset.is_dirty = false;
+        preset.file = bundle.prints.path_for_preset(preset);
+        const fs::path file = preset.file;
+        REQUIRE(preset.save(nullptr));
+        REQUIRE(fs::exists(file));
+        return file;
+    };
+
+    const fs::path listed_file = persist_user_print("Cloud Listed", "listed-id", "");
+    const fs::path syncing_file = persist_user_print("Syncing", "sync-id", "update");
+    const fs::path no_id_file = persist_user_print("No Setting Id", "", "");
+    const fs::path dirty_file = persist_user_print("Dirty", "dirty-id", "");
+    const fs::path removed_file = persist_user_print("Deleted", "deleted-id", "");
+
+    REQUIRE(bundle.prints.select_preset_by_name("Cloud Listed", true));
+    Preset *dirty_before_remove = bundle.prints.find_preset("Dirty", false, true);
+    REQUIRE(dirty_before_remove != nullptr);
+    dirty_before_remove->is_dirty = true;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    cloud.emplace("Cloud Listed", std::map<std::string, std::string>{{"setting_id", "listed-id"}});
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    bundle.remove_users_preset(app, &cloud);
+
+    const Preset *listed = bundle.prints.find_preset("Cloud Listed", false);
+    REQUIRE(listed != nullptr);
+    CHECK(listed->setting_id == "listed-id");
+    CHECK(fs::exists(listed_file));
+    CHECK(bundle.prints.get_selected_preset_name() == "Cloud Listed");
+
+    const Preset *syncing = bundle.prints.find_preset("Syncing", false);
+    REQUIRE(syncing != nullptr);
+    CHECK(syncing->sync_info == "update");
+    CHECK(fs::exists(syncing_file));
+
+    const Preset *no_id = bundle.prints.find_preset("No Setting Id", false);
+    REQUIRE(no_id != nullptr);
+    CHECK(no_id->setting_id.empty());
+    CHECK(fs::exists(no_id_file));
+
+    const Preset *dirty_preset = bundle.prints.find_preset("Dirty", false);
+    REQUIRE(dirty_preset != nullptr);
+    CHECK(dirty_preset->setting_id.empty());
+    CHECK(fs::exists(dirty_file));
+
+    CHECK(bundle.prints.find_preset("Deleted", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_file));
+}
