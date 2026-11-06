@@ -11518,3 +11518,36 @@ TEST_CASE("Invalid embedded parent is rejected while ordinary presets remain int
     REQUIRE(parent->config.option<ConfigOptionFloat>("layer_height") != nullptr);
     CHECK_THAT(parent->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
 }
+
+TEST_CASE("Root filament preset export includes changed and default configuration",
+          "[PresetBundleLoading][PresetRootFilamentCloudDiff]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.filaments;
+    Preset &root = add_inmemory_preset(collection, "Root Cloud Filament");
+    root.setting_id = "root-filament-id";
+    root.filament_id = "root-filament-family";
+    root.updated_time = 123;
+    const auto version = Semver::parse("2.3.4");
+    REQUIRE(version);
+    root.version = *version;
+
+    const std::string default_type = collection.default_preset().config.opt_string("filament_type", 0u);
+    const std::string changed_type = default_type == "PETG" ? "PLA" : "PETG";
+    root.config.opt<ConfigOptionStrings>("filament_type", true)->values = {changed_type};
+    const auto *default_density = collection.default_preset().config.opt<ConfigOptionFloats>("filament_density");
+    REQUIRE(default_density != nullptr);
+    const std::string unchanged_density = default_density->serialize();
+
+    std::map<std::string, std::string> values;
+    REQUIRE(collection.get_differed_values_to_update(root, values) == 0);
+    REQUIRE(values.find("filament_type") != values.end());
+    REQUIRE(values.find("filament_density") != values.end());
+    CHECK(values.at("filament_type") == changed_type);
+    CHECK(values.at("filament_density") == unchanged_density);
+    CHECK(values.at(BBL_JSON_KEY_VERSION) == "2.3.0.4");
+    CHECK(values.at(BBL_JSON_KEY_TYPE) == PRESET_IOT_FILAMENT_TYPE);
+    CHECK(values.at(BBL_JSON_KEY_FILAMENT_ID) == "root-filament-family");
+    CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "123");
+    CHECK(values.find(BBL_JSON_KEY_BASE_ID) == values.end());
+}
