@@ -1499,6 +1499,39 @@ TEST_CASE("Support speed rejects zero and emits the valid minimum on both suppor
     require_support_role_feeds(evidence.interface, 60.0, evidence.first_layer_z, 3000.0);
 }
 
+TEST_CASE("Small support perimeter speed scales exported base and interface support",
+          "[GCode][SettingsSpeedAccelVariance][SmallSupportPerimeterSpeed]")
+{
+    DynamicPrintConfig config = support_motion_config(18.0, 31.0);
+    config.set_deserialize_strict({
+        {"small_support_perimeter_speed", "25%"},
+        {"small_support_perimeter_threshold", 1000.0},
+    });
+    REQUIRE(config.validate().empty());
+
+    const SupportFeedEvidence evidence =
+        export_support_with_object_override(config, SupportObjectOverride::None);
+    require_support_role_feeds(evidence.base, 18.0 * 0.25 * 60.0, evidence.first_layer_z, 3000.0);
+    require_support_role_feeds(evidence.interface, 31.0 * 0.25 * 60.0, evidence.first_layer_z, 3000.0);
+
+    DynamicPrintConfig threshold_disabled = config;
+    threshold_disabled.set_deserialize_strict({{"small_support_perimeter_threshold", 0.0}});
+    const SupportFeedEvidence disabled_evidence =
+        export_support_with_object_override(threshold_disabled, SupportObjectOverride::None);
+    require_support_role_feeds(disabled_evidence.base, 18.0 * 60.0, disabled_evidence.first_layer_z, 3000.0);
+    require_support_role_feeds(disabled_evidence.interface, 31.0 * 60.0, disabled_evidence.first_layer_z, 3000.0);
+    const auto require_same_support_geometry = [](const auto &expected, const auto &actual) {
+        REQUIRE_FALSE(expected.empty());
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            CHECK_THAT(actual[i].z, Catch::Matchers::WithinAbs(expected[i].z, EPSILON));
+            CHECK_THAT(actual[i].xy, Catch::Matchers::WithinAbs(expected[i].xy, EPSILON));
+        }
+    };
+    require_same_support_geometry(evidence.base, disabled_evidence.base);
+    require_same_support_geometry(evidence.interface, disabled_evidence.interface);
+}
+
 TEST_CASE("Nil object support speed overrides inherit parent rates on exported support",
           "[GCode][SettingsSpeedAccelVariance][SupportSpeedNil]")
 {

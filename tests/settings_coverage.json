@@ -6597,6 +6597,25 @@
         "pipeline_oracle"
       ],
       "reason": "PrintConfig.cpp registers 0..20 mm with default 1 mm. The minimum 0 is exercised through public SupportTreeBuildsteps head/mesh geometry using fixed generated points. The maximum 20 is first confirmed to fail SLAPrint validation when elevation is too low, then processed with elevation derived from the registered head dimensions plus 1 mm; completed steps, mapped config, finite support points and finite support-mesh vertices are required, without assuming positive support volume. At representative 0.5 mm, the public builder support mesh matches SLAPrint output. Holding points, model mesh and radii fixed, increasing width to 1.5 mm must increase valid-head width and aggregate head-only mesh volume from `sla::get_mesh`; total support volume is not assumed to increase because wider heads shorten pillars."
+    },
+    "small_support_perimeter_speed": {
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[GCode][SettingsSpeedAccelVariance][SmallSupportPerimeterSpeed]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A valid public Print export applies a 25% small-support speed to base and interface support moves while keeping first-layer support at its configured infill speed. With a 1000 mm threshold, all observed later-layer support feed samples use the expected 25% rates; the zero-threshold control restores the independent base/interface rates while support sample count, Z and XY path stay equal. This covers the percentage encoding on this overhang fixture; minimum absolute speed, other encodings, and nullable ModelObject inheritance are not claimed."
+    },
+    "small_support_perimeter_threshold": {
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[GCode][SettingsSpeedAccelVariance][SmallSupportPerimeterSpeed]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same valid support Print uses the registered 0 mm minimum to disable the small-support speed and a 1000 mm threshold to activate it for the observed support paths. The output oracle checks the resulting base/interface feed rates and equal support sample count, Z and XY path. Nil behavior and other thresholds or support geometries are not claimed."
     }
   }
 }

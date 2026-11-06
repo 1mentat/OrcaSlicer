@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_commit": "3ed21446da568a7e76e6fc35a103b829fde50eb8",
+  "description": "Bounded FFF mutation of the small-support perimeter speed resolver.",
+  "test_source": "tests/fff_print/test_gcode_motion_settings.cpp",
+  "test_source_sha256": "ab85cfbc480aa5bc093e8a89c0e2412abc274097c3f8ba9accae57819e4571f3",
+  "production_source": "src/libslic3r/GCode.cpp",
+  "production_source_sha256": "875766b0177490db1698eac2aa716e49c8166ad8a4f9fb58dfb9144bfee986db",
+  "mutants": [
+    {
+      "id": "small-support-perimeter-speed-percent-bypassed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "small_perimeter_speed = NOZZLE_CONFIG(small_support_perimeter_speed).get_abs_value(base_speed);",
+      "new": "small_perimeter_speed = base_speed;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^SmallSupportPerimeterSpeed$",
+      "description": "Ignore the configured percentage for short base and interface support paths; both emitted feed-rate oracles must fail."
+    }
+  ]
+}

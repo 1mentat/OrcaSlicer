@@ -367,7 +367,7 @@ This target also stays outside default builds and CTest discovery.
 For motion-setting iteration, use `fff_print_motion_settings_tests` and
 `build/tests/fff_print/fff_print_motion_settings_tests` with
 `--test-source tests/fff_print/test_gcode_motion_settings.cpp`. This target
-compiles the 18 motion-setting cases separately from the other GCode tests.
+compiles the 19 motion-setting cases separately from the other GCode tests.
 All cases remain in the canonical `fff_print_tests` suite; the focused target
 stays outside default builds and CTest discovery. The focused discovery option
 registers its cases with the distinct `FocusedMotionSettings::` prefix.
