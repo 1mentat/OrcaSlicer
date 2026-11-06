@@ -263,3 +263,65 @@ TEST_CASE("Model print-volume classification follows instance movement", "[Model
 }
 
 } // namespace model_bounds_contracts
+
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model object splitting preserves disconnected components and positions", "[Model][ModelObjectSplit]")
+{
+    Model split_model;
+    ModelObject *source = split_model.add_object();
+    REQUIRE(source != nullptr);
+    source->name = "Disconnected";
+    TriangleMesh disconnected = make_cube(10, 10, 10);
+    TriangleMesh second = make_cube(10, 10, 10);
+    second.translate(Vec3f(30, 0, 0));
+    disconnected.merge(second);
+    REQUIRE(source->add_volume(std::move(disconnected), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(source->add_instance() != nullptr);
+    ModelObjectPtrs split_objects;
+    source->split(&split_objects, false);
+    REQUIRE(split_objects.size() == 2);
+    for (ModelObject *object : split_objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->volumes.size() == 1);
+        REQUIRE(object->volumes.front() != nullptr);
+        CHECK(object->parts_count() == 1);
+        CHECK(object->facets_count() == 12);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->instances.front() != nullptr);
+    }
+    std::vector<double> split_min_x;
+    for (ModelObject *object : split_objects)
+        split_min_x.push_back(object->instance_bounding_box(0).min.x());
+    std::sort(split_min_x.begin(), split_min_x.end());
+    REQUIRE(split_min_x.size() == 2);
+    CHECK_THAT(split_min_x[0], Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(split_min_x[1], Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model volume merge preserves geometry and facet count", "[Model][ModelObjectMerge]")
+{
+    Model merge_model;
+    ModelObject *merged = merge_model.add_object();
+    REQUIRE(merged != nullptr);
+    REQUIRE(merged->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false) != nullptr);
+    TriangleMesh second = make_cube(10, 10, 10);
+    second.translate(Vec3f(30, 0, 0));
+    REQUIRE(merged->add_volume(std::move(second), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(merged->add_instance() != nullptr);
+    CHECK(merged->parts_count() == 2);
+    CHECK(merged->facets_count() == 24);
+    merged->merge();
+    REQUIRE(merged->volumes.size() == 1);
+    REQUIRE(merged->volumes.front() != nullptr);
+    CHECK(merged->parts_count() == 1);
+    CHECK(merged->facets_count() == 24);
+    check_vec3d(merged->raw_mesh_bounding_box().size(), Vec3d(40, 10, 10), 1e-5);
+}
+
+} // namespace model_bounds_contracts
