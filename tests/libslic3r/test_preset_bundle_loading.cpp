@@ -11496,3 +11496,25 @@ TEST_CASE("Preset parent save emits nil for inherited filament variants",
     CHECK_THAT(differed_flow->values[0], Catch::Matchers::WithinAbs(0.99, 1e-9));
     CHECK(differed_flow->is_nil(1));
 }
+
+TEST_CASE("Invalid embedded parent is rejected while ordinary presets remain intact", "[PresetBundleLoading][PresetEmbeddedInvalidParent]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    add_inmemory_preset(collection, "Ordinary Parent").config.option<ConfigOptionFloat>("layer_height", true)->value = 0.20;
+    const size_t before = collection.size();
+    auto child = std::make_unique<Preset>(Preset::TYPE_PRINT, "Orphan Embedded");
+    child->config = collection.default_preset().config;
+    child->inherits() = "No Such Parent";
+    child->is_project_embedded = true;
+    std::vector<Preset *> input{child.get()};
+    PresetsConfigSubstitutions substitutions;
+    collection.load_project_embedded_presets(input, PRESET_PRINT_NAME, substitutions,
+                                             ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(collection.find_preset("Orphan Embedded", false, true) == nullptr);
+    CHECK(collection.size() == before);
+    const Preset *parent = collection.find_preset("Ordinary Parent", false, true);
+    REQUIRE(parent != nullptr);
+    REQUIRE(parent->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(parent->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+}
