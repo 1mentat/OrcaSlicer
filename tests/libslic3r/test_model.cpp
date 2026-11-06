@@ -811,3 +811,80 @@ TEST_CASE("Volume transformations update mesh bounds and handedness", "[Model][M
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model volume split preserves each disconnected solid and its assignment", "[Model][ModelVolumeSplit]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    TriangleMesh disconnected = make_cube(10, 10, 10);
+    TriangleMesh second = make_cube(10, 10, 10);
+    second.translate(Vec3f(30, 0, 0));
+    disconnected.merge(second);
+    ModelVolume *volume = object->add_volume(std::move(disconnected), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    volume->name = "multi";
+    volume->config.set("extruder", 2);
+    REQUIRE(object->add_instance() != nullptr);
+    REQUIRE(volume->is_splittable());
+
+    const size_t created = volume->split(4, false);
+    REQUIRE(created == 2);
+    REQUIRE(object->volumes.size() == 2);
+    std::vector<double> min_x;
+    for (const ModelVolume *part : object->volumes) {
+        REQUIRE(part != nullptr);
+        REQUIRE(part->is_model_part());
+        CHECK(part->mesh().facets_count() == 12);
+        CHECK(part->get_extruders() == std::vector<int>{ 2 });
+        REQUIRE(part->get_convex_hull_shared_ptr() != nullptr);
+        CHECK(part->get_convex_hull().facets_count() > 0);
+        min_x.push_back(part->mesh().transformed_bounding_box(part->get_matrix()).min.x());
+    }
+    std::sort(min_x.begin(), min_x.end());
+    CHECK_THAT(min_x[0], Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(min_x[1], Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Merging selected volumes retains unselected volume geometry", "[Model][ModelSelectedMerge]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *left = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(left != nullptr);
+    left->set_offset(Vec3d(0, 0, 0));
+    ModelVolume *right = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(right != nullptr);
+    right->set_offset(Vec3d(20, 0, 0));
+    ModelVolume *modifier = object->add_volume(make_cube(5, 5, 5), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(modifier != nullptr);
+    modifier->set_offset(Vec3d(40, 0, 0));
+    REQUIRE(object->add_instance() != nullptr);
+
+    std::vector<int> selected{ 0, 1 };
+    // merge_volumes returns detached objects; Model provides their owning cleanup.
+    Model merged_model;
+    merged_model.objects = object->merge_volumes(selected);
+    const ModelObjectPtrs &result = merged_model.objects;
+    REQUIRE(result.size() == 1);
+    REQUIRE(result.front() != nullptr);
+    REQUIRE(result.front()->volumes.size() == 2);
+    REQUIRE(result.front()->volumes.front() != nullptr);
+    REQUIRE(result.front()->volumes.back() != nullptr);
+    CHECK(result.front()->volumes.front()->is_model_part());
+    CHECK(result.front()->volumes.back()->is_modifier());
+    model_bounds_contracts::check_box(result.front()->volumes.front()->mesh().transformed_bounding_box(result.front()->volumes.front()->get_matrix()),
+              Vec3d(0, 0, 0), Vec3d(30, 10, 10));
+    model_bounds_contracts::check_box(result.front()->volumes.back()->mesh().transformed_bounding_box(result.front()->volumes.back()->get_matrix()),
+              Vec3d(40, 0, 0), Vec3d(45, 5, 5));
+}
+
+} // namespace model_extended_contracts
