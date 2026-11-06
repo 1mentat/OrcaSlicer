@@ -682,6 +682,50 @@ TEST_CASE("Machine envelope serializes registered numeric boundaries and preserv
     CHECK_THAT(upper_junction.junction_deviation.front(), Catch::Matchers::WithinAbs(0.3f, 1e-5f));
 }
 
+TEST_CASE("Printed mass limit follows its configured threshold without changing deposited motion",
+          "[GCodePrintVariance][MachinePrintedMass]")
+{
+    constexpr int printed_mass_limit_error = 1 << 11;
+    struct LimitRow {
+        const char *name;
+        double      limit_grams;
+        bool        expect_error;
+    };
+    const std::array<LimitRow, 3> rows = {{
+        { "zero disables the printed-mass check", 0.0, false },
+        { "a low positive limit flags the print", 0.001, true },
+        { "a high positive limit permits the print", 2000.0, false },
+    }};
+
+    std::optional<MotionEvidence> baseline_motion;
+    for (const LimitRow &row : rows) {
+        INFO(row.name);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({ { "filament_density", 1.24 }, { "machine_max_printed_mass", row.limit_grams } });
+
+        Print print;
+        Model model;
+        initialize(print, model, config, false);
+        GCodeProcessorResult result;
+        const std::string output = Test::gcode(print, &result);
+        REQUIRE_FALSE(output.empty());
+
+        const double printed_mass = print.print_statistics().total_weight;
+        REQUIRE(printed_mass > 0.001);
+        REQUIRE(printed_mass < 2000.0);
+        const bool has_limit_error =
+            (result.gcode_check_result.error_code & printed_mass_limit_error) != 0;
+        CHECK(has_limit_error == row.expect_error);
+
+        const MotionEvidence motion = motion_evidence(output, config);
+        REQUIRE(motion.extrusion_moves > 0);
+        if (baseline_motion.has_value())
+            require_same_material(*baseline_motion, motion);
+        else
+            baseline_motion = motion;
+    }
+}
+
 TEST_CASE("Z hop changes travel height while preserving material paths", "[GCodePrintVariance]")
 {
     DynamicPrintConfig no_hop = base_config();

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Source-reviewed GCode/Print settings mutation candidates. Expected kills are proposals only; no native mutation run has been performed.",
+  "description": "Source-reviewed GCode/Print settings mutations. The printed-mass threshold mutant was killed in a bounded native run; other entries remain proposals.",
   "mutants": [
     {
       "id": "gcode-print-envelope-opt-in",
@@ -41,6 +41,14 @@
       "new": "if (false) {\n                    gcode += std::string(\"; stop printing object \") +",
       "description": "Drop the object-stop comments while labels are enabled; the labels case requires both starts and stops without changing deposited material.",
       "test_filter": "GCodePrintVariance"
+    },
+    {
+      "id": "gcode-print-mass-limit-inverts-threshold",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "mass_on_bed_total > m_print->config().machine_max_printed_mass.value",
+      "new": "mass_on_bed_total < m_print->config().machine_max_printed_mass.value",
+      "description": "Invert the printed-mass comparison; the 0.001 g row must set error bit 11 while the 2000 g row must leave it clear, with emitted material unchanged.",
+      "test_filter": "MachinePrintedMass"
     }
   ]
 }
