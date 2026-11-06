@@ -364,3 +364,33 @@ TEST_CASE("Model volume types preserve material and extruder semantics", "[Model
 }
 
 } // namespace model_bounds_contracts
+
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model unit conversion scales meshes and preserves conversion flags", "[Model][ModelUnitConversion]")
+{
+    Model unit_model;
+    ModelObject *inch_object = unit_model.add_object();
+    REQUIRE(inch_object != nullptr);
+    ModelVolume *inch_volume = inch_object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(inch_volume != nullptr);
+    CHECK(unit_model.looks_like_imperial_units());
+    unit_model.convert_from_imperial_units(true);
+    check_vec3d(inch_volume->mesh().bounding_box().size(), Vec3d(25.4, 25.4, 25.4), 1e-4);
+    CHECK(inch_volume->source.is_converted_from_inches);
+    CHECK_FALSE(inch_volume->source.is_converted_from_meters);
+
+    Model meter_model;
+    ModelObject *meter_object = meter_model.add_object();
+    REQUIRE(meter_object != nullptr);
+    ModelVolume *meter_volume = meter_object->add_volume(make_cube(0.1, 0.1, 0.1), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(meter_volume != nullptr);
+    CHECK(meter_model.looks_like_saved_in_meters());
+    meter_model.convert_from_meters(true);
+    check_vec3d(meter_volume->mesh().bounding_box().size(), Vec3d(100., 100., 100.), 1e-4);
+    CHECK(meter_volume->source.is_converted_from_meters);
+    CHECK_FALSE(meter_volume->source.is_converted_from_inches);
+}
+
+} // namespace model_bounds_contracts
