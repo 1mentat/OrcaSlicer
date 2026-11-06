@@ -12928,3 +12928,64 @@ TEST_CASE("PresetBundle saves user roots through all three preset collections",
         CHECK(saved.at("name") == name);
     }
 }
+
+
+TEST_CASE("PresetBundle sync cleanup repairs invalid ownership and persists create state",
+          "[PresetBundleLoading][PresetBundleSyncRepair]")
+{
+    ScopedTemporaryDir temp("preset-bundle-sync-fix");
+    ScopedDataDir data(temp.path() / "data");
+    fs::create_directories(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    Preset &preset = add_inmemory_preset(bundle.prints, "Alice Process");
+    preset.file = bundle.prints.path_for_preset(preset);
+    preset.user_id.clear();
+    preset.setting_id = "legacy-id";
+    preset.sync_info.clear();
+    REQUIRE(preset.save(nullptr));
+    REQUIRE(fs::exists(preset.file));
+    bundle.check_and_fix_user_presets_syncinfo("alice");
+    CHECK(preset.user_id == "alice");
+    CHECK(preset.setting_id.empty());
+    CHECK(preset.sync_info == "create");
+    const fs::path info = fs::path(preset.file).replace_extension(".info");
+    REQUIRE(fs::exists(info));
+    Preset persisted(Preset::TYPE_PRINT, "Alice Process");
+    persisted.load_info(info.string());
+    CHECK(persisted.user_id == "alice");
+    CHECK(persisted.setting_id.empty());
+    CHECK(persisted.sync_info == "create");
+}
+
+TEST_CASE("PresetCollection sync repair persists the direct parent's id for a stale child",
+          "[PresetBundleLoading][PresetChildSyncRepair]")
+{
+    ScopedTemporaryDir temp("preset-collection-sync-child");
+    ScopedDataDir data(temp.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
+    add_inmemory_preset(collection, "Parent").setting_id = "parent-id-123";
+    add_inmemory_preset(collection, "Child", "Parent");
+    Preset *parent = collection.find_preset("Parent", false, true);
+    Preset *child = collection.find_preset("Child", false, true);
+    REQUIRE(parent != nullptr);
+    REQUIRE(child != nullptr);
+    child->setting_id = "child-id-123";
+    child->user_id = "alice";
+    child->base_id = "stale-base";
+    child->sync_info.clear();
+    child->file = collection.path_for_preset(*child);
+    REQUIRE(child->save(&parent->config));
+    REQUIRE(fs::exists(child->file));
+    collection.check_and_fix_syncinfo(*child, "alice");
+    CHECK(child->base_id == "parent-id-123");
+    CHECK(child->sync_info == "update");
+    const fs::path info = fs::path(child->file).replace_extension(".info");
+    REQUIRE(fs::exists(info));
+    Preset persisted(Preset::TYPE_PRINT, "Child");
+    persisted.load_info(info.string());
+    CHECK(persisted.base_id == "parent-id-123");
+    CHECK(persisted.sync_info == "update");
+}
