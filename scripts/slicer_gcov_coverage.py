@@ -608,6 +608,13 @@ class GcovProfileMergeError(ValueError):
         self.report = report
 
 
+def _is_transient_gcov_tool_allocator_abort(result: Any) -> bool:
+    """Match only the observed GCC 13 allocator abort eligible for one retry."""
+    stderr = result.stderr or ""
+    return (result.returncode == -6 and isinstance(stderr, str) and
+            "free(): invalid pointer" in stderr)
+
+
 def resolve_gcov_tool(gcov: str, explicit: str | None = None) -> Path:
     """Find gcov-tool alongside the selected gcov, then verify it before use."""
     candidate: str | None = explicit
@@ -692,6 +699,7 @@ def _copy_profile_inventory(source_root: Path, inventory: dict[str, str],
 
 def _merge_profile_inventories(
         profiles: list[tuple[Path, dict[str, str]]], *, gcov_tool: Path,
+        gcc_version: str,
         stage_root: Path, timeout: float, common: Any,
         commands: list[dict[str, Any]], phase: str,
         category: str | None = None) -> tuple[Path, set[str]]:
@@ -699,53 +707,76 @@ def _merge_profile_inventories(
     if len(profiles) < 2:
         raise ValueError("gcov-tool merge requires at least two nonempty profiles")
     current_input, first_inventory = profiles[0]
+    current_inventory = first_inventory
     current_paths = set(first_inventory)
     for merge_index, (right_input, right_inventory) in enumerate(profiles[1:], 1):
         expected_paths = current_paths | set(right_inventory)
-        destination = stage_root / f"{phase}-{category or 'all'}-step-{merge_index:02d}"
-        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if destination.exists() or destination.is_symlink():
-            raise ValueError(f"gcov merge destination is not fresh: {destination}")
-        argv = [str(gcov_tool), "merge", "--weight", "1,1", "--output",
-                str(destination), str(current_input), str(right_input)]
-        record: dict[str, Any] = {
-            "phase": phase, "category": category, "argv": argv,
-            "left_input": str(current_input), "right_input": str(right_input),
-            "output": str(destination),
-        }
-        started = time.monotonic()
-        try:
-            result = common._run(argv, cwd=destination.parent, timeout=timeout)
-        except Exception as exc:
+        for attempt in range(1, 3):
+            destination = stage_root / (
+                f"{phase}-{category or 'all'}-step-{merge_index:02d}-attempt-{attempt:02d}")
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                raise ValueError(f"gcov merge destination is not fresh: {destination}")
+            argv = [str(gcov_tool), "merge", "--weight", "1,1", "--output",
+                    str(destination), str(current_input), str(right_input)]
+            record: dict[str, Any] = {
+                "phase": phase, "category": category, "attempt": attempt, "argv": argv,
+                "left_input": str(current_input), "right_input": str(right_input),
+                "output": str(destination),
+            }
+            input_roots = ((current_input, current_inventory), (right_input, right_inventory))
+            input_snapshots: list[dict[str, str]] = []
+            for input_root, expected_inventory in input_roots:
+                before_inventory = _gcda_profile_inventory(input_root)
+                if before_inventory != expected_inventory:
+                    raise ValueError(f"gcov-tool merge input changed before command: {input_root}")
+                input_snapshots.append(before_inventory)
+
+            started = time.monotonic()
+            try:
+                result = common._run(argv, cwd=destination.parent, timeout=timeout)
+            except Exception as exc:
+                record.update({
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "exception": {"type": type(exc).__name__, "message": str(exc)},
+                })
+                commands.append(record)
+                raise ValueError(f"gcov-tool merge command raised {type(exc).__name__}: {exc}") from exc
             record.update({
+                "returncode": result.returncode, "stdout": result.stdout,
+                "stderr": result.stderr,
                 "duration_seconds": round(time.monotonic() - started, 3),
-                "exception": {"type": type(exc).__name__, "message": str(exc)},
             })
             commands.append(record)
-            raise ValueError(f"gcov-tool merge command raised {type(exc).__name__}: {exc}") from exc
-        record.update({
-            "returncode": result.returncode, "stdout": result.stdout,
-            "stderr": result.stderr,
-            "duration_seconds": round(time.monotonic() - started, 3),
-        })
-        commands.append(record)
-        if result.returncode != 0:
-            raise ValueError(f"gcov-tool merge exited {result.returncode}")
-        if not destination.is_dir() or destination.is_symlink():
-            raise ValueError("gcov-tool merge did not create a regular output directory")
-        output_inventory = _gcda_profile_inventory(destination)
-        record["output_gcda_count"] = len(output_inventory)
-        record["output_inventory_sha256"] = _gcda_inventory_digest(output_inventory)
-        if set(output_inventory) != expected_paths:
-            missing = sorted(expected_paths - set(output_inventory))
-            unexpected = sorted(set(output_inventory) - expected_paths)
-            record["identity_mismatch"] = {
-                "missing": missing[:20], "unexpected": unexpected[:20],
-                "missing_count": len(missing), "unexpected_count": len(unexpected),
-            }
-            raise ValueError("gcov-tool merge output GCDA inventory differs from input union")
-        current_input = destination
-        current_paths = expected_paths
+            for (input_root, _), before_inventory in zip(input_roots, input_snapshots):
+                if _gcda_profile_inventory(input_root) != before_inventory:
+                    record["input_profiles_unchanged"] = False
+                    raise ValueError(f"gcov-tool merge modified an input profile: {input_root}")
+            record["input_profiles_unchanged"] = True
+
+            if result.returncode != 0:
+                if (attempt == 1 and gcc_version.split(".", maxsplit=1)[0] == "13" and
+                        _is_transient_gcov_tool_allocator_abort(result)):
+                    record["retry_reason"] = "gcc_allocator_abort_free_invalid_pointer"
+                    continue
+                raise ValueError(f"gcov-tool merge exited {result.returncode}")
+            if not destination.is_dir() or destination.is_symlink():
+                raise ValueError("gcov-tool merge did not create a regular output directory")
+            output_inventory = _gcda_profile_inventory(destination)
+            record["output_gcda_count"] = len(output_inventory)
+            record["output_inventory_sha256"] = _gcda_inventory_digest(output_inventory)
+            if set(output_inventory) != expected_paths:
+                missing = sorted(expected_paths - set(output_inventory))
+                unexpected = sorted(set(output_inventory) - expected_paths)
+                record["identity_mismatch"] = {
+                    "missing": missing[:20], "unexpected": unexpected[:20],
+                    "missing_count": len(missing), "unexpected_count": len(unexpected),
+                }
+                raise ValueError("gcov-tool merge output GCDA inventory differs from input union")
+            current_input = destination
+            current_inventory = output_inventory
+            current_paths = expected_paths
+            break
     return current_input, current_paths
 
 
@@ -797,7 +828,7 @@ def _partition_profiles_by_build_tree(
 def _recover_split_profile_merge(
         roots: list[Path], inventories: list[dict[str, str]], *,
         build_dir: Path, expected_notes: set[Path], gcov_tool: Path,
-        expected_tool_sha256: str,
+        gcc_version: str, expected_tool_sha256: str,
         output_root: Path, stage_root: Path, timeout: float, common: Any,
         commands: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge isolated build/src and build/tests trees, then union them."""
@@ -826,7 +857,7 @@ def _recover_split_profile_merge(
             category_strategy = "copy_single_nonempty_profile"
         else:
             category_output, merged_paths = _merge_profile_inventories(
-                category_profiles, gcov_tool=gcov_tool,
+                category_profiles, gcov_tool=gcov_tool, gcc_version=gcc_version,
                 stage_root=stage_root / "commands", timeout=timeout,
                 common=common, commands=commands, phase="recovery", category=category)
             if merged_paths != expected_category_paths:
@@ -995,7 +1026,7 @@ def merge_gcov_profile_roots(profile_roots: list[Path], *, gcov_tool: Path,
                 stage_root = Path(stage)
                 try:
                     primary_output, primary_paths = _merge_profile_inventories(
-                        active_roots, gcov_tool=gcov_tool,
+                        active_roots, gcov_tool=gcov_tool, gcc_version=gcc_version,
                         stage_root=stage_root / "primary", timeout=timeout,
                         common=common, commands=report["commands"], phase="primary")
                     expected_active_paths = set().union(
@@ -1020,6 +1051,7 @@ def merge_gcov_profile_roots(profile_roots: list[Path], *, gcov_tool: Path,
                         recovery = _recover_split_profile_merge(
                             roots, input_inventories, build_dir=build_dir,
                             expected_notes=expected_notes, gcov_tool=gcov_tool,
+                            gcc_version=gcc_version,
                             expected_tool_sha256=tool_sha_before,
                             output_root=output_root, stage_root=stage_root / "recovery",
                             timeout=timeout, common=common, commands=report["commands"])

@@ -141,6 +141,165 @@ class CatchBatchGcovIntegrationTests(unittest.TestCase):
                       for path in profile.rglob("*.gcda")} for profile in inputs]
             self.assertEqual(before, after)
 
+    def test_gcov_tool_merge_retries_observed_allocator_abort_with_fresh_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profiles = [root / "left", root / "right"]
+            for profile in profiles:
+                profile.mkdir()
+            (profiles[0] / "build" / "src").mkdir(parents=True)
+            (profiles[0] / "build" / "src" / "one.gcda").write_bytes(b"one")
+            (profiles[1] / "build" / "tests").mkdir(parents=True)
+            (profiles[1] / "build" / "tests" / "two.gcda").write_bytes(b"two")
+            inventories = [(profile, gcov._gcda_profile_inventory(profile))
+                           for profile in profiles]
+            before = [inventory.copy() for _, inventory in inventories]
+
+            class CrashThenSuccess:
+                calls = []
+                fresh_at_entry = []
+
+                def _run(self, argv, *, cwd=None, env=None, timeout=None):
+                    self.calls.append(list(argv))
+                    destination = Path(argv[argv.index("--output") + 1])
+                    self.fresh_at_entry.append(not destination.exists())
+                    if len(self.calls) == 1:
+                        destination.mkdir()
+                        (destination / "partial.gcda").write_bytes(b"partial crash output")
+                        return subprocess.CompletedProcess(
+                            argv, -6, "", "free(): invalid pointer")
+                    destination.mkdir()
+                    for source in profiles:
+                        for gcda in source.rglob("*.gcda"):
+                            target = destination / gcda.relative_to(source)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(gcda, target)
+                    return subprocess.CompletedProcess(argv, 0, "merged", "")
+
+            common = CrashThenSuccess()
+            commands = []
+            merged_root, merged_paths = gcov._merge_profile_inventories(
+                inventories, gcov_tool=root / "gcov-tool-13", gcc_version="13.3.0",
+                stage_root=root / "commands",
+                timeout=30, common=common, commands=commands, phase="test")
+
+            destinations = [Path(argv[argv.index("--output") + 1]) for argv in common.calls]
+            self.assertEqual(len(common.calls), 2)
+            self.assertTrue(all(common.fresh_at_entry))
+            self.assertNotEqual(destinations[0], destinations[1])
+            self.assertEqual(destinations[0].name, "test-all-step-01-attempt-01")
+            self.assertEqual(destinations[1].name, "test-all-step-01-attempt-02")
+            self.assertTrue((destinations[0] / "partial.gcda").is_file())
+            self.assertEqual(merged_root, destinations[1])
+            self.assertEqual(merged_paths, {
+                "build/src/one.gcda", "build/tests/two.gcda"})
+            self.assertEqual([row["attempt"] for row in commands], [1, 2])
+            self.assertEqual(commands[0]["retry_reason"],
+                             "gcc_allocator_abort_free_invalid_pointer")
+            self.assertTrue(all(row["input_profiles_unchanged"] for row in commands))
+            self.assertEqual([gcov._gcda_profile_inventory(profile) for profile in profiles], before)
+
+    def test_gcov_tool_merge_stops_after_persistent_allocator_abort(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profiles = [root / "left", root / "right"]
+            for index, profile in enumerate(profiles):
+                profile.mkdir()
+                (profile / f"{index}.gcda").write_bytes(f"profile-{index}".encode())
+            inventories = [(profile, gcov._gcda_profile_inventory(profile))
+                           for profile in profiles]
+
+            class PersistentCrash:
+                calls = []
+                fresh_at_entry = []
+
+                def _run(self, argv, *, cwd=None, env=None, timeout=None):
+                    self.calls.append(list(argv))
+                    destination = Path(argv[argv.index("--output") + 1])
+                    self.fresh_at_entry.append(not destination.exists())
+                    destination.mkdir()
+                    (destination / "partial.gcda").write_bytes(b"failed attempt")
+                    return subprocess.CompletedProcess(
+                        argv, -6, "", "free(): invalid pointer")
+
+            common = PersistentCrash()
+            commands = []
+            with self.assertRaisesRegex(ValueError, "gcov-tool merge exited -6"):
+                gcov._merge_profile_inventories(
+                    inventories, gcov_tool=root / "gcov-tool-13", gcc_version="13.3.0",
+                    stage_root=root / "commands",
+                    timeout=30, common=common, commands=commands, phase="test")
+
+            destinations = [Path(argv[argv.index("--output") + 1]) for argv in common.calls]
+            self.assertEqual(len(common.calls), 2)
+            self.assertTrue(all(common.fresh_at_entry))
+            self.assertNotEqual(destinations[0], destinations[1])
+            self.assertEqual([row["attempt"] for row in commands], [1, 2])
+            self.assertTrue(all(row["input_profiles_unchanged"] for row in commands))
+            self.assertTrue(all((destination / "partial.gcda").is_file()
+                                for destination in destinations))
+
+    def test_gcov_tool_merge_does_not_retry_allocator_abort_for_other_gcc_versions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profiles = [root / "left", root / "right"]
+            for index, profile in enumerate(profiles):
+                profile.mkdir()
+                (profile / f"{index}.gcda").write_bytes(f"profile-{index}".encode())
+            inventories = [(profile, gcov._gcda_profile_inventory(profile))
+                           for profile in profiles]
+
+            class Gcc14Crash:
+                calls = []
+
+                def _run(self, argv, *, cwd=None, env=None, timeout=None):
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(
+                        argv, -6, "", "free(): invalid pointer")
+
+            common = Gcc14Crash()
+            commands = []
+            with self.assertRaisesRegex(ValueError, "gcov-tool merge exited -6"):
+                gcov._merge_profile_inventories(
+                    inventories, gcov_tool=root / "gcov-tool-14", gcc_version="14.1.0",
+                    stage_root=root / "commands", timeout=30, common=common,
+                    commands=commands, phase="test")
+
+            self.assertEqual(len(common.calls), 1)
+            self.assertEqual(commands[0]["attempt"], 1)
+            self.assertNotIn("retry_reason", commands[0])
+
+    def test_gcov_tool_merge_does_not_retry_allocator_abort_after_input_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profiles = [root / "left", root / "right"]
+            for profile in profiles:
+                profile.mkdir()
+                (profile / "profile.gcda").write_bytes(b"original")
+            inventories = [(profile, gcov._gcda_profile_inventory(profile))
+                           for profile in profiles]
+
+            class MutatingCrash:
+                calls = []
+
+                def _run(self, argv, *, cwd=None, env=None, timeout=None):
+                    self.calls.append(list(argv))
+                    (profiles[1] / "profile.gcda").write_bytes(b"changed")
+                    return subprocess.CompletedProcess(
+                        argv, -6, "", "free(): invalid pointer")
+
+            common = MutatingCrash()
+            commands = []
+            with self.assertRaisesRegex(ValueError, "modified an input profile"):
+                gcov._merge_profile_inventories(
+                    inventories, gcov_tool=root / "gcov-tool-13", gcc_version="13.3.0",
+                    stage_root=root / "commands",
+                    timeout=30, common=common, commands=commands, phase="test")
+
+            self.assertEqual(len(common.calls), 1)
+            self.assertEqual(commands[0]["attempt"], 1)
+            self.assertFalse(commands[0]["input_profiles_unchanged"])
+
     def test_profile_copy_checks_source_and_destination_sha256(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -298,6 +457,7 @@ class CatchBatchGcovIntegrationTests(unittest.TestCase):
             receipt = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(receipt["status"], "merge_failed")
             self.assertEqual(receipt["commands"][0]["returncode"], 2)
+            self.assertEqual(len(receipt["commands"]), 1)
             self.assertFalse(output.exists())
 
     def test_gcov_profile_merge_rejects_incomplete_path_union(self):
