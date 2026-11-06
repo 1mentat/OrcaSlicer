@@ -12132,3 +12132,45 @@ TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament t
 }
 
 } // namespace preset_ams_sync_contracts
+
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("extruder filament information partitions AMS cells by left and right extruder", "[PresetBundleLoading][PresetAmsCombo1]")
+{
+    PresetBundle bundle;
+    bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
+    bundle.filament_ams_list.emplace(0, tray("L", "#110000", "PLA", "0", "0"));
+    bundle.filament_ams_list.emplace(1, tray("L2", "#220000", "PLA", "0", "0"));
+    bundle.filament_ams_list.emplace(0x10000, tray("R", "#001100", "PETG", "0", "0"));
+    const auto info = bundle.get_extruder_filament_info();
+    REQUIRE(info.size() == 2);
+    REQUIRE(info[0].size() == 2);
+    REQUIRE(info[1].size() == 1);
+    const auto *left_first = info[0][0].option<ConfigOptionStrings>("filament_id");
+    const auto *left_second = info[0][1].option<ConfigOptionStrings>("filament_id");
+    const auto *right = info[1][0].option<ConfigOptionStrings>("filament_id");
+    REQUIRE(left_first != nullptr);
+    REQUIRE(left_second != nullptr);
+    REQUIRE(right != nullptr);
+    REQUIRE(left_first->values.size() == 1);
+    REQUIRE(left_second->values.size() == 1);
+    REQUIRE(right->values.size() == 1);
+    CHECK(left_first->values.front() == "L");
+    CHECK(left_second->values.front() == "L2");
+    CHECK(right->values.front() == "R");
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("Single-extruder configuration returns no AMS extruder groups", "[PresetBundleLoading][PresetAmsCombo2]")
+{
+    PresetBundle bundle;
+    bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
+    bundle.filament_ams_list.emplace(0x10000, tray("R", "#001100", "PETG", "0", "0"));
+    CHECK(bundle.get_extruder_filament_info().empty());
+}
+
+} // namespace preset_ams_sync_contracts
