@@ -12737,3 +12737,18 @@ TEST_CASE("PresetBundle backup preserves its first copy when called again",
     load_string_file(backup.string(), contents);
     CHECK(contents == "owned");
 }
+
+
+TEST_CASE("Vendor profile version lookup preserves legacy serialization and missing status",
+          "[PresetBundleLoading][PresetVendorVersion]")
+{
+    PresetBundle bundle;
+    VendorProfile vendor("BBL");
+    vendor.name = "BBL";
+    const auto version = Semver::parse("3.2.1");
+    REQUIRE(version);
+    vendor.config_version = *version;
+    bundle.vendors.emplace(vendor.id, vendor);
+    CHECK(bundle.get_vendor_profile_version("BBL").to_string() == "3.2.0.1");
+    CHECK_FALSE(bundle.get_vendor_profile_version("Missing").valid());
+}
