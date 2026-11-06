@@ -13447,3 +13447,23 @@ TEST_CASE("PresetBundle reset maps unavailable filament slots to visible fallbac
         }
     }
 }
+
+
+TEST_CASE("Selected preset parent resolves an inherited base and rejects a missing base",
+          "[PresetBundleLoading][PresetSelectedParent]")
+{
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    add_inmemory_preset(collection, "Parent Process");
+    add_inmemory_preset(collection, "Child Process", "Parent Process");
+    REQUIRE(collection.select_preset_by_name("Child Process", true));
+    const Preset *resolved = collection.get_selected_preset_parent();
+    const Preset *parent = collection.find_preset("Parent Process", false, true);
+    REQUIRE(resolved != nullptr);
+    REQUIRE(parent != nullptr);
+    CHECK(resolved == parent);
+    CHECK(resolved->name == "Parent Process");
+    add_inmemory_preset(collection, "Orphan Process", "Missing Parent");
+    REQUIRE(collection.select_preset_by_name("Orphan Process", true));
+    CHECK(collection.get_selected_preset_parent() == nullptr);
+}
