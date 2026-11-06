@@ -10384,6 +10384,33 @@ TEST_CASE("Full FFF configuration applies explicit filament volume maps", "[Pres
                         {first_speed, second_speed});
 }
 
+TEST_CASE("Full FFF configuration pads a short volume map with Standard", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffShortMap]")
+{
+    BundleFixture fx;
+    set_variant_aware_printer(fx);
+    add_filament(fx, "PLA", "PLA-ID", "PLA", false, true);
+    add_filament(fx, "PETG", "PETG-ID", "PETG");
+    Preset* pla = fx.bundle.filaments.find_preset("PLA", false, true);
+    Preset* petg = fx.bundle.filaments.find_preset("PETG", false, true);
+    REQUIRE(pla != nullptr);
+    REQUIRE(petg != nullptr);
+    set_variant_aware_filament(*pla, 12., 22.);
+    set_variant_aware_filament(*petg, 13., 23.);
+    REQUIRE(fx.bundle.filaments.select_preset_by_name("PLA", true));
+    fx.bundle.filament_presets = {"PLA", "PETG"};
+    fx.bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {
+        int(nvtHighFlow), int(nvtHighFlow)};
+
+    const DynamicPrintConfig out = fx.bundle.full_config(
+        true, std::vector<int>{2, 1}, std::vector<int>{int(nvtHighFlow)});
+
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{2, 1});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{int(nvtHighFlow)});
+    CHECK(out.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+          std::vector<std::string>{"Direct Drive High Flow", "Direct Drive Standard"});
+    check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
+}
+
 TEST_CASE("Full FFF configuration records selected system filament changes", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffProvenance]")
 {
     BundleFixture fx;

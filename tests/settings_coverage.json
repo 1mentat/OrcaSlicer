@@ -2363,6 +2363,16 @@
       ],
       "reason": "Both filaments are mapped to each of two extruders; emitted pressure advance must follow the selected extruder variant. Empty, invalid and larger map boundaries remain unclaimed."
     },
+    "filament_volume_map": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleFullFffShortMap]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A two-filament hybrid-printer composition passes the explicit one-entry map [High Flow] and preserves a reversed filament map [2,1]. The composed per-filament variant strings and independently assigned volumetric speeds must be High Flow/22 for the first material and Standard/13 for the padded second material. This covers the short-vector shape and these two registered nozzle-volume values only; other map lengths and numeric domains are not claimed."
+    },
     "filament_self_index": {
       "test": "tests/fff_print/test_multifilament.cpp",
       "tag": "[MultiFilament]",

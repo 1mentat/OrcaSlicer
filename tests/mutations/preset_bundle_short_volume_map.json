@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "One bounded source mutation for the short explicit per-filament volume-map fallback.",
+  "mutants": [
+    {
+      "id": "preset-full-fff-short-volume-map-defaults-high-flow",
+      "anchor_line": 4791,
+      "old": "    else {\n        assert(filament_maps.size() == num_filaments);\n    }\n    if (filament_volume_maps.size() != num_filaments) {\n        filament_volume_maps.resize(num_filaments, nvtStandard);\n    }",
+      "new": "    else {\n        assert(filament_maps.size() == num_filaments);\n    }\n    if (filament_volume_maps.size() != num_filaments) {\n        filament_volume_maps.resize(num_filaments, nvtHighFlow);\n    }",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "expected_matches": 1,
+      "test_filter": "PresetBundleFullFffShortMap",
+      "description": "The missing second map entry resolves as High Flow instead of Standard; the second filament speed assertion must fail."
+    }
+  ]
+}

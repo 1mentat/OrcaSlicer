@@ -2888,6 +2888,50 @@ void store_bbs_base(const std::string &path, Model &model, DynamicPrintConfig &c
 
 } // namespace
 
+TEST_CASE("BBS 3MF prefers the current CAD recipe over a later legacy duplicate",
+          "[3MFArchiveVariants][Bbs3mfVariants][CADRecipePrecedence][Compatibility]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+
+    const std::string current_recipe = make_cad_recipe();
+    const std::string legacy_recipe = "legacy-recipe-must-not-overwrite-current";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; },
+        {{CAD_RECIPE_ENTRY, current_recipe}, {LEGACY_CAD_RECIPE_ENTRY, legacy_recipe}}));
+
+    std::vector<std::pair<std::string, std::string>> recipe_entries;
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, archive.string()));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+    const mz_uint num_entries = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_entries; ++i) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &stat));
+        const std::string name(stat.m_filename);
+        if (name != CAD_RECIPE_ENTRY && name != LEGACY_CAD_RECIPE_ENTRY)
+            continue;
+
+        std::string payload(static_cast<size_t>(stat.m_uncomp_size), '\0');
+        if (!payload.empty())
+            REQUIRE(mz_zip_reader_extract_to_mem(&zip, i, payload.data(), payload.size(), 0));
+        recipe_entries.emplace_back(name, std::move(payload));
+    }
+    REQUIRE(recipe_entries.size() == 2);
+    CHECK(recipe_entries[0].first == CAD_RECIPE_ENTRY);
+    CHECK(recipe_entries[0].second == current_recipe);
+    CHECK(recipe_entries[1].first == LEGACY_CAD_RECIPE_ENTRY);
+    CHECK(recipe_entries[1].second == legacy_recipe);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded));
+    CHECK(loaded_model.cad_recipe == current_recipe);
+}
+
 TEST_CASE("BBS 3MF restores filament, nozzle, and optimal-assignment sequences", "[3MFArchiveVariants][Bbs3mfVariants][Sequences]")
 {
     Model source = make_cube_model();
