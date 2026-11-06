@@ -12989,3 +12989,66 @@ TEST_CASE("PresetCollection sync repair persists the direct parent's id for a st
     CHECK(persisted.base_id == "parent-id-123");
     CHECK(persisted.sync_info == "update");
 }
+
+TEST_CASE("PresetBundle removes only the selected user's deleted cloud profiles", "[PresetBundleLoading][PresetCloudOtherUser]")
+{
+    ScopedTemporaryDir temp("preset-bundle-remove-user");
+    ScopedDataDir data(temp.path() / "data");
+    fs::create_directories(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    Preset &print = add_inmemory_preset(bundle.prints, "To Remove");
+    print.user_id = "alice";
+    print.sync_info.clear();
+    print.is_dirty = false;
+    print.setting_id = "cloud-id";
+    print.file = bundle.prints.path_for_preset(print);
+    REQUIRE(print.save(nullptr));
+    const fs::path removed_file = print.file;
+    Preset &other = add_inmemory_preset(bundle.prints, "Other User");
+    other.user_id = "bob";
+    other.sync_info.clear();
+    other.is_dirty = false;
+    other.setting_id = "other-cloud-id";
+    other.file = bundle.prints.path_for_preset(other);
+    REQUIRE(other.save(nullptr));
+    const fs::path retained_file = other.file;
+    REQUIRE(fs::exists(removed_file));
+    REQUIRE(fs::exists(retained_file));
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    bundle.remove_users_preset(app, &cloud);
+    CHECK(bundle.prints.find_preset("To Remove", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_file));
+    const Preset *retained = bundle.prints.find_preset("Other User", false);
+    REQUIRE(retained != nullptr);
+    CHECK(retained->user_id == "bob");
+    CHECK(fs::exists(retained_file));
+
+}
+
+TEST_CASE("PresetBundle removes one user directory after ignoring an empty request",
+          "[PresetBundleLoading][PresetUserDirectoryRemoval]")
+{
+    ScopedTemporaryDir temp("preset-bundle-remove-dir");
+    ScopedDataDir data(temp.path() / "data");
+    fs::create_directories(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    const fs::path alice = temp.path() / "data" / PRESET_USER_DIR / "alice";
+    const fs::path bob = temp.path() / "data" / PRESET_USER_DIR / "bob";
+    preset_workflow_contracts::write_text(alice / "sentinel", "alice-owned");
+    preset_workflow_contracts::write_text(bob / "sentinel", "bob-owned");
+    REQUIRE(fs::exists(alice / "sentinel"));
+    REQUIRE(fs::exists(bob / "sentinel"));
+    bundle.remove_user_presets_directory("");
+    std::string contents;
+    load_string_file((alice / "sentinel").string(), contents);
+    CHECK(contents == "alice-owned");
+    bundle.remove_user_presets_directory("alice");
+    CHECK_FALSE(fs::exists(alice));
+    REQUIRE(fs::exists(bob / "sentinel"));
+    load_string_file((bob / "sentinel").string(), contents);
+    CHECK(contents == "bob-owned");
+}
