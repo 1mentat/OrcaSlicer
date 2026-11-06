@@ -1410,3 +1410,33 @@ TEST_CASE("Volume conversion resets offset and records the source unit", "[Model
 }
 
 } // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Only-one-part and connector cleanup distinguish model and auxiliary volumes", "[Model][ModelConnectorCleanup]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2., false);
+    ModelVolume *part = object->volumes.front();
+    CHECK(part->is_the_only_one_part());
+    ModelVolume *modifier = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(modifier != nullptr);
+    const ObjectID modifier_id = modifier->id();
+    CHECK(part->is_the_only_one_part());
+    ModelVolume *other = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(other != nullptr);
+    CHECK_FALSE(part->is_the_only_one_part());
+    other->cut_info.is_connector = true;
+    other->cut_info.is_processed = true;
+    object->delete_connectors();
+    REQUIRE(object->volumes.size() == 2);
+    const auto modifier_it = std::find_if(object->volumes.begin(), object->volumes.end(),
+        [modifier_id](const ModelVolume *volume) { return volume != nullptr && volume->id() == modifier_id; });
+    REQUIRE(modifier_it != object->volumes.end());
+    modifier = *modifier_it;
+    modifier->cut_info.is_connector = true;
+    object->invalidate_cut();
+    CHECK_FALSE(modifier->cut_info.is_connector);
+}
+
+} // namespace model_extended_contracts
