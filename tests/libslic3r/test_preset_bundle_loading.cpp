@@ -13087,3 +13087,20 @@ TEST_CASE("PresetBundle validates printer, filament, and modified G-code referen
     different.clear();
     CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
 }
+
+
+TEST_CASE("PresetBundle alias dispatch resolves a distinct material identity and preserves invalid passthrough",
+          "[PresetBundleLoading][PresetBundleAliasDispatch]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.prints, "Canonical Process");
+    Preset &material = add_inmemory_preset(bundle.filaments, "Material @Printer");
+    material.is_visible = true;
+    material.is_compatible = true;
+    material.alias.clear();
+    REQUIRE(material.inherits().empty());
+    REQUIRE(bundle.filaments.get_preset_alias(material, true) == "Material");
+    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_FILAMENT, "Material") == "Material @Printer");
+    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_PRINT, "Canonical Process") == "Canonical Process");
+    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_INVALID, "literal") == "literal");
+}
