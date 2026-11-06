@@ -7384,7 +7384,8 @@ OuterWallFeeds parse_later_outer_wall_feeds(const std::string &text, const Dynam
     return result;
 }
 
-void check_resonance_row(double requested, double expected, bool enabled)
+void check_resonance_row(double requested, double expected, bool enabled,
+                         double minimum = 30.0, double maximum = 60.0)
 {
     DynamicPrintConfig config = gcode_broad_contracts::base_config();
     config.set_deserialize_strict({
@@ -7413,8 +7414,8 @@ void check_resonance_row(double requested, double expected, bool enabled)
         {"filament_max_volumetric_speed", "1000"},
         {"filament_adaptive_volumetric_speed", false},
         {"resonance_avoidance", enabled},
-        {"min_resonance_avoidance_speed", 30.0},
-        {"max_resonance_avoidance_speed", 60.0},
+        {"min_resonance_avoidance_speed", minimum},
+        {"max_resonance_avoidance_speed", maximum},
     });
 
     const std::string output = export_resonance_cube(config);
@@ -7458,6 +7459,22 @@ TEST_CASE("Resonance avoidance is a public feature gate for outer-wall speed",
           "[GCode][ResonanceAvoidanceGCode]")
 {
     check_resonance_row(40., 40., false);
+}
+
+TEST_CASE("Resonance avoidance honors its configured minimum and maximum speeds",
+          "[GCode][ResonanceAvoidanceGCode][SettingsVariance]")
+{
+    // GCode.cpp uses min + (max - min) / 2 as a strict split: a slower
+    // source speed is clamped down to min, otherwise it is raised to max.
+    // A source speed above max bypasses the adjustment entirely.
+    const auto [requested, minimum, maximum, expected] = GENERATE(table<double, double, double, double>({
+        {35.,  0., 60., 60.}, // min endpoint: midpoint 30, so 35 selects max.
+        {35., 15., 60., 15.}, // midpoint 37.5, so 35 selects min.
+        {50.,  0.,  0., 50.}, // max endpoint: 50 is above max and passes through.
+        {50.,  0., 80., 80.}, // midpoint 40, so 50 selects max.
+    }));
+    CAPTURE(requested, minimum, maximum, expected);
+    check_resonance_row(requested, expected, true, minimum, maximum);
 }
 
 } // namespace gcode_resonance_contracts

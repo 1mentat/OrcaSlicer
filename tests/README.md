@@ -1350,7 +1350,9 @@ project migration, and format round trips. `[GCodeExportFailures]` retries the s
 Print after temporary-file, thumbnail, and destination errors while checking
 lifecycle outcomes and preserved files. `[ResonanceAvoidanceGCode]` checks emitted
 outer-wall speeds at the midpoint and bounds, with cooling and flow limits set
-explicitly. `[ConfigJsonMigration]`, `[PresetNullableSave]`, and
+explicitly. `tests/mutations/resonance_speed_bounds.json` probes both configured
+speed endpoints; the focused setting rows distinguish them from fixed values.
+`[ConfigJsonMigration]`, `[PresetNullableSave]`, and
 `[PlaceholderParserMapping]` check persisted migration markers, inherited variant
 slots, and externally mapped vector values. `[CadDocumentStepExport]` reimports
 two solids and checks analytic volumes and centers after per-body transforms.

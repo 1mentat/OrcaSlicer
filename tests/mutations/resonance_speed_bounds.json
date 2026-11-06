@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Configured resonance speed endpoints must flow through the emitted outer-wall feed, rather than fixed representative values.",
+  "mutants": [
+    {
+      "id": "resonance-minimum-forced-to-thirty",
+      "path": "src/libslic3r/GCode.cpp",
+      "anchor_line": 9012,
+      "old": "speed = std::min(speed, m_config.min_resonance_avoidance_speed.value);",
+      "new": "speed = std::min(speed, 30.0);",
+      "expected_matches": 1,
+      "test_filter": "ResonanceAvoidanceGCode",
+      "description": "The configured 15 mm/s lower endpoint must produce 15 rather than the fixed 30 mm/s value."
+    },
+    {
+      "id": "resonance-maximum-forced-to-sixty",
+      "path": "src/libslic3r/GCode.cpp",
+      "anchor_line": 9014,
+      "old": "speed = m_config.max_resonance_avoidance_speed.value;",
+      "new": "speed = 60.0;",
+      "expected_matches": 1,
+      "test_filter": "ResonanceAvoidanceGCode",
+      "description": "The configured 80 mm/s upper endpoint must produce 80 rather than the fixed 60 mm/s value."
+    }
+  ]
+}

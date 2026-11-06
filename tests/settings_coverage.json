@@ -718,6 +718,24 @@
       ],
       "reason": "The public G-code pipeline runs resonance avoidance enabled across lower, midpoint, upper-bound, and over-band speeds plus a disabled control; parsed finite positive outer-wall feeds distinguish the configured clamp behavior from the feature-gated passthrough. The numeric speed band is representative and is not claimed exhaustive."
     },
+    "max_resonance_avoidance_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][ResonanceAvoidanceGCode][SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public six-layer cube G-code pipeline sets the registered zero minimum boundary and compares max speeds of 0 and 80 mm/s. Parsed finite positive outer-wall feeds on layers 1–5 follow the source rule: a requested 50 mm/s passes through above max=0 and selects max=80 above its midpoint when max=80. Other speed-band values and interactions are not claimed."
+    },
+    "min_resonance_avoidance_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[GCode][ResonanceAvoidanceGCode][SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public six-layer cube G-code pipeline sets the registered zero minimum boundary and compares minimum speeds of 0 and 15 mm/s with max fixed at 60. Parsed finite positive outer-wall feeds on layers 1–5 follow the strict midpoint rule: 35 mm/s selects max=60 at min=0 and min=15 when the midpoint rises to 37.5. Other speed-band values and interactions are not claimed."
+    },
     "is_infill_first": {
       "test": "tests/fff_print/test_boolean_settings.cpp",
       "tag": "[SettingsBooleanVariance]",
