@@ -3720,6 +3720,16 @@
       ],
       "reason": "The registered 0 and 10 mm endpoints are sliced on the same 120-layer 45-degree ramp. Zero produces positive support extrusion; at 10 mm the aggregate base/interface extrusion is shorter. Non-finite support moves fail the parser checks. Intermediate distances, other support styles, and other contact geometries are not claimed."
     },
+    "support_object_first_layer_gap": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportObjectFirstLayerGap]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 10 mm endpoints and a 2 mm representative value are applied to valid normal(auto) Prints of the same 45-degree ramp with raft_first_layer_expansion pinned at 20 mm. Parsed bed-support extrusion requires first-layer path length to decrease from 0 to 2 to 10 mm, while every later support layer keeps equal length across all rows. This isolates first-layer trimming from the ordinary 0.35 mm support_object_xy_distance; other support geometries remain unclaimed."
+    },
     "support_top_z_distance": {
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportMaterial]",
