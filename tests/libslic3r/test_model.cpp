@@ -1290,3 +1290,53 @@ TEST_CASE("Ensure-on-bed respects auto-drop and the negative-Z allowance", "[Mod
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Deleting the last instance and clearing instances invalidate world geometry", "[Model][ModelInstanceDeletion]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    REQUIRE(object->add_instance(Vec3d(30, 0, 0), Vec3d::Ones(), Vec3d::Zero(), Vec3d::Ones()) != nullptr);
+    REQUIRE(object->instances.size() == 2);
+    CHECK(object->bounding_box_exact().size().x() > 30.);
+    object->delete_last_instance();
+    REQUIRE(object->instances.size() == 1);
+    REQUIRE(object->instances.front() != nullptr);
+    CHECK_THAT(object->bounding_box_exact().size().x(), Catch::Matchers::WithinAbs(10., 1e-5));
+    object->clear_instances();
+    CHECK(object->instances.empty());
+    CHECK_THROWS(object->raw_bounding_box());
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Deleting one of two volumes folds its transform into the remaining instance", "[Model][ModelVolumeDeletion]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *removed = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(removed != nullptr);
+    removed->set_offset(Vec3d(20, 0, 0));
+    ModelVolume *remaining = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(remaining != nullptr);
+    remaining->set_offset(Vec3d(5, 0, 0));
+    ModelInstance *instance = object->add_instance(Vec3d(7, 0, 0), Vec3d::Ones(), Vec3d::Zero(), Vec3d::Ones());
+    REQUIRE(instance != nullptr);
+    REQUIRE(object->volumes.size() == 2);
+    const BoundingBoxf3 before_remaining = remaining->mesh().transformed_bounding_box(instance->get_matrix() * remaining->get_matrix());
+    object->delete_volume(0);
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    REQUIRE(object->instances.size() == 1);
+    REQUIRE(object->instances.front() != nullptr);
+    instance = object->instances.front();
+    model_bounds_contracts::check_vec3d(object->volumes.front()->get_offset(), Vec3d::Zero());
+    model_bounds_contracts::check_box(object->instance_bounding_box(*instance), before_remaining.min.cast<double>(), before_remaining.max.cast<double>());
+}
+
+} // namespace model_extended_contracts
