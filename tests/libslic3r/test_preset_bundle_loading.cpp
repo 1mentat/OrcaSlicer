@@ -12044,3 +12044,24 @@ TEST_CASE("AMS empty input preserves existing project names and colors", "[Prese
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS overwrite preserves valid support selections and clamps out-of-range selections", "[PresetBundleLoading][PresetAmsSupportSelection]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"A"}, {"#000000"});
+    const int selected = GENERATE(0, 1, 9);
+    bundle.prints.get_edited_preset().config.set_key_value("support_filament", new ConfigOptionInt(selected));
+    bundle.prints.get_edited_preset().config.set_key_value("support_interface_filament", new ConfigOptionInt(selected));
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.prints.get_edited_preset().config.opt_int("support_filament") == (selected > 1 ? 0 : selected));
+    CHECK(bundle.prints.get_edited_preset().config.opt_int("support_interface_filament") == (selected > 1 ? 0 : selected));
+}
+
+} // namespace preset_ams_sync_contracts
