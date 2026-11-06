@@ -12832,3 +12832,33 @@ TEST_CASE("PresetBundle filament lookup returns typed compatibility metadata", "
     CHECK(compatible->get_filament_extruder_compatibility() == 17);
     CHECK_FALSE(bundle.get_filament_by_filament_id("fil-42", "Other").has_value());
 }
+
+
+TEST_CASE("PresetBundle dispatches differed saves for process presets and rejects invalid types",
+          "[PresetBundleLoading][PresetBundleDifferedDispatch]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.prints, "Parent");
+    add_inmemory_preset(bundle.prints, "Child", "Parent");
+    Preset *parent = bundle.prints.find_preset("Parent", false, true);
+    Preset *child = bundle.prints.find_preset("Child", false, true);
+    REQUIRE(parent != nullptr);
+    REQUIRE(child != nullptr);
+    parent->config.option<ConfigOptionFloat>("layer_height", true)->value = 0.20;
+    child->config.option<ConfigOptionFloat>("layer_height", true)->value = 0.31;
+    parent->config.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    child->config.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    std::unique_ptr<Preset> diff(bundle.get_preset_differed_for_save(*child));
+    REQUIRE(diff != nullptr);
+    REQUIRE(diff->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(diff->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+    CHECK_FALSE(diff->config.has("wall_loops"));
+    std::map<std::string, std::string> values;
+    REQUIRE(bundle.get_differed_values_to_update(*child, values) == 0);
+    REQUIRE(values.count("layer_height") == 1);
+    CHECK(values.at("layer_height") == "0.31");
+    CHECK(values.count("wall_loops") == 0);
+    Preset invalid(Preset::TYPE_INVALID, "invalid");
+    CHECK(bundle.get_preset_differed_for_save(invalid) == nullptr);
+    CHECK(bundle.get_differed_values_to_update(invalid, values) == -1);
+}
