@@ -1,3 +1,4 @@
+#include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/TexturePainting.hpp"
 #include <boost/filesystem/operations.hpp>
 #include "libslic3r/Exception.hpp"
@@ -1906,6 +1907,149 @@ TEST_CASE("Model import maps OBJ material colors to face colors", "[Model][Model
     CHECK(model.texture_mesh->precomputed_face_colors[1] == std::array<std::size_t, 3>{0, 0, 255});
     CHECK(model.texture_mesh->precomputed_face_colors[2] == std::array<std::size_t, 3>{0, 0, 255});
     CHECK(model.texture_mesh->precomputed_face_colors[3] == std::array<std::size_t, 3>{0, 0, 255});
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+namespace {
+
+std::string material_obj_with_uv_without_texture(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "vt 0.1 0.2\n"
+           "vt 0.4 0.5\n"
+           "vt 0.8 0.9\n"
+           "f 1/1 2/2 3/3\n";
+}
+
+std::string textured_obj_without_uv(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "f 1 2 3\n";
+}
+
+std::string textured_obj(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl painted\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "vt 0.1 0.2\n"
+           "vt 0.4 0.5\n"
+           "vt 0.8 0.9\n"
+           "f 1/1 2/2 3/3\n";
+}
+
+void write_valid_texture(const std::string& path)
+{
+    const std::vector<std::uint8_t> pixels = {
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0,
+    };
+    REQUIRE(png::write_rgb_to_file(path, 2, 2, pixels));
+}
+
+} // namespace
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import retains OBJ texture bytes and flipped UVs", "[Model][ModelImport][OBJ][Texture][ModelObjTexture]")
+{
+    ScopedTemporaryDir directory("model-obj-texture");
+    const auto obj = directory.path() / "texture.obj";
+    const auto mtl = directory.path() / "texture.mtl";
+    const auto texture = directory.path() / "texture.png";
+    write_valid_texture(texture.string());
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\nmap_Kd " + texture.filename().string() + "\n");
+    write_text(obj.string(), textured_obj(mtl.filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->textures.size() == 1);
+    const auto& encoded = model.texture_mesh->textures[0].data;
+    REQUIRE_FALSE(encoded.empty());
+    REQUIRE(png::is_png(png::ReadBuf{encoded.data(), encoded.size()}));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    CHECK(decoded.cols == 2);
+    CHECK(decoded.rows == 2);
+    CHECK(decoded.bytes_per_pixel == 3);
+    // The colored PNG decoder returns rows bottom-up.
+    CHECK(decoded.buf == std::vector<std::uint8_t>{0, 0, 255, 255, 255, 0, 255, 0, 0, 0, 255, 0});
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.objects.front()->input_file == obj.string());
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 10., 0.), 1e-5);
+    REQUIRE(model.texture_mesh->uv_coords.size() == 3);
+    CHECK_THAT(model.texture_mesh->uv_coords[0][0], Catch::Matchers::WithinAbs(.1, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[0][1], Catch::Matchers::WithinAbs(.8, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[1][0], Catch::Matchers::WithinAbs(.4, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[1][1], Catch::Matchers::WithinAbs(.5, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[2][0], Catch::Matchers::WithinAbs(.8, 1e-6));
+    CHECK_THAT(model.texture_mesh->uv_coords[2][1], Catch::Matchers::WithinAbs(.1, 1e-6));
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("OBJ UVs without a texture retain material face colors", "[Model][ModelImport][OBJ][Texture][ModelObjUvMaterial]")
+{
+    ScopedTemporaryDir directory("model-obj-texture");
+    const auto obj = directory.path() / "texture.obj";
+    const auto mtl = directory.path() / "texture.mtl";
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\n");
+    write_text(obj.string(), material_obj_with_uv_without_texture(mtl.filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 1);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{51, 102, 153});
+    CHECK(model.texture_mesh->textures.empty());
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("OBJ texture material without UVs does not publish a textured mesh", "[Model][ModelImport][OBJ][Texture][ModelObjNoUv]")
+{
+    ScopedTemporaryDir directory("model-obj-texture");
+    const auto obj = directory.path() / "texture.obj";
+    const auto mtl = directory.path() / "texture.mtl";
+    const auto texture = directory.path() / "texture.png";
+    write_valid_texture(texture.string());
+    write_text(mtl.string(), "newmtl painted\nKd .2 .4 .6\nmap_Kd " + texture.filename().string() + "\n");
+    write_text(obj.string(), textured_obj_without_uv(mtl.filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.texture_mesh == nullptr);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 1);
 }
 
 } // namespace model_import_contracts
