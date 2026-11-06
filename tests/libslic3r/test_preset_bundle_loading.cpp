@@ -11675,3 +11675,97 @@ TEST_CASE("AMS synchronization keeps left and right physical trays in map order"
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS sync retains the previous preset and reports an unknown material",
+          "[PresetBundleLoading][PresetAmsUnknown]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#AAAAAA"});
+    bundle.filament_ams_list.emplace(0, tray("MISSING-ID", "#123456", "Nylon", "0", "2"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == "Existing");
+    REQUIRE(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.size() == 1);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.front() == "#123456");
+    REQUIRE(unknowns.size() == 1);
+    CHECK(unknowns.front().first == &bundle.filament_ams_list.begin()->second);
+    CHECK_FALSE(unknowns.front().second.empty());
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing color",
+          "[PresetBundleLoading][PresetAmsUnchanged]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#AAAAAA"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#ABCDEF", "PLA", "0", "0", false));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#ABCDEF"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS unknown type uses the longest whole-word generic preset match", "[PresetBundleLoading][PresetAmsGenericType]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PA", "pa-id", "PA");
+    system_filament(bundle, "Generic PA-CF", "pa-cf-id", "PA-CF");
+    system_filament(bundle, "Generic PA-CF B", "substring-id", "PA-CF B");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("missing-id", "#112233", "PA-CF blend", "0", "0"));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == "Generic PA-CF");
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#112233"});
+    REQUIRE(unknowns.size() == 1);
+    CHECK(unknowns.front().first == &bundle.filament_ams_list.begin()->second);
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS unknown material without generic preset falls back to a compatible system preset", "[PresetBundleLoading][PresetAmsSystemFallback]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "A Incompatible", "incompatible-id", "ABS").is_compatible = false;
+    system_filament(bundle, "B User", "user-id", "PLA").is_system = false;
+    system_filament(bundle, "Custom System", "custom-id", "PLA");
+    project_slots(bundle, {}, {});
+    bundle.filament_ams_list.emplace(0, tray("missing-id", "#334455", "Nylon", "A", "0"));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+
+    REQUIRE(bundle.filament_presets.size() == 1);
+    CHECK(bundle.filament_presets.front() == "Custom System");
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#334455"});
+    REQUIRE(unknowns.size() == 1);
+    CHECK_FALSE(unknowns.front().second.empty());
+}
+
+} // namespace preset_ams_sync_contracts
