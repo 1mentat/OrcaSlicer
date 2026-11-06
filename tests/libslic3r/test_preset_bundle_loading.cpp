@@ -12862,3 +12862,35 @@ TEST_CASE("PresetBundle dispatches differed saves for process presets and reject
     CHECK(bundle.get_preset_differed_for_save(invalid) == nullptr);
     CHECK(bundle.get_differed_values_to_update(invalid, values) == -1);
 }
+
+
+TEST_CASE("PresetBundle loads enumerates and resets an embedded process preset",
+          "[PresetBundleLoading][PresetBundleEmbeddedDispatch]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.prints, "Embedded Parent");
+    auto embedded = std::make_unique<Preset>(Preset::TYPE_PRINT, "Embedded Process");
+    embedded->is_project_embedded = true;
+    embedded->config = bundle.prints.default_preset().config;
+    embedded->inherits() = "Embedded Parent";
+    embedded->config.option<ConfigOptionFloat>("layer_height", true)->value = 0.33;
+    std::vector<Preset *> project{embedded.get()};
+    const PresetsConfigSubstitutions substitutions = bundle.load_project_embedded_presets(
+        project, ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+    const auto current = bundle.get_current_project_embedded_presets();
+    std::vector<std::unique_ptr<Preset>> owned;
+    for (Preset *preset : current)
+        owned.emplace_back(preset);
+    REQUIRE(owned.size() == 1);
+    REQUIRE(owned.front() != nullptr);
+    CHECK(owned.front()->name == "Embedded Process");
+    REQUIRE(owned.front()->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(owned.front()->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    bundle.reset_project_embedded_presets();
+    const auto remaining = bundle.get_current_project_embedded_presets();
+    std::vector<std::unique_ptr<Preset>> owned_remaining;
+    for (Preset *preset : remaining)
+        owned_remaining.emplace_back(preset);
+    CHECK(owned_remaining.empty());
+}
