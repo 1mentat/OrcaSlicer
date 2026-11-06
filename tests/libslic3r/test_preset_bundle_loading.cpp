@@ -12752,3 +12752,37 @@ TEST_CASE("Vendor profile version lookup preserves legacy serialization and miss
     CHECK(bundle.get_vendor_profile_version("BBL").to_string() == "3.2.0.1");
     CHECK_FALSE(bundle.get_vendor_profile_version("Missing").valid());
 }
+
+TEST_CASE("Vendor network and device-tab decisions follow the configured model and host settings", "[PresetBundleLoading][PresetVendorNetwork]")
+{
+    PresetBundle bundle;
+    VendorProfile bbl("BBL");
+    bbl.name = "BBL";
+    VendorProfile::PrinterModel model;
+    model.name = "X1 Carbon";
+    model.id = "X1C";
+    model.variants.emplace_back("0.4");
+    bbl.models.push_back(model);
+    bundle.vendors.emplace(bbl.id, bbl);
+    bundle.printers.get_edited_preset().config.option<ConfigOptionString>("printer_model", true)->value = "X1 Carbon";
+    bundle.printers.get_edited_preset().config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    auto &config = bundle.printers.get_edited_preset().config;
+    CHECK(bundle.get_current_vendor_type() == VendorType::Marlin_BBL);
+    for (bool local_host : {false, true}) {
+        for (const std::string &url : {std::string{}, std::string{"http://printer.local"}}) {
+            CAPTURE(local_host, url);
+            config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = local_host;
+            config.option<ConfigOptionString>("print_host_webui", true)->value = url;
+            CHECK(bundle.use_bbl_network() == !local_host);
+            const bool expect_device_tab = !local_host || url.empty();
+            CHECK(bundle.use_bbl_device_tab() == expect_device_tab);
+        }
+    }
+    config.option<ConfigOptionString>("printer_model", true)->value = "Unlisted Model";
+    config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = false;
+    config.option<ConfigOptionString>("print_host_webui", true)->value.clear();
+    CHECK(bundle.get_current_vendor_type() == VendorType::Unknown);
+    CHECK_FALSE(bundle.use_bbl_network());
+    CHECK_FALSE(bundle.use_bbl_device_tab());
+
+}
