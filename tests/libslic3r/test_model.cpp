@@ -1210,3 +1210,23 @@ TEST_CASE("Object export statistics use printable volume determinants and names"
     CHECK(object->has_solid_mesh());
     CHECK(object->facets_count() == 12);
 }
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Backup IDs remain stable and advance independently of object IDs", "[Model][ModelBackupIds]")
+{
+    Model model;
+    ModelObject *first = cube_object(model);
+    ModelObject *second = cube_object(model);
+    model.set_object_backup_id(*first, 1);
+    CHECK(first->get_backup_id() == 1);
+    CHECK(first->get_backup_id() == 1);
+    model.set_object_backup_id(*second, 42);
+    CHECK(second->get_backup_id() == 42);
+    ModelObject *third = cube_object(model);
+    CHECK(model.get_object_backup_id(*third) == 43);
+    CHECK(model.get_object_backup_id(*third) == 43);
+}
+
+} // namespace model_extended_contracts
