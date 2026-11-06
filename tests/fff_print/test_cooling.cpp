@@ -129,6 +129,17 @@ TEST_CASE("Overhang fan transitions do not depend on overhang speed", "[Cooling]
 
 namespace cooling_slowdown_contracts {
 
+std::string validated_slice(const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({mesh}, print, model, config);
+    const auto validation = print.validate();
+    INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    return gcode(print);
+}
+
 struct FeedEvidence {
     std::vector<double> feeds;
     double path_length = 0.0;
@@ -229,7 +240,116 @@ double minimum_feed(const FeedEvidence &evidence)
     return *std::min_element(evidence.feeds.begin(), evidence.feeds.end());
 }
 
+struct LayerFeedEvidence {
+    std::map<int, std::vector<double>> feeds_by_layer;
+    double path_length = 0.0;
+    double filament_length = 0.0;
+    bool finite = true;
+};
+
+DynamicPrintConfig early_layer_speed_config(const int slow_down_layers)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"slow_down_layers", slow_down_layers},
+        {"slow_down_for_layer_cooling", false},
+        {"slowdown_for_curled_perimeters", false},
+        {"initial_layer_speed", 30.0},
+        {"initial_layer_infill_speed", 30.0},
+        {"outer_wall_speed", 120.0},
+        {"inner_wall_speed", 120.0},
+        {"sparse_infill_speed", 120.0},
+        {"top_surface_speed", 120.0},
+        {"bridge_speed", 120.0},
+        {"filament_max_volumetric_speed", 200.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"fan_min_speed", 0},
+        {"fan_max_speed", 0},
+    });
+    return config;
+}
+
+LayerFeedEvidence inspect_layer_feeds(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    LayerFeedEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&evidence](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double feed = line.has_f() ? line.f() : self.f();
+        const double xy = line.dist_XY(self);
+        const double filament = line.dist_E(self);
+        const int layer = static_cast<int>(std::lround(line.new_Z(self) / 0.2)) - 1;
+        evidence.feeds_by_layer[layer].push_back(feed);
+        evidence.path_length += xy;
+        evidence.filament_length += filament;
+        evidence.finite = evidence.finite && std::isfinite(feed) && feed > 0.0 &&
+                          std::isfinite(xy) && std::isfinite(filament);
+    });
+    return evidence;
+}
+
+double uniform_layer_feed(const LayerFeedEvidence &evidence, const int layer)
+{
+    const auto found = evidence.feeds_by_layer.find(layer);
+    REQUIRE(found != evidence.feeds_by_layer.end());
+    REQUIRE_FALSE(found->second.empty());
+    for (const double feed : found->second)
+        CHECK_THAT(feed, Catch::Matchers::WithinAbs(found->second.front(), 0.25));
+    return found->second.front();
+}
+
 } // namespace cooling_slowdown_contracts
+
+TEST_CASE("Slow-down layer count ramps early perimeter feed and preserves deposition",
+          "[Cooling][SlowDownLayerCount]")
+{
+    using namespace cooling_slowdown_contracts;
+    const TriangleMesh fixture = make_cube(8.0, 8.0, 1.2);
+    const DynamicPrintConfig no_slowdown_config = early_layer_speed_config(0);
+    const DynamicPrintConfig one_layer_config = early_layer_speed_config(1);
+    const DynamicPrintConfig ramp_config = early_layer_speed_config(3);
+    const std::string no_slowdown_gcode = validated_slice(fixture, no_slowdown_config);
+    const std::string one_layer_gcode = validated_slice(fixture, one_layer_config);
+    const std::string ramp_gcode = validated_slice(fixture, ramp_config);
+    const LayerFeedEvidence no_slowdown = inspect_layer_feeds(no_slowdown_gcode, no_slowdown_config);
+    const LayerFeedEvidence one_layer = inspect_layer_feeds(one_layer_gcode, one_layer_config);
+    const LayerFeedEvidence ramp = inspect_layer_feeds(ramp_gcode, ramp_config);
+    REQUIRE(no_slowdown.finite);
+    REQUIRE(one_layer.finite);
+    REQUIRE(ramp.finite);
+    REQUIRE(no_slowdown.path_length > 0.0);
+    CHECK_THAT(one_layer.path_length, Catch::Matchers::WithinRel(no_slowdown.path_length, 1e-6));
+    CHECK_THAT(ramp.path_length, Catch::Matchers::WithinRel(no_slowdown.path_length, 1e-6));
+    CHECK_THAT(one_layer.filament_length, Catch::Matchers::WithinAbs(no_slowdown.filament_length, 1e-3));
+    CHECK_THAT(ramp.filament_length, Catch::Matchers::WithinAbs(no_slowdown.filament_length, 1e-3));
+
+    CHECK_THAT(uniform_layer_feed(no_slowdown, 0), Catch::Matchers::WithinAbs(1800.0, 0.25));
+    CHECK_THAT(uniform_layer_feed(one_layer, 1), Catch::Matchers::WithinAbs(7200.0, 0.25));
+    CHECK_THAT(uniform_layer_feed(no_slowdown, 1), Catch::Matchers::WithinAbs(7200.0, 0.25));
+    CHECK_THAT(uniform_layer_feed(ramp, 1), Catch::Matchers::WithinAbs(3600.0, 0.25));
+    CHECK_THAT(uniform_layer_feed(ramp, 2), Catch::Matchers::WithinAbs(5400.0, 0.25));
+    CHECK_THAT(uniform_layer_feed(ramp, 3), Catch::Matchers::WithinAbs(7200.0, 0.25));
+}
 
 TEST_CASE("Layer cooling settings slow extrusion without changing deposited geometry",
           "[Cooling][SlowDownSettings]")
@@ -1171,6 +1291,41 @@ TEST_CASE("Fan speedup overhang setting changes physical fan scheduling without 
                Catch::Matchers::WithinRel(ordinary_material.path_length, 1e-6));
     CHECK_THAT(overhang_material.filament_length,
                Catch::Matchers::WithinAbs(ordinary_material.filament_length, 1e-3));
+}
+
+
+TEST_CASE("Fan speed-up time advances the ordinary cooling target without changing deposition",
+          "[Cooling][FanSpeedupTime]")
+{
+    using namespace fan_speedup_overhangs_physical_contracts;
+    DynamicPrintConfig immediate_config = config_for(false);
+    immediate_config.set_deserialize_strict({
+        {"fan_speedup_time", 0.0},
+        {"layer_change_gcode", "G92 E0\n;TEST_LAYER_Z=[layer_z]"},
+    });
+    DynamicPrintConfig early_config = config_for(false);
+    early_config.set_deserialize_strict({
+        {"fan_speedup_time", 0.5},
+        {"layer_change_gcode", "G92 E0\n;TEST_LAYER_Z=[layer_z]"},
+    });
+    const TriangleMesh fixture = stepped_overhang_fixture();
+    const std::string immediate_gcode = cooling_slowdown_contracts::validated_slice(fixture, immediate_config);
+    const std::string early_gcode = cooling_slowdown_contracts::validated_slice(fixture, early_config);
+    const MotionEvidence immediate = inspect_motion_and_fans(immediate_gcode, immediate_config);
+    const MotionEvidence early = inspect_motion_and_fans(early_gcode, early_config);
+    REQUIRE(immediate.finite);
+    REQUIRE(early.finite);
+    const FanOnEvent &immediate_ironing = first_rising_fan_target(immediate, 102);
+    const FanOnEvent &early_ironing = first_rising_fan_target(early, 102);
+    CHECK(early_ironing.path_distance < immediate_ironing.path_distance);
+    CHECK(early_ironing.elapsed_seconds + 0.01 < immediate_ironing.elapsed_seconds);
+
+    const auto immediate_material = cooling_slowdown_contracts::inspect_feed_evidence(immediate_gcode, immediate_config);
+    const auto early_material = cooling_slowdown_contracts::inspect_feed_evidence(early_gcode, early_config);
+    REQUIRE(immediate_material.finite);
+    REQUIRE(early_material.finite);
+    CHECK_THAT(early_material.path_length, Catch::Matchers::WithinRel(immediate_material.path_length, 1e-6));
+    CHECK_THAT(early_material.filament_length, Catch::Matchers::WithinAbs(immediate_material.filament_length, 1e-3));
 }
 
 namespace overhang_fan_threshold_settings_contracts {

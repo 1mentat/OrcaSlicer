@@ -5050,6 +5050,15 @@
       ],
       "reason": "The same stepped base/stem/cap mesh and pinned cooling/ironing configuration are sliced with fan_speedup_overhangs=false and true. Both rows require finite positive motion, ordinary PWM=51 and overhang PWM=255 witnesses, then compare the first rising non-overhang ironing PWM=102 event. The false (unrestricted) row must advance that event in signed physical distance and elapsed time relative to the true row while path length and filament remain conserved. This covers both boolean states with a scheduling/material oracle; ironing settings and other fan numeric domains remain pinned/unclaimed."
     },
+    "fan_speedup_time": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][FanSpeedupTime]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public [FanSpeedupTime] case compares 0 with 0.5 s on the same stepped base/stem/cap model. It requires the first rising ironing PWM 102 event to move earlier in physical path distance and elapsed time with 0.5 s, while emitted XY path length and deposited filament remain conserved. This covers selected representative values and the fan-scheduling pipeline; other fan targets, negative inputs, and the unbounded positive domain are not claimed."
+    },
     "internal_bridge_fan_speed": {
       "test": "tests/fff_print/test_cooling.cpp",
       "tag": "[Cooling][CoolingSettings][RoleFanBoundaries]",
@@ -5386,6 +5395,16 @@
         "pipeline_oracle"
       ],
       "reason": "The accepted Print-to-G-code cases set skirt_height to 0, 1, 3, and 5 and count emitted skirt-role layers; the table also checks draft-shield and print-sequence interactions. The declared maximum of 10000 is not exercised, so this is partial evidence."
+    },
+    "slow_down_layers": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[Cooling][SlowDownLayerCount]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public [SlowDownLayerCount] case exercises the registered minimum 0, gate-edge value 1, and representative 3 on an 8 x 8 x 1.2 mm cube. Values 0 and 1 retain the nominal feed on layer index 1; value 3 emits 3600 and 5400 mm/min on indices 1 and 2, then returns to 7200 mm/min at index 3. The rows preserve XY path and deposited filament. This covers selected counts in the non-raft path; raft behavior and larger counts are not claimed."
     },
     "support_object_elevation": {
       "test": "tests/libslic3r/test_rotfinder.cpp",
