@@ -12684,3 +12684,32 @@ TEST_CASE("PresetBundle setup_directories creates the owned data layout", "[Pres
     CHECK(fs::is_directory(temp.path() / "data" / PRESET_SYSTEM_DIR));
     CHECK(fs::is_directory(temp.path() / "data" / PRESET_USER_DIR));
 }
+
+
+TEST_CASE("PresetBundle copy_files preserves the three supported preset trees",
+          "[PresetBundleLoading][PresetBundleCopyFiles]")
+{
+    ScopedTemporaryDir temp("preset-bundle-copy");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path source = temp.path() / "source";
+    const fs::path destination = temp.path() / "data" / "old";
+    fs::create_directories(destination);
+    preset_workflow_contracts::write_text(source / PRESET_PRINT_NAME / "base" / "process.json", "print");
+    preset_workflow_contracts::write_text(source / PRESET_FILAMENT_NAME / "base" / "filament.json", "filament");
+    preset_workflow_contracts::write_text(source / PRESET_PRINTER_NAME / "base" / "printer.json", "printer");
+    preset_workflow_contracts::write_text(source / "vendor" / "ignored.json", "ignored");
+    REQUIRE(fs::exists(source / "vendor" / "ignored.json"));
+    PresetBundle bundle;
+    bundle.copy_files(source.string());
+    const std::vector<std::pair<fs::path, std::string>> copied{
+        {destination / PRESET_PRINT_NAME / "base" / "process.json", "print"},
+        {destination / PRESET_FILAMENT_NAME / "base" / "filament.json", "filament"},
+        {destination / PRESET_PRINTER_NAME / "base" / "printer.json", "printer"}};
+    for (const auto &[path, expected] : copied) {
+        REQUIRE(fs::exists(path));
+        std::string contents;
+        load_string_file(path.string(), contents);
+        CHECK(contents == expected);
+    }
+    CHECK_FALSE(fs::exists(destination / "vendor"));
+}
