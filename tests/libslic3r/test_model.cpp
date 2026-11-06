@@ -1,3 +1,4 @@
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Config.hpp"
 #include <boost/filesystem/path.hpp>
@@ -1437,6 +1438,55 @@ TEST_CASE("Only-one-part and connector cleanup distinguish model and auxiliary v
     modifier->cut_info.is_connector = true;
     object->invalidate_cut();
     CHECK_FALSE(modifier->cut_info.is_connector);
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Material painting round-trips serialized triangle state and resets", "[Model][ModelPaintingState]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2., false);
+    ModelVolume *volume = object->volumes.front();
+    REQUIRE_FALSE(volume->mesh().its.indices.empty());
+    volume->mmu_segmentation_facets.set_triangle_from_string(0, "8");
+    CHECK(volume->mmu_segmentation_facets.get_triangle_as_string(0) == "8");
+    CHECK_FALSE(volume->mmu_segmentation_facets.get_data().bitstream.empty());
+    CHECK(volume->is_mm_painted());
+    const auto saved = volume->save_painting();
+    REQUIRE(saved.has_value());
+    volume->reset_extra_facets();
+    CHECK_FALSE(volume->is_any_painted());
+    volume->restore_painting(saved);
+    CHECK(volume->is_mm_painted());
+    volume->reset_extra_facets();
+    CHECK_FALSE(volume->save_painting().has_value());
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("OBJ face and vertex filament imports reject malformed cardinality and record painted slots", "[Model][ModelObjColorCardinality]")
+{
+    Model face_model;
+    ModelObject *face_object = cube_object(face_model, 2., false);
+    const std::size_t faces = face_object->volumes.front()->mesh().its.indices.size();
+    REQUIRE(faces > 0);
+    CHECK_FALSE(Model::obj_import_face_color_deal({}, 1, &face_model));
+    CHECK_FALSE(Model::obj_import_face_color_deal(std::vector<unsigned char>(faces - 1, 2), 1, &face_model));
+    REQUIRE(Model::obj_import_face_color_deal(std::vector<unsigned char>(faces, 2), 1, &face_model));
+    CHECK(face_object->is_mm_painted());
+    CHECK(face_object->volumes.front()->get_extruders_from_multi_material_painting() == std::vector<std::size_t>{1});
+
+    Model vertex_model;
+    ModelObject *vertex_object = cube_object(vertex_model, 2., false);
+    const std::size_t vertices = vertex_object->volumes.front()->mesh().its.vertices.size();
+    REQUIRE(vertices > 0);
+    CHECK_FALSE(Model::obj_import_vertex_color_deal(std::vector<unsigned char>(vertices - 1, 2), 1, &vertex_model));
+    REQUIRE(Model::obj_import_vertex_color_deal(std::vector<unsigned char>(vertices, 2), 1, &vertex_model));
+    CHECK(vertex_object->is_mm_painted());
 }
 
 } // namespace model_extended_contracts
