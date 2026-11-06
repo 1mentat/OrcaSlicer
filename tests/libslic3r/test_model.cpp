@@ -394,3 +394,25 @@ TEST_CASE("Model unit conversion scales meshes and preserves conversion flags", 
 }
 
 } // namespace model_bounds_contracts
+
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model cleanup removes only zero-volume objects", "[Model][ModelZeroVolumeCleanup]")
+{
+    Model model;
+    ModelObject *empty = model.add_object();
+    REQUIRE(empty != nullptr);
+    TriangleMesh empty_mesh;
+    REQUIRE(empty_mesh.volume() == 0.f);
+    REQUIRE(empty->add_volume(std::move(empty_mesh), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelObject *solid = model.add_object();
+    REQUIRE(solid != nullptr);
+    REQUIRE(solid->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false) != nullptr);
+    CHECK(model.removed_objects_with_zero_volume() == 1);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    CHECK(model.objects.front()->facets_count() == 12);
+}
+
+} // namespace model_bounds_contracts
