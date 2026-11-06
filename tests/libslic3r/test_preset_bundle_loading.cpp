@@ -12617,3 +12617,53 @@ TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[
         CHECK(installed_filament->is_visible);
     }
 }
+
+TEST_CASE("PresetBundle copy repairs vendor pointers and preserves selected configurations",
+          "[PresetBundleLoading][PresetBundleCopy]")
+{
+    PresetBundle original;
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    original.vendors.emplace(vendor.id, vendor);
+    Preset &printer = add_inmemory_preset(original.printers, "Acme Printer");
+    printer.vendor = &original.vendors.at("Acme");
+    printer.config.option<ConfigOptionString>("printer_model", true)->value = "Acme One";
+    printer.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    REQUIRE(original.printers.select_preset_by_name("Acme Printer", true));
+    original.printers.get_edited_preset().config.option<ConfigOptionString>("printer_model", true)->value = "Edited Acme";
+    original.filament_presets = {"Acme PLA"};
+    original.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#112233"};
+
+    PresetBundle copied(original);
+    const Preset *copied_printer = copied.printers.find_preset("Acme Printer", false, true);
+    REQUIRE(copied_printer != nullptr);
+    CHECK(copied.printers.get_selected_preset_name() == "Acme Printer");
+    const auto *copied_stored_model = copied_printer->config.opt<ConfigOptionString>("printer_model");
+    REQUIRE(copied_stored_model != nullptr);
+    CHECK(copied_stored_model->value == "Acme One");
+    const auto *copied_edited_model = copied.printers.get_edited_preset().config.opt<ConfigOptionString>("printer_model");
+    REQUIRE(copied_edited_model != nullptr);
+    CHECK(copied_edited_model->value == "Edited Acme");
+    CHECK(copied_printer->vendor == &copied.vendors.at("Acme"));
+    CHECK(copied_printer->vendor != printer.vendor);
+    CHECK(copied.filament_presets == std::vector<std::string>{"Acme PLA"});
+    const auto *copied_colors = copied.project_config.option<ConfigOptionStrings>("filament_colour");
+    REQUIRE(copied_colors != nullptr);
+    CHECK(copied_colors->values == std::vector<std::string>{"#112233"});
+
+    PresetBundle assigned;
+    assigned = original;
+    CHECK(assigned.printers.get_selected_preset_name() == "Acme Printer");
+    const auto *assigned_edited_model = assigned.printers.get_edited_preset().config.opt<ConfigOptionString>("printer_model");
+    REQUIRE(assigned_edited_model != nullptr);
+    CHECK(assigned_edited_model->value == "Edited Acme");
+    const Preset *assigned_printer = assigned.printers.find_preset("Acme Printer", false, true);
+    REQUIRE(assigned_printer != nullptr);
+    const auto *assigned_stored_model = assigned_printer->config.opt<ConfigOptionString>("printer_model");
+    REQUIRE(assigned_stored_model != nullptr);
+    CHECK(assigned_stored_model->value == "Acme One");
+    CHECK(assigned_printer->vendor == &assigned.vendors.at("Acme"));
+    original.vendors.at("Acme").name = "Changed original";
+    CHECK(copied.vendors.at("Acme").name == "Acme");
+    CHECK(assigned.vendors.at("Acme").name == "Acme");
+}
