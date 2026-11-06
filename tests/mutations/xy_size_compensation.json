@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_commit": "0b789166f7d4afe14ac04a8597bca065405c1a59",
+  "description": "Manual bounded mutation of the FFF XY hole compensation consumer; validated on a source-equivalent ARM64 guest.",
+  "test_source": "tests/fff_print/test_print.cpp",
+  "test_source_sha256": "1623e082e27d31ae66f4a8a8b9a8bdc4300506292fb7127a4f4c698469256e71",
+  "production_source": "src/libslic3r/PrintObjectSlice.cpp",
+  "production_source_sha256": "0898b8324191ae8dc9aeb60421f9744a8695ebdd49a62e9b2f9e8c6082c434de",
+  "mutants": [
+    {
+      "id": "xy-hole-compensation-uses-contour-value",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "const auto   xy_hole_scaled = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_hole_compensation.value);",
+      "new": "const auto   xy_hole_scaled = (num_extruders > 1 && this->is_mm_painted()) ? scaled<float>(0.f) : scaled<float>(m_config.xy_contour_compensation.value);",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^XYSizeCompensation$",
+      "description": "The test must fail only the positive and negative cavity-width checks when hole compensation is sourced from the contour setting."
+    }
+  ]
+}

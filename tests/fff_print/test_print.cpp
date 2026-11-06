@@ -2365,6 +2365,58 @@ TEST_CASE("Single-volume slicing preserves a hole in every occupied layer", "[Pr
     CHECK(occupied > 0);
 }
 
+TEST_CASE("XY size compensation adjusts object contours and cavities independently",
+          "[Print][PrintPipelineWorkflows][XYSizeCompensation]")
+{
+    struct SliceBounds {
+        double contour_width = 0.0;
+        double hole_width = 0.0;
+    };
+
+    const auto observe = [](double contour_compensation, double hole_compensation) {
+        DynamicPrintConfig config = pipeline_config();
+        config.set_deserialize_strict({
+            {"xy_contour_compensation", contour_compensation},
+            {"xy_hole_compensation", hole_compensation},
+        });
+
+        Print print;
+        Model model;
+        init_valid({mesh(TestMesh::cube_with_hole)}, print, model, config);
+        REQUIRE_NOTHROW(print.process());
+
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.layer_count() >= 3);
+        const Layer *layer = object.get_layer(static_cast<int>(object.layer_count() / 2));
+        REQUIRE(layer != nullptr);
+        REQUIRE(layer->lslices.size() == 1);
+        const ExPolygon &slice = layer->lslices.front();
+        REQUIRE(slice.holes.size() == 1);
+
+        const BoundingBox contour_bounds = slice.contour.bounding_box();
+        const BoundingBox hole_bounds = slice.holes.front().bounding_box();
+        return SliceBounds{
+            double(contour_bounds.max.x() - contour_bounds.min.x()) * SCALING_FACTOR,
+            double(hole_bounds.max.x() - hole_bounds.min.x()) * SCALING_FACTOR,
+        };
+    };
+
+    const SliceBounds baseline = observe(0.0, 0.0);
+    const SliceBounds grown = observe(0.2, 0.5);
+    const SliceBounds reduced = observe(-0.2, -0.5);
+
+    CHECK_THAT(baseline.contour_width, Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(baseline.hole_width, Catch::Matchers::WithinAbs(10.0, 0.05));
+    CHECK_THAT(grown.contour_width - baseline.contour_width,
+               Catch::Matchers::WithinAbs(0.4, 0.05));
+    CHECK_THAT(grown.hole_width - baseline.hole_width,
+               Catch::Matchers::WithinAbs(1.0, 0.05));
+    CHECK_THAT(reduced.contour_width - baseline.contour_width,
+               Catch::Matchers::WithinAbs(-0.4, 0.05));
+    CHECK_THAT(reduced.hole_width - baseline.hole_width,
+               Catch::Matchers::WithinAbs(-1.0, 0.05));
+}
+
 TEST_CASE("Support preview generates support layers without requiring full G-code export", "[Print][PrintPipelineWorkflows]")
 {
     DynamicPrintConfig config = pipeline_config();

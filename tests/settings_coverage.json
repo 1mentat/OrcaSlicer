@@ -6616,6 +6616,22 @@
         "pipeline_oracle"
       ],
       "reason": "The same valid support Print uses the registered 0 mm minimum to disable the small-support speed and a 1000 mm threshold to activate it for the observed support paths. The output oracle checks the resulting base/interface feed rates and equal support sample count, Z and XY path. Nil behavior and other thresholds or support geometries are not claimed."
+    },
+    "xy_contour_compensation": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[XYSizeCompensation]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "On one valid single-material, single-region hollow-cube Print, zero establishes the middle-layer baseline and +/-0.2 mm settings change the outer X width by +/-0.4 mm. This records representative values with a geometry observation. It intentionally leaves the pipeline_oracle dimension unclaimed because MM-painted suppression, multi-region slices and elephant-foot interactions remain untested."
+    },
+    "xy_hole_compensation": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[XYSizeCompensation]",
+      "dimensions": [
+        "representative_values"
+      ],
+      "reason": "On one valid single-material, single-region hollow-cube Print, zero establishes the middle-layer baseline and +/-0.5 mm settings change the cavity X width by +/-1.0 mm. This records representative values with a geometry observation. It intentionally leaves the pipeline_oracle dimension unclaimed because MM-painted suppression, multi-region slices and elephant-foot interactions remain untested."
     }
   }
 }
