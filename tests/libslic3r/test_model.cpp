@@ -1,3 +1,4 @@
+#include "libslic3r/TexturePainting.hpp"
 #include <boost/filesystem/operations.hpp>
 #include "libslic3r/Exception.hpp"
 #include <admesh/stl.h>
@@ -1780,6 +1781,131 @@ TEST_CASE("Model import reports malformed OBJ files", "[Model][ModelImport][OBJ]
     ScopedTemporaryFile obj(".obj");
     write_text(obj.string(), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 99\n");
     CHECK_THROWS_AS(Model::read_from_file(obj.string()), Slic3r::RuntimeError);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+namespace {
+
+std::string plain_obj()
+{
+    return "o triangle\n"
+           "v 0 0 0\n"
+           "v 12 0 0\n"
+           "v 0 8 0\n"
+           "v 0 0 5\n"
+           "f 1 2 3\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+std::string colored_obj()
+{
+    return "o colored\n"
+           "v 0 0 0 1 0 0\n"
+           "v 10 0 0 0.5 0.5 0\n"
+           "v 0 10 0 0 0 0.25\n"
+           "v 0 0 10 0.25 1 0.75\n"
+           "f 1 2 3\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+std::string material_obj(const std::string& mtl_name)
+{
+    return "mtllib " + mtl_name +
+           "\n"
+           "usemtl red\n"
+           "v 0 0 0\n"
+           "v 10 0 0\n"
+           "v 0 10 0\n"
+           "v 0 0 10\n"
+           "f 1 2 3\n"
+           "usemtl blue\n"
+           "f 1 4 2\n"
+           "f 1 3 4\n"
+           "f 2 4 3\n";
+}
+
+} // namespace
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import preserves plain OBJ bounds and topology", "[Model][ModelImport][OBJ][ModelObjGeometry]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), plain_obj());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string(), nullptr, nullptr, LoadStrategy::Default));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.objects.front()->raw_mesh().facets_count() == 4);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(12., 8., 5.), 1e-5);
+    CHECK(model.objects.front()->instances.empty());
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import turns OBJ vertex colors into per-face colors", "[Model][ModelImport][OBJ][Colors][ModelObjVertexColors]")
+{
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj.string(), colored_obj());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 4);
+    REQUIRE(model.texture_mesh->precomputed_vertex_colors.size() == 4);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{127, 42, 21});
+    CHECK(model.texture_mesh->precomputed_face_colors[1] == std::array<std::size_t, 3>{148, 127, 63});
+    CHECK(model.texture_mesh->precomputed_face_colors[2] == std::array<std::size_t, 3>{106, 85, 85});
+    CHECK(model.texture_mesh->precomputed_face_colors[3] == std::array<std::size_t, 3>{63, 127, 85});
+    const std::array<std::array<float, 4>, 4> expected_colors = {
+        {{1.f, 0.f, 0.f, 1.f}, {.5f, .5f, 0.f, 1.f}, {0.f, 0.f, .25f, 1.f}, {.25f, 1.f, .75f, 1.f}}};
+    for (std::size_t vertex = 0; vertex < expected_colors.size(); ++vertex)
+        for (std::size_t channel = 0; channel < expected_colors[vertex].size(); ++channel)
+            CHECK_THAT(model.texture_mesh->precomputed_vertex_colors[vertex][channel], Catch::Matchers::WithinAbs(expected_colors[vertex][channel], 1e-6));
+    const std::array<std::array<float, 3>, 4> expected_vertices = {{{0.f, 0.f, 0.f}, {10.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}}};
+    REQUIRE(model.texture_mesh->vertices.size() == expected_vertices.size());
+    for (std::size_t vertex = 0; vertex < expected_vertices.size(); ++vertex)
+        for (std::size_t axis = 0; axis < expected_vertices[vertex].size(); ++axis)
+            CHECK_THAT(model.texture_mesh->vertices[vertex][axis], Catch::Matchers::WithinAbs(expected_vertices[vertex][axis] - 5.f, 1e-6));
+    // Model volumes center their mesh; OBJ import repairs inward winding.
+    CHECK(model.texture_mesh->indices == std::vector<std::array<int, 3>>{{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 10., 10.), 1e-5);
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), Catch::Matchers::WithinRel(1000. / 6., 1e-5));
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import maps OBJ material colors to face colors", "[Model][ModelImport][OBJ][Colors][ModelObjMaterialColors]")
+{
+    ScopedTemporaryDir directory("model-obj-materials");
+    const auto obj = directory.path() / "material.obj";
+    const auto mtl = directory.path() / "material.mtl";
+    write_text(mtl.string(), "newmtl red\nKd 1 0 0\nnewmtl blue\nKd 0 0 1\n");
+    write_text(obj.string(), material_obj(mtl.filename().string()));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(obj.string()));
+    REQUIRE(model.texture_mesh != nullptr);
+    REQUIRE(model.texture_mesh->precomputed_face_colors.size() == 4);
+    CHECK(model.texture_mesh->precomputed_face_colors[0] == std::array<std::size_t, 3>{255, 0, 0});
+    CHECK(model.texture_mesh->precomputed_face_colors[1] == std::array<std::size_t, 3>{0, 0, 255});
+    CHECK(model.texture_mesh->precomputed_face_colors[2] == std::array<std::size_t, 3>{0, 0, 255});
+    CHECK(model.texture_mesh->precomputed_face_colors[3] == std::array<std::size_t, 3>{0, 0, 255});
 }
 
 } // namespace model_import_contracts
