@@ -1340,3 +1340,55 @@ TEST_CASE("Deleting one of two volumes folds its transform into the remaining in
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Raw printable mesh excludes modifiers and reverses mirrored winding", "[Model][ModelRawPrintableMesh]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *part = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(20, 20, 20), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(part != nullptr);
+    REQUIRE(modifier != nullptr);
+    modifier->set_offset(Vec3d(100, 0, 0));
+    const indexed_triangle_set before = object->raw_indexed_triangle_set();
+    REQUIRE_FALSE(before.indices.empty());
+    REQUIRE(before.indices.size() == part->mesh().its.indices.size());
+    CHECK(before.indices.front() == part->mesh().its.indices.front());
+    part->set_mirror(X, -1.);
+    REQUIRE(part->is_left_handed());
+    const indexed_triangle_set mirrored = object->raw_indexed_triangle_set();
+    REQUIRE(mirrored.indices.size() == before.indices.size());
+    CHECK(mirrored.indices.front() != before.indices.front());
+    CHECK(mirrored.indices.front()[0] == before.indices.front()[1]);
+    CHECK(mirrored.indices.front()[1] == before.indices.front()[0]);
+    CHECK(mirrored.indices.front()[2] == before.indices.front()[2]);
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Convex hull cache separates translation from shape changes", "[Model][ModelHullCache]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10., false);
+    ModelVolume *volume = object->volumes.front();
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    const Polygon &base = volume->get_convex_hull_2d(Transform3d::Identity());
+    const auto base_box = base.bounding_box();
+    Transform3d translated = Transform3d::Identity();
+    translated.translation() = Vec3d(20, 30, 0);
+    const Polygon &moved = volume->get_convex_hull_2d(translated);
+    CHECK(moved.bounding_box().min.x() == base_box.min.x() + scaled(20.));
+    CHECK(moved.bounding_box().min.y() == base_box.min.y() + scaled(30.));
+    volume->set_scaling_factor(Vec3d(2, 1, 1));
+    const Polygon &scaled_hull = volume->get_convex_hull_2d(Transform3d::Identity());
+    CHECK(scaled_hull.bounding_box().size().x() == scaled(20.));
+    CHECK(scaled_hull.bounding_box().size().y() == scaled(10.));
+}
+
+} // namespace model_extended_contracts
