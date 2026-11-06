@@ -1163,3 +1163,50 @@ TEST_CASE("Volume sorting orders precise seam strength and semantic volume types
 }
 
 } // namespace model_extended_contracts
+
+TEST_CASE("Named object overload records source metadata and export filename", "[Model][ModelSourceExportMetadata]")
+{
+    Model model;
+    const boost::filesystem::path directory("model-input");
+    const std::string source_path = (directory / "source.stl").make_preferred().string();
+    const std::string export_path = (directory / "part").make_preferred().string();
+    ModelObject *object = model.add_object("part", source_path.c_str(), make_cube(4, 4, 4));
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    CHECK(object->name == "part");
+    CHECK(object->input_file == source_path);
+    CHECK(object->volumes.front()->source.input_file == source_path);
+    CHECK(object->volumes.front()->source.object_idx == 0);
+    CHECK(object->volumes.front()->source.volume_idx == 0);
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+    CHECK(object->config.extruder() == 1);
+    CHECK(object->get_export_filename() == export_path);
+    CHECK(model.propose_export_file_name_and_path().empty());
+    REQUIRE(object->add_instance() != nullptr);
+    CHECK(model.propose_export_file_name_and_path() == export_path);
+    CHECK(model.propose_export_file_name_and_path("3mf") == (directory / "part.3mf").make_preferred().string());
+}
+
+TEST_CASE("Object export statistics use printable volume determinants and names", "[Model][ModelExportStatistics]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    const boost::filesystem::path directory("model-input");
+    object->name = "named";
+    object->input_file = (directory / "source.stl").make_preferred().string();
+    ModelVolume *part = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(4, 4, 4), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(part != nullptr);
+    REQUIRE(modifier != nullptr);
+    modifier->set_offset(Vec3d(100, 0, 0));
+    REQUIRE(object->add_instance() != nullptr);
+    CHECK(object->get_export_filename() == (directory / "named").make_preferred().string());
+    CHECK_THAT(object->get_object_stl_stats().volume, Catch::Matchers::WithinAbs(8., 1e-4));
+    part->set_scaling_factor(Vec3d(2, 3, 4));
+    CHECK_THAT(object->get_object_stl_stats().volume, Catch::Matchers::WithinAbs(192., 1e-3));
+    CHECK(object->get_object_stl_stats().number_of_parts == 1);
+    CHECK(object->has_solid_mesh());
+    CHECK(object->facets_count() == 12);
+}
