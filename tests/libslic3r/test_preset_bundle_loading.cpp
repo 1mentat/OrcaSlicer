@@ -11192,3 +11192,73 @@ TEST_CASE("Printer snapshot supplies defaults when optional filament arrays are 
     CHECK(fallback_multi_colours->values == std::vector<std::string>{"#26A69A", "#26A69A"});
     CHECK(fallback_colour_types->values == std::vector<std::string>{"1", "1"});
 }
+
+TEST_CASE("Removing selected cloud printer and filament restores configured defaults", "[PresetBundleLoading][PresetCloudRemovalDefaults]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    auto add_printer = [&](const std::string &name, const std::string &model, bool system) -> Preset & {
+        Preset &preset = add_inmemory_preset(bundle.printers, name);
+        preset.is_system = system;
+        preset.is_visible = true;
+        preset.is_compatible = true;
+        preset.config.option<ConfigOptionString>("printer_model", true)->value = model;
+        preset.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+        preset.config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
+        return preset;
+    };
+    auto add_filament = [&](const std::string &name, const std::string &id, bool system) -> Preset & {
+        Preset &preset = add_inmemory_preset(bundle.filaments, name);
+        preset.is_system = system;
+        preset.is_visible = true;
+        preset.is_compatible = true;
+        preset.filament_id = id;
+        preset.config.set_key_value("filament_id", new ConfigOptionStrings({id}));
+        preset.config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+        preset.config.option<ConfigOptionStrings>("compatible_printers", true)->values.clear();
+        return preset;
+    };
+    // Earlier visible competitors prevent incidental first-visible fallback from passing.
+    add_printer("A Other Printer", "Other Model", true)
+        .config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {"A Other PLA"};
+    add_printer("Z Fallback Printer", PresetBundle::ORCA_DEFAULT_PRINTER_MODEL, true)
+        .config.option<ConfigOptionStrings>("default_filament_profile", true)->values = {"Z Fallback PLA"};
+    add_filament("A Other PLA", "other-id", true);
+    add_filament("Z Fallback PLA", "fallback-id", true);
+    bundle.printers.set_default_suppressed(true);
+    bundle.filaments.set_default_suppressed(true);
+
+    auto persist_user = [](PresetCollection &collection, Preset &preset, const std::string &setting_id) {
+        preset.user_id = "alice";
+        preset.setting_id = setting_id;
+        preset.sync_info.clear();
+        preset.is_dirty = false;
+        preset.file = collection.path_for_preset(preset);
+        const fs::path file = preset.file;
+        REQUIRE(preset.save(nullptr));
+        REQUIRE(fs::exists(file));
+        return file;
+    };
+    const fs::path removed_printer_file = persist_user(
+        bundle.printers, add_printer("Alice Printer", "Alice Model", false), "printer-cloud-id");
+    const fs::path removed_filament_file = persist_user(
+        bundle.filaments, add_filament("Alice PLA", "alice-id", false), "filament-cloud-id");
+    REQUIRE(bundle.printers.select_preset_by_name("Alice Printer", true));
+    REQUIRE(bundle.filaments.select_preset_by_name("Alice PLA", true));
+    bundle.filament_presets = {"Alice PLA", "Stale Missing Filament"};
+
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+    bundle.remove_users_preset(app, &cloud);
+
+    CHECK(bundle.printers.find_preset("Alice Printer", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_printer_file));
+    CHECK(bundle.filaments.find_preset("Alice PLA", false) == nullptr);
+    CHECK_FALSE(fs::exists(removed_filament_file));
+    CHECK(bundle.printers.get_selected_preset_name() == "Z Fallback Printer");
+    CHECK(bundle.printers.get_edited_preset().name == "Z Fallback Printer");
+    CHECK(bundle.filaments.get_selected_preset_name() == "Z Fallback PLA");
+    CHECK(bundle.filaments.get_edited_preset().name == "Z Fallback PLA");
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Z Fallback PLA", "Z Fallback PLA"});
+}
