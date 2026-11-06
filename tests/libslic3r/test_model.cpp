@@ -1028,3 +1028,50 @@ TEST_CASE("Model volume change predicates ignore filtered modifiers and detect t
 }
 
 } // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Filament slot remapping updates object and volume assignments together", "[Model][ModelSlotRemapping]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->config.set("extruder", 2);
+    object->volumes.front()->config.set("extruder", 3);
+    remap_model_filament_slots(model, { { 1, 0 }, { 2, 1 } });
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+    CHECK(object->config.extruder() == 1);
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->volumes.front()->config.option("extruder")) != nullptr);
+    CHECK(object->volumes.front()->config.extruder() == 2);
+
+    remap_model_filament_slots(model, {});
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+    CHECK(object->config.extruder() == 1);
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->volumes.front()->config.option("extruder")) != nullptr);
+    CHECK(object->volumes.front()->config.extruder() == 2);
+    object->volumes.front()->update_extruder_count(1);
+    CHECK_FALSE(object->volumes.front()->config.has("extruder"));
+    CHECK(object->volumes.front()->extruder_id() == 1);
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Filament deletion preserves mixed assignments and removes stale explicit assignments", "[Model][ModelFilamentDeletion]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 2.);
+    ModelVolume *volume = object->volumes.front();
+    volume->config.set("extruder", 6);
+    volume->update_extruder_count_when_delete_filament(4, 1, 4, {0, 0, 0, 0, 0, 0});
+    CHECK_FALSE(volume->config.has("extruder"));
+    volume->config.set("extruder", 6);
+    volume->update_extruder_count_when_delete_filament(4, 1, 4, {0, 0, 0, 0, 0, 1});
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(volume->config.option("extruder")) != nullptr);
+    CHECK(volume->config.extruder() == 6);
+    volume->config.set("extruder", 2);
+    volume->update_extruder_count(1);
+    CHECK_FALSE(volume->config.has("extruder"));
+}
+
+} // namespace model_extended_contracts
