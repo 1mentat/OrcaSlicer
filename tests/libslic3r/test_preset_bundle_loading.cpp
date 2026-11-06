@@ -12667,3 +12667,17 @@ TEST_CASE("PresetBundle copy repairs vendor pointers and preserves selected conf
     CHECK(copied.vendors.at("Acme").name == "Acme");
     CHECK(assigned.vendors.at("Acme").name == "Acme");
 }
+
+TEST_CASE("PresetBundle setup_directories creates the owned data layout", "[PresetBundleLoading][PresetBundleDirectories]")
+{
+    ScopedTemporaryDir temp("preset-bundle-layout");
+    ScopedDataDir data(temp.path() / "data");
+    REQUIRE(fs::is_directory(temp.path()));
+    REQUIRE_FALSE(fs::exists(temp.path() / "data"));
+    PresetBundle bundle;
+    bundle.setup_directories();
+    CHECK(fs::is_directory(temp.path() / "data"));
+    CHECK(fs::is_directory(temp.path() / "data" / "ota"));
+    CHECK(fs::is_directory(temp.path() / "data" / PRESET_SYSTEM_DIR));
+    CHECK(fs::is_directory(temp.path() / "data" / PRESET_USER_DIR));
+}
