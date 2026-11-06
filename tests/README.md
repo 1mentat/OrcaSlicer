@@ -965,9 +965,10 @@ sequential-print feature gates, and the full ooze-prevention/single-extruder
 multi-material truth table, including valid controls and blocking-error keys.
 Its mutations are in `print_validation_interactions.json`.
 
-`[PresetBundleFullFffMaps]` and `[PresetBundleFullFffProvenance]` check explicit
-filament-volume map overrides and selected system-profile changes, with
-mutations in `preset_bundle_full_fff.json`.
+`[PresetBundleFullFffMaps]`, `[PresetBundleFullFffSingleVariant]`, and
+`[PresetBundleFullFffProvenance]` check explicit filament-volume map overrides,
+single-filament nozzle-variant selection, and selected system-profile changes.
+Their mutations are in `preset_bundle_full_fff.json`.
 
 `[SupportCache]` checks support-layer cache round trips through `Print`, including
 island coordinates, extrusion geometry, interface metadata, layer links, and

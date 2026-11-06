@@ -2371,7 +2371,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "A two-filament hybrid-printer composition passes the explicit one-entry map [High Flow] and preserves a reversed filament map [2,1]. The composed per-filament variant strings and independently assigned volumetric speeds must be High Flow/22 for the first material and Standard/13 for the padded second material. This covers the short-vector shape and these two registered nozzle-volume values only; other map lengths and numeric domains are not claimed."
+      "reason": "A two-filament hybrid-printer composition passes the explicit one-entry map [High Flow] and preserves a reversed filament map [2,1]. The composed per-filament variant strings and independently assigned volumetric speeds must be High Flow/22 for the first material and Standard/13 for the padded second material. The [PresetBundleFullFffSingleVariant] case also selects nozzle 2 at High Flow with one filament and requires the composed High Flow variant and speed 22; a source mutant that forces Standard is killed. These cases cover the short-vector and single-filament shapes with these two registered nozzle-volume values only; other map lengths and numeric domains are not claimed."
     },
     "filament_self_index": {
       "test": "tests/fff_print/test_multifilament.cpp",
