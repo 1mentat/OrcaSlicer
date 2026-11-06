@@ -1,3 +1,6 @@
+#include <cstddef>
+#include <array>
+#include <cmath>
 #include "libslic3r/libslic3r.h"
 #include <tuple>
 #include "libslic3r/PrintConfig.hpp"
@@ -471,6 +474,130 @@ TEST_CASE("ModelObject mirror reflects each axis and restores cached bounds", "[
         REQUIRE(volume != nullptr);
         CHECK_FALSE(volume->is_left_handed());
     }
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+namespace {
+
+std::array<Vec3d, 8> centered_box_corners(const BoundingBoxf3 &bbox)
+{
+    const Vec3d lo = bbox.min.cast<double>();
+    const Vec3d hi = bbox.max.cast<double>();
+    return {
+        Vec3d(lo.x(), lo.y(), lo.z()), Vec3d(lo.x(), lo.y(), hi.z()),
+        Vec3d(lo.x(), hi.y(), lo.z()), Vec3d(lo.x(), hi.y(), hi.z()),
+        Vec3d(hi.x(), lo.y(), lo.z()), Vec3d(hi.x(), lo.y(), hi.z()),
+        Vec3d(hi.x(), hi.y(), lo.z()), Vec3d(hi.x(), hi.y(), hi.z())
+    };
+}
+
+double max_corner_error(const Transform3d &chain, const BoundingBoxf3 &bbox)
+{
+    REQUIRE(chain.matrix().allFinite());
+    double max_error = 0.;
+    for (const Vec3d &corner : centered_box_corners(bbox)) {
+        const double error = (chain * corner - corner).norm();
+        REQUIRE(std::isfinite(error));
+        max_error = std::max(max_error, error);
+    }
+    return max_error;
+}
+
+Vec3d transformed_box_size(const Transform3d &transform, const BoundingBoxf3 &bbox)
+{
+    REQUIRE(transform.matrix().allFinite());
+    const auto corners = centered_box_corners(bbox);
+    Vec3d minimum = transform * corners.front();
+    REQUIRE(minimum.allFinite());
+    Vec3d maximum = minimum;
+    for (std::size_t i = 1; i < corners.size(); ++i) {
+        const Vec3d point = transform * corners[i];
+        REQUIRE(point.allFinite());
+        minimum = minimum.cwiseMin(point);
+        maximum = maximum.cwiseMax(point);
+    }
+    return maximum - minimum;
+}
+
+} // namespace
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Volume-to-bed transform inverts uniform scale and rotation while ignoring translation", "[Model][Geometry][VolumeBedTransformation][VolumeBedUniform]")
+{
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
+    Geometry::Transformation instance;
+    instance.set_scaling_factor(Vec3d(2., 2., 2.));
+    instance.set_rotation(Z, Geometry::deg2rad(17.));
+    instance.set_offset(Vec3d(37., -11., 5.));
+
+    const Geometry::Transformation volume = Geometry::Transformation::volume_to_bed_transformation(instance, bbox);
+
+    CHECK(volume.get_offset().isApprox(Vec3d::Zero(), 1e-12));
+    CHECK_THAT(max_corner_error(instance.get_matrix_no_offset() * volume.get_matrix(), bbox),
+               Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(volume.get_scaling_factor(X), Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Y), Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Z), Catch::Matchers::WithinAbs(0.5, 1e-12));
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Volume-to-bed transform cancels quarter-turn anisotropic mirror", "[Model][Geometry][VolumeBedTransformation][VolumeBedQuarterTurn]")
+{
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
+    Geometry::Transformation instance;
+    instance.set_scaling_factor(Vec3d(2., 3., 4.));
+    instance.set_rotation(Z, 0.5 * double(PI));
+    instance.set_mirror(X, -1.);
+    instance.set_offset(Vec3d(-17., 23., 9.));
+
+    const Geometry::Transformation volume = Geometry::Transformation::volume_to_bed_transformation(instance, bbox);
+
+    CHECK(volume.get_offset().isApprox(Vec3d::Zero(), 1e-12));
+    CHECK_THAT(max_corner_error(instance.get_matrix_no_offset() * volume.get_matrix(), bbox),
+               Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(volume.get_scaling_factor(X), Catch::Matchers::WithinAbs(1. / 3., 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Y), Catch::Matchers::WithinAbs(1. / 2., 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Z), Catch::Matchers::WithinAbs(1. / 4., 1e-12));
+    // Rotation/reflection factors are not unique; the physical inverse and its
+    // handedness are invariant under an equivalent matrix decomposition.
+    const Transform3d expected = instance.get_matrix_no_offset().inverse();
+    CHECK(volume.get_matrix().isApprox(expected, 1e-12));
+    CHECK(volume.is_left_handed());
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Volume-to-bed transform keeps general rotation out of the volume", "[Model][Geometry][VolumeBedTransformation][VolumeBedGeneralRotation]")
+{
+    const BoundingBoxf3 bbox(Vec3d(-2., -3., -4.), Vec3d(2., 3., 4.));
+    Geometry::Transformation instance;
+    instance.set_scaling_factor(Vec3d(2., 3., 4.));
+    instance.set_rotation(Z, Geometry::deg2rad(23.));
+    instance.set_mirror(X, -1.);
+    instance.set_offset(Vec3d(8., -19., 12.));
+
+    const Geometry::Transformation volume = Geometry::Transformation::volume_to_bed_transformation(instance, bbox);
+
+    CHECK(volume.get_offset().isApprox(Vec3d::Zero(), 1e-12));
+    CHECK_THAT(volume.get_rotation().norm(), Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK(volume.get_mirror().isApprox(Vec3d::Ones(), 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(X), Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Y), Catch::Matchers::WithinAbs(1. / 3., 1e-12));
+    CHECK_THAT(volume.get_scaling_factor(Z), Catch::Matchers::WithinAbs(0.25, 1e-12));
+
+    const Vec3d bed_size = transformed_box_size(volume.get_matrix(), bbox);
+    CHECK_THAT(bed_size.x(), Catch::Matchers::WithinAbs(2., 1e-12));
+    CHECK_THAT(bed_size.y(), Catch::Matchers::WithinAbs(2., 1e-12));
+    CHECK_THAT(bed_size.z(), Catch::Matchers::WithinAbs(2., 1e-12));
 }
 
 } // namespace model_bounds_contracts
