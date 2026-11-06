@@ -3855,6 +3855,46 @@
       ],
       "reason": "Registered minimum 0 suppresses gap-fill deposited E while preserving its generated XY path; registered maximum 2 doubles gap-fill material without changing other roles. Existing representative and gate coverage is retained. Nullable inheritance and exhaustive combinations remain unclaimed."
     },
+    "seam_gap": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero, the registered 10% default, and a 0.6 mm representative value change both the public seam-gap statistic and positive-E outer-wall path length. No maximum is registered."
+    },
+    "scarf_angle_threshold": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A sharp square is admitted at the 0-degree minimum and rejected at the 180-degree maximum, with the registered 155-degree default observed. This does not enumerate all integer values."
+    },
+    "scarf_joint_speed": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 1 mm/s minimum and 10 mm/s representative are read from emitted rising outer-wall G-code feedrates with outer-wall speed pinned at 60 mm/s. The 100% default exceeds the representative but is reduced by the filament volumetric-speed cap; no maximum is registered."
+    },
+    "scarf_joint_flow_ratio": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 0 and 2 endpoints plus default 1 are checked by rising outer-wall G-code E/XY. Continuous values between the endpoints are not exhaustively tested."
+    },
     "seam_slope_conditional": {
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamSlopeSettings]",
