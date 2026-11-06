@@ -12894,3 +12894,37 @@ TEST_CASE("PresetBundle loads enumerates and resets an embedded process preset",
         owned_remaining.emplace_back(preset);
     CHECK(owned_remaining.empty());
 }
+
+
+TEST_CASE("PresetBundle saves user roots through all three preset collections",
+          "[PresetBundleLoading][PresetBundleSaveDispatch]")
+{
+    ScopedTemporaryDir temp("preset-bundle-save-user");
+    ScopedDataDir data(temp.path() / "data");
+    fs::create_directories(temp.path() / "data");
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("alice");
+    const std::vector<std::pair<PresetCollection *, std::string>> collections{
+        {&bundle.prints, "Alice Process"}, {&bundle.filaments, "Alice Filament"},
+        {&bundle.printers, "Alice Printer"}};
+    for (const auto &[collection, name] : collections) {
+        Preset &preset = add_inmemory_preset(*collection, name);
+        preset.sync_info = "save";
+        preset.file = collection->path_for_preset(preset);
+        REQUIRE_FALSE(fs::exists(preset.file));
+    }
+    AppConfig app;
+    app.set("preset_folder", "alice");
+    std::map<std::string, std::string> deletions;
+    bundle.save_user_presets(app, deletions);
+    for (const auto &[collection, name] : collections) {
+        const Preset *preset = collection->find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        REQUIRE(fs::exists(preset->file));
+        CHECK(preset->sync_info.empty());
+        std::string contents;
+        load_string_file(preset->file, contents);
+        const nlohmann::json saved = nlohmann::json::parse(contents);
+        CHECK(saved.at("name") == name);
+    }
+}
