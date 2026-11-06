@@ -11769,3 +11769,48 @@ TEST_CASE("AMS unknown material without generic preset falls back to a compatibl
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them",
+          "[PresetBundleLoading][PresetAmsPlaceholder]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing A", "Existing B"}, {"#AAAAAA", "#BBBBBB"});
+    bundle.filament_ams_list.emplace(0, tray("", "", "", "0", "0", true, true));
+    bundle.filament_ams_list.emplace(1, tray("PLA-ID", "#123456", "PLA", "0", "1"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing A", "Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#AAAAAA", "#123456"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS placeholder merge fills slots beyond the existing project selection", "[PresetBundleLoading][PresetAmsExtendedPlaceholders]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    project_slots(bundle, {"Existing"}, {"#AAAAAA"});
+    bundle.filament_ams_list.emplace(0, tray("", "", "", "0", "0", true, true));
+    bundle.filament_ams_list.emplace(1, tray("", "", "", "0", "1", true, true));
+    bundle.filament_ams_list.emplace(2, tray("", "", "", "0", "2", true, true));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing", "Generic PLA", "Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#AAAAAA", "#CECECE", "#CECECE"});
+    CHECK(bundle.project_config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 1});
+}
+
+} // namespace preset_ams_sync_contracts
