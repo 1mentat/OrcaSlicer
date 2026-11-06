@@ -11021,3 +11021,64 @@ TEST_CASE("Cloud preset timestamp reconciliation preserves local state for stale
     CHECK(persisted.updated_time == 5);
     CHECK(persisted.sync_info == (cloud_time == 5 ? "" : "update"));
 }
+
+TEST_CASE("Cloud user loading routes printer and filament profiles through typed collections",
+          "[PresetBundleLoading][PresetCloudTypedRouting]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    AppConfig app_config;
+    std::map<std::string, std::map<std::string, std::string>> cloud;
+
+    auto filament_root = cloud_values(PRESET_IOT_FILAMENT_TYPE, "cloud-filament-id", "account-1");
+    filament_root.emplace(BBL_JSON_KEY_FILAMENT_ID, "cloud-filament-family");
+    filament_root.emplace("filament_diameter", "1.75,2.85");
+    cloud.emplace("Cloud Filament Root", std::move(filament_root));
+
+    auto filament_child = cloud_values(PRESET_IOT_FILAMENT_TYPE, "cloud-filament-child-id", "account-1",
+                                       "Cloud Filament Root");
+    filament_child.emplace(BBL_JSON_KEY_FILAMENT_ID, "null");
+    cloud.emplace("Cloud Filament Child", std::move(filament_child));
+
+    auto printer = cloud_values(PRESET_IOT_PRINTER_TYPE, "cloud-printer-id", "account-1");
+    printer.emplace("printer_model", "Cloud Model");
+    printer.emplace("nozzle_diameter", "0.4,0.6");
+    cloud.emplace("Cloud Printer", std::move(printer));
+
+    // A supported type with incomplete identity metadata is ignored, as is an unknown type.
+    cloud.emplace("Incomplete Cloud", std::map<std::string, std::string>{
+        { BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE },
+        { BBL_JSON_KEY_VERSION, "1.0.0" },
+        { BBL_JSON_KEY_SETTING_ID, "incomplete-id" },
+    });
+    cloud.emplace("Unsupported Cloud", cloud_values("future-profile", "future-id", "account-1"));
+
+    const PresetsConfigSubstitutions substitutions = bundle.load_user_presets(
+        app_config, cloud, ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    const Preset *loaded_root = bundle.filaments.find_preset("Cloud Filament Root");
+    const Preset *loaded_child = bundle.filaments.find_preset("Cloud Filament Child");
+    const Preset *loaded_printer = bundle.printers.find_preset("Cloud Printer");
+    REQUIRE(loaded_root != nullptr);
+    REQUIRE(loaded_child != nullptr);
+    REQUIRE(loaded_printer != nullptr);
+    CHECK(loaded_root->setting_id == "cloud-filament-id");
+    CHECK(loaded_child->base_id == "cloud-filament-id");
+    CHECK(loaded_child->filament_id == "cloud-filament-family");
+    REQUIRE(loaded_child->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    check_double_vector(loaded_child->config.option<ConfigOptionFloats>("filament_diameter")->values,
+                        {1.75, 2.85});
+    CHECK(loaded_printer->user_id == "account-1");
+    CHECK(loaded_printer->config.opt_string("printer_model") == "Cloud Model");
+    REQUIRE(loaded_printer->config.option<ConfigOptionFloats>("nozzle_diameter") != nullptr);
+    check_double_vector(loaded_printer->config.option<ConfigOptionFloats>("nozzle_diameter")->values,
+                        {0.4, 0.6});
+    // Smoke checks for supported incomplete metadata and unsupported types.
+    CHECK(bundle.prints.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.filaments.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.printers.find_preset("Incomplete Cloud") == nullptr);
+    CHECK(bundle.prints.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(bundle.filaments.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(bundle.printers.find_preset("Unsupported Cloud") == nullptr);
+    CHECK(substitutions.empty());
+}
