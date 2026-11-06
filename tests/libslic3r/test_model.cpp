@@ -1,3 +1,4 @@
+#include <memory>
 #include <string>
 #include <map>
 #include <cstddef>
@@ -780,6 +781,33 @@ TEST_CASE("Scaling to fit respects the limiting X target", "[Model][ModelFitScal
     CHECK_THAT(after.x(), Catch::Matchers::WithinAbs(15., 1e-5));
     CHECK(after.y() < 30.);
     CHECK(after.z() < 40.);
+}
+
+} // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Volume transformations update mesh bounds and handedness", "[Model][ModelVolumeTransforms]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 4., false);
+    ModelVolume *volume = object->volumes.front();
+    volume->center_geometry_after_creation();
+    model_bounds_contracts::check_box(volume->mesh().bounding_box(), Vec3d(-2, -2, -2), Vec3d(2, 2, 2));
+    CHECK_THAT(volume->source.mesh_offset.x(), Catch::Matchers::WithinAbs(2., 1e-5));
+
+    volume->translate(Vec3d(3, 4, 5));
+    volume->scale(Vec3d(2, 3, 4));
+    model_bounds_contracts::check_vec3d(volume->get_offset(), Vec3d(5, 6, 7));
+    model_bounds_contracts::check_vec3d(volume->get_scaling_factor(), Vec3d(2, 3, 4));
+    CHECK_FALSE(volume->is_left_handed());
+    volume->mirror(X);
+    CHECK(volume->is_left_handed());
+    volume->rotate(0.5, Z);
+    CHECK_THAT(volume->get_rotation(Z), Catch::Matchers::WithinAbs(0.5, 1e-5));
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    CHECK(volume->get_convex_hull().facets_count() > 0);
 }
 
 } // namespace model_extended_contracts
