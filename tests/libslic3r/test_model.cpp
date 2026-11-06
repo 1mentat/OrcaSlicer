@@ -1,3 +1,10 @@
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include <limits>
+#include <ios>
+#include <cstring>
+#include <cstdint>
+#include <boost/nowide/fstream.hpp>
+#include "test_utils.hpp"
 #include <set>
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -1550,3 +1557,104 @@ TEST_CASE("Arrange polygon reports transformed footprint and material support as
 }
 
 } // namespace model_extended_contracts
+
+namespace model_import_contracts {
+namespace {
+
+void write_binary(const std::string &path, const std::vector<unsigned char> &bytes)
+{
+    boost::nowide::ofstream out(path, std::ios::binary);
+    REQUIRE(out.good());
+    out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    out.close();
+    REQUIRE(out.good());
+}
+
+void write_cube_binary_stl(const std::string &path, std::size_t header_size = 80)
+{
+    static_assert(sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559);
+    const indexed_triangle_set cube = its_make_cube(10., 20., 30.);
+    REQUIRE(cube.indices.size() == 12);
+    std::vector<unsigned char> bytes(header_size, 0);
+    const auto append_u32 = [&bytes](std::uint32_t value) {
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+            bytes.push_back(static_cast<unsigned char>(value >> shift));
+    };
+    const auto append_float = [&append_u32](float value) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        append_u32(bits);
+    };
+    append_u32(static_cast<std::uint32_t>(cube.indices.size()));
+    for (const Vec3i32 &face : cube.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE(static_cast<std::size_t>(face.maxCoeff()) < cube.vertices.size());
+        for (int axis = 0; axis < 3; ++axis)
+            append_float(0.f);
+        for (int corner = 0; corner < 3; ++corner)
+            for (int axis = 0; axis < 3; ++axis)
+                append_float(cube.vertices[face[corner]][axis]);
+        bytes.push_back(0);
+        bytes.push_back(0);
+    }
+    write_binary(path, bytes);
+}
+
+} // namespace
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import reads binary STL geometry and records its source", "[Model][ModelImport][STL][ModelBinaryStl]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string()));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+    CHECK(model.objects.front()->input_file == stl.string());
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), Catch::Matchers::WithinRel(6000., 1e-5));
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import can suppress STL default instances", "[Model][ModelImport][STL][ModelStlInstanceOption]")
+{
+    ScopedTemporaryFile stl(".stl");
+    write_cube_binary_stl(stl.string());
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(stl.string(), nullptr, nullptr, LoadStrategy::Default));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.objects.front()->instances.empty());
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("OLTP import uses the STL path while preserving geometry", "[Model][ModelImport][OLTP][ModelOltp]")
+{
+    ScopedTemporaryFile oltp(".oltp");
+    write_cube_binary_stl(oltp.string(), 256);
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(oltp.string(), nullptr, nullptr, LoadStrategy::AddDefaultInstances));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+}
+
+} // namespace model_import_contracts
