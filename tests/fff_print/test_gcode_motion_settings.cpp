@@ -130,6 +130,12 @@ std::string export_cube(const DynamicPrintConfig& config)
 
 struct ParsedMotion
 {
+    struct RoleFeedSample
+    {
+        double z;
+        double feed;
+    };
+
     struct RoleMotionEvent
     {
         std::string role;
@@ -140,6 +146,7 @@ struct ParsedMotion
     };
 
     std::map<std::string, std::vector<double>> first_layer_feeds;
+    std::map<std::string, std::vector<RoleFeedSample>> role_feed_samples;
     std::map<std::string, std::map<int, std::vector<int>>> role_accelerations;
     std::map<std::string, std::map<int, std::vector<double>>> role_jerks;
     std::vector<RoleMotionEvent> role_motion_events;
@@ -182,7 +189,7 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
         const std::string_view comment = line.comment();
         if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
             ++layer_index;
-            role.clear();
+            // Feature comments only appear when the active extrusion role changes.
         }
         if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
             if (comment.find("Outer wall") != std::string_view::npos)
@@ -235,6 +242,7 @@ ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& c
             else if (role == "Internal bridge")
                 parsed.internal_bridge_feeds.push_back(line.new_F(self));
             if (layer_index >= 0 && !role.empty()) {
+                parsed.role_feed_samples[role].push_back({line.new_Z(self), line.new_F(self)});
                 parsed.role_motion_events.push_back(
                     {role, print_acceleration, jerk, prior_acceleration_update, prior_jerk_update});
                 parsed.role_accelerations[role][layer_index].push_back(print_acceleration);
@@ -789,6 +797,83 @@ TEST_CASE("First-layer sparse infill keeps its separate infill speed", "[GCode][
     const ParsedMotion motion = parse_motion(export_cube(config), config);
     require_all_first_role_feeds(motion, "Outer wall", 27 * 60);
     require_all_first_role_feeds(motion, "Sparse infill", 43 * 60);
+}
+
+TEST_CASE("Walls after raft layers follow the configured speed ramp", "[GCode][SettingsSpeedAccelVariance][GCodeRaftSpeed]")
+{
+    constexpr int raft_layers = 2;
+    constexpr int slow_down_layers = 3;
+    constexpr double initial_wall_speed = 20.0;
+    constexpr double nominal_wall_speed = 60.0;
+
+    DynamicPrintConfig config = motion_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"raft_layers", raft_layers},
+        {"slow_down_layers", slow_down_layers},
+        {"z_offset", 0.0},
+        {"initial_layer_speed", initial_wall_speed},
+        {"outer_wall_speed", nominal_wall_speed},
+        {"inner_wall_speed", nominal_wall_speed},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"fan_cooling_layer_time", 0.0},
+        {"filament_max_volumetric_speed", "200"},
+    });
+
+    Model model;
+    Print print;
+    init_print({make_cube(12.0, 12.0, 1.2)}, print, model, config);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+
+    const ParsedMotion motion = parse_motion(gcode(print), config);
+    const auto found = motion.role_feed_samples.find("Outer wall");
+    REQUIRE(found != motion.role_feed_samples.end());
+
+    // The first object layer sits on the raft. Each following object layer advances
+    // the configured interpolation by one step until the nominal wall speed is reached.
+    // Match by the object layer's print Z: G-code layer numbers count emitted support
+    // layers and need not equal Layer::id() when some support layers are empty.
+    constexpr double z_match_tolerance_mm = 0.002;
+    const auto &object_layers = print.objects().front()->layers();
+    for (const ParsedMotion::RoleFeedSample &sample : found->second) {
+        const size_t matching_layers = static_cast<size_t>(std::count_if(
+            object_layers.begin(), object_layers.end(), [sample, z_match_tolerance_mm](const Layer *candidate) {
+                return std::abs(sample.z - candidate->print_z) <= z_match_tolerance_mm;
+            }));
+        REQUIRE(matching_layers == 1);
+    }
+
+    for (int offset = 0; offset <= slow_down_layers; ++offset) {
+        const int layer_id = raft_layers + offset;
+        const Layer *object_layer = nullptr;
+        for (const Layer *candidate : print.objects().front()->layers())
+            if (candidate->id() == layer_id) {
+                object_layer = candidate;
+                break;
+            }
+        REQUIRE(object_layer != nullptr);
+
+        std::vector<double> layer_feeds;
+        for (const ParsedMotion::RoleFeedSample &sample : found->second)
+            if (std::abs(sample.z - object_layer->print_z) <= z_match_tolerance_mm)
+                layer_feeds.push_back(sample.feed);
+        INFO("object layer id=" << layer_id << " print_z=" << object_layer->print_z);
+        REQUIRE_FALSE(layer_feeds.empty());
+
+        const double expected_speed = offset == 0
+            ? initial_wall_speed
+            : initial_wall_speed + (nominal_wall_speed - initial_wall_speed) *
+                                      static_cast<double>(std::min(offset, slow_down_layers)) / slow_down_layers;
+        for (const double feed : layer_feeds)
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(expected_speed * 60.0, 1.0));
+    }
 }
 
 TEST_CASE("First layer percentage travel settings resolve and emit finite travel commands", "[GCode][SettingsSpeedAccelVariance]")
