@@ -10937,3 +10937,37 @@ TEST_CASE("Saving cloud user presets writes root and inherited values and clears
     CHECK_THAT(std::stod(child_json.at("layer_height").get<std::string>()), Catch::Matchers::WithinAbs(0.29, 1e-6));
     CHECK(child_json.at("inherits") == "Base");
 }
+
+TEST_CASE("Cloud user loading updates newer profiles while preserving dirty local options", "[PresetBundleLoading][PresetCloudDirtyUpdate]")
+{
+    ScopedTemporaryDir dir("preset-cloud-dirty-update");
+    ScopedDataDir data(dir.path());
+    PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
+                                static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
+    collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
+    Preset &local = add_inmemory_preset(collection, "Cloud");
+    local.file = collection.path_for_preset(local);
+    local.setting_id = "old";
+    local.updated_time = 2;
+    local.config.option<ConfigOptionFloat>("layer_height", true)->value = 0.31;
+    local.config.option<ConfigOptionInt>("wall_loops", true)->value = 2;
+    REQUIRE(local.save(nullptr));
+    REQUIRE(collection.select_preset_by_name("Cloud", true));
+    collection.get_edited_preset().config.opt<ConfigOptionInt>("wall_loops")->value = 7;
+    local.is_dirty = true;
+    collection.get_edited_preset().set_dirty(true);
+    std::map<std::string, std::string> values{
+        {BBL_JSON_KEY_VERSION, "1.0.0"}, {BBL_JSON_KEY_SETTING_ID, "new"},
+        {BBL_JSON_KEY_USER_ID, "u"}, {ORCA_JSON_KEY_UPDATE_TIME, "3"},
+        {"layer_height", "0.22"}, {"wall_loops", "3"}};
+    PresetsConfigSubstitutions substitutions;
+    CHECK_FALSE(collection.load_user_preset("Cloud", values, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::Disable));
+    const Preset *updated = collection.find_preset("Cloud", false, true);
+    REQUIRE(updated != nullptr);
+    CHECK(updated->setting_id == "new");
+    CHECK(updated->updated_time == 3);
+    CHECK_THAT(updated->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.22, 1e-6));
+    CHECK(updated->config.opt_int("wall_loops") == 7);
+    CHECK(collection.get_edited_preset().config.opt_int("wall_loops") == 7);
+}
