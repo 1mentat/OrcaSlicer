@@ -12673,8 +12673,11 @@ TEST_CASE("PresetBundle setup_directories creates the owned data layout", "[Pres
     ScopedTemporaryDir temp("preset-bundle-layout");
     ScopedDataDir data(temp.path() / "data");
     REQUIRE(fs::is_directory(temp.path()));
-    REQUIRE_FALSE(fs::exists(temp.path() / "data"));
+    REQUIRE(fs::is_directory(temp.path() / "data"));
     PresetBundle bundle;
+    REQUIRE_FALSE(fs::exists(temp.path() / "data" / "ota"));
+    REQUIRE_FALSE(fs::exists(temp.path() / "data" / PRESET_SYSTEM_DIR));
+    REQUIRE_FALSE(fs::exists(temp.path() / "data" / PRESET_USER_DIR));
     bundle.setup_directories();
     CHECK(fs::is_directory(temp.path() / "data"));
     CHECK(fs::is_directory(temp.path() / "data" / "ota"));
