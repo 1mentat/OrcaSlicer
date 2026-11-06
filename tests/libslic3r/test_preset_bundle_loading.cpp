@@ -13644,3 +13644,31 @@ TEST_CASE("Saving a detached preset writes a standalone base",
     CHECK(serialized.opt_int("wall_loops") == 7);
     CHECK_THAT(serialized.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.29, 1e-9));
 }
+
+TEST_CASE("Saving a root preset reloads its inherited child",
+          "[PresetBundleLoading][PresetExternalSave5]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.prints;
+    const fs::path parent_file =
+        scoped.directory.path() / PRESET_PRINT_NAME / "base" / "Reload Parent.json";
+    collection.load_preset(parent_file.string(), "Reload Parent", preset_lifecycle_contracts::print_config(scoped.bundle, 0.20), true);
+    collection.save_current_preset("Reload Child", false, false);
+
+    Preset *child = collection.find_preset("Reload Child", false, true);
+    REQUIRE(child != nullptr);
+    REQUIRE(child->inherits() == "Reload Parent");
+    REQUIRE(fs::exists(child->file));
+    REQUIRE(child->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    REQUIRE_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.20, 1e-9));
+
+    REQUIRE(collection.select_preset_by_name("Reload Parent", true));
+    collection.get_edited_preset().config.option<ConfigOptionFloat>("layer_height")->value = 0.33;
+    collection.save_current_preset("Reload Parent", false, false);
+
+    Preset *reloaded = collection.find_preset("Reload Child", false, true);
+    REQUIRE(reloaded != nullptr);
+    REQUIRE(reloaded->config.option<ConfigOptionFloat>("layer_height") != nullptr);
+    CHECK_THAT(reloaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
+    CHECK(reloaded->inherits() == "Reload Parent");
+}
