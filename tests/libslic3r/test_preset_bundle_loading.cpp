@@ -12027,3 +12027,20 @@ TEST_CASE("AMS map merges record all project slots pointing at one physical tray
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS empty input preserves existing project names and colors", "[PresetBundleLoading][PresetAmsEmptyInput]")
+{
+    PresetBundle bundle;
+    project_slots(bundle, {"Existing"}, {"#ABCDEF"});
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    CHECK(bundle.sync_ams_list(unknowns, false, maps, false, merge) == 0);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#ABCDEF"});
+}
+
+} // namespace preset_ams_sync_contracts
