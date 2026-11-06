@@ -2053,3 +2053,65 @@ TEST_CASE("OBJ texture material without UVs does not publish a textured mesh", "
 }
 
 } // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import reads the supported AMF extension and rejects malformed XML", "[Model][ModelImport][AMF][ModelAmfMillimeter]")
+{
+    ScopedTemporaryFile amf(".amf");
+    write_text(amf.string(), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                             "<amf unit=\"millimeter\"><object id=\"0\"><mesh><vertices>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>10</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>10</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>10</z></coordinates></vertex>"
+                             "</vertices><volume><triangle><v1>0</v1><v2>2</v2><v3>1</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>1</v2><v3>3</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>3</v2><v3>2</v3></triangle>"
+                             "<triangle><v1>1</v1><v2>2</v2><v3>3</v3></triangle></volume></mesh></object></amf>");
+    bool is_inches = true;
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(amf.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, &is_inches));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK_FALSE(is_inches);
+    CHECK_THAT(model.objects.front()->raw_mesh().volume(), Catch::Matchers::WithinRel(1000. / 6., 1e-5));
+
+    ScopedTemporaryFile bad(".amf");
+    write_text(bad.string(), "<amf><object>");
+    CHECK_THROWS_AS(Model::read_from_file(bad.string()), Slic3r::RuntimeError);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("AMF inch units are reported while preserving source coordinates", "[Model][ModelImport][AMF][ModelAmfInch]")
+{
+    ScopedTemporaryFile amf(".amf");
+    write_text(amf.string(), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                             "<amf unit=\"inch\"><object id=\"0\"><mesh><vertices>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>"
+                             "<vertex><coordinates><x>0</x><y>0</y><z>1</z></coordinates></vertex>"
+                             "</vertices><volume>"
+                             "<triangle><v1>0</v1><v2>2</v2><v3>1</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>1</v2><v3>3</v3></triangle>"
+                             "<triangle><v1>0</v1><v2>3</v2><v3>2</v3></triangle>"
+                             "<triangle><v1>1</v1><v2>2</v2><v3>3</v3></triangle>"
+                             "</volume></mesh></object></amf>");
+    bool is_inches = false;
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(amf.string(), nullptr, nullptr, LoadStrategy::Default, nullptr, nullptr, &is_inches));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(is_inches);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d::Ones(), 1e-5);
+}
+
+} // namespace model_import_contracts
