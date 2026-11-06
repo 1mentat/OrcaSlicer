@@ -11891,3 +11891,139 @@ TEST_CASE("AMS color-only sync falls back to tray indices when a supplied map do
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS mapped synchronization records duplicate reported tray identities", "[PresetBundleLoading][PresetAmsDuplicateMapping]")
+{
+    // This covers duplicate device reports, including a mapping beyond the initial project slots.
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("PETG-ID", "#222222", "PETG", "A", "0"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}, {1, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, true, merge);
+    REQUIRE(bundle.filament_presets.size() == 2);
+    CHECK(bundle.filament_presets.front() == "Generic PLA");
+    CHECK(bundle.filament_presets.back() == "Generic PETG");
+    REQUIRE(merge.merges.size() == 1);
+    CHECK(merge.merges.front() == std::vector<int>{0, 1});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS mapped synchronization leaves unassigned trays out when append is disabled", "[PresetBundleLoading][PresetAmsAppendDisabled]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("PETG-ID", "#222222", "PETG", "A", "1"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge);
+    REQUIRE(maps.size() == 1);
+    const auto mapped = maps.find(0);
+    REQUIRE(mapped != maps.end());
+    CHECK(mapped->second.ams_id == "A");
+    CHECK(mapped->second.slot_id == "0");
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#111111"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS empty-id tray removes its mapping and retains the project slot", "[PresetBundleLoading][PresetAmsEmptyId]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("", "#111111", "PLA", "A", "0"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge);
+    CHECK(maps.empty());
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#000000"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS mapped sync appends each unmapped tray once when append is enabled", "[PresetBundleLoading][PresetAmsAppendEnabled]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    system_filament(bundle, "Generic PETG", "petg-id", "PETG");
+    project_slots(bundle, {"Existing"}, {"#000000"});
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#112233", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("petg-id", "#445566", "PETG", "A", "1"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}};
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, true, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PETG"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#112233", "#445566"});
+    CHECK(bundle.project_config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS unmapped trays sharing the selected preset and color are appended once", "[PresetBundleLoading][PresetAmsDeduplicatedAppend]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    project_slots(bundle, {}, {});
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#112233", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("pla-id", "#112233", "PLA", "A", "1"));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, true, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#112233"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS map merges record all project slots pointing at one physical tray", "[PresetBundleLoading][PresetAmsMergedMapping]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    project_slots(bundle, {"Old A", "Old B"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#112233", "PLA", "A", "0"));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "0"}}, {1, {"A", "0"}}};
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, true, maps, false, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PLA"});
+    REQUIRE(merge.merges.size() == 1);
+    CHECK(merge.merges.front() == std::vector<int>{0, 1});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#112233", "#112233"});
+}
+
+} // namespace preset_ams_sync_contracts
