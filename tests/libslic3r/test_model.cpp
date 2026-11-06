@@ -1392,3 +1392,21 @@ TEST_CASE("Convex hull cache separates translation from shape changes", "[Model]
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Volume conversion resets offset and records the source unit", "[Model][ModelConversionOffset]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 1., false);
+    ModelVolume *volume = object->volumes.front();
+    volume->set_offset(Vec3d(5, 6, 7));
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    volume->convert_from_imperial_units();
+    model_bounds_contracts::check_vec3d(volume->mesh().bounding_box().size().cast<double>(), Vec3d(25.4, 25.4, 25.4), 1e-3);
+    model_bounds_contracts::check_vec3d(volume->get_offset(), Vec3d::Zero());
+    CHECK(volume->source.is_converted_from_inches);
+}
+
+} // namespace model_extended_contracts
