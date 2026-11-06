@@ -1,3 +1,4 @@
+#include <boost/filesystem/operations.hpp>
 #include "libslic3r/Exception.hpp"
 #include <admesh/stl.h>
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -1707,6 +1708,27 @@ TEST_CASE("STL cancellation is surfaced as an import failure", "[Model][ModelImp
                                           nullptr, progress),
                     Slic3r::RuntimeError);
     CHECK(callback_called);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model import accepts the repository ASCII STL fixture variants", "[Model][ModelImport][STL][ModelAsciiStl]")
+{
+    const std::array<const char*, 3> names = {"ASCII/20mmbox-LF.stl", "ASCII/20mmbox-CRLF.stl", "ASCII/20mmbox-nonstandard.stl"};
+    for (const char* name : names) {
+        CAPTURE(name);
+        const boost::filesystem::path input = boost::filesystem::path(TEST_DATA_DIR) / "test_stl" / name;
+        REQUIRE(boost::filesystem::is_regular_file(input));
+        Model model;
+        REQUIRE_NOTHROW(model = Model::read_from_file(input.string()));
+        REQUIRE(model.objects.size() == 1);
+        REQUIRE(model.objects.front() != nullptr);
+        REQUIRE(model.objects.front()->volumes.size() == 1);
+        REQUIRE(model.objects.front()->volumes.front() != nullptr);
+        model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(20., 20., 20.), 1e-5);
+    }
 }
 
 } // namespace model_import_contracts
