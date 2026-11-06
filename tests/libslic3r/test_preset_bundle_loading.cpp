@@ -1,3 +1,4 @@
+#include "libslic3r_version.h"
 #include <boost/property_tree/ptree.hpp>
 #include <catch2/generators/catch_generators_range.hpp>
 #include <boost/filesystem/path.hpp>
@@ -12712,4 +12713,27 @@ TEST_CASE("PresetBundle copy_files preserves the three supported preset trees",
         CHECK(contents == expected);
     }
     CHECK_FALSE(fs::exists(destination / "vendor"));
+}
+
+TEST_CASE("PresetBundle backup preserves its first copy when called again",
+          "[PresetBundleLoading][PresetBundleBackup]")
+{
+    ScopedTemporaryDir temp("preset-bundle-backup");
+    ScopedDataDir data(temp.path() / "data");
+    const fs::path source = temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json";
+    preset_workflow_contracts::write_text(source, "owned");
+    REQUIRE(fs::exists(source));
+    PresetBundle bundle;
+    REQUIRE(bundle.backup_user_folder());
+    const fs::path backup = temp.path() / "data" / (std::string("user_backup-v") + SoftFever_VERSION) / "default" / "sentinel.json";
+    REQUIRE(fs::exists(backup));
+    std::string contents;
+    load_string_file(backup.string(), contents);
+    CHECK(contents == "owned");
+    preset_workflow_contracts::write_text(source, "changed");
+    load_string_file(source.string(), contents);
+    REQUIRE(contents == "changed");
+    CHECK_FALSE(bundle.backup_user_folder());
+    load_string_file(backup.string(), contents);
+    CHECK(contents == "owned");
 }
