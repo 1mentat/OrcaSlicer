@@ -12065,3 +12065,39 @@ TEST_CASE("AMS overwrite preserves valid support selections and clamps out-of-ra
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS overwrite re-appends mixed slots without changing their metadata", "[PresetBundleLoading][PresetAmsMixedMetadata]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    project_slots(bundle, {"Physical", "Mixed"}, {"#101010", "#202020"});
+    bundle.project_config.option<ConfigOptionBools>("filament_is_mixed", true)->values = {false, true};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components", true)->values = {"", "1,2"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios", true)->values = {"", "0.25,0.75"};
+    bundle.project_config.option<ConfigOptionBools>("filament_mixed_gradient", true)->values = {false, true};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range", true)->values = {"", "2-8"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve", true)->values = {"", "linear"};
+    bundle.project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part", true)->values = {false, true};
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#AABBCC", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("pla-id", "#DDEEFF", "PLA", "A", "1"));
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PLA", "Mixed"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#AABBCC", "#DDEEFF", "#202020"});
+    CHECK(bundle.project_config.opt<ConfigOptionBools>("filament_is_mixed")->values == std::vector<unsigned char>{0, 0, 1});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_mixed_components")->values == std::vector<std::string>{"", "", "1,2"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values ==
+          std::vector<std::string>{"", "", "0.25,0.75"});
+    CHECK(bundle.project_config.opt<ConfigOptionBools>("filament_mixed_gradient")->values == std::vector<unsigned char>{0, 0, 1});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_mixed_gradient_range")->values == std::vector<std::string>{"", "", "2-8"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_mixed_gradient_curve")->values == std::vector<std::string>{"", "", "linear"});
+    CHECK(bundle.project_config.opt<ConfigOptionBools>("filament_mixed_gradient_per_part")->values == std::vector<unsigned char>{0, 0, 1});
+}
+
+} // namespace preset_ams_sync_contracts
