@@ -11395,3 +11395,21 @@ TEST_CASE("Project embedded loading resolves parent-only values and rejects dupl
     CHECK(collection.find_preset("Other", false, true) == nullptr);
     CHECK(collection.size() == collection.num_default_presets() + 2);
 }
+
+TEST_CASE("Preset JSON extraction distinguishes missing malformed and valid files", "[PresetBundleLoading][PresetJsonValues]")
+{
+    ScopedTemporaryDir dir("preset-json-values");
+    std::vector<std::string> keys{"name", "version"};
+    std::map<std::string, std::string> values;
+    CHECK(get_values_from_json((dir.path() / "missing.json").string(), keys, values) == 0);
+    CHECK(values.empty());
+    const fs::path bad_file = dir.path() / "bad.json";
+    preset_workflow_contracts::write_text(bad_file, "not-json");
+    REQUIRE(fs::exists(bad_file));
+    CHECK(get_values_from_json(bad_file.string(), keys, values) == 0);
+    CHECK(values.empty());
+    const fs::path good_file = dir.path() / "good.json";
+    preset_workflow_contracts::write_text(good_file, R"({"name":"One","version":"1.0.0"})");
+    REQUIRE(get_values_from_json(good_file.string(), keys, values) == 2);
+    CHECK(values == std::map<std::string, std::string>{{"name", "One"}, {"version", "1.0.0"}});
+}
