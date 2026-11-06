@@ -13486,6 +13486,7 @@ TEST_CASE("Collection reset removes loaded entries and optionally their files",
     REQUIRE(collection.select_preset_by_name("Transient Process", true));
     collection.reset(delete_files);
     CHECK(collection.size() == collection.num_default_presets());
+    REQUIRE(collection.get_selected_idx() < collection.size());
     CHECK(collection.get_selected_preset().is_default);
     CHECK(collection.find_preset("Transient Process", false, true) == nullptr);
     CHECK(fs::exists(saved_file) == !delete_files);
