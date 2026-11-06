@@ -1,3 +1,4 @@
+#include <boost/filesystem/path.hpp>
 #include <memory>
 #include <string>
 #include <map>
@@ -885,6 +886,50 @@ TEST_CASE("Merging selected volumes retains unselected volume geometry", "[Model
               Vec3d(0, 0, 0), Vec3d(30, 10, 10));
     model_bounds_contracts::check_box(result.front()->volumes.back()->mesh().transformed_bounding_box(result.front()->volumes.back()->get_matrix()),
               Vec3d(40, 0, 0), Vec3d(45, 5, 5));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Multipart conversion preserves world geometry and material volume count", "[Model][ModelMultipartConversion]")
+{
+    Model model;
+    ModelObject *first = cube_object(model, 10.);
+    first->name = "first";
+    first->input_file = (boost::filesystem::path("model-input") / "first.stl").make_preferred().string();
+    first->instances.front()->set_offset(Vec3d(3, 4, 0));
+    ModelObject *second = cube_object(model, 5.);
+    second->name = "second";
+    second->input_file = (boost::filesystem::path("model-input") / "second.stl").make_preferred().string();
+    second->instances.front()->set_offset(Vec3d(30, 4, 5));
+    const BoundingBoxf3 before = model.mesh().bounding_box();
+    REQUIRE(model.looks_like_multipart_object());
+
+    model.convert_multipart_object(2);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+    REQUIRE(model.objects.front()->volumes[0] != nullptr);
+    REQUIRE(model.objects.front()->volumes[1] != nullptr);
+    CHECK(model.objects.front()->instances.empty());
+    model_bounds_contracts::check_box(model.objects.front()->full_raw_mesh_bounding_box(), before.min.cast<double>(), before.max.cast<double>());
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Multipart detection distinguishes equal and different minimum Z", "[Model][ModelMultipartDetection]")
+{
+    Model model;
+    cube_object(model, 10.);
+    ModelObject *second = cube_object(model, 5.);
+    second->instances.front()->set_offset(Vec3d(30, 0, 0));
+    CHECK_FALSE(model.looks_like_multipart_object());
+    second->instances.front()->set_offset(Vec3d(30, 0, 2));
+    second->invalidate_bounding_box();
+    CHECK(model.looks_like_multipart_object());
 }
 
 } // namespace model_extended_contracts
