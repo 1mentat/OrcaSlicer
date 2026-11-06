@@ -762,3 +762,24 @@ TEST_CASE("Model instance transform helpers separate translation from vector geo
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Scaling to fit respects the limiting X target", "[Model][ModelFitScaling]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->instances.front()->set_offset(Vec3d(10, 20, 30));
+    const Vec3d before = object->bounding_box_exact().size().cast<double>();
+    object->scale_to_fit(Vec3d(15, 30, 40));
+    const Vec3d after = object->bounding_box_exact().size().cast<double>();
+
+    const double factor = 15. / before.x();
+    model_bounds_contracts::check_vec3d(after, before * factor);
+    CHECK_THAT(after.x(), Catch::Matchers::WithinAbs(15., 1e-5));
+    CHECK(after.y() < 30.);
+    CHECK(after.z() < 40.);
+}
+
+} // namespace model_extended_contracts
