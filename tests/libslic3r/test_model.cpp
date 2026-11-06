@@ -933,3 +933,40 @@ TEST_CASE("Multipart detection distinguishes equal and different minimum Z", "[M
 }
 
 } // namespace model_extended_contracts
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Baking rotated instances preserves world bounds and removes unsupported transforms", "[Model][ModelBakeRotation]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    ModelInstance *first = object->instances.front();
+    first->set_offset(Vec3d(10, 20, 0));
+    first->set_rotation(Z, 0.37);
+    first->set_scaling_factor(Vec3d(2, 1, 1));
+    ModelInstance *second = object->add_instance(*first);
+    REQUIRE(second != nullptr);
+    REQUIRE(object->instances.size() == 2);
+    second->set_offset(Vec3d(40, 20, 0));
+    object->volumes.front()->source.input_file = "bake-source.stl";
+    const BoundingBoxf3 before = object->mesh().bounding_box();
+
+    object->bake_xy_rotation_into_meshes(0);
+    REQUIRE(object->instances.size() == 2);
+    REQUIRE(object->instances[0] != nullptr);
+    REQUIRE(object->instances[1] != nullptr);
+    first = object->instances[0];
+    second = object->instances[1];
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    const BoundingBoxf3 after = object->mesh().bounding_box();
+    model_bounds_contracts::check_box(after, before.min.cast<double>(), before.max.cast<double>(), 1e-4);
+    CHECK_THAT(first->get_rotation(Z), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(second->get_rotation(Z), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK(first->get_scaling_factor().x() > 0.);
+    CHECK(first->get_mirror().isApprox(Vec3d::Ones(), 1e-6));
+    CHECK(object->volumes.front()->source.input_file.empty());
+}
+
+} // namespace model_extended_contracts
