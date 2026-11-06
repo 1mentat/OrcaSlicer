@@ -58,6 +58,10 @@ Require the native control's exit status and exact JUnit inventory to pass befor
 compiling or running a mutant. Preserve raw assertion text when classifying a
 mutation; reporter punctuation alone must not turn an ordinary assertion failure
 into a survivor.
+For ad hoc mutation restores, source hashes alone do not prove the executable is
+normal: a timestamp-preserving copy can leave the mutant object newer than its
+source. Force the affected object to rebuild, verify it in the build log, and
+rerun the normal control before accepting restoration.
 After the first normal build, run the exact new or changed cases and capture
 their JUnit before running the preserved broader control cohort. Reuse that
 binary when the source is unchanged. The mutation runner's `--timeout` bounds
