@@ -1,3 +1,4 @@
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -322,6 +323,44 @@ TEST_CASE("Model volume merge preserves geometry and facet count", "[Model][Mode
     CHECK(merged->parts_count() == 1);
     CHECK(merged->facets_count() == 24);
     check_vec3d(merged->raw_mesh_bounding_box().size(), Vec3d(40, 10, 10), 1e-5);
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("Model volume types preserve material and extruder semantics", "[Model][ModelVolumeSemantics]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *part = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *negative = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::NEGATIVE_VOLUME, false);
+    REQUIRE(part != nullptr);
+    REQUIRE(negative != nullptr);
+    object->config.set("extruder", 2);
+    part->set_material_id("part-material");
+    negative->set_material_id("negative-material");
+    part->config.set("extruder", 3);
+
+    CHECK(object->parts_count() == 1);
+    CHECK(object->facets_count() == 12);
+    CHECK(object->materials_count() == 2);
+    CHECK(object->has_solid_mesh());
+    CHECK(part->extruder_id() == 3);
+    part->config.erase("extruder");
+    CHECK(part->extruder_id() == 2);
+    CHECK(part->get_extruders() == std::vector<int>{ 2 });
+    CHECK(negative->get_extruders().empty());
+    ModelVolume *modifier = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::PARAMETER_MODIFIER, false);
+    ModelVolume *support = object->add_volume(make_cube(10, 10, 10), ModelVolumeType::SUPPORT_BLOCKER, false);
+    REQUIRE(modifier != nullptr);
+    REQUIRE(support != nullptr);
+    CHECK(support->get_extruders().empty());
+    CHECK(modifier->is_modifier());
+    CHECK(support->is_support_blocker());
+    CHECK_FALSE(part->is_splittable());
+    CHECK(ModelVolume::type_from_string(ModelVolume::type_to_string(ModelVolumeType::SUPPORT_ENFORCER)) == ModelVolumeType::SUPPORT_ENFORCER);
 }
 
 } // namespace model_bounds_contracts
