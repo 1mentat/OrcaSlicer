@@ -11322,3 +11322,34 @@ TEST_CASE("Removing cloud presets preserves live metadata and clears a dirty set
     CHECK(bundle.prints.find_preset("Deleted", false) == nullptr);
     CHECK_FALSE(fs::exists(removed_file));
 }
+
+TEST_CASE("Filament differed value export carries changed density and cloud metadata", "[PresetBundleLoading][PresetFilamentCloudDiff]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetCollection &collection = scoped.bundle.filaments;
+    add_inmemory_preset(collection, "Base");
+    add_inmemory_preset(collection, "Child", "Base");
+    Preset *parent = collection.find_preset("Base", false, true);
+    Preset *child = collection.find_preset("Child", false, true);
+    REQUIRE(parent != nullptr);
+    REQUIRE(child != nullptr);
+    parent->setting_id = "base-id";
+    parent->config.option<ConfigOptionFloats>("filament_density", true)->values = {1.75};
+    child->config = parent->config;
+    child->inherits() = "Base";
+    child->base_id = "base-id";
+    child->setting_id = "cloud-id";
+    const auto version = Semver::parse("1.2.3");
+    REQUIRE(version);
+    child->version = *version;
+    child->updated_time = 77;
+    child->config.option<ConfigOptionFloats>("filament_density", true)->values = {1.24};
+    std::map<std::string, std::string> values;
+    REQUIRE(collection.get_differed_values_to_update(*child, values) == 0);
+    REQUIRE(values.count("filament_density") == 1);
+    CHECK(values.at("filament_density") == "1.24");
+    CHECK(values.at(BBL_JSON_KEY_VERSION) == "1.2.0.3");
+    CHECK(values.at(ORCA_JSON_KEY_UPDATE_TIME) == "77");
+    CHECK(values.at(BBL_JSON_KEY_TYPE) == PRESET_IOT_FILAMENT_TYPE);
+    CHECK(values.at(BBL_JSON_KEY_BASE_ID) == "base-id");
+}
