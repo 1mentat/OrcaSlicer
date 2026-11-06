@@ -1,3 +1,5 @@
+#include <string>
+#include <map>
 #include <cstddef>
 #include <array>
 #include <cmath>
@@ -598,3 +600,109 @@ TEST_CASE("Volume-to-bed transform keeps general rotation out of the volume", "[
 }
 
 } // namespace model_bounds_contracts
+
+namespace model_extended_contracts {
+namespace {
+
+ModelObject *cube_object(Model &model, double size = 10., bool add_instance = true)
+{
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(float(size), float(size), float(size)), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    if (add_instance) {
+        REQUIRE(object->add_instance() != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->instances.front() != nullptr);
+    }
+    return object;
+}
+
+} // namespace
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model copy and clone retain topology while clone IDs are independent", "[Model][ModelCopyClone]")
+{
+    Model original;
+    ModelObject *object = cube_object(original);
+    object->name = "copy-source";
+    object->volumes.front()->name = "body";
+    object->volumes.front()->set_material_id("blue");
+    ModelMaterial *material = original.get_material("blue");
+    REQUIRE(material != nullptr);
+    material->apply({ { "color", "#0000ff" } });
+
+    const ObjectID model_id = original.id();
+    const ObjectID object_id = object->id();
+    const ObjectID volume_id = object->volumes.front()->id();
+    Model copied(original);
+    REQUIRE(copied.id() == model_id);
+    REQUIRE(copied.objects.size() == 1);
+    REQUIRE(copied.objects.front() != nullptr);
+    REQUIRE(copied.objects.front()->volumes.size() == 1);
+    REQUIRE(copied.objects.front()->volumes.front() != nullptr);
+    CHECK(copied.objects.front()->id() == object_id);
+    CHECK(copied.objects.front()->volumes.front()->id() == volume_id);
+    CHECK(copied.objects.front() != object);
+    CHECK(copied.objects.front()->volumes.front()->mesh_ptr() == object->volumes.front()->mesh_ptr());
+    const ModelMaterial *copied_material = copied.objects.front()->volumes.front()->material();
+    REQUIRE(copied_material != nullptr);
+    REQUIRE(copied_material->attributes.count("color") == 1);
+    CHECK(copied_material->attributes.at("color") == "#0000ff");
+
+    Model cloned = original.make_clone(original);
+    REQUIRE(cloned.objects.size() == 1);
+    REQUIRE(cloned.objects.front() != nullptr);
+    REQUIRE(cloned.objects.front()->volumes.size() == 1);
+    REQUIRE(cloned.objects.front()->volumes.front() != nullptr);
+    CHECK(cloned.id() != model_id);
+    CHECK(cloned.objects.front()->id() != object_id);
+    CHECK(cloned.objects.front()->volumes.front()->id() != volume_id);
+    CHECK(cloned.objects.front()->get_model() == &cloned);
+    CHECK(cloned.objects.front()->volumes.front()->get_object() == cloned.objects.front());
+    CHECK(model_object_list_equal(original, copied));
+    CHECK_FALSE(model_object_list_equal(original, cloned));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model copy and move assignment preserve parent links and ownership", "[Model][ModelAssignmentOwnership]")
+{
+    Model source;
+    ModelObject *object = cube_object(source);
+    object->name = "source";
+    ModelMaterial *material = source.add_material("PLA");
+    REQUIRE(material != nullptr);
+    material->attributes["type"] = "PLA";
+    object->volumes.front()->set_material_id("PLA");
+    const ObjectID model_id = source.id();
+
+    Model copied;
+    copied = source;
+    REQUIRE(copied.id() == model_id);
+    REQUIRE(copied.objects.size() == 1);
+    REQUIRE(copied.objects.front() != nullptr);
+    REQUIRE(copied.objects.front()->volumes.size() == 1);
+    REQUIRE(copied.objects.front()->volumes.front() != nullptr);
+    CHECK(copied.objects.front()->get_model() == &copied);
+    CHECK(copied.objects.front()->volumes.front()->get_object() == copied.objects.front());
+    const ModelMaterial *copied_material = copied.get_material("PLA");
+    REQUIRE(copied_material != nullptr);
+    CHECK(copied_material->get_model() == &copied);
+
+    Model moved;
+    moved = std::move(copied);
+    CHECK(moved.id() == model_id);
+    REQUIRE(moved.objects.size() == 1);
+    REQUIRE(moved.objects.front() != nullptr);
+    CHECK(moved.objects.front()->get_model() == &moved);
+    CHECK(copied.objects.empty());
+    CHECK(copied.materials.empty());
+}
+
+} // namespace model_extended_contracts
