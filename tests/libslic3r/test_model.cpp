@@ -1,3 +1,5 @@
+#include "libslic3r/libslic3r.h"
+#include <tuple>
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include <catch2/catch_message.hpp>
@@ -413,6 +415,62 @@ TEST_CASE("Model cleanup removes only zero-volume objects", "[Model][ModelZeroVo
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects.front() != nullptr);
     CHECK(model.objects.front()->facets_count() == 12);
+}
+
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+namespace {
+
+void check_box(const BoundingBoxf3 &box, const Vec3d &min, const Vec3d &max, double epsilon = 1e-5)
+{
+    check_vec3d(box.min, min, epsilon);
+    check_vec3d(box.max, max, epsilon);
+}
+
+} // namespace
+} // namespace model_bounds_contracts
+
+namespace model_bounds_contracts {
+
+TEST_CASE("ModelObject mirror reflects each axis and restores cached bounds", "[Model][ModelMirror]")
+{
+    const auto [axis, reflected_min, reflected_max] = GENERATE(table<Axis, Vec3d, Vec3d>({
+        { X, Vec3d(-4., 0., 0.), Vec3d(0., 6., 8.) },
+        { Y, Vec3d(0., -6., 0.), Vec3d(4., 0., 8.) },
+        { Z, Vec3d(0., 0., -8.), Vec3d(4., 6., 0.) },
+    }));
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(4.f, 6.f, 8.f), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(object->add_volume(make_cube(2.f, 3.f, 5.f), ModelVolumeType::MODEL_PART, false) != nullptr);
+    REQUIRE(object->volumes.size() == 2);
+    REQUIRE(object->add_instance() != nullptr);
+
+    const BoundingBoxf3 before_approx = object->bounding_box_approx();
+    const BoundingBoxf3 before_exact = object->bounding_box_exact();
+    check_box(before_approx, Vec3d::Zero(), Vec3d(4., 6., 8.));
+    check_box(before_exact, Vec3d::Zero(), Vec3d(4., 6., 8.));
+
+    object->mirror(axis);
+
+    check_box(object->bounding_box_approx(), reflected_min, reflected_max);
+    check_box(object->bounding_box_exact(), reflected_min, reflected_max);
+    for (const ModelVolume *volume : object->volumes) {
+        REQUIRE(volume != nullptr);
+        CHECK(volume->is_left_handed());
+    }
+
+    object->mirror(axis);
+
+    check_box(object->bounding_box_approx(), Vec3d::Zero(), Vec3d(4., 6., 8.));
+    check_box(object->bounding_box_exact(), Vec3d::Zero(), Vec3d(4., 6., 8.));
+    for (const ModelVolume *volume : object->volumes) {
+        REQUIRE(volume != nullptr);
+        CHECK_FALSE(volume->is_left_handed());
+    }
 }
 
 } // namespace model_bounds_contracts
