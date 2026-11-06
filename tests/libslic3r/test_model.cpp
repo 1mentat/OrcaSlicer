@@ -706,3 +706,59 @@ TEST_CASE("Model copy and move assignment preserve parent links and ownership", 
 }
 
 } // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model and object meshes aggregate transformed instances exactly", "[Model][ModelAggregateMeshes]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->instances.front()->set_offset(Vec3d(5, 7, 2));
+    ModelInstance *second = object->add_instance();
+    REQUIRE(second != nullptr);
+    REQUIRE(object->instances.size() == 2);
+    second->set_offset(Vec3d(25, 7, 2));
+    second->set_scaling_factor(Vec3d(2, 1, 1));
+
+    const BoundingBoxf3 object_mesh_box = object->mesh().bounding_box();
+    const BoundingBoxf3 model_mesh_box = model.mesh().bounding_box();
+    model_bounds_contracts::check_box(object_mesh_box, Vec3d(5, 7, 2), Vec3d(45, 17, 12));
+    model_bounds_contracts::check_box(model_mesh_box, Vec3d(5, 7, 2), Vec3d(45, 17, 12));
+    model_bounds_contracts::check_box(object->instance_convex_hull_bounding_box(size_t(0)), Vec3d(5, 7, 2), Vec3d(15, 17, 12));
+    model_bounds_contracts::check_box(object->instance_convex_hull_bounding_box(second), Vec3d(25, 7, 2), Vec3d(45, 17, 12));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Model instance transform helpers separate translation from vector geometry", "[Model][ModelInstanceHelpers]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    ModelInstance *instance = object->instances.front();
+    instance->set_offset(Vec3d(11, 13, 17));
+    instance->set_scaling_factor(Vec3d(2, 3, 4));
+    instance->set_rotation(Z, 0.5);
+
+    const Vec3d transformed = instance->transform_vector(Vec3d(1, 0, 0));
+    const Vec3d without_offset = instance->transform_vector(Vec3d(1, 0, 0), true);
+    model_bounds_contracts::check_vec3d(without_offset, Vec3d(2. * std::cos(0.5), 2. * std::sin(0.5), 0.));
+    model_bounds_contracts::check_vec3d(transformed, Vec3d(11. + 2. * std::cos(0.5), 13. + 2. * std::sin(0.5), 17.));
+    model_bounds_contracts::check_vec3d(transformed - without_offset, Vec3d(11, 13, 17));
+
+    BoundingBoxf3 source_box;
+    source_box.merge(Vec3d::Zero());
+    source_box.merge(Vec3d::Ones());
+    model_bounds_contracts::check_box(instance->transform_bounding_box(source_box),
+              Vec3d(11. - 3. * std::sin(0.5), 13., 17.),
+              Vec3d(11. + 2. * std::cos(0.5), 13. + 2. * std::sin(0.5) + 3. * std::cos(0.5), 21.));
+
+    Polygon polygon({ Point(0, 0), Point(scaled(1.), 0), Point(scaled(1.), scaled(1.)), Point(0, scaled(1.)) });
+    instance->transform_polygon(&polygon);
+    const double rotated_unit_extent = std::abs(std::cos(0.5)) + std::abs(std::sin(0.5));
+    CHECK_THAT(double(polygon.bounding_box().size().x()), Catch::Matchers::WithinAbs(scaled(2. * rotated_unit_extent), 3.));
+    CHECK_THAT(double(polygon.bounding_box().size().y()), Catch::Matchers::WithinAbs(scaled(3. * rotated_unit_extent), 3.));
+}
+
+} // namespace model_extended_contracts
