@@ -1343,6 +1343,50 @@ std::vector<OuterLoop> outer_wall_loops(const std::string &gcode)
     return loops;
 }
 
+
+struct ObjectOuterLoop {
+    std::string object_name;
+    Vec2d seam;
+    BoundingBoxf bounds;
+};
+
+std::vector<ObjectOuterLoop> outer_wall_loops_by_object(const std::string &gcode)
+{
+    std::vector<ObjectOuterLoop> loops;
+    std::string current_object;
+    bool outer_wall = false;
+    bool in_loop = false;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        const size_t object_marker = comment.find("printing object ");
+        if (object_marker != std::string_view::npos) {
+            const size_t begin = object_marker + std::string_view("printing object ").size();
+            size_t end = comment.find(" id:", begin);
+            if (end == std::string_view::npos)
+                end = comment.find(" copy", begin);
+            if (end != std::string_view::npos)
+                current_object.assign(comment.substr(begin, end - begin));
+            in_loop = false;
+        }
+        if (comment.find("TYPE:") != std::string_view::npos) {
+            outer_wall = comment.find("Outer wall") != std::string_view::npos;
+            in_loop = false;
+        }
+        if (!outer_wall || current_object.empty() || !line.extruding(self) || line.dist_XY(self) == 0.f)
+            return;
+        if (!in_loop) {
+            loops.push_back({current_object, Vec2d(self.x(), self.y()), {}});
+            loops.back().bounds.merge(loops.back().seam);
+            in_loop = true;
+        }
+        loops.back().bounds.merge(Vec2d(line.new_X(self), line.new_Y(self)));
+    });
+    for (ObjectOuterLoop &loop : loops)
+        loop.seam -= loop.bounds.center();
+    return loops;
+}
+
 TriangleMesh helper_with_hole()
 {
     // 8 x 6 x 4 mm with a 4 x 3 mm hole through every layer of the cube.
@@ -1354,6 +1398,76 @@ TriangleMesh helper_with_hole()
     return helper;
 }
 } // namespace
+
+
+TEST_CASE("Parallel seam initialization emits each object's rear seam",
+          "[PreciseSeam][GCodeExport][ParallelSeamInitialization]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"seam_position", "back"},
+        {"seam_slope_type", "none"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"outer_wall_line_width", 0.4},
+        {"initial_layer_line_width", 0.4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"gcode_label_objects", true},
+        {"gcode_comments", true},
+    });
+
+    TriangleMesh wide = make_cube(20, 10, 1);
+    TriangleMesh tall = make_cube(10, 20, 1);
+    tall.translate(0., 40., 0.);
+    std::vector<TriangleMesh> meshes{std::move(wide), std::move(tall)};
+    std::vector<std::vector<ConfigBase::SetDeserializeItem>> object_overrides(2);
+    object_overrides[0] = {{"seam_position", "back"}};
+    object_overrides[1] = {{"seam_position", "back"}};
+
+    Print print;
+    Model model;
+    Test::init_print(std::move(meshes), print, model, config, &object_overrides, false);
+    REQUIRE(print.objects().size() == 2);
+    model.objects[0]->name = "wide_seam_object";
+    model.objects[1]->name = "tall_seam_object";
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("print validation error: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+
+    const std::string output = Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    const std::vector<ObjectOuterLoop> loops = outer_wall_loops_by_object(output);
+    REQUIRE_FALSE(loops.empty());
+
+    size_t wide_loops = 0;
+    size_t tall_loops = 0;
+    for (const ObjectOuterLoop &loop : loops) {
+        const double width = loop.bounds.max.x() - loop.bounds.min.x();
+        const double depth = loop.bounds.max.y() - loop.bounds.min.y();
+        CAPTURE(loop.object_name, width, depth, loop.seam.x(), loop.seam.y());
+        if (loop.object_name == "wide_seam_object") {
+            ++wide_loops;
+            CHECK(width > depth + 8.0);
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.max.y() - loop.bounds.center().y(), 0.1));
+        } else if (loop.object_name == "tall_seam_object") {
+            ++tall_loops;
+            CHECK(depth > width + 8.0);
+            CHECK_THAT(loop.seam.y(), Catch::Matchers::WithinAbs(loop.bounds.max.y() - loop.bounds.center().y(), 0.1));
+        } else {
+            FAIL("Outer wall loop has no recognized object label: " << loop.object_name);
+        }
+    }
+    REQUIRE(wide_loops == 5);
+    REQUIRE(tall_loops == 5);
+}
 
 TEST_CASE("Strong modifiers place the exported seam on the side they cross", "[PreciseSeam]")
 {
