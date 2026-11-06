@@ -13186,3 +13186,13 @@ TEST_CASE("fast purge uses the fast multiplier independently of default multipli
 }
 
 } // namespace preset_flush_matrix_contracts
+
+TEST_CASE("filament nozzle volume defaults follow valid maps and standard-fallback maps", "[PresetBundleLoading][PresetNozzleVolumeMaps]")
+{
+    PresetBundle bundle;
+    bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {int(nvtHighFlow), int(nvtStandard)};
+    std::vector<int> maps{1, 2, 9};
+    const auto result = bundle.get_default_nozzle_volume_types_for_filaments(maps);
+    REQUIRE(result.size() == maps.size());
+    CHECK(result == std::vector<int>{int(nvtHighFlow), int(nvtStandard), int(nvtStandard)});
+}
