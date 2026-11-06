@@ -12189,3 +12189,99 @@ TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots"
 }
 
 } // namespace preset_ams_sync_contracts
+
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS combo ID matching is distinct from generic fallback and preserves unchanged slots", "[PresetBundleLoading][PresetAmsComboMatching]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "fallback-id", "PLA");
+    system_filament(bundle, "Matched PLA", "PLA-ID", "PLA");
+    bundle.filament_presets = {"Old Selection", "Another Selection"};
+    auto matched = tray("PLA-ID", "#AB12CD", "PLA", "0", "0");
+    matched.set_key_value("tray_name", new ConfigOptionStrings({"Bay A"}));
+    auto unchanged = tray("unknown", "#00AA00", "PLA", "0", "1", false);
+    unchanged.set_key_value("tray_name", new ConfigOptionStrings({"Bay B"}));
+    bundle.filament_ams_list.emplace(0, std::move(matched));
+    bundle.filament_ams_list.emplace(1, std::move(unchanged));
+    AMSComboInfo info;
+    bundle.get_ams_cobox_infos(info);
+    CHECK(info.ams_filament_presets == std::vector<std::string>{"Matched PLA", "Another Selection"});
+    CHECK(info.ams_filament_colors == std::vector<std::string>{"#AB12CD", "#00AA00"});
+    CHECK(info.ams_names == std::vector<std::string>{"Bay A", "Bay B"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS combo fallback prefers generic material then prior selection then compatible system material", "[PresetBundleLoading][PresetAmsComboFallback]")
+{
+    const int scenario = GENERATE(0, 1, 2, 3, 4);
+    INFO("fallback scenario=" << scenario);
+    PresetBundle bundle;
+    bundle.filament_presets.clear();
+    system_filament(bundle, "Generic PLA A Incompatible", "incompatible", "PLA").is_compatible = false;
+    system_filament(bundle, "Generic PLA B User", "user", "PLA").is_system = false;
+    if (scenario == 0 || scenario == 4)
+        system_filament(bundle, "Generic PLA Z Compatible", "generic", "PLA");
+    if (scenario != 3)
+        system_filament(bundle, "System PETG", "system", "PETG");
+    if (scenario == 0 || scenario == 1 || scenario == 4) {
+        system_filament(bundle, "Previously Selected", "previous", "PETG").is_system = false;
+        bundle.filament_presets = {"Previously Selected"};
+    }
+
+    DynamicPrintConfig physical_tray = tray(scenario == 4 ? "" : "unknown-material", "#AB12CD", "PLA", "0", "0");
+    const std::vector<std::string> colors{"#AB12CD", "#0099FF"};
+    physical_tray.set_key_value("filament_multi_colour", new ConfigOptionStrings(colors));
+    physical_tray.set_key_value("tray_name", new ConfigOptionStrings({"Bay A"}));
+    bundle.filament_ams_list.emplace(7, std::move(physical_tray));
+
+    AMSComboInfo info;
+    info.ams_filament_presets = {"stale"};
+    info.ams_filament_colors = {"stale"};
+    info.ams_multi_color_filment = {{"stale"}};
+    info.ams_names = {"stale"};
+    bundle.get_ams_cobox_infos(info);
+    if (scenario >= 3) {
+        CHECK(info.empty());
+        CHECK(info.ams_filament_presets.empty());
+        CHECK(info.ams_filament_colors.empty());
+        CHECK(info.ams_multi_color_filment.empty());
+        CHECK(info.ams_names.empty());
+    } else {
+        const std::vector<std::string> expected{"Generic PLA Z Compatible", "Previously Selected", "System PETG"};
+        REQUIRE(info.ams_filament_presets.size() == 1);
+        CHECK(info.ams_filament_presets.front() == expected[scenario]);
+        REQUIRE(info.ams_filament_colors.size() == 1);
+        CHECK(info.ams_filament_colors.front() == "#AB12CD");
+        REQUIRE(info.ams_multi_color_filment.size() == 1);
+        CHECK(info.ams_multi_color_filment.front() == colors);
+        REQUIRE(info.ams_names.size() == 1);
+        CHECK(info.ams_names.front() == "Bay A");
+    }
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS combo info clears stale output before resolving an empty tray list", "[PresetBundleLoading][PresetAmsCombo6]")
+{
+    PresetBundle bundle;
+    AMSComboInfo info;
+    info.ams_filament_presets = {"stale"};
+    info.ams_names = {"stale"};
+    info.ams_filament_colors = {"stale"};
+    info.ams_multi_color_filment = {{"stale"}};
+    bundle.get_ams_cobox_infos(info);
+    CHECK(info.empty());
+    CHECK(info.ams_filament_presets.empty());
+    CHECK(info.ams_filament_colors.empty());
+    CHECK(info.ams_multi_color_filment.empty());
+    CHECK(info.ams_names.empty());
+}
+
+} // namespace preset_ams_sync_contracts
