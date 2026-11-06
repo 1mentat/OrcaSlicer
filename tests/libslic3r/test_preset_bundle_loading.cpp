@@ -13672,3 +13672,202 @@ TEST_CASE("Saving a root preset reloads its inherited child",
     CHECK_THAT(reloaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.33, 1e-9));
     CHECK(reloaded->inherits() == "Reload Parent");
 }
+
+
+namespace preset_asset_lookup_contracts {
+namespace {
+
+void check_selected_asset(const std::string &selected, const fs::path &expected, const std::string &contents)
+{
+    const fs::path selected_path(selected);
+    REQUIRE(fs::is_regular_file(selected_path));
+    REQUIRE(fs::is_regular_file(expected));
+    CHECK(fs::equivalent(selected_path, expected));
+    std::string actual;
+    load_string_file(selected, actual);
+    CHECK(actual == contents);
+}
+
+} // namespace
+} // namespace preset_asset_lookup_contracts
+
+namespace preset_asset_lookup_contracts {
+
+TEST_CASE("Preset bundle vendor model and fallback asset lookup use configured roots", "[PresetBundleLoading][PresetAssetLookup1]")
+{
+    ScopedTemporaryDir dir("preset-deep-assets");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+    preset_workflow_contracts::write_text(dir.path() / "resources" / "profiles" / "hotend.stl", "fallback marker");
+    preset_workflow_contracts::write_text(dir.path() / "resources" / "profiles" / "Acme" / "bed.stl", "bed marker");
+    VendorProfile profile("Acme");
+    profile.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    model.bed_model = "bed.stl";
+    model.bed_texture = "bed.png";
+    model.hotend_model = "hotend.stl";
+    profile.models.push_back(model);
+    PresetBundle bundle;
+    bundle.vendors["Acme"] = profile;
+    check_selected_asset(bundle.get_stl_model_for_printer_model("Acme One"),
+                         dir.path() / "resources" / "profiles" / "Acme" / "bed.stl", "bed marker");
+    check_selected_asset(bundle.get_hotend_model_for_printer_model("Acme One"),
+                         dir.path() / "resources" / "profiles" / "hotend.stl", "fallback marker");
+    CHECK(bundle.get_stl_model_for_printer_model("missing").empty());
+    CHECK(bundle.get_texture_for_printer_model("missing").empty());
+    check_selected_asset(bundle.get_hotend_model_for_printer_model("missing"),
+                         dir.path() / "resources" / "profiles" / "hotend.stl", "fallback marker");
+}
+
+} // namespace preset_asset_lookup_contracts
+
+namespace preset_asset_lookup_contracts {
+
+TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", "[PresetBundleLoading][PresetAssetLookup2]")
+{
+    ScopedTemporaryDir dir("preset-texture-lookup");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+    const fs::path local = dir.path() / "data" / "vendor" / "Acme" / "bed.png";
+    const fs::path fallback = dir.path() / "resources" / "profiles" / "Acme" / "bed.png";
+    preset_workflow_contracts::write_text(local, "local texture");
+    preset_workflow_contracts::write_text(fallback, "resource texture");
+
+    VendorProfile profile("Acme");
+    profile.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    model.bed_texture = "bed.png";
+    profile.models.push_back(model);
+    PresetBundle bundle;
+    bundle.vendors["Acme"] = profile;
+
+    check_selected_asset(bundle.get_texture_for_printer_model("Acme One"), local, "local texture");
+    check_selected_asset(bundle.get_texture_for_printer_model("M1"), local, "local texture");
+    REQUIRE(fs::remove(local));
+    check_selected_asset(bundle.get_texture_for_printer_model("Acme One"), fallback, "resource texture");
+    CHECK(bundle.get_texture_for_printer_model("missing").empty());
+}
+
+} // namespace preset_asset_lookup_contracts
+
+namespace preset_asset_lookup_contracts {
+
+TEST_CASE("PresetUtils resolves configured printer assets from installed and bundled roots",
+          "[PresetBundleLoading][PresetAssetLookup3]")
+{
+    ScopedTemporaryDir dir("preset-utils-printer-assets");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+
+    const fs::path data_vendor = dir.path() / "data" / "vendor" / "Acme";
+    const fs::path resource_vendor = dir.path() / "resources" / "profiles" / "Acme";
+    const fs::path generic_hotend = dir.path() / "resources" / "profiles" / "hotend.stl";
+    const fs::path data_bed = data_vendor / "bed.stl";
+    const fs::path resource_bed = resource_vendor / "bed.stl";
+    const fs::path data_texture = data_vendor / "bed.png";
+    const fs::path resource_texture = resource_vendor / "bed.png";
+    const fs::path data_hotend = data_vendor / "nozzle.stl";
+    const fs::path resource_hotend = resource_vendor / "nozzle.stl";
+
+    preset_workflow_contracts::write_text(data_bed, "installed bed");
+    preset_workflow_contracts::write_text(resource_bed, "bundled bed");
+    preset_workflow_contracts::write_text(data_texture, "installed texture");
+    preset_workflow_contracts::write_text(resource_texture, "bundled texture");
+    preset_workflow_contracts::write_text(data_hotend, "installed nozzle");
+    preset_workflow_contracts::write_text(resource_hotend, "bundled nozzle");
+    preset_workflow_contracts::write_text(generic_hotend, "generic nozzle");
+
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    model.bed_model = "bed.stl";
+    model.bed_texture = "bed.png";
+    model.hotend_model = "nozzle.stl";
+    vendor.models.push_back(model);
+
+    Preset preset(Preset::TYPE_PRINTER, "Acme One");
+    preset.vendor = &vendor;
+    preset.config.set_key_value("printer_model", new ConfigOptionString("M1"));
+    REQUIRE(PresetUtils::system_printer_model(preset) == &vendor.models.front());
+
+    const std::string selected_bed = PresetUtils::system_printer_bed_model(preset);
+    const std::string selected_texture = PresetUtils::system_printer_bed_texture(preset);
+    const std::string selected_hotend = PresetUtils::system_printer_hotend_model(preset);
+    check_selected_asset(selected_bed, data_bed, "installed bed");
+    check_selected_asset(selected_texture, data_texture, "installed texture");
+    check_selected_asset(selected_hotend, data_hotend, "installed nozzle");
+
+    REQUIRE(fs::remove(data_bed));
+    REQUIRE(fs::remove(data_texture));
+    REQUIRE(fs::remove(data_hotend));
+    const std::string bundled_bed = PresetUtils::system_printer_bed_model(preset);
+    const std::string bundled_texture = PresetUtils::system_printer_bed_texture(preset);
+    const std::string bundled_hotend = PresetUtils::system_printer_hotend_model(preset);
+    check_selected_asset(bundled_bed, resource_bed, "bundled bed");
+    check_selected_asset(bundled_texture, resource_texture, "bundled texture");
+    check_selected_asset(bundled_hotend, resource_hotend, "bundled nozzle");
+
+    vendor.models.front().hotend_model = "missing-nozzle.stl";
+    const std::string generic = PresetUtils::system_printer_hotend_model(preset);
+    check_selected_asset(generic, generic_hotend, "generic nozzle");
+}
+
+} // namespace preset_asset_lookup_contracts
+
+namespace preset_asset_lookup_contracts {
+
+TEST_CASE("PresetUtils handles presets without a resolved printer model",
+          "[PresetBundleLoading][PresetAssetLookup4]")
+{
+    ScopedTemporaryDir dir("preset-utils-unresolved-printer");
+    ScopedDataDir data(dir.path() / "data");
+    ScopedResourcesDir resources(dir.path() / "resources");
+    const fs::path generic_hotend = dir.path() / "resources" / "profiles" / "hotend.stl";
+    preset_workflow_contracts::write_text(generic_hotend, "generic nozzle");
+
+    Preset without_vendor(Preset::TYPE_PRINTER, "Default");
+    CHECK(PresetUtils::system_printer_model(without_vendor) == nullptr);
+    CHECK(PresetUtils::system_printer_bed_model(without_vendor).empty());
+    CHECK(PresetUtils::system_printer_bed_texture(without_vendor).empty());
+    check_selected_asset(PresetUtils::system_printer_hotend_model(without_vendor), generic_hotend, "generic nozzle");
+
+    VendorProfile vendor("Acme");
+    vendor.name = "Acme";
+    VendorProfile::PrinterModel model;
+    model.id = "M1";
+    model.name = "Acme One";
+    vendor.models.push_back(model);
+    Preset unresolved(Preset::TYPE_PRINTER, "Unknown Acme");
+    unresolved.vendor = &vendor;
+    unresolved.config.set_key_value("printer_model", new ConfigOptionString("not-installed"));
+    CHECK(PresetUtils::system_printer_model(unresolved) == nullptr);
+    CHECK(PresetUtils::system_printer_bed_model(unresolved).empty());
+    CHECK(PresetUtils::system_printer_bed_texture(unresolved).empty());
+    check_selected_asset(PresetUtils::system_printer_hotend_model(unresolved), generic_hotend, "generic nozzle");
+
+    Preset without_model_key(Preset::TYPE_PRINTER, "Missing model key");
+    without_model_key.vendor = &vendor;
+    CHECK(PresetUtils::system_printer_model(without_model_key) == nullptr);
+
+    Preset empty_model_key(Preset::TYPE_PRINTER, "Empty model key");
+    empty_model_key.vendor = &vendor;
+    empty_model_key.config.set_key_value("printer_model", new ConfigOptionString());
+    CHECK(PresetUtils::system_printer_model(empty_model_key) == nullptr);
+
+    Preset model_without_assets(Preset::TYPE_PRINTER, "Acme without assets");
+    model_without_assets.vendor = &vendor;
+    model_without_assets.config.set_key_value("printer_model", new ConfigOptionString("M1"));
+    REQUIRE(PresetUtils::system_printer_model(model_without_assets) == &vendor.models.front());
+    CHECK(PresetUtils::system_printer_bed_model(model_without_assets).empty());
+    CHECK(PresetUtils::system_printer_bed_texture(model_without_assets).empty());
+    check_selected_asset(PresetUtils::system_printer_hotend_model(model_without_assets),
+                         generic_hotend, "generic nozzle");
+}
+
+} // namespace preset_asset_lookup_contracts
