@@ -11155,3 +11155,40 @@ TEST_CASE("Printer snapshot restores filament colors and replaces unavailable sl
     check_double_vector(flush_multiplier->values,
                         {0.5, 0.75, 1.0});
 }
+
+TEST_CASE("Printer snapshot supplies defaults when optional filament arrays are absent",
+          "[PresetBundleLoading][PresetPrinterSnapshotDefaults]")
+{
+    preset_lifecycle_contracts::ScopedPresetBundle scoped;
+    PresetBundle &bundle = scoped.bundle;
+    bundle.printers.load_preset("", "Fallback Printer", bundle.printers.default_preset().config, false);
+    bundle.prints.load_preset("", "Fallback Process", bundle.prints.default_preset().config, false);
+    bundle.filaments.load_preset("", "Fallback PLA", bundle.filaments.default_preset().config, false);
+    bundle.filaments.set_default_suppressed(true);
+    bundle.printers.select_preset_by_name("Fallback Printer", true);
+    bundle.prints.select_preset_by_name("Fallback Process", true);
+    bundle.filaments.select_preset_by_name("Fallback PLA", true);
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#ABABAB"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour", true)->values = {"stale"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values = {"stale"};
+
+    AppConfig app_config;
+    app_config.set_printer_setting("Fallback Printer", PRESET_PRINT_NAME, "Fallback Process");
+    app_config.set_printer_setting("Fallback Printer", PRESET_FILAMENT_NAME, "Fallback PLA");
+    app_config.set_printer_setting("Fallback Printer", "filament_01", "Ghost PLA");
+    // No filament_colors, filament_multi_colors, or filament_color_types keys: the public
+    // startup path must provide per-slot defaults and resolve the missing slot.
+
+    bundle.update_selections(app_config);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Fallback PLA", "Fallback PLA"});
+    auto *fallback_colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    auto *fallback_multi_colours = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour");
+    auto *fallback_colour_types = bundle.project_config.option<ConfigOptionStrings>("filament_colour_type");
+    REQUIRE(fallback_colours != nullptr);
+    REQUIRE(fallback_multi_colours != nullptr);
+    REQUIRE(fallback_colour_types != nullptr);
+    CHECK(fallback_colours->values == std::vector<std::string>{"#26A69A", "#26A69A"});
+    CHECK(fallback_multi_colours->values == std::vector<std::string>{"#26A69A", "#26A69A"});
+    CHECK(fallback_colour_types->values == std::vector<std::string>{"1", "1"});
+}
