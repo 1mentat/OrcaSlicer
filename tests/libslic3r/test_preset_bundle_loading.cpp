@@ -12386,3 +12386,49 @@ TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[Pres
 }
 
 } // namespace preset_ams_validation_contracts
+
+
+namespace preset_ams_validation_contracts {
+
+TEST_CASE("AMS duplicate validation scopes material identifiers by compatible system printer", "[PresetBundleLoading][PresetAmsValidation8]")
+{
+    const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6);
+    CAPTURE(scenario);
+    AmsValidationFixture fixture;
+    fixture.filament("First").is_system = true;
+    auto &model = fixture.bundle.vendors.at("Contract Vendor").models.emplace_back();
+    model.id = model.name = "Contract Printer";
+    model.variants.emplace_back("0.4");
+    model.default_materials = {"First"};
+    auto &second = fixture.filament("Second");
+    second.is_system = true;
+    bool duplicate = true;
+    if (scenario == 1) { second.filament_id = "distinct"; duplicate = false; }
+    if (scenario == 2) { second.filament_id.clear(); duplicate = false; }
+    if (scenario == 3) { second.is_system = false; duplicate = false; }
+    if (scenario == 4) {
+        auto &library = fixture.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+        library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+        second.vendor = &library;
+        second.config.option<ConfigOptionStrings>("compatible_printers")->values.clear();
+    }
+    if (scenario == 5) {
+        auto &library = fixture.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
+        library.id = library.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
+        second.vendor = &library;
+        second.config.option<ConfigOptionStrings>("compatible_printers")->values.clear();
+        second.m_excluded_from.insert("Contract Printer 0.4 nozzle");
+        duplicate = false;
+    }
+    if (scenario == 6) {
+        Preset *printer = fixture.bundle.printers.find_preset("Contract Printer 0.4 nozzle");
+        REQUIRE(printer != nullptr);
+        printer->is_system = false;
+        duplicate = false;
+    }
+    // The optional check is the only reason this otherwise valid bundle fails.
+    REQUIRE_FALSE(fixture.bundle.has_errors(false));
+    CHECK(fixture.bundle.has_errors(true) == duplicate);
+}
+
+} // namespace preset_ams_validation_contracts
