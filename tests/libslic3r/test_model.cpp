@@ -1246,3 +1246,47 @@ TEST_CASE("Model metadata and plate custom code have explicit current-plate sele
     model.curr_plate_index = 9;
     CHECK(model.get_curr_plate_custom_gcodes().gcodes.empty());
 }
+
+
+namespace model_extended_contracts {
+
+TEST_CASE("Centering can include modifiers while printable-only centering excludes them", "[Model][ModelCentering]")
+{
+    Model model;
+    ModelObject *object = cube_object(model, 10., false);
+    ModelVolume *modifier = object->add_volume(make_cube(4, 4, 4), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(modifier != nullptr);
+    modifier->set_offset(Vec3d(100, 0, 0));
+    REQUIRE(object->add_instance() != nullptr);
+    object->center_around_origin(false);
+    object->invalidate_bounding_box();
+    CHECK_THAT(object->raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(object->full_raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(47., 1e-5));
+    object->center_around_origin(true);
+    CHECK_THAT(object->full_raw_mesh_bounding_box().center().x(), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
+TEST_CASE("Ensure-on-bed respects auto-drop and the negative-Z allowance", "[Model][ModelAutoDrop]")
+{
+    Model model;
+    ModelObject *object = cube_object(model);
+    object->instances.front()->set_offset(Vec3d(0, 0, -5));
+    object->invalidate_bounding_box();
+    object->ensure_on_bed();
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(0., 1e-6));
+    object->instances.front()->set_offset(Vec3d(0, 0, -5));
+    object->invalidate_bounding_box();
+    object->instances.front()->auto_drop = false;
+    object->ensure_on_bed();
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-5., 1e-6));
+    object->instances.front()->auto_drop = true;
+    object->invalidate_bounding_box();
+    object->ensure_on_bed(true);
+    CHECK_THAT(object->min_z(), Catch::Matchers::WithinAbs(-5., 1e-6));
+}
+
+} // namespace model_extended_contracts
