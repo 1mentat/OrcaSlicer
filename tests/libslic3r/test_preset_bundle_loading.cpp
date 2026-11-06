@@ -13052,3 +13052,38 @@ TEST_CASE("PresetBundle removes one user directory after ignoring an empty reque
     load_string_file((bob / "sentinel").string(), contents);
     CHECK(contents == "bob-owned");
 }
+
+TEST_CASE("PresetBundle validates printer, filament, and modified G-code references", "[PresetBundleLoading][PresetProjectValidation]")
+{
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.prints, "Process");
+    Preset &filament = add_inmemory_preset(bundle.filaments, "PLA");
+    filament.inherits().clear();
+    filament.is_system = true;
+    Preset &filament_two = add_inmemory_preset(bundle.filaments, "PETG");
+    filament_two.inherits().clear();
+    filament_two.is_system = true;
+    Preset &printer = add_inmemory_preset(bundle.printers, "Printer");
+    printer.inherits().clear();
+    printer.is_system = true;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"PLA", "PETG"};
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Printer";
+    config.option<ConfigOptionStrings>("inherits_group", true)->values = {"", "", "", ""};
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "", "", ""};
+    std::set<std::string> different;
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_SUCCESS);
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "machine_end_gcode", "", ""};
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_MODIFIED_GCODES);
+    CHECK(different.count("machine_end_gcode") == 1);
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Missing Printer";
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_PRINTER_NOT_FOUND);
+    config.option<ConfigOptionString>("printer_settings_id", true)->value = "Printer";
+    config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = {"", "", "", ""};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"PLA", "Missing Filament"};
+    different.clear();
+    CHECK(bundle.validate_presets("project.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
+}
