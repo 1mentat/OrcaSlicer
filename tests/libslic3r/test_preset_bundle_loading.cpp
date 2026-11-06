@@ -13104,3 +13104,85 @@ TEST_CASE("PresetBundle alias dispatch resolves a distinct material identity and
     CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_PRINT, "Canonical Process") == "Canonical Process");
     CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_INVALID, "literal") == "literal");
 }
+
+
+namespace preset_flush_matrix_contracts {
+namespace {
+
+void set_two_extruder_project(PresetBundle &bundle)
+{
+    add_inmemory_preset(bundle.filaments, "PLA").config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA"};
+    add_inmemory_preset(bundle.filaments, "PETG").config.option<ConfigOptionStrings>("filament_type", true)->values = {"PETG"};
+    bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
+    bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard", "HighFlow"};
+    bundle.project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode", true)->value = PrimeVolumeMode::pvmDefault;
+    bundle.project_config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA", "PETG"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#AA0000", "#00AA00"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values = {"1", "1"};
+    bundle.project_config.option<ConfigOptionInts>("filament_map", true)->values = {1, 2};
+    bundle.project_config.option<ConfigOptionInts>("filament_volume_map", true)->values = {0, 0};
+    bundle.filament_presets = {"PLA", "PETG"};
+}
+
+} // namespace
+} // namespace preset_flush_matrix_contracts
+
+namespace preset_flush_matrix_contracts {
+
+TEST_CASE("flush matrix preserves dimensions and applies per extruder multipliers", "[PresetBundleLoading][PresetFlushMatrix1]")
+{
+    PresetBundle bundle;
+    set_two_extruder_project(bundle);
+    bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values = {10., 20., 30., 40., 50., 60., 70., 80.};
+    bundle.project_config.option<ConfigOptionFloats>("flush_multiplier", true)->values     = {2., 3.};
+    const auto raw                                                                            = bundle.get_full_flush_matrix(false);
+    const auto scaled                                                                         = bundle.get_full_flush_matrix(true);
+    REQUIRE(raw.size() == 2);
+    REQUIRE(scaled.size() == raw.size());
+    for (size_t extruder = 0; extruder < raw.size(); ++extruder) {
+        REQUIRE(raw[extruder].size() == 2);
+        REQUIRE(scaled[extruder].size() == raw[extruder].size());
+        for (size_t from = 0; from < 2; ++from) {
+            REQUIRE(raw[extruder][from].size() == 2);
+            REQUIRE(scaled[extruder][from].size() == 2);
+            for (size_t to = 0; to < 2; ++to) {
+                const float expected = 10.f * float(1 + 4 * extruder + 2 * from + to);
+                CHECK_THAT(raw[extruder][from][to], Catch::Matchers::WithinAbs(expected, 1e-5));
+                CHECK_THAT(scaled[extruder][from][to], Catch::Matchers::WithinAbs(expected * (extruder == 0 ? 2.f : 3.f), 1e-5));
+            }
+        }
+    }
+}
+
+} // namespace preset_flush_matrix_contracts
+
+namespace preset_flush_matrix_contracts {
+
+TEST_CASE("fast purge uses the fast multiplier independently of default multiplier", "[PresetBundleLoading][PresetFlushMatrix2]")
+{
+    PresetBundle bundle;
+    set_two_extruder_project(bundle);
+    bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values  = {4., 8., 12., 16., 20., 24., 28., 32.};
+    bundle.project_config.option<ConfigOptionFloats>("flush_multiplier", true)->values      = {2., 2.};
+    bundle.project_config.option<ConfigOptionFloats>("flush_multiplier_fast", true)->values = {5., 7.};
+    const auto regular                                                                         = bundle.get_full_flush_matrix(true);
+    bundle.project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode", true)->value = PrimeVolumeMode::pvmFast;
+    const auto fast = bundle.get_full_flush_matrix(true);
+    REQUIRE(regular.size() == 2);
+    REQUIRE(fast.size() == 2);
+    for (size_t e = 0; e < 2; ++e) {
+        REQUIRE(regular[e].size() == 2);
+        REQUIRE(fast[e].size() == 2);
+        for (size_t from = 0; from < 2; ++from) {
+            REQUIRE(regular[e][from].size() == 2);
+            REQUIRE(fast[e][from].size() == 2);
+            for (size_t to = 0; to < 2; ++to) {
+                const float volume = 4.f * float(1 + 4 * e + 2 * from + to);
+                CHECK_THAT(regular[e][from][to], Catch::Matchers::WithinAbs(volume * 2.f, 1e-5));
+                CHECK_THAT(fast[e][from][to], Catch::Matchers::WithinAbs(volume * (e == 0 ? 5.f : 7.f), 1e-5));
+            }
+        }
+    }
+}
+
+} // namespace preset_flush_matrix_contracts
