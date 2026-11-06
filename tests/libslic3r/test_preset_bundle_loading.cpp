@@ -12786,3 +12786,23 @@ TEST_CASE("Vendor network and device-tab decisions follow the configured model a
     CHECK_FALSE(bundle.use_bbl_device_tab());
 
 }
+
+TEST_CASE("PresetBundle custom vendor models retain distinct variants", "[PresetBundleLoading][PresetCustomModels]")
+{
+    PresetBundle bundle;
+    Preset &a = add_inmemory_preset(bundle.printers, "Custom A");
+    a.config.option<ConfigOptionString>("printer_model", true)->value = "Maker";
+    a.config.option<ConfigOptionString>("printer_variant", true)->value = "0.4";
+    a.is_system = false;
+    Preset &b = add_inmemory_preset(bundle.printers, "Custom B");
+    b.config.option<ConfigOptionString>("printer_model", true)->value = "Maker";
+    b.config.option<ConfigOptionString>("printer_variant", true)->value = "0.6";
+    b.is_system = false;
+    VendorProfile custom = bundle.get_custom_vendor_models();
+    REQUIRE(custom.id == PRESET_CUSTOM_VENDOR);
+    REQUIRE(custom.models.size() == 1);
+    CHECK(custom.models.front().name == "Maker");
+    CHECK(custom.models.front().variants.size() == 2);
+    CHECK(custom.models.front().variant("0.4") != nullptr);
+    CHECK(custom.models.front().variant("0.6") != nullptr);
+}
