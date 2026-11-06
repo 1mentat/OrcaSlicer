@@ -8553,6 +8553,50 @@ TEST_CASE("BBS foreign import expands nested components into transformed volumes
                Catch::Matchers::WithinAbs(60., 1e-5));
 }
 
+TEST_CASE("BBS foreign import treats a malformed component transform as identity",
+          "[3MF][Bbs3mfComponents][Bbs3mfForeign][Regression]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_nested_foreign_component_archive(archive.string());
+
+    const std::string valid_transform = "transform=\"1 0 0 0 1 0 0 0 1 10 0 0\"";
+    const std::string malformed_transform = "transform=\"1 0 0 0 1 0 0 0 1 10 0\"";
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", valid_transform,
+                                 malformed_transform));
+
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    CHECK(model_xml.find(malformed_transform) != std::string::npos);
+    CHECK(model_xml.find("transform=\"1 0 0 0 1 0 0 0 1 20 0 0\"") != std::string::npos);
+    CHECK(model_xml.find("transform=\"1 0 0 0 1 0 0 0 1 -20 0 0\"") != std::string::npos);
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 2);
+
+    const auto find_object_with_volumes = [&loaded](size_t count) {
+        return std::find_if(loaded.objects.begin(), loaded.objects.end(),
+                            [count](const ModelObject *object) {
+                                return object != nullptr && object->volumes.size() == count;
+                            });
+    };
+    const auto wrapped_it = find_object_with_volumes(1);
+    const auto assembly_it = find_object_with_volumes(2);
+    REQUIRE(wrapped_it != loaded.objects.end());
+    REQUIRE(assembly_it != loaded.objects.end());
+
+    const BoundingBoxf3 wrapped_box = (*wrapped_it)->bounding_box_exact();
+    CHECK_THAT(double(wrapped_box.min.x()), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(double(wrapped_box.max.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    const BoundingBoxf3 assembly_box = (*assembly_it)->bounding_box_exact();
+    CHECK_THAT(double(assembly_box.min.x()), Catch::Matchers::WithinAbs(-20., 1e-5));
+    CHECK_THAT(double(assembly_box.max.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()),
+               Catch::Matchers::WithinAbs(50., 1e-5));
+}
+
 } // namespace high_yield_bbs_import_contracts
 
 namespace stream_archive_contracts {

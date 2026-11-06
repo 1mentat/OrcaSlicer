@@ -928,6 +928,11 @@ reachability and mutation kills require native validation.
 named object/volume identities, analytic mesh volumes, and world placements.
 `bbs_restore_graph.json` challenges the wrapper, child, and marker remapping.
 
+`[Bbs3mfComponents]` checks world bounds for nested foreign 3MF components,
+including identity fallback when one transform has only 11 of the required 12
+values while valid sibling transforms remain active. Its targeted mutation is
+in `bbs3mf_component_transform.json`.
+
 `[MixedBBLLabels]` checks ordered BBL/Marlin object boundaries across mixed
 sublayers, the encoded single-instance BBL label, and conserved deposition.
 Marlin object definitions are validated separately from body boundaries.

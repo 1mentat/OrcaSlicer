@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Malformed foreign 3MF component transforms must fall back to identity without changing valid sibling transforms.",
+  "mutants": [
+    {
+      "id": "bbs3mf-eleven-value-component-keeps-translation",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "anchor_line": 642,
+      "old": "    if (size != 12)\n        // invalid data, return identity matrix\n        return ret;",
+      "new": "    if (size != 12) {\n        if (size == 11)\n            ret.translation().x() = 10.;\n        return ret;\n    }",
+      "expected_matches": 1,
+      "test_filter": "Bbs3mfComponents",
+      "description": "An eleven-value transform must not retain its x translation; the malformed fixture's wrapped and assembly bounds detect this while the valid-transform case remains green."
+    }
+  ]
+}
