@@ -1,3 +1,6 @@
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/TexturePainting.hpp"
 #include <boost/filesystem/operations.hpp>
@@ -2112,6 +2115,138 @@ TEST_CASE("AMF inch units are reported while preserving source coordinates", "[M
     REQUIRE(model.objects.front()->volumes.front() != nullptr);
     CHECK(is_inches);
     model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d::Ones(), 1e-5);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+namespace {
+
+void store_archive(const std::string& path)
+{
+    ScopedTemporaryDir backup("orca_model_import_store");
+    Model model;
+    ModelObject* object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name        = "archive-cube";
+    REQUIRE(object->add_volume(make_cube(10., 20., 30.)) != nullptr);
+    REQUIRE(object->add_instance() != nullptr);
+
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    plate.plate_name  = "Import fixture";
+
+    StoreParams params;
+    params.path   = path;
+    params.model  = &model;
+    params.config = &config;
+    params.plate_data_list.push_back(&plate);
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+Model read_archive(const std::string& path, En3mfType& type, LoadStrategy options = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    return Model::read_from_archive(path, &config, &substitutions, type, options, &plates, &presets, &version);
+}
+
+} // namespace
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_file imports a generated BBS archive with model options", "[Model][ModelImport][Archive][ModelArchiveFileOptions]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_read");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    bool is_bbl = false;
+    Semver version;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_file(archive.string(), &config, &substitutions,
+                                                  LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances,
+                                                  &plates, &presets, &is_bbl, &version));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+    CHECK(model.objects.front()->input_file == archive.string());
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_file preserves an archive's explicit instance without adding another", "[Model][ModelImport][Archive][ModelArchiveFileInstance]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_no_instances");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    Model model;
+    REQUIRE_NOTHROW(
+        model = Model::read_from_file(archive.string(), &config, &substitutions, LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                                      &plates, &presets));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    CHECK(model.objects.front()->instances.size() == 1);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_archive identifies the generated archive origin and restores geometry", "[Model][ModelImport][Archive][ModelArchiveOrigin]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_archive");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    En3mfType type = En3mfType::From_Other;
+    Model model;
+    REQUIRE_NOTHROW(model = read_archive(archive.string(), type,
+                                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model_bounds_contracts::check_vec3d(model.objects.front()->raw_mesh_bounding_box().size(), Vec3d(10., 20., 30.), 1e-5);
+    CHECK(type == En3mfType::From_Orca);
+    CHECK(model.objects.front()->input_file == archive.string());
 }
 
 } // namespace model_import_contracts
