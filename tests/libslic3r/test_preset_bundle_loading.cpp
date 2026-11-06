@@ -11814,3 +11814,80 @@ TEST_CASE("AMS placeholder merge fills slots beyond the existing project selecti
 }
 
 } // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS color-only index synchronization preserves names and mapped multi-colors",
+          "[PresetBundleLoading][PresetAmsMappedColors]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"PLA selected", "PETG selected"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#101010", "PLA", "A", "0", true, false, {"#101010", "#202020"}));
+    bundle.filament_ams_list.emplace(1, tray("PETG-ID", "#303030", "PETG", "A", "1", true, false, {"#303030"}));
+    std::map<int, AMSMapInfo> maps{{0, {"A", "1"}}, {1, {"A", "0"}}};
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    merge.merges = {{0, 1}};
+    REQUIRE_FALSE(merge.is_empty());
+    bundle.sync_ams_list(unknowns, true, maps, false, merge, true);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"PLA selected", "PETG selected"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#303030", "#101010"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colour")->values ==
+          std::vector<std::string>{"#303030", "#101010 #202020"});
+    CHECK(bundle.ams_multi_color_filment == std::vector<std::vector<std::string>>{{"#303030"}, {"#101010", "#202020"}});
+    CHECK(merge.is_empty());
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS color-only synchronization falls back to tray order without a map",
+          "[PresetBundleLoading][PresetAmsUnmappedColors]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    project_slots(bundle, {"A", "B"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#111111", "PLA", "A", "0"));
+    bundle.filament_ams_list.emplace(1, tray("PLA-ID", "#222222", "PLA", "A", "1"));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge, true);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"A", "B"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#111111", "#222222"});
+}
+
+} // namespace preset_ams_sync_contracts
+
+namespace preset_ams_sync_contracts {
+
+TEST_CASE("AMS color-only sync falls back to tray indices when a supplied map does not match", "[PresetBundleLoading][PresetAmsUnmatchedMapColors]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "pla-id", "PLA");
+    project_slots(bundle, {"PLA A", "PLA B"}, {"#AAAAAA", "#BBBBBB"});
+    bundle.project_config.option<ConfigOptionStrings>("filament_multi_colour")->values = {"#AAAAAA #AA0000", "#BBBBBB"};
+    bundle.filament_ams_list.emplace(0, tray("pla-id", "#112233", "PLA", "A", "0", true, false, {"#112233", "#334455"}));
+    bundle.filament_ams_list.emplace(1, tray("pla-id", "#445566", "PLA", "A", "1", true, false, {"#445566"}));
+    std::map<int, AMSMapInfo> maps{{0, {"wrong", "slot"}}};
+
+    std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+    MergeFilamentInfo merge;
+    merge.merges = {{0, 1}};
+    REQUIRE_FALSE(merge.is_empty());
+    bundle.sync_ams_list(unknowns, true, maps, false, merge, true);
+
+    CHECK(bundle.filament_presets == std::vector<std::string>{"PLA A", "PLA B"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#112233", "#445566"});
+    CHECK(bundle.ams_multi_color_filment == std::vector<std::vector<std::string>>{{"#112233", "#334455"}, {"#445566"}});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colour")->values ==
+          std::vector<std::string>{"#112233 #334455", "#445566"});
+    CHECK(merge.is_empty());
+}
+
+} // namespace preset_ams_sync_contracts
