@@ -862,7 +862,9 @@ void Model::duplicate_objects_grid(size_t x, size_t y, coordf_t dist)
     ModelObject* object = this->objects.front();
     object->clear_instances();
 
-    Vec3d ext_size = object->bounding_box_exact().size() + dist * Vec3d::Ones();
+    // Copies below use default instance transforms, so their spacing comes
+    // from the part geometry even after the previous instances are cleared.
+    Vec3d ext_size = object->raw_mesh_bounding_box().size() + dist * Vec3d::Ones();
 
     for (size_t x_copy = 1; x_copy <= x; ++x_copy) {
         for (size_t y_copy = 1; y_copy <= y; ++y_copy) {
