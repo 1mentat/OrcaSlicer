@@ -3384,3 +3384,214 @@ TEST_CASE("Splitting a multi-volume model copies per-volume facet state and conf
 }
 
 } // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+namespace {
+
+struct FacetAreaCentroid {
+    double area { 0. };
+    Vec3d  centroid { Vec3d::Zero() };
+};
+
+
+FacetAreaCentroid facet_area_centroid(const indexed_triangle_set &its)
+{
+    FacetAreaCentroid result;
+    for (const Vec3f &vertex : its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const Vec3i32 &face : its.indices) {
+        for (int corner = 0; corner < 3; ++corner) {
+            REQUIRE(face[corner] >= 0);
+            REQUIRE(static_cast<size_t>(face[corner]) < its.vertices.size());
+        }
+        const Vec3d a = its.vertices[face[0]].cast<double>();
+        const Vec3d b = its.vertices[face[1]].cast<double>();
+        const Vec3d c = its.vertices[face[2]].cast<double>();
+        const double area = (b - a).cross(c - a).norm() * 0.5;
+        result.area += area;
+        result.centroid += area * (a + b + c) / 3.;
+    }
+    if (result.area > 0.)
+        result.centroid /= result.area;
+    return result;
+}
+
+double triangle_area(const std::array<Vec3f, 3> &points)
+{
+    return (points[1] - points[0]).cross(points[2] - points[0]).norm() * 0.5;
+}
+
+} // namespace
+} // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("OBJ vertex colors assign semantic regions to filament facets", "[Model][ModelPaintGeometry3][ModelGapContracts]")
+{
+    auto check_triangle = [](const std::array<Vec3f, 3> &points, const std::array<unsigned char, 3> &colors) {
+        CAPTURE(colors[0], colors[1], colors[2]);
+        indexed_triangle_set its;
+        its.vertices.assign(points.begin(), points.end());
+        its.indices.emplace_back(0, 1, 2);
+        std::vector<unsigned char> vertex_colors(colors.begin(), colors.end());
+
+        Model model;
+        ModelObject *object = model.add_object();
+        REQUIRE(object != nullptr);
+        ModelVolume *volume = object->add_volume(TriangleMesh(std::move(its)), ModelVolumeType::MODEL_PART, false);
+        REQUIRE(volume != nullptr);
+        REQUIRE(facet_area_centroid(volume->mesh().its).area > 0.);
+        REQUIRE(Model::obj_import_vertex_color_deal(vertex_colors, 1, &model));
+        REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+        CHECK(object->config.extruder() == 1);
+        REQUIRE(dynamic_cast<const ConfigOptionInt *>(volume->config.option("extruder")) != nullptr);
+        CHECK(volume->config.extruder() == 1);
+
+        if (colors[0] <= 1 && colors[1] <= 1 && colors[2] <= 1) {
+            CHECK_FALSE(volume->is_mm_painted());
+            CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2).indices.empty());
+            return;
+        }
+
+        const double source_area = triangle_area(points);
+        auto state = [&](EnforcerBlockerType type) {
+            return facet_area_centroid(volume->mmu_segmentation_facets.get_facets(*volume, type));
+        };
+        auto check_region_corners = [&](unsigned char color) {
+            const indexed_triangle_set facets =
+                volume->mmu_segmentation_facets.get_facets(*volume, static_cast<EnforcerBlockerType>(color));
+            const auto color_state = facet_area_centroid(facets);
+            REQUIRE(color_state.area > 0.);
+            std::array<bool, 3> includes_corner{};
+            for (const Vec3i32 &triangle : facets.indices)
+                for (int index = 0; index < 3; ++index) {
+                    const Vec3d vertex = facets.vertices[triangle[index]].cast<double>();
+                    for (size_t corner = 0; corner < points.size(); ++corner)
+                        if ((vertex - points[corner].cast<double>()).norm() <= 1e-5)
+                            includes_corner[corner] = true;
+                }
+            for (size_t corner = 0; corner < points.size(); ++corner) {
+                if (colors[corner] == color)
+                    CHECK(includes_corner[corner]);
+                else
+                    CHECK_FALSE(includes_corner[corner]);
+            }
+        };
+
+        if (colors[0] == colors[1] && colors[1] == colors[2]) {
+            const auto colored = state(static_cast<EnforcerBlockerType>(colors[0]));
+            CHECK_THAT(colored.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+            for (int extruder = 2; extruder <= 4; ++extruder)
+                if (extruder != colors[0])
+                    CHECK_THAT(state(static_cast<EnforcerBlockerType>(extruder)).area,
+                               Catch::Matchers::WithinAbs(0., 1e-9));
+            return;
+        }
+
+        if (colors[0] != colors[1] && colors[1] != colors[2] && colors[0] != colors[2]) {
+            FacetAreaCentroid total;
+            for (size_t corner = 0; corner < 3; ++corner) {
+                const auto color_state = state(static_cast<EnforcerBlockerType>(colors[corner]));
+                REQUIRE(color_state.area > 0.);
+                total.area += color_state.area;
+                check_region_corners(colors[corner]);
+            }
+            CHECK_THAT(total.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+            return;
+        }
+
+        size_t singleton_corner = 0;
+        if (colors[0] == colors[1]) singleton_corner = 2;
+        else if (colors[1] == colors[2]) singleton_corner = 0;
+        else singleton_corner = 1;
+        unsigned char singleton_color = colors[singleton_corner];
+        unsigned char repeated_color = colors[(singleton_corner + 1) % 3];
+        const auto singleton = state(static_cast<EnforcerBlockerType>(singleton_color));
+        const auto repeated = state(static_cast<EnforcerBlockerType>(repeated_color));
+        REQUIRE(singleton.area > 0.);
+        REQUIRE(repeated.area > 0.);
+        check_region_corners(singleton_color);
+        check_region_corners(repeated_color);
+        CHECK(singleton.area < repeated.area);
+        CHECK_THAT(singleton.area + repeated.area, Catch::Matchers::WithinAbs(source_area, 1e-5));
+        CHECK_THAT(state(EnforcerBlockerType::Extruder4).area, Catch::Matchers::WithinAbs(0., 1e-9));
+    };
+
+    const std::array<Vec3f, 3> acute_triangle{ Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(0.4f, 1.4f, 0.f) };
+    check_triangle(acute_triangle, { 1, 1, 1 });
+    check_triangle(acute_triangle, { 0, 0, 0 });
+    check_triangle(acute_triangle, { 4, 4, 4 });
+    check_triangle(acute_triangle, { 3, 2, 2 });
+    check_triangle(acute_triangle, { 2, 3, 2 });
+    check_triangle(acute_triangle, { 2, 2, 3 });
+
+    const std::array<std::array<Vec3f, 3>, 3> distinct_shapes{{
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(-0.2f, 1.5f, 0.f) },
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(2.2f, 1.5f, 0.f) },
+        { Vec3f(0.f, 0.f, 0.f), Vec3f(2.f, 0.f, 0.f), Vec3f(1.f, -0.8f, 0.f) }
+    }};
+    // The three fixtures put the obtuse corner at indices 0, 1, and 2 respectively.
+    for (const auto &shape : distinct_shapes)
+        check_triangle(shape, { 2, 3, 4 });
+}
+
+} // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("OBJ face colors leave unpainted facets in the default state", "[Model][ModelPaintGeometry8][ModelGapContracts]")
+{
+    TriangleMesh source = make_cube(2., 2., 2.);
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(TriangleMesh(source), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    REQUIRE(facet_area_centroid(volume->mesh().its).area > 0.);
+    REQUIRE(source.its.indices.size() >= 2);
+    REQUIRE(facet_area_centroid(source.its).area > 0.);
+    std::vector<unsigned char> face_colors(source.its.indices.size(), 0);
+    std::vector<Vec3d> expected_painted_centroids;
+    double expected_painted_area = 0.;
+    for (size_t face_idx = 0; face_idx < face_colors.size(); face_idx += 2) {
+        face_colors[face_idx] = 2;
+        const Vec3i32 face = source.its.indices[face_idx];
+        const Vec3d a = source.its.vertices[face[0]].cast<double>();
+        const Vec3d b = source.its.vertices[face[1]].cast<double>();
+        const Vec3d c = source.its.vertices[face[2]].cast<double>();
+        expected_painted_area += (b - a).cross(c - a).norm() * 0.5;
+        expected_painted_centroids.emplace_back((a + b + c) / 3.);
+    }
+
+    REQUIRE(expected_painted_area > 0.);
+    REQUIRE(Model::obj_import_face_color_deal(face_colors, 1, &model));
+
+    const indexed_triangle_set painted_facets =
+        volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2);
+    const auto painted = facet_area_centroid(painted_facets);
+    CHECK_THAT(painted.area, Catch::Matchers::WithinAbs(expected_painted_area, 1e-5));
+    CHECK(painted.area < facet_area_centroid(source.its).area);
+    std::vector<bool> matched(expected_painted_centroids.size(), false);
+    for (const Vec3i32 &face : painted_facets.indices) {
+        const Vec3d a = painted_facets.vertices[face[0]].cast<double>();
+        const Vec3d b = painted_facets.vertices[face[1]].cast<double>();
+        const Vec3d c = painted_facets.vertices[face[2]].cast<double>();
+        const Vec3d center = (a + b + c) / 3.;
+        size_t matched_index = expected_painted_centroids.size();
+        for (size_t i = 0; i < expected_painted_centroids.size(); ++i)
+            if ((center - expected_painted_centroids[i]).norm() < 1e-5) {
+                matched_index = i;
+                break;
+            }
+        REQUIRE(matched_index < expected_painted_centroids.size());
+        CHECK_FALSE(matched[matched_index]);
+        matched[matched_index] = true;
+    }
+    CHECK(std::all_of(matched.begin(), matched.end(), [](bool value) { return value; }));
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+    CHECK(object->config.extruder() == 1);
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(volume->config.option("extruder")) != nullptr);
+    CHECK(volume->config.extruder() == 1);
+}
+
+} // namespace model_painted_geometry_contracts
