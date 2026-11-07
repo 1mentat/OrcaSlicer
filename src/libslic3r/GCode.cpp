@@ -8477,6 +8477,8 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
     std::string                                   gcode;
     std::vector<const ExtrusionEntity*>           extrusions;
     std::vector<std::unique_ptr<ExtrusionEntity>> reversed;
+    std::vector<const ExtrusionEntity*>           children;
+    std::vector<std::unique_ptr<ExtrusionEntity>> children_reversed;
     const char*                                   extrusion_name = ironing ? "ironing" : "infill";
     for (const ObjectByExtruder::Island::Region &region : by_region)
         if (! region.infills.empty()) {
@@ -8494,12 +8496,20 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                 for (const ExtrusionEntity *fill : extrusions) {
                     ExtrusionEntity *own_copy = next_reversed != reversed.end() && next_reversed->get() == fill ? (next_reversed++)->get() : nullptr;
                     auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
-                    if (eec) {
+                    if (eec && own_copy) {
                         // A reversed copy is owned here and can be moved from.
-                        ExtrusionEntityCollection chained = own_copy ? std::move(static_cast<ExtrusionEntityCollection&>(*own_copy)) : ExtrusionEntityCollection(*eec);
+                        ExtrusionEntityCollection chained = std::move(static_cast<ExtrusionEntityCollection&>(*own_copy));
                         if (!chained.no_sort)
                             chain_and_reorder_extrusion_entities(chained.entities, m_last_pos.to_point());
                         for (ExtrusionEntity *ee : chained.entities)
+                            gcode += this->extrude_entity(*ee, extrusion_name);
+                    } else if (eec) {
+                        // Chain the collection's entities without copying it; only the reversed ones are cloned.
+                        children.assign(eec->entities.begin(), eec->entities.end());
+                        children_reversed.clear();
+                        if (!eec->no_sort)
+                            chain_and_reorder_extrusion_entities(children, m_last_pos.to_point(), children_reversed);
+                        for (const ExtrusionEntity *ee : children)
                             gcode += this->extrude_entity(*ee, extrusion_name);
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
