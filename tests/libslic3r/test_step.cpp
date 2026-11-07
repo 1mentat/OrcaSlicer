@@ -58,6 +58,23 @@ TEST_CASE("Part names with multi-byte UTF-8 survive import", "[Step]")
     CHECK(object->volumes[2]->name == "bracket");
 }
 
+TEST_CASE("STEP triangle estimators agree for a loaded assembly", "[Step]")
+{
+    const std::string path = TEST_DATA_DIR PATH_SEPARATOR "utf8_part_names.step";
+    constexpr double linear_deflection = 0.003;
+    constexpr double angle_deflection = 0.5;
+
+    Step step(path);
+    REQUIRE(step.load() == Step::Step_Status::LOAD_SUCCESS);
+
+    const unsigned int serial_triangle_num = step.get_triangle_num(linear_deflection, angle_deflection);
+    const unsigned int parallel_triangle_num = step.get_triangle_num_tbb(linear_deflection, angle_deflection);
+
+    CHECK(serial_triangle_num > 0);
+    CHECK(parallel_triangle_num > 0);
+    CHECK(parallel_triangle_num == serial_triangle_num);
+}
+
 TEST_CASE("A security classification assignment does not crash import", "[Step]")
 {
     const std::string path = std::string(TEST_DATA_DIR) + PATH_SEPARATOR "security_classification.step";
