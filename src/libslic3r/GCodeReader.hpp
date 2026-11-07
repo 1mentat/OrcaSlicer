@@ -93,10 +93,9 @@ public:
         }
 
         static std::string extract_cmd(const std::string& gcode_line) {
-            GCodeLine temp;
-            temp.m_raw = gcode_line;
-            const std::string_view cmd = temp.cmd();
-            return { cmd.begin(), cmd.end() };
+            // The same word cmd() returns, read without copying the line.
+            const char *cmd = GCodeReader::skip_whitespaces(gcode_line.c_str());
+            return std::string(cmd, GCodeReader::skip_word(cmd) - cmd);
         }
     private:
         std::string      m_raw;
