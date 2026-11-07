@@ -7940,7 +7940,7 @@ TEST_CASE("DynamicConfig erase removes one key and reports whether it existed", 
 
 }
 
-TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts][!shouldfail]")
+TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts]")
 {
     using namespace main_merge_support_test_config;
 
@@ -7950,8 +7950,7 @@ TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing
     source.set_key_value("count", new ConfigOptionInt(12));
 
     target += source;
-    // Known bug: the lvalue operator+= only adds missing keys and keeps the old value of existing
-    // ones; it should overwrite them with the source value, as the rvalue overload does.
+    // The lvalue overload must replace existing values, as the rvalue overload does.
     CHECK(target.opt<ConfigOptionInt>("count")->value == 12);
 
 }

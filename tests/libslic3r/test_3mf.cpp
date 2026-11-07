@@ -12342,14 +12342,12 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
     }
 }
 
-TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata][!shouldfail]")
+TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
 {
     const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
                                "rev 7"};
     const auto metadata = round_trip(values);
-    // Known bug: the importer's xml_unescape() decodes &amp; &lt; &gt; but not &quot; or &apos;, so
-    // quotes come back as entities; fixed by the follow-up fix PR. The unquoted entry is not
-    // affected and is checked above.
+    // Quote entities must decode as the original metadata after the export/import round trip.
     CHECK(metadata.at("MakerLab") == values.maker_name);
     CHECK(metadata.at("MakerLabVersion") == values.maker_version);
     CHECK(metadata.at("MakerWorkflow") == values.workflow);
@@ -13680,23 +13678,16 @@ TEST_CASE("BBS plate thumbnails keep the small preview size for source blocks wi
     CHECK(small_preview_has_expected_size(small_preview(make_pattern(384, 256))));
 }
 
-// Known bug: the downsampler steps the source by (sw wide, sh tall) blocks but indexes the small
-// image with `i / sw` and `j / sh` (the divisors are swapped), so for non-square blocks (3 x 2 pixels
-// here) blocks land on the wrong small pixels: pixel (0, 0) holds a neighbouring block's average.
-// Fixed by a follow-up fix PR. The previous case asserts the size precondition; if it does not hold
-// here the test runs no assertion and is reported as an unexpected pass.
-TEST_CASE("BBS plate thumbnails downsample wide source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample][!shouldfail]")
+// Non-square source blocks must map to the corresponding small-preview pixels.
+TEST_CASE("BBS plate thumbnails downsample wide source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample]")
 {
     const png::ImageColorscale decoded = small_preview(make_pattern(384, 256));
-    if (!small_preview_has_expected_size(decoded))
-        return;
+    REQUIRE(small_preview_has_expected_size(decoded));
     check_small_preview_pixels(decoded);
 }
 
-// Known bug: with 2 x 3 pixel blocks (256 x 384) the same swapped indexes (`i / sw` runs up to 190,
-// past the 128 rows of the small image) write beyond the small pixel buffer, a heap overflow that
-// crashes the process here; hidden so the suite does not abort. Fixed by the same follow-up PR.
-TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small preview", "[.][3MF][Bbs3mfThumbnailDownsample][Bbs3mfThumbnailDownsampleTall]")
+// Tall blocks exercise the other non-square indexing direction, previously prone to overflow.
+TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample][Bbs3mfThumbnailDownsampleTall]")
 {
     const png::ImageColorscale decoded = small_preview(make_pattern(256, 384));
     REQUIRE(small_preview_has_expected_size(decoded));

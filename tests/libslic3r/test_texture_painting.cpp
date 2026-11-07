@@ -612,7 +612,7 @@ void require_red_blue_by_side(const PaintedMesh &mesh)
 
 } // namespace
 
-TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh mesh = two_material_faces();
     mesh.textures[0] = solid_texture(1, 2, { 255, 0, 0 });
