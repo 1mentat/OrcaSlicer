@@ -601,3 +601,37 @@ TEST_CASE("Texture atlas decodes encoded PNGs for separate material rows", "[Tex
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+namespace {
+
+TextureImage rgba_texture(RGB rgb, unsigned char alpha)
+{
+    TextureImage image;
+    image.width = 1;
+    image.height = 1;
+    image.channels = 4;
+    image.data = {
+        static_cast<unsigned char>(rgb[0]),
+        static_cast<unsigned char>(rgb[1]),
+        static_cast<unsigned char>(rgb[2]),
+        alpha,
+    };
+    return image;
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas converts RGBA material textures without using alpha as color", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures = {
+        rgba_texture({ 255, 0, 0 }, 7),
+        rgba_texture({ 0, 0, 255 }, 231),
+    };
+
+    const PaintedMesh output = paint(mesh);
+    require_red_blue_by_side(output);
+}
+
+} // namespace texture_atlas_contracts
