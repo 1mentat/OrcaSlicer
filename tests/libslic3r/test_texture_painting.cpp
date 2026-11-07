@@ -502,3 +502,56 @@ TEST_CASE("Texture atlas keeps encoded PNG cancellation before conversion", "[Te
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+namespace {
+
+double face_center_x(const PaintedMesh &mesh, size_t face_id)
+{
+    REQUIRE(face_id < mesh.indices.size());
+    const auto &f = mesh.indices[face_id];
+    for (int index : f) {
+        REQUIRE(index >= 0);
+        REQUIRE(static_cast<std::size_t>(index) < mesh.vertices.size());
+        for (float coordinate : mesh.vertices[static_cast<std::size_t>(index)])
+            REQUIRE(std::isfinite(coordinate));
+    }
+    const double x = (mesh.vertices[f[0]][0] + mesh.vertices[f[1]][0] + mesh.vertices[f[2]][0]) / 3.;
+    REQUIRE(std::isfinite(x));
+    return x;
+}
+
+const RGB *color_near_x(const PaintedMesh &mesh, double x, double tolerance = 0.75)
+{
+    require_valid_painted_geometry(mesh);
+    REQUIRE(std::isfinite(x));
+    REQUIRE(std::isfinite(tolerance));
+    REQUIRE(tolerance > 0.);
+    for (size_t i = 0; i < mesh.face_colors.size(); ++i)
+        if (std::abs(face_center_x(mesh, i) - x) < tolerance)
+            return &mesh.face_colors[i];
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = solid_texture(1, 2, { 255, 0, 0 });
+    mesh.textures[1] = solid_texture(1, 2, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.99f });
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    const RGB *right = color_near_x(output, 10. / 3.);
+    REQUIRE(left != nullptr);
+    REQUIRE(right != nullptr);
+    CHECK((*left)[0] > 180);
+    CHECK((*left)[1] < 40);
+    CHECK((*left)[2] < 40);
+    CHECK((*right)[0] < 40);
+    CHECK((*right)[1] < 40);
+    CHECK((*right)[2] > 180);
+}
+
+} // namespace texture_atlas_contracts
