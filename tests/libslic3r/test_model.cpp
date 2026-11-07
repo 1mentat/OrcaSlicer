@@ -3665,3 +3665,38 @@ TEST_CASE("Direct meter conversion scales the volume and clears its offset", "[M
 }
 
 } // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("Model fuzzy-skin query follows painted volume state", "[Model][ModelPaintGeometry6][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *plain = model.add_object();
+    ModelObject *painted = model.add_object();
+    REQUIRE(plain != nullptr);
+    REQUIRE(painted != nullptr);
+    REQUIRE(plain->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelVolume *painted_volume = painted->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(painted_volume != nullptr);
+
+    CHECK_FALSE(model.is_fuzzy_skin_painted());
+    REQUIRE(painted_volume->mesh().its.indices.size() >= 1);
+    REQUIRE_FALSE(painted_volume->mesh().its.vertices.empty());
+    for (const Vec3f &vertex : painted_volume->mesh().its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const Vec3i32 &face : painted_volume->mesh().its.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE(static_cast<std::size_t>(face.maxCoeff()) < painted_volume->mesh().its.vertices.size());
+    }
+    TriangleSelector selector(painted_volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::FUZZY_SKIN);
+    REQUIRE(painted_volume->fuzzy_skin_facets.set(selector));
+    CHECK(painted->is_fuzzy_skin_painted());
+    CHECK(model.is_fuzzy_skin_painted());
+
+    painted_volume->reset_extra_facets();
+    CHECK_FALSE(painted->is_fuzzy_skin_painted());
+    CHECK_FALSE(model.is_fuzzy_skin_painted());
+}
+
+} // namespace model_painted_geometry_contracts
