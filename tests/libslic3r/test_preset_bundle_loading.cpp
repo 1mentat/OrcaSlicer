@@ -12556,6 +12556,7 @@ TEST_CASE("save_changes_for_preset reverts unselected edits and embeds the saved
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
 
     ScopedTemporaryDir temp("preset-workflow-save");
     ScopedDataDir data(temp.path() / "data");
@@ -13224,6 +13225,7 @@ TEST_CASE("full SLA config merges selected profiles and marks SLA technology", "
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     auto printer_config                                                               = fx.bundle.printers.default_preset().config;
@@ -13350,6 +13352,7 @@ TEST_CASE("Full FFF configuration records selected system filament changes", "[P
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     add_filament(fx, "System PLA", "SYSTEM-PLA", "PLA", true, true);
@@ -13425,6 +13428,8 @@ TEST_CASE("current config export writes the selected user profiles and a fresh b
           "[Preset][Bundle][PresetExport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_user_selection;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
 
     ScopedTemporaryDir temp("preset-workflow-export");
     ScopedDataDir data(temp.path() / "data");
@@ -13466,6 +13471,7 @@ TEST_CASE("current config export chooses edited values only when requested", "[P
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
 
     ScopedTemporaryDir temp("preset-workflow-export-edited");
     ScopedDataDir data(temp.path() / "data");
@@ -13499,6 +13505,9 @@ TEST_CASE("current config export chooses edited values only when requested", "[P
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_user_selection;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_exported_json;
 
     ScopedTemporaryDir temp("preset-workflow-export-edited");
     ScopedDataDir data(temp.path() / "data");
@@ -13525,6 +13534,8 @@ TEST_CASE("current config export asks about each existing file and honors a diff
           "[Preset][Bundle][PresetExport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_user_selection;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_exported_json;
 
     ScopedTemporaryDir temp("preset-workflow-overwrite");
     ScopedDataDir data(temp.path() / "data");
@@ -13573,6 +13584,9 @@ TEST_CASE("current config export asks about each existing file and honors a diff
 TEST_CASE("current config export skips an existing file when the answer is 2", "[Preset][Bundle][PresetExport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_exported_json;
 
     ScopedTemporaryDir temp("preset-workflow-overwrite-two");
     ScopedDataDir data(temp.path() / "data");
@@ -13614,6 +13628,8 @@ TEST_CASE("current config export omits built-in default selections", "[Preset][B
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
 
     ScopedTemporaryDir temp("preset-workflow-export-default");
     ScopedDataDir data(temp.path() / "data");
@@ -13644,6 +13660,11 @@ TEST_CASE("JSON preset import installs print, printer and filament presets into 
           "[Preset][Bundle][PresetImport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     ScopedTemporaryDir temp("preset-workflow-import");
     ScopedDataDir data(temp.path() / "data");
@@ -13699,6 +13720,10 @@ TEST_CASE("JSON preset import skips a profile without a settings id key and impo
           "[Preset][Bundle][PresetImport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_process_json;
 
     ScopedTemporaryDir temp("preset-workflow-import-no-id");
     ScopedDataDir data(temp.path() / "data");
@@ -13733,6 +13758,8 @@ TEST_CASE("JSON preset import ignores a file with another extension and imports 
           "[Preset][Bundle][PresetImport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_process_json;
 
     ScopedTemporaryDir temp("preset-workflow-import-extension");
     ScopedDataDir data(temp.path() / "data");
@@ -13762,6 +13789,10 @@ TEST_CASE("JSON preset import rejects a name outside the preset directory and wr
           "[Preset][Bundle][PresetImport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_process_json;
 
     ScopedTemporaryDir temp("preset-workflow-import-confinement");
     ScopedDataDir data(temp.path() / "data");
@@ -13789,6 +13820,8 @@ TEST_CASE("JSON preset import asks before replacing an installed profile and hon
           "[Preset][Bundle][PresetImport]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_process_json;
 
     ScopedTemporaryDir temp("preset-workflow-import-overwrite");
     ScopedDataDir data(temp.path() / "data");
@@ -13850,6 +13883,11 @@ TEST_CASE("JSON preset import asks before replacing an installed profile and hon
 TEST_CASE("Preset bundle ZIP import preserves bundle identity and per-type files", "[Preset][Bundle][PresetBundleImport][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::confirm_all;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     ScopedTemporaryDir temp("preset-workflow-bundle-import");
     ScopedDataDir      data(temp.path() / "data");
@@ -13938,6 +13976,7 @@ TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved pa
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using testing_branch_support_test_preset_bundle_loading::preset_persistence_contracts::write_inherited_process_json;
 
     ScopedTemporaryDir temp("preset-persistence-json-inheritance");
     ScopedDataDir data(temp.path() / "data");
@@ -13998,6 +14037,7 @@ TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved pa
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     ScopedTemporaryDir temp("preset-persistence-json-inheritance");
     ScopedDataDir data(temp.path() / "data");
@@ -14064,6 +14104,7 @@ TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved pa
 TEST_CASE("Config loading rejects a non-G-code extension even for loadable G-code contents", "[Preset][Bundle][ConfigFileRejection]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_gcode_config;
 
     ScopedTemporaryDir temp("preset-workflow-unsupported-config");
     preset_lifecycle_contracts::ScopedPresetBundle scoped;
@@ -14158,6 +14199,7 @@ TEST_CASE("Vendor profile INI header and model fields are parsed semantically", 
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts::write_text;
 
     ScopedTemporaryDir dir("preset-deep-vendor");
     const fs::path file = dir.path() / "Acme.ini";
@@ -14189,6 +14231,7 @@ TEST_CASE("Vendor profile INI header and model fields are parsed semantically", 
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+        using main_merge_support_test_preset_bundle_loading::preset_workflow_contracts::write_text;
 
     ScopedTemporaryDir dir("preset-deep-vendor");
     const fs::path file = dir.path() / "Acme.ini";
@@ -14228,6 +14271,7 @@ TEST_CASE("Vendor profile INI header and model fields are parsed semantically", 
 TEST_CASE("Vendor INI parsing infers BBL families and rejects a missing version", "[Preset][Vendor][VendorIni]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_workflow_contracts::write_text;
 
     ScopedTemporaryDir dir("preset-deep-vendor-invalid");
     const fs::path file = dir.path() / "BBL.ini";
@@ -14251,6 +14295,9 @@ TEST_CASE("Vendor INI parsing infers BBL families and rejects a missing version"
 TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes lists", "[Preset][Vendor][VendorJson][PresetBundle]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_vendor_model_tree;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_json_vendor;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::only_model;
 
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
@@ -14300,6 +14347,9 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
 TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists", "[Preset][Vendor][VendorJson][VendorJsonSla][PresetBundle]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_vendor_model_tree;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_json_vendor;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::only_model;
 
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
@@ -14330,6 +14380,8 @@ TEST_CASE("JSON vendor malformed lists return normally and retain models with va
           "[Preset][Vendor][VendorJson][VendorJsonMalformed]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_vendor_model_tree;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_json_vendor;
 
     const auto [field, expected_models] = GENERATE(table<std::string, size_t>({
         {"nozzle_diameter", 0u}, {"default_materials", 1u}, {"not_support_bed_type", 1u},
@@ -14368,6 +14420,7 @@ TEST_CASE("External config preserves project settings but filters print-host cre
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using Catch::Matchers::WithinAbs;
 
     DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
     defaults.set_key_value("print_host", new ConfigOptionString("default-host"));
@@ -14586,6 +14639,7 @@ TEST_CASE("External preset override marks an existing profile dirty", "[Preset][
 TEST_CASE("G-code config loading activates an external profile from recognized metadata", "[Preset][ExternalGcodeConfig][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_gcode_config;
 
     ScopedTemporaryDir temp("preset-workflow-gcode");
     const fs::path gcode = temp.path() / "metadata.gcode";
@@ -14610,6 +14664,7 @@ TEST_CASE("G-code config loading activates an external profile from recognized m
 TEST_CASE("External G-code config splits each filament slot into its own source profile", "[Preset][ExternalGcodeConfig][MultiFilament][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_gcode_config;
 
     ScopedTemporaryDir temp("preset-workflow-multi-filament");
     const fs::path gcode = temp.path() / "multi.gcode";
@@ -14668,6 +14723,9 @@ TEST_CASE("External G-code config splits each filament slot into its own source 
 TEST_CASE("local bundle metadata and preset identity survive user loading", "[Preset][LocalBundleReload][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::bundle_metadata;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
 
     ScopedTemporaryDir temp("preset-workflow-local");
     ScopedDataDir data(temp.path() / "data");
@@ -14709,6 +14767,12 @@ TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::read_text;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
+        using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::subscribed_metadata;
 
     const bool read_only = GENERATE(false, true);
     CAPTURE(read_only);
@@ -14777,6 +14841,11 @@ TEST_CASE("Subscribed bundle reload rebuilds typed preset membership from disk",
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::bundle_metadata;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+        using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     const bool read_only = GENERATE(false, true);
     CAPTURE(read_only);
@@ -14959,6 +15028,7 @@ TEST_CASE("Subscribed bundle reconciliation prunes obsolete typed entries while 
 TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets", "[PresetBundle][PresetBundleSubscribedPrune][PresetBundleWorkflowsExtended]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::bundle_metadata;
 
     ScopedTemporaryDir temp("preset-workflow-subscribed");
     ScopedDataDir data(temp.path() / "data");
@@ -15001,6 +15071,8 @@ TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets"
 TEST_CASE("Subscribed refresh preserves bundle identity while replacing metadata and values", "[PresetBundle][PresetPersistence][PresetBundleSubscribedRefresh]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+    using main_merge_support_test_preset_bundle_loading::preset_persistence_contracts::refresh_metadata;
+    using main_merge_support_test_preset_bundle_loading::preset_persistence_contracts::refresh_values;
 
     ScopedTemporaryDir temp("preset-persistence-subscribed-refresh");
     ScopedDataDir data(temp.path() / "data");
@@ -15136,6 +15208,7 @@ TEST_CASE("Preset invalid-key removal reports and removes only unknown options",
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using Catch::Matchers::WithinAbs;
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_key_value("preset_deep_unknown", new ConfigOptionString("x"));
@@ -15210,6 +15283,7 @@ TEST_CASE("Preset parent save writes a diff that reload restores over the parent
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using Catch::Matchers::WithinAbs;
 
     ScopedTemporaryDir dir("preset-deep-save");
     Preset parent(Preset::TYPE_PRINT, "Base", false);
@@ -16291,6 +16365,7 @@ TEST_CASE("Cloud sync metadata updates a base and inherited child and reports fr
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     ScopedTemporaryDir dir("preset-extended-sync");
     PresetCollection collection = make_print_collection();
@@ -16451,6 +16526,7 @@ TEST_CASE("Cloud user loading updates newer profiles while preserving dirty loca
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     PresetCollection collection = make_print_collection();
     Preset &local = load_local_preset(collection, "Cloud");
@@ -16513,6 +16589,7 @@ TEST_CASE("Cloud preset timestamp reconciliation preserves local state for stale
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     const long long cloud_time = GENERATE(4LL, 5LL, 0LL);
     ScopedTemporaryDir dir("preset-cloud-timestamp");
@@ -16862,6 +16939,7 @@ TEST_CASE("Removing selected cloud printer and filament restores configured defa
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+        using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     ScopedDataDir data(fx.temp.path());
@@ -17270,6 +17348,7 @@ TEST_CASE("Root filament preset export includes changed and default configuratio
     const auto *default_density = collection.default_preset().config.opt<ConfigOptionFloats>("filament_density");
     REQUIRE(default_density != nullptr);
     const std::string unchanged_density = default_density->serialize();
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     std::map<std::string, std::string> values;
     REQUIRE(collection.get_differed_values_to_update(root, values) == 0);
@@ -17304,6 +17383,7 @@ TEST_CASE("Root filament preset export includes changed and default configuratio
     const auto *default_density = collection.default_preset().config.opt<ConfigOptionFloats>("filament_density");
     REQUIRE(default_density != nullptr);
     const std::string unchanged_density = default_density->serialize();
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     std::map<std::string, std::string> values;
     REQUIRE(collection.get_differed_values_to_update(root, values) == 0);
@@ -17325,6 +17405,8 @@ TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metada
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
@@ -17345,6 +17427,8 @@ TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metada
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -17371,6 +17455,8 @@ TEST_CASE("AMS overwrite serializes multi-color vectors into project configurati
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#000000"});
@@ -17390,6 +17476,8 @@ TEST_CASE("AMS overwrite serializes multi-color vectors into project configurati
 TEST_CASE("AMS synchronization keeps left and right physical trays in map order", "[PresetBundleLoading][PresetAmsPhysicalOrder][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17414,6 +17502,8 @@ TEST_CASE("AMS sync retains the previous preset and reports an unknown material"
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#AAAAAA"});
@@ -17436,6 +17526,8 @@ TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing c
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#AAAAAA"});
@@ -17453,6 +17545,8 @@ TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing c
 TEST_CASE("AMS unknown type uses the longest whole-word generic preset match", "[PresetBundleLoading][PresetAmsGenericType][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PA", "pa-id", "PA");
@@ -17478,6 +17572,8 @@ TEST_CASE("AMS unknown material without generic preset falls back to a compatibl
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "A Incompatible", "incompatible-id", "ABS").is_compatible = false;
     system_filament(bundle, "B User", "user-id", "PLA").is_system = false;
@@ -17502,6 +17598,8 @@ TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing A", "Existing B"}, {"#AAAAAA", "#BBBBBB"});
@@ -17520,6 +17618,8 @@ TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them
 TEST_CASE("AMS placeholder merge fills slots beyond the existing project selection", "[PresetBundleLoading][PresetAmsExtendedPlaceholders][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17545,6 +17645,8 @@ TEST_CASE("AMS color-only index synchronization preserves names and mapped multi
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
@@ -17565,6 +17667,8 @@ TEST_CASE("AMS color-only index synchronization preserves names and mapped multi
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -17593,6 +17697,8 @@ TEST_CASE("AMS color-only synchronization falls back to tray order without a map
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"A", "B"}, {"#000000", "#000000"});
@@ -17611,6 +17717,8 @@ TEST_CASE("AMS color-only synchronization falls back to tray order without a map
 TEST_CASE("AMS color-only sync falls back to tray indices when a supplied map does not match", "[PresetBundleLoading][PresetAmsUnmatchedMapColors][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17639,6 +17747,8 @@ TEST_CASE("AMS mapped synchronization records duplicate reported tray identities
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     // This covers duplicate device reports, including a mapping beyond the initial project slots.
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -17661,6 +17771,8 @@ TEST_CASE("AMS mapped synchronization records duplicate reported tray identities
 TEST_CASE("AMS mapped synchronization leaves unassigned trays out when append is disabled", "[PresetBundleLoading][PresetAmsAppendDisabled]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -17687,6 +17799,8 @@ TEST_CASE("AMS empty-id tray removes its mapping and retains the project slot", 
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#000000"});
@@ -17705,6 +17819,8 @@ TEST_CASE("AMS empty-id tray removes its mapping and retains the project slot", 
 TEST_CASE("AMS mapped sync appends each unmapped tray once when append is enabled", "[PresetBundleLoading][PresetAmsAppendEnabled][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17728,6 +17844,8 @@ TEST_CASE("AMS unmapped trays sharing the selected preset and color are appended
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
     project_slots(bundle, {}, {});
@@ -17747,6 +17865,8 @@ TEST_CASE("AMS unmapped trays sharing the selected preset and color are appended
 TEST_CASE("AMS map merges record all project slots pointing at one physical tray", "[PresetBundleLoading][PresetAmsMergedMapping][PresetBundle][PresetAmsSync]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17769,6 +17889,8 @@ TEST_CASE("AMS empty input preserves existing project names and colors", "[Prese
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     project_slots(bundle, {"Existing"}, {"#ABCDEF"});
     std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
@@ -17784,6 +17906,8 @@ TEST_CASE("AMS empty input preserves existing project names and colors", "[Prese
 TEST_CASE("AMS overwrite preserves valid support selections and clamps out-of-range selections", "[PresetBundleLoading][PresetAmsSupportSelection]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -17805,6 +17929,8 @@ TEST_CASE("AMS overwrite re-appends mixed slots without changing their metadata"
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17837,6 +17963,8 @@ TEST_CASE("AMS overwrite re-appends mixed slots without changing their metadata"
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -17874,6 +18002,8 @@ TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament t
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     VendorProfile& bbl = bundle.vendors["BBL"];
     bbl.id = "BBL";
@@ -17905,6 +18035,8 @@ TEST_CASE("extruder filament information partitions AMS cells by left and right 
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     set_two_extruder_project(fx);
     fx.bundle.filament_ams_list.emplace(0, tray("L", "PLA", "#110000"));
@@ -17920,6 +18052,8 @@ TEST_CASE("extruder filament information partitions AMS cells by left and right 
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
@@ -17950,6 +18084,8 @@ TEST_CASE("Single-extruder configuration returns no AMS extruder groups", "[Pres
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4};
     bundle.filament_ams_list.emplace(0x10000, tray("R", "#001100", "PETG", "0", "0"));
@@ -17960,6 +18096,8 @@ TEST_CASE("Single-extruder configuration returns no AMS extruder groups", "[Pres
 TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots", "[PresetBundleLoading][PresetAmsCombo3][PresetBundle][PresetBundleContracts]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     add_inmemory_preset(bundle.filaments, "TPU").config.option<ConfigOptionStrings>("filament_type", true)->values = {"TPU"};
@@ -17973,6 +18111,8 @@ TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots"
 TEST_CASE("AMS combo ID matching is distinct from generic fallback and preserves unchanged slots", "[PresetBundleLoading][PresetAmsComboMatching]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "fallback-id", "PLA");
@@ -17995,6 +18135,8 @@ TEST_CASE("AMS combo ID matching is distinct from generic fallback and preserves
 TEST_CASE("AMS combo fallback prefers generic material then prior selection then compatible system material", "[PresetBundleLoading][PresetAmsComboFallback][PresetBundle][AmsComboFallback]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     const int scenario = GENERATE(0, 1, 2, 3, 4);
     INFO("fallback scenario=" << scenario);
@@ -18066,6 +18208,8 @@ TEST_CASE("AMS tray temperatures reconcile only the identified compatible user m
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_validation_contracts;
+
     const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6, 7, 8);
     CAPTURE(scenario);
     AmsValidationFixture fixture;
@@ -18099,6 +18243,8 @@ TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[Pres
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_validation_contracts;
+
     const int variant = GENERATE(0, 1, 2, 3);
     CAPTURE(variant);
     AmsValidationFixture fixture;
@@ -18128,6 +18274,8 @@ TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[Pres
 TEST_CASE("AMS duplicate validation scopes material identifiers by compatible system printer", "[PresetBundleLoading][PresetAmsValidation8][PresetBundle][AmsValidation]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_ams_validation_contracts;
 
     const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6);
     CAPTURE(scenario);
@@ -18396,6 +18544,8 @@ TEST_CASE("PresetBundle copy repairs vendor pointers and preserves selected conf
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     PresetBundle original;
     VendorProfile vendor("Acme");
@@ -18835,6 +18985,8 @@ TEST_CASE("PresetBundle removes only the selected user's deleted cloud profiles"
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     ScopedTemporaryDir temp("preset-bundle-remove-user");
     ScopedDataDir data(temp.path() / "data");
     PresetBundle bundle;
@@ -18992,6 +19144,8 @@ TEST_CASE("flush matrix preserves dimensions and applies per extruder multiplier
 {
     using namespace main_merge_support_test_preset_bundle_loading;
 
+    using namespace main_merge_support_test_preset_bundle_loading::preset_flush_matrix_contracts;
+
     PresetBundle bundle;
     set_two_extruder_project(bundle);
     bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values = {10., 20., 30., 40., 50., 60., 70., 80.};
@@ -19019,6 +19173,8 @@ TEST_CASE("flush matrix preserves dimensions and applies per extruder multiplier
 TEST_CASE("fast purge uses the fast multiplier independently of default multiplier", "[PresetBundleLoading][PresetFlushMatrix2][PresetBundle][PresetBundleContracts]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_flush_matrix_contracts;
 
     PresetBundle bundle;
     set_two_extruder_project(bundle);
@@ -19304,6 +19460,8 @@ TEST_CASE("external .3mf presets retain source identity and distinct configs", "
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_external_save_followup_contracts;
+
     PrintCollectionFixture fx;
     const size_t before = fx.collection.size();
     ScopedTemporaryFile source_a(".3mf");
@@ -19414,6 +19572,8 @@ TEST_CASE("project embedded external preset refreshes stored config without dirt
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_external_save_followup_contracts;
+
     PrintCollectionFixture fx;
     Preset &stored = fx.collection.load_preset({}, "Embedded Process", fx.config(0.20), true);
     stored.is_project_embedded = true;
@@ -19470,6 +19630,8 @@ TEST_CASE("Saving an inherited preset keeps its parent", "[PresetBundleLoading][
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_external_save_followup_contracts;
 
     PrintCollectionFixture fx;
     fx.collection.load_preset({}, "Save Parent", fx.config(0.20), true);
@@ -19528,6 +19690,8 @@ TEST_CASE("Saving a detached preset writes a standalone base", "[PresetBundleLoa
 {
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_external_save_followup_contracts;
 
     PrintCollectionFixture fx;
     fx.collection.load_preset({}, "Detach Parent", fx.config(0.20), true);
@@ -19624,6 +19788,8 @@ TEST_CASE("Preset bundle vendor model and fallback asset lookup use configured r
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
+
     ScopedTemporaryDir dir("preset-deep-assets");
     ScopedDataDir data(dir.path() / "data");
     ScopedResourcesDir resources(dir.path() / "resources");
@@ -19653,6 +19819,8 @@ TEST_CASE("Preset bundle vendor model and fallback asset lookup use configured r
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_asset_lookup_contracts;
 
     ScopedTemporaryDir dir("preset-deep-assets");
     ScopedDataDir data(dir.path() / "data");
@@ -19687,6 +19855,8 @@ TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", 
     SECTION("testing branch assertions") {
         using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
+
     ScopedTemporaryDir dir("preset-texture-lookup");
     ScopedDataDir data(dir.path() / "data");
     ScopedResourcesDir resources(dir.path() / "resources");
@@ -19714,6 +19884,8 @@ TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", 
     }
     SECTION("main assertions") {
         using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_asset_lookup_contracts;
 
     ScopedTemporaryDir dir("preset-texture-lookup");
     ScopedDataDir data(dir.path() / "data");
@@ -19745,6 +19917,8 @@ TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", 
 TEST_CASE("PresetUtils resolves configured printer assets from installed and bundled roots", "[PresetBundleLoading][PresetAssetLookup3][Preset][PresetAssetResolution]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_asset_lookup_contracts;
 
     ScopedTemporaryDir dir("preset-utils-printer-assets");
     ScopedDataDir data(dir.path() / "data");
@@ -19809,6 +19983,8 @@ TEST_CASE("PresetUtils resolves configured printer assets from installed and bun
 TEST_CASE("PresetUtils handles presets without a resolved printer model", "[PresetBundleLoading][PresetAssetLookup4][Preset][PresetAssetResolution]")
 {
     using namespace main_merge_support_test_preset_bundle_loading;
+
+    using namespace main_merge_support_test_preset_bundle_loading::preset_asset_lookup_contracts;
 
     ScopedTemporaryDir dir("preset-utils-unresolved-printer");
     ScopedDataDir data(dir.path() / "data");
@@ -20174,6 +20350,12 @@ TEST_CASE("current config export writes selected user profiles and can be reload
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::ScopedDataDir;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::read_text;
+
     ScopedTemporaryDir temp("preset-workflow-export");
     ScopedDataDir data(temp.path() / "data");
 
@@ -20208,6 +20390,11 @@ TEST_CASE("current config export honors a per-file overwrite decision", "[Preset
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::ScopedDataDir;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::printer_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::filament_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+
     ScopedTemporaryDir temp("preset-workflow-overwrite");
     ScopedDataDir data(temp.path() / "data");
     PresetBundle bundle;
@@ -20236,6 +20423,10 @@ TEST_CASE("current config export honors a per-file overwrite decision", "[Preset
 TEST_CASE("JSON preset import installs a user profile under the scoped data directory", "[PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::ScopedDataDir;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     ScopedTemporaryDir temp("preset-workflow-import");
     ScopedDataDir data(temp.path() / "data");
@@ -20288,6 +20479,10 @@ TEST_CASE("JSON preset import rejects a name outside the scoped preset directory
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::ScopedDataDir;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
+
     ScopedTemporaryDir temp("preset-workflow-import-confinement");
     ScopedDataDir data(temp.path() / "data");
     const fs::path file = temp.path() / "incoming" / "Escape.json";
@@ -20308,6 +20503,10 @@ TEST_CASE("JSON preset import rejects a name outside the scoped preset directory
 TEST_CASE("JSON preset import preserves the existing profile when overwrite is declined", "[PresetBundle][PresetBundleWorkflowsExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::ScopedDataDir;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::print_config;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_json_preset;
 
     ScopedTemporaryDir temp("preset-workflow-import-overwrite");
     ScopedDataDir data(temp.path() / "data");
@@ -20369,6 +20568,8 @@ TEST_CASE("default suppression is applied consistently to all preset collections
 TEST_CASE("Vendor profile infers BBL families and rejects missing sections", "[PresetBundleLoading][PresetDeep][Vendor]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
 
     ScopedTemporaryDir dir("preset-deep-vendor-invalid");
     const fs::path file = dir.path() / "BBL.ini";
@@ -20432,6 +20633,8 @@ TEST_CASE("Preset remove_files deletes local info and marks cloud info for delet
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
+
     ScopedTemporaryDir dir("preset-deep-remove");
     ScopedDataDir data(dir.path() / "data");
     SECTION("local") {
@@ -20462,6 +20665,8 @@ TEST_CASE("Preset remove_files deletes local info and marks cloud info for delet
 TEST_CASE("Physical printer preserves preset membership and legacy serialized names", "[PresetBundleLoading][PresetDeep][PhysicalPrinter]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
 
     DynamicPrintConfig defaults = physical_defaults();
     PhysicalPrinter printer("Office", defaults);
@@ -20544,6 +20749,8 @@ TEST_CASE("Preset bundle full config applies current project values over selecte
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetBundle bundle;
     bundle.project_config = DynamicPrintConfig::full_print_config();
     bundle.project_config.opt<ConfigOptionFloat>("layer_height")->value = 0.22;
@@ -20589,6 +20796,8 @@ TEST_CASE("Preset printer model metadata drives current type lidar calibration a
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetBundle bundle;
     VendorProfile bbl("BBL");
     bbl.name = "BBL";
@@ -20629,6 +20838,8 @@ TEST_CASE("Preset differed save emits only child changes and rejects built-in pr
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection = make_print_collection();
     Preset &parent = load_local_preset(collection, "Parent");
     parent.setting_id = "parent-id";
@@ -20649,6 +20860,8 @@ TEST_CASE("Preset differed save emits only child changes and rejects built-in pr
 TEST_CASE("Preset differed value export carries cloud metadata and changed density", "[Preset][PresetExtendedVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
@@ -20679,6 +20892,8 @@ TEST_CASE("Project embedded presets resolve their parent and reject duplicate or
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection = make_print_collection();
     Preset &parent = load_local_preset(collection, "Parent");
     parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.2;
@@ -20705,6 +20920,8 @@ TEST_CASE("Project embedded presets resolve their parent and reject duplicate or
 TEST_CASE("User preset export filters cloud states and saves root and inherited profiles", "[Preset][PresetExtendedVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     ScopedTemporaryDir dir("preset-extended-user-export");
     PresetCollection collection = make_print_collection();
@@ -20741,6 +20958,8 @@ TEST_CASE("Cloud user loading rejects incomplete metadata and installs a canonic
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection = make_print_collection();
     PresetsConfigSubstitutions substitutions;
     CHECK_FALSE(collection.load_user_preset("MissingVersion", {{BBL_JSON_KEY_SETTING_ID, "id"}, {BBL_JSON_KEY_USER_ID, "u"}}, substitutions,
@@ -20767,6 +20986,8 @@ TEST_CASE("Preset validation rejects unknown inheritance and trusts system profi
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection = make_print_collection();
     Preset &system = load_local_preset(collection, "System");
     system.is_system = true;
@@ -20787,6 +21008,8 @@ TEST_CASE("Preset validation rejects unknown inheritance and trusts system profi
 TEST_CASE("Filament grouping and type lookup prefer visible compatible system bases", "[Preset][PresetExtendedVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
@@ -20814,6 +21037,8 @@ TEST_CASE("Preset parent vendor lookup follows inheritance and base identity", "
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection = make_print_collection();
     VendorProfile vendor("Acme");
     vendor.name = "Acme";
@@ -20835,6 +21060,8 @@ TEST_CASE("Printer hold aliases are added and removed without changing preset id
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     PresetCollection collection(Preset::TYPE_FILAMENT, Preset::filament_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
     Preset &filament = load_local_preset(collection, "PLA");
@@ -20853,6 +21080,8 @@ TEST_CASE("Printer hold aliases are added and removed without changing preset id
 TEST_CASE("Compatibility conditions accept valid predicates and fail open for malformed predicates", "[Preset][PresetExtendedVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     Preset filament(Preset::TYPE_FILAMENT, "PLA");
     filament.config = DynamicPrintConfig::full_print_config();
@@ -20875,6 +21104,8 @@ TEST_CASE("Preset paths canonicalize names under the configured user directory",
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
+
     ScopedTemporaryDir dir("preset-extended-paths");
     PresetCollection collection = make_print_collection();
     collection.update_user_presets_directory(dir.path().string(), PRESET_PRINT_NAME);
@@ -20889,6 +21120,8 @@ TEST_CASE("Preset paths canonicalize names under the configured user directory",
 TEST_CASE("Project embedded export returns independent diffs and reset only removes embedded entries", "[Preset][PresetExtendedVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_extended_contracts;
 
     PresetCollection collection = make_print_collection();
     Preset &parent = load_local_preset(collection, "Parent");
@@ -20930,6 +21163,8 @@ TEST_CASE("AMS mapped synchronization appends unassigned trays and records dupli
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
@@ -20953,6 +21188,8 @@ TEST_CASE("AMS mapped synchronization does not append when append is disabled",
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
@@ -20974,6 +21211,8 @@ TEST_CASE("AMS unknown tray mapping is removed without corrupting existing slots
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#000000"});
@@ -20994,6 +21233,8 @@ TEST_CASE("AMS multi-color vectors are serialized back into project configuratio
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
     project_slots(bundle, {"Existing"}, {"#000000"});
@@ -21013,6 +21254,8 @@ TEST_CASE("AMS empty input is a no-op for existing project slots",
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     project_slots(bundle, {"Existing"}, {"#ABCDEF"});
     std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
@@ -21029,6 +21272,8 @@ TEST_CASE("AMS overwrite clamps support selections beyond the synchronized slot 
           "[Preset][PresetBundleAmsVariance]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
 
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -21138,6 +21383,8 @@ TEST_CASE("PresetBundle copy_files preserves only the supported preset trees", "
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     ScopedTemporaryDir temp("preset-bundle-copy");
     ScopedDataDir data(temp.path() / "data");
     const fs::path source = temp.path() / "source";
@@ -21160,6 +21407,8 @@ TEST_CASE("PresetBundle backup_user_folder is successful once and idempotent", "
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     ScopedTemporaryDir temp("preset-bundle-backup");
     ScopedDataDir data(temp.path() / "data");
     write_marker(temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json", "owned");
@@ -21176,6 +21425,8 @@ TEST_CASE("PresetBundle backup_user_folder is successful once and idempotent", "
 TEST_CASE("PresetBundle vendor version and current vendor type follow the configured model", "[Preset][PresetBundleLifecycleExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
 
     PresetBundle bundle;
     VendorProfile bbl("BBL");
@@ -21216,6 +21467,8 @@ TEST_CASE("PresetBundle dispatches differed saves only for supported preset type
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     PresetBundle bundle;
     Preset &parent = load_local_preset(bundle.prints, "Parent");
     parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.2;
@@ -21238,6 +21491,8 @@ TEST_CASE("PresetBundle dispatches differed saves only for supported preset type
 TEST_CASE("PresetBundle project embedded enumeration and reset are bundle-wide", "[Preset][PresetBundleLifecycleExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
 
     PresetBundle bundle;
     Preset &parent = load_local_preset(bundle.prints, "Embedded Parent");
@@ -21262,6 +21517,8 @@ TEST_CASE("PresetBundle project embedded enumeration and reset are bundle-wide",
 TEST_CASE("PresetBundle save_user_presets writes all selected collection roots", "[Preset][PresetBundleLifecycleExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
 
     ScopedTemporaryDir temp("preset-bundle-save-user");
     ScopedDataDir data(temp.path() / "data");
@@ -21294,6 +21551,8 @@ TEST_CASE("PresetBundle sync cleanup repairs invalid user metadata", "[Preset][P
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     ScopedTemporaryDir temp("preset-bundle-sync-fix");
     ScopedDataDir data(temp.path() / "data");
     PresetBundle bundle;
@@ -21315,6 +21574,8 @@ TEST_CASE("PresetBundle removes a user directory without touching an empty-folde
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     ScopedTemporaryDir temp("preset-bundle-remove-dir");
     ScopedDataDir data(temp.path() / "data");
     PresetBundle bundle;
@@ -21331,6 +21592,8 @@ TEST_CASE("PresetBundle alias lookup and conversion keep canonical identities", 
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
+
     PresetBundle bundle;
     Preset &print = load_local_preset(bundle.prints, "Canonical Process");
     print.alias.clear();
@@ -21346,6 +21609,8 @@ TEST_CASE("PresetBundle alias lookup and conversion keep canonical identities", 
 TEST_CASE("PresetCollection sync repair reconciles a child base id", "[Preset][PresetBundleLifecycleExtended]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
 
     ScopedTemporaryDir temp("preset-collection-sync-child");
     PresetCollection collection = make_print_collection();
@@ -21370,6 +21635,8 @@ TEST_CASE("different extruder support is determined by the variant set", "[Prese
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     set_two_extruder_project(fx);
     CHECK(fx.bundle.support_different_extruders());
@@ -21383,6 +21650,8 @@ TEST_CASE("single extruder has no right-hand AMS configuration", "[PresetBundle]
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     fx.bundle.filament_ams_list.emplace(0x10000, tray("R", "PETG", "#001100"));
     CHECK(fx.bundle.get_extruder_filament_info().empty());
@@ -21392,6 +21661,8 @@ TEST_CASE("single extruder has no right-hand AMS configuration", "[PresetBundle]
 TEST_CASE("only edited filament requires a unique selected slot", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     add_filament(fx, "TPU", "TPU-ID", "TPU", false, true);
@@ -21407,6 +21678,8 @@ TEST_CASE("only edited filament requires a unique selected slot", "[PresetBundle
 TEST_CASE("AMS combo info resolves matching IDs and preserves changed false slots", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     add_filament(fx, "Generic PLA", "PLA-ID", "PLA", true);
@@ -21426,6 +21699,8 @@ TEST_CASE("similar printer chooses requested variant among the same model", "[Pr
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     Preset& a = add_printer(fx, "Acme 0.4", "Acme", "0.4", true);
     Preset& b = add_printer(fx, "Acme 0.6", "Acme", "0.6", true);
@@ -21438,6 +21713,8 @@ TEST_CASE("similar printer chooses requested variant among the same model", "[Pr
 TEST_CASE("system setting IDs are attached only to matching printer entries", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     Preset& printer = add_printer(fx, "System Printer", "Acme", "0.4", true);
@@ -21454,6 +21731,8 @@ TEST_CASE("system setting IDs are attached only to matching printer entries", "[
 TEST_CASE("project embedded preset loading resolves its explicit parent", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     DynamicPrintConfig parent_config                                     = fx.bundle.prints.default_preset().config;
@@ -21480,6 +21759,8 @@ TEST_CASE("project embedded reset removes embedded entries but retains ordinary 
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     const std::string detached = fx.bundle.prints.add_detached_preset("Contract Detached", DynamicPrintConfig::full_print_config());
     REQUIRE(fx.bundle.prints.find_preset(detached) != nullptr);
@@ -21495,6 +21776,8 @@ TEST_CASE("project embedded reset removes embedded entries but retains ordinary 
 TEST_CASE("detached preset names are unique and never create a user file", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     const std::string first = fx.bundle.filaments.add_detached_preset("Published Filament", DynamicPrintConfig::full_print_config(), "fid");
@@ -21526,6 +21809,8 @@ TEST_CASE("preset default suppression changes first visible selection", "[Preset
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     VendorProfile library(PresetBundle::ORCA_FILAMENT_LIBRARY);
     library.id                                             = PresetBundle::ORCA_FILAMENT_LIBRARY;
@@ -21546,6 +21831,8 @@ TEST_CASE("preset default suppression changes first visible selection", "[Preset
 TEST_CASE("preset parent and base preserve inheritance identity", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     DynamicPrintConfig parent_config = fx.bundle.prints.default_preset().config;
@@ -21568,6 +21855,8 @@ TEST_CASE("invalid embedded parent is rejected without installing a preset", "[P
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     auto child    = std::make_unique<Preset>(Preset::TYPE_PRINT, "Orphan Embedded");
     child->config = fx.bundle.prints.default_preset().config;
@@ -21585,6 +21874,8 @@ TEST_CASE("collection names and section names identify their preset type", "[Pre
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     CHECK(fx.bundle.prints.name() == PRESET_PRINT_NAME);
     CHECK(fx.bundle.prints.section_name() == PRESET_PRINT_NAME);
@@ -21597,6 +21888,8 @@ TEST_CASE("empty detached names are rejected without changing collection", "[Pre
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
+
     BundleFixture fx;
     const size_t before = fx.bundle.prints.size();
     CHECK(fx.bundle.prints.add_detached_preset("", DynamicPrintConfig::full_print_config()).empty());
@@ -21607,6 +21900,8 @@ TEST_CASE("empty detached names are rejected without changing collection", "[Pre
 TEST_CASE("filament map selection keeps the selected edited slot unique", "[PresetBundle][PresetBundleContracts]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     add_filament(fx, "Mapped", "mapped", "PLA");
@@ -21622,6 +21917,8 @@ TEST_CASE("Full FFF configuration resolves a single filament by its selected noz
           "[PresetBundle][PresetBundleContracts][PresetBundleFullFffSingleVariant]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     set_variant_aware_printer(fx);
@@ -21645,6 +21942,8 @@ TEST_CASE("Full FFF configuration resolves a single filament by its selected noz
 TEST_CASE("Full FFF configuration pads a short volume map with Standard", "[PresetBundle][PresetBundleContracts][PresetBundleFullFffShortMap]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
 
     BundleFixture fx;
     set_variant_aware_printer(fx);
@@ -21676,6 +21975,8 @@ TEST_CASE("AMS duplicate unmapped trays are appended only once", "[PresetBundle]
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
+
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
     project_slots(bundle, {}, {});
@@ -21696,6 +21997,10 @@ TEST_CASE("JSON vendor printer metadata counts malformed default material lists"
           "[PresetBundle][VendorJson]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_vendor_model_tree;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_json_vendor;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::only_model;
 
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
@@ -21719,6 +22024,9 @@ TEST_CASE("JSON vendor malformed list fields preserve their distinct load outcom
           "[PresetBundle][VendorJson]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::write_vendor_model_tree;
+    using testing_branch_support_test_preset_bundle_loading::preset_bundle_workflow_contracts::load_json_vendor;
 
     const auto [vendor, model_name, model_json, expected_errors, expected_models] = GENERATE(
         table<std::string, std::string, std::string, int, int>({
@@ -21787,6 +22095,8 @@ TEST_CASE("Selected preset parent resolves inherited and missing bases",
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
 
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_parent_reset_followup_contracts;
+
     PresetCollection collection = make_followup_print_collection();
     Preset &parent = collection.load_preset({}, "Parent Process",
                                              followup_print_config(collection), false);
@@ -21813,6 +22123,8 @@ TEST_CASE("Reset removes loaded presets and optionally their files",
           "[Preset][PresetReset]")
 {
     using namespace testing_branch_support_test_preset_bundle_loading;
+
+    using namespace testing_branch_support_test_preset_bundle_loading::preset_parent_reset_followup_contracts;
 
     const bool delete_files = GENERATE(false, true);
     ScopedTemporaryDir temp("preset-reset-followup");
