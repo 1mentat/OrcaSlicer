@@ -1,3 +1,5 @@
+#include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include <cmath>
 #include <atomic>
 #include <algorithm>
@@ -265,4 +267,68 @@ TEST_CASE("Texture painting rejects incomplete import payloads", "[TexturePainti
     REQUIRE(volume != nullptr);
     object->add_instance();
     CHECK_FALSE(apply_painted_mesh_to_volume(painted, {}, *volume));
+}
+
+namespace {
+
+void require_valid_indexed_geometry(const indexed_triangle_set &mesh)
+{
+    REQUIRE_FALSE(mesh.vertices.empty());
+    REQUIRE_FALSE(mesh.indices.empty());
+    for (const auto &vertex : mesh.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const auto &face : mesh.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE(static_cast<std::size_t>(face.maxCoeff()) < mesh.vertices.size());
+    }
+}
+
+} // namespace
+
+TEST_CASE("Texture painting replaces a volume and keeps its world placement", "[TexturePainting]")
+{
+    Model model;
+    const TriangleMesh cube_mesh = make_cube(10., 10., 10.);
+    require_valid_indexed_geometry(cube_mesh.its);
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(cube_mesh);
+    REQUIRE(volume != nullptr);
+    REQUIRE(object->add_instance() != nullptr);
+
+    const indexed_triangle_set cube = cube_mesh.its;
+    PaintedMesh painted;
+    painted.vertices.reserve(cube.vertices.size());
+    for (const Vec3f &vertex : cube.vertices)
+        painted.vertices.push_back({ vertex.x(), vertex.y(), vertex.z() });
+    painted.indices.reserve(cube.indices.size());
+    painted.face_colors.assign(cube.indices.size(), RED);
+    for (const Vec3i32 &face : cube.indices)
+        painted.indices.push_back({ face[0], face[1], face[2] });
+    painted.cluster_colors = { RED };
+
+    FilamentMatch match;
+    match.cluster_index = 0;
+    match.filament_index = 0;
+    require_valid_painted_geometry(painted);
+    require_valid_indexed_geometry(volume->mesh().its);
+    REQUIRE(volume->source.mesh_offset.allFinite());
+    REQUIRE(volume->get_matrix().matrix().allFinite());
+    REQUIRE(apply_painted_mesh_to_volume(painted, { match }, *volume));
+
+    // Reacquire the owned mesh after apply replaces it; keep no mesh reference across apply.
+    require_valid_indexed_geometry(volume->mesh().its);
+    REQUIRE(volume->get_matrix().matrix().allFinite());
+    const BoundingBoxf3 world_box = volume->mesh().transformed_bounding_box(volume->get_matrix());
+    REQUIRE(world_box.defined);
+    REQUIRE(world_box.min.allFinite());
+    REQUIRE(world_box.max.allFinite());
+    CHECK_THAT(world_box.min.x(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(world_box.max.x(), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(world_box.min.z(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(world_box.max.z(), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK(volume->is_mm_painted());
+    REQUIRE(volume->mmu_segmentation_facets.get_data().used_states.size() >
+            static_cast<std::size_t>(EnforcerBlockerType::Extruder1));
+    CHECK(volume->mmu_segmentation_facets.get_data().used_states[static_cast<std::size_t>(EnforcerBlockerType::Extruder1)]);
 }
