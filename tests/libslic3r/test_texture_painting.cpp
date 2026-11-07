@@ -755,3 +755,27 @@ TEST_CASE("Texture atlas wraps negative V against a nonuniform texture", "[Textu
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas honors distinct per-face UV values", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = horizontal_texture(2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(2, 1, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.f });
+    mesh.uv_coords = {
+        { 0.25f, 0.f }, { 0.75f, 0.f }, { 0.75f, 0.f },
+        { 0.f, 0.f }, { 0.f, 0.f }, { 0.f, 0.f },
+    };
+    mesh.uv_indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
+    CHECK((*left)[2] < 80);
+}
+
+} // namespace texture_atlas_contracts
