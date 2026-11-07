@@ -750,6 +750,7 @@ TEST_CASE("Emboss text conversion yields one shape per character and caches glyp
     const ExPolygonsWithIds first = Emboss::text2vshapes(cached, text, prop);
     REQUIRE(first.size() == text.size());
     CHECK(first[3].id == static_cast<unsigned>(L'\n'));
+    CHECK(first[3].expoly.empty());
     size_t outlined = 0;
     for (const ExPolygonsWithId &shape : first)
         outlined += !shape.expoly.empty();
@@ -762,6 +763,12 @@ TEST_CASE("Emboss text conversion yields one shape per character and caches glyp
     // cached outline of A leaves A without an outline the second time, while B and C keep theirs.
     const size_t cache_size = cached.cache->size();
     REQUIRE(cache_size >= 3);
+    // An ordinary repeat preserves glyph area before the separate corrupted-cache control below.
+    const double first_area = glyph_area(first);
+    const ExPolygonsWithIds unmodified_repeat = Emboss::text2vshapes(cached, text, prop);
+    REQUIRE(unmodified_repeat.size() == first.size());
+    CHECK(cached.cache->size() == cache_size);
+    CHECK_THAT(glyph_area(unmodified_repeat), WithinAbs(first_area, 1e-9));
     const auto cached_a = cached.cache->find(static_cast<int>(L'A'));
     REQUIRE(cached_a != cached.cache->end());
     REQUIRE_FALSE(cached_a->second.shape.empty());
