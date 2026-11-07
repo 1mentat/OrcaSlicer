@@ -4,6 +4,8 @@
 #include <Standard_Handle.hxx>
 #include <TCollection_AsciiString.hxx>
 
+#include <algorithm>
+#include <cctype>
 #include <Eigen/Geometry>
 #include <admesh/stl.h>
 
@@ -19,9 +21,21 @@
 #include "libslic3r/BoundingBox.hpp"
 
 #include <cmath>
+#include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <system_error>
+#include <vector>
+
+#if defined(__linux__)
+#include <stdlib.h>
+#endif
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -56,6 +70,117 @@ Handle(Font_SystemFont) register_bundled_font()
     REQUIRE(registered->FontPath(Font_FontAspect_Regular).IsEqual(font_path));
     return registered;
 }
+
+#if defined(__linux__)
+class ScopedTemporaryDirectory
+{
+public:
+    ScopedTemporaryDirectory()
+    {
+        const std::string pattern =
+            (std::filesystem::temp_directory_path() / "orca-textshape-fontconfig-XXXXXX").string();
+        std::vector<char> writable_pattern(pattern.begin(), pattern.end());
+        writable_pattern.push_back('\0');
+        char *created = ::mkdtemp(writable_pattern.data());
+        if (created == nullptr)
+            throw std::system_error(errno, std::generic_category(), "mkdtemp");
+        m_path = created;
+    }
+
+    ~ScopedTemporaryDirectory()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(m_path, error);
+    }
+
+    const std::filesystem::path &path() const { return m_path; }
+
+private:
+    std::filesystem::path m_path;
+};
+
+std::string xml_escape(const std::string &value)
+{
+    std::string escaped;
+    for (const char character : value) {
+        switch (character) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '\"': escaped += "&quot;"; break;
+        case '\'': escaped += "&apos;"; break;
+        default: escaped += character; break;
+        }
+    }
+    return escaped;
+}
+
+class ScopedFontconfigSandbox
+{
+public:
+    ScopedFontconfigSandbox()
+    {
+        if (const char *configured_file = std::getenv("FONTCONFIG_FILE"))
+            m_original_config_file = configured_file;
+
+        m_font_directory = m_temporary_directory.path() / "fonts";
+        std::filesystem::create_directory(m_font_directory);
+        for (const char *font_name : {"NotoSansKR-Regular.ttf",
+                                      "NotoSansKR-Bold.ttf",
+                                      "Sarabun-Medium.ttf"}) {
+            const std::filesystem::path source = bundled_font_path().parent_path() / font_name;
+            std::filesystem::copy_file(source, m_font_directory / font_name);
+        }
+        const std::filesystem::path cache_directory = m_temporary_directory.path() / "cache";
+        std::filesystem::create_directory(cache_directory);
+        m_config_file = m_temporary_directory.path() / "fonts.conf";
+        std::ofstream config(m_config_file, std::ios::binary);
+        config << "<?xml version=\"1.0\"?>\n"
+                  "<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n"
+                  "<fontconfig>\n"
+               << "  <dir>" << xml_escape(m_font_directory.string()) << "</dir>\n"
+               << "  <cachedir>" << xml_escape(cache_directory.string()) << "</cachedir>\n"
+                  "</fontconfig>\n";
+        config.close();
+        if (!config)
+            throw std::runtime_error("could not write isolated Fontconfig configuration");
+
+        if (::setenv("FONTCONFIG_FILE", m_config_file.c_str(), 1) != 0)
+            throw std::system_error(errno, std::generic_category(), "setenv(FONTCONFIG_FILE)");
+        m_environment_overridden = true;
+    }
+
+    ~ScopedFontconfigSandbox()
+    {
+        if (!m_environment_overridden)
+            return;
+
+        const int restored = m_original_config_file
+            ? ::setenv("FONTCONFIG_FILE", m_original_config_file->c_str(), 1)
+            : ::unsetenv("FONTCONFIG_FILE");
+        if (restored == 0 && m_manager_may_be_modified) {
+            try {
+                (void)init_occt_fonts();
+            } catch (...) {
+            }
+        }
+    }
+
+    std::vector<std::string> initialize_fonts()
+    {
+        m_manager_may_be_modified = true;
+        return init_occt_fonts();
+    }
+
+private:
+    ScopedTemporaryDirectory m_temporary_directory;
+    std::filesystem::path m_font_directory;
+    std::filesystem::path m_config_file;
+    std::optional<std::string> m_original_config_file;
+    bool m_environment_overridden = false;
+    bool m_manager_may_be_modified = false;
+};
+#endif // defined(__linux__)
 
 struct TextMeshMetrics {
     double width = 0.;
@@ -158,3 +283,28 @@ TEST_CASE("OCCT text shape preserves the caller result for non-positive thicknes
         CHECK(result.text_mesh.its.indices[i] == sentinel.its.indices[i]);
 
 }
+
+#if defined(__linux__)
+TEST_CASE("OCCT font enumeration uses configured bundled fonts and filters style families",
+          "[TextShape]")
+{
+    ScopedFontconfigSandbox fontconfig;
+    const std::vector<std::string> names = fontconfig.initialize_fonts();
+    const std::map<std::string, std::string> fonts = get_occt_fonts_maps();
+
+    REQUIRE(names.size() == fonts.size());
+    auto name = names.cbegin();
+    for (const auto &font : fonts) {
+        CHECK(*name == font.first);
+        ++name;
+    }
+
+    const auto noto_font = fonts.find("Noto Sans KR");
+    REQUIRE(noto_font != fonts.end());
+    CHECK(fonts.find("Sarabun Medium") == fonts.end());
+    std::string extension = std::filesystem::path(noto_font->second).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    CHECK((extension == ".ttf" || extension == ".otf" || extension == ".ttc"));
+}
+#endif // defined(__linux__)
