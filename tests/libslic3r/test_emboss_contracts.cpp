@@ -99,6 +99,12 @@ TEST_CASE("Close-point division honors a Euclidean radius boundary", "[Emboss][E
     CHECK_FALSE(Emboss::divide_segments_for_close_point(below, 1.9 * unit));
     CHECK(below.front().contour.size() == original_points);
 
+    // The radius query excludes points exactly on its strict distance boundary.
+    ExPolygons exact = close_point_shape();
+    CHECK_FALSE(Emboss::divide_segments_for_close_point(exact, 2.0 * unit));
+    REQUIRE_FALSE(exact.empty());
+    CHECK(exact.front().contour.size() == original_points);
+
     ExPolygons above = close_point_shape();
     REQUIRE(Emboss::divide_segments_for_close_point(above, 2.1 * unit));
     CHECK(above.front().contour.size() == original_points + 1);
