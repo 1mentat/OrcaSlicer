@@ -1,3 +1,6 @@
+#include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
+#include "libslic3r/Format/STEP.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/Preset.hpp"
@@ -2419,3 +2422,135 @@ TEST_CASE("Model read_from_archive rejects malformed archives and unsupported su
 }
 
 } // namespace model_import_contracts
+
+namespace model_step_wrapper_contracts {
+namespace {
+
+void require_named_step_model(const Model &model, const std::string &input_file, bool expect_default_instance)
+{
+    REQUIRE(model.objects.size() == 1);
+    const ModelObject *object = model.objects.front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 3);
+    CHECK(object->input_file == input_file);
+
+    const std::array<const char *, 3> expected_names{
+        "pi\xC3\xA8" "ce", "Geh\xC3\xA4use", "bracket"};
+    for (std::size_t i = 0; i < expected_names.size(); ++i) {
+        const ModelVolume *volume = object->volumes[i];
+        REQUIRE(volume != nullptr);
+        CHECK(volume->name == expected_names[i]);
+        CHECK(volume->source.input_file == input_file);
+        TriangleMesh mesh = volume->mesh();
+        const double volume_mm3 = std::abs(static_cast<double>(mesh.volume()));
+        CHECK(std::isfinite(volume_mm3));
+        CHECK(volume_mm3 > 0.0);
+        CHECK(volume->mesh().facets_count() > 0);
+    }
+
+    if (expect_default_instance)
+        CHECK(object->instances.size() == 1);
+    else
+        CHECK(object->instances.empty());
+}
+
+} // namespace
+} // namespace model_step_wrapper_contracts
+
+namespace model_step_wrapper_contracts {
+
+TEST_CASE("Model STEP wrapper imports named solids and adds a default instance",
+          "[Model][ModelImport][Step][ModelStepWrapper][ModelStepNamed]")
+{
+    ScopedSlic3rTemporaryDir temporary("model-step-wrapper");
+    const std::string input_file = (boost::filesystem::path(TEST_DATA_DIR) / "utf8_part_names.step").string();
+    REQUIRE(boost::filesystem::is_regular_file(input_file));
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file,
+                                                  LoadStrategy::AddDefaultInstances,
+                                                  nullptr, nullptr, nullptr,
+                                                  0.003, 0.5, false));
+    require_named_step_model(model, input_file, true);
+}
+
+} // namespace model_step_wrapper_contracts
+
+namespace model_step_wrapper_contracts {
+
+TEST_CASE("Model STEP wrapper passes requested options to the mesh callback",
+          "[Model][ModelImport][Step][ModelStepWrapper][ModelStepOptions]")
+{
+    ScopedSlic3rTemporaryDir temporary("model-step-wrapper");
+    const std::string input_file = (boost::filesystem::path(TEST_DATA_DIR) / "utf8_part_names.step").string();
+    REQUIRE(boost::filesystem::is_regular_file(input_file));
+    int callback_calls = 0;
+    double callback_linear_deflection = -1.0;
+    double callback_angle_deflection = -1.0;
+    bool callback_split_compound = true;
+    auto mesh_options = [&](Step &, double &linear_deflection, double &angle_deflection,
+                            bool &is_split_compound) {
+        ++callback_calls;
+        callback_linear_deflection = linear_deflection;
+        callback_angle_deflection = angle_deflection;
+        callback_split_compound = is_split_compound;
+        linear_deflection = 0.05;
+        angle_deflection = 0.25;
+        is_split_compound = true;
+        return 0;
+    };
+
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file, LoadStrategy::Default,
+                                                  nullptr, nullptr, mesh_options,
+                                                  0.003, 0.5, false));
+    REQUIRE(callback_calls == 1);
+    CHECK_THAT(callback_linear_deflection, Catch::Matchers::WithinAbs(0.003, 1e-12));
+    CHECK_THAT(callback_angle_deflection, Catch::Matchers::WithinAbs(0.5, 1e-12));
+    CHECK_FALSE(callback_split_compound);
+    require_named_step_model(model, input_file, false);
+}
+
+} // namespace model_step_wrapper_contracts
+
+namespace model_step_wrapper_contracts {
+
+TEST_CASE("Model STEP wrapper cancellation returns an empty model",
+          "[Model][ModelImport][Step][ModelStepWrapper][ModelStepCancel]")
+{
+    ScopedSlic3rTemporaryDir temporary("model-step-wrapper");
+    const std::string input_file = (boost::filesystem::path(TEST_DATA_DIR) / "utf8_part_names.step").string();
+    REQUIRE(boost::filesystem::is_regular_file(input_file));
+    bool callback_called = false;
+    auto cancel = [&](Step &, double &, double &, bool &) {
+        callback_called = true;
+        return -1;
+    };
+
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_step(input_file, LoadStrategy::Default,
+                                                  nullptr, nullptr, cancel,
+                                                  0.003, 0.5, false));
+    REQUIRE(callback_called);
+    CHECK(model.objects.empty());
+    CHECK(model.materials.empty());
+}
+
+} // namespace model_step_wrapper_contracts
+
+namespace model_step_wrapper_contracts {
+
+TEST_CASE("Model STEP wrapper classifies malformed input as a load failure",
+          "[Model][ModelImport][Step][ModelStepWrapper][ModelStepError][ModelImportErrors]")
+{
+    ScopedSlic3rTemporaryDir temporary("model-step-wrapper");
+    ScopedTemporaryFile malformed(".step");
+    model_import_contracts::write_text(malformed.string(),
+        "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n#1 = ;\nENDSEC;\nEND-ISO-10303-21;\n");
+    CHECK_THROWS_MATCHES(Model::read_from_step(malformed.string(), LoadStrategy::Default,
+                                            nullptr, nullptr, nullptr,
+                                            0.003, 0.5, false),
+                      Slic3r::RuntimeError,
+                      Catch::Matchers::MessageMatches(Catch::Matchers::ContainsSubstring("Loading of a model file failed.")));
+}
+
+} // namespace model_step_wrapper_contracts
