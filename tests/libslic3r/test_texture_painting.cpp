@@ -843,3 +843,13 @@ TEST_CASE("Texture atlas uses the first decoded row for a material-less encoded-
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas keeps each mapped texture attached to its face", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    const PaintedMesh output = paint(two_material_faces());
+    require_red_blue_by_side(output);
+}
+
+} // namespace texture_atlas_contracts
