@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Emitted E-motion probes for ordinary restart extra and toolchange retract length on a two-filament Type1 tower print, plus direct-writer toolchange restart extra.",
+  "mutants": [
+    {
+      "id": "ordinary-restart-extra-ignored",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "factor * filament()->retract_restart_extra(),",
+      "new": "0.0,",
+      "expected_matches": 1,
+      "description": "The positive 0.2 mm restart extra must produce a 1.0 mm E-only recovery after a 0.8 mm ordinary retract.",
+      "test_filter": "^FocusedGCode::Retraction settings change emitted E moves on the mapped filaments$",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "toolchange-length-uses-ordinary-length",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "retract_length > EPSILON ? retract_length : factor * filament()->retract_length_toolchange(),",
+      "new": "retract_length > EPSILON ? retract_length : factor * filament()->retraction_length(),",
+      "expected_matches": 1,
+      "description": "The 2.4 mm toolchange retract must remain distinct from the 0.8 mm ordinary retract for filament one.",
+      "test_filter": "^FocusedGCode::Retraction settings change emitted E moves on the mapped filaments$",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "toolchange-extra-uses-ordinary-extra",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "factor * filament()->retract_restart_extra_toolchange(),",
+      "new": "factor * filament()->retract_restart_extra(),",
+      "expected_matches": 1,
+      "description": "The direct writer must recover 2.75 mm after a 2.4 mm toolchange retract, using 0.35 mm toolchange extra rather than the 0.2 mm ordinary extra.",
+      "test_filter": "^Toolchange restart extra reaches the direct writer unretract$",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

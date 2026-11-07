@@ -273,10 +273,29 @@
       "test": "tests/fff_print/test_gcode.cpp",
       "tag": "[SettingsVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The shipped X2D template's mapped tool-change retract is checked for configured values 0 and 12.5 mm with filament_map={2,1}; each emitted row must select the expected physical-filament value, including through the template's pressure-retract placeholders. These are representative fixture values, not a claimed registered range; other mappings and templates remain unclaimed."
+      "reason": "The shipped X2D template's mapped tool-change retract is checked for configured values 0 and 12.5 mm with filament_map={2,1}; each emitted row must select the expected physical-filament value, including through the template's pressure-retract placeholders. A valid two-filament Type1 tower export also checks the zero slot emits no toolchange E retract and the positive slot emits the configured 2.4 mm retract. These two-element vectors cover zero/positive element behavior on this mapping; malformed or empty vectors, other mappings, and other templates remain unclaimed."
+    },
+    "retract_restart_extra": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A valid two-filament Type1 tower Print checks the ordinary retract/recovery E moves for a two-element vector with 0 and 0.2 mm values: both tools retract 0.8 mm, while their emitted unretracts are 0.8 and 1.0 mm. This covers zero/positive element behavior through the G-code pipeline for this fixture; malformed or empty vectors and other maps are not claimed."
+    },
+    "retract_restart_extra_toolchange": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[SettingsVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A direct GCodeWriter test configures two filament columns with toolchange restart extras 0 and 0.35 mm. The zero-length slot emits no retract or recovery; the positive slot emits a 2.4 mm toolchange retract and 2.75 mm recovery, distinguishing the toolchange extra from the separate ordinary restart extra of 0.2 mm. Other maps and malformed vectors are not claimed."
     },
     "silent_mode": {
       "test": "tests/fff_print/test_gcode_processor.cpp",

@@ -6794,6 +6794,72 @@ std::string export_x2d_tower_rows(const DynamicPrintConfig &config)
     return output;
 }
 
+struct RetractionEMoves {
+    std::array<std::vector<double>, 2> ordinary_retracts;
+    std::array<std::vector<double>, 2> toolchange_retracts;
+    std::array<std::vector<double>, 2> toolchange_retract_totals;
+    std::array<std::vector<double>, 2> unretracts;
+};
+
+RetractionEMoves inspect_retraction_e_moves(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    RetractionEMoves moves;
+    int current_filament = 0;
+    std::array<double, 2> retracted_since_unretract{};
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&moves, &current_filament, &retracted_since_unretract](
+                            GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (line.cmd_is("M1020")) {
+            float filament = 0.f;
+            if (line.has_value('S', filament))
+                current_filament = static_cast<int>(std::lround(filament));
+        } else if (command.size() >= 2 && command[0] == 'T' &&
+                   std::isdigit(static_cast<unsigned char>(command[1]))) {
+            current_filament = std::stoi(command.substr(1));
+        }
+        if (current_filament < 0 || current_filament >= int(moves.ordinary_retracts.size()))
+            return;
+
+        const double e = line.dist_E(state);
+        const std::string_view comment = line.comment();
+        if (line.retracting(state) && line.dist_XY(state) <= EPSILON) {
+            retracted_since_unretract[size_t(current_filament)] += -e;
+            if (comment.find("retract for toolchange") != std::string_view::npos) {
+                moves.toolchange_retracts[size_t(current_filament)].push_back(-e);
+                moves.toolchange_retract_totals[size_t(current_filament)].push_back(
+                    retracted_since_unretract[size_t(current_filament)]);
+            }
+            else if (comment.find("retract") != std::string_view::npos)
+                moves.ordinary_retracts[size_t(current_filament)].push_back(-e);
+        } else if (line.extruding(state) && line.dist_XY(state) <= EPSILON &&
+                   comment.find("unretract") != std::string_view::npos) {
+            moves.unretracts[size_t(current_filament)].push_back(e);
+            retracted_since_unretract[size_t(current_filament)] = 0.0;
+        }
+    });
+    return moves;
+}
+
+DynamicPrintConfig retraction_e_config()
+{
+    DynamicPrintConfig config = x2d_flush_config(pvmDefault, {1500, 0}, read_shipped_x2d_change_template(), true);
+    // The X2D fixture has two explicit variant columns: filament 0 uses the first
+    // (High Flow) column and filament 1 uses the second (Standard) column.
+    config.set_key_value("retraction_length", new ConfigOptionFloats({0.8, 0.8}));
+    config.set_key_value("retract_restart_extra", new ConfigOptionFloats({0.0, 0.2}));
+    config.set_key_value("retract_length_toolchange", new ConfigOptionFloats({0.0, 2.4}));
+    config.set_key_value("retract_restart_extra_toolchange", new ConfigOptionFloats({0.0, 0.0}));
+    config.set_key_value("retraction_minimum_travel", new ConfigOptionFloats({0.0, 0.0}));
+    config.set_key_value("wipe", new ConfigOptionBools({false, false}));
+    config.set_deserialize_strict({
+        {"use_firmware_retraction", false},
+        {"retract_when_changing_layer", false},
+    });
+    return config;
+}
+
 bool comment_starts_with_marker(std::string_view comment, std::string_view marker)
 {
     while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
@@ -7053,6 +7119,41 @@ TEST_CASE("X2D tool-change flush settings reach the shipped template by filament
     REQUIRE(direct_rows.size() >= 2);
     check_flush_rows(direct_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps,
                      no_tower_cooling, retract, interface_temps, true, false);
+}
+
+TEST_CASE("Retraction settings change emitted E moves on the mapped filaments",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][RetractionE]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const DynamicPrintConfig config = retraction_e_config();
+    const std::string output = export_x2d_tower_rows(config);
+    const RetractionEMoves moves = inspect_retraction_e_moves(output, config);
+
+    // The Type1 fixture makes real tool changes across five slabs. Each filament
+    // also has object travel retracts; the E-only lines are independent of the
+    // tower purge paths and can be checked against the configured raw-filament mm.
+    REQUIRE_FALSE(moves.ordinary_retracts[0].empty());
+    REQUIRE_FALSE(moves.ordinary_retracts[1].empty());
+    REQUIRE_FALSE(moves.unretracts[0].empty());
+    REQUIRE_FALSE(moves.unretracts[1].empty());
+    for (const double length : moves.ordinary_retracts[0])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.8, 0.001));
+    for (const double length : moves.ordinary_retracts[1])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.8, 0.001));
+
+    const auto has_unretract = [&moves](size_t filament, double expected) {
+        return std::any_of(moves.unretracts[filament].begin(), moves.unretracts[filament].end(),
+            [expected](double amount) { return std::abs(amount - expected) < 0.001; });
+    };
+    CHECK(has_unretract(0, 0.8));                 // retract_restart_extra = 0
+    CHECK(has_unretract(1, 0.8 + 0.2));           // retract_restart_extra = 0.2
+
+    // The first filament uses the zero toolchange-length slot; the second uses
+    // the positive slot. Check the emitted retracts independently of recovery.
+    CHECK(moves.toolchange_retracts[0].empty());
+    REQUIRE_FALSE(moves.toolchange_retracts[1].empty());
+    for (const double length : moves.toolchange_retract_totals[1])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(2.4, 0.001));
 }
 
 TEST_CASE("Nullable filament flush values resolve through child presets during G-code export",

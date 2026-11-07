@@ -2365,3 +2365,10 @@ distance case also compares positive path lengths and retraction partitioning.
 `tests/mutations/wipe_setting_boundaries.json` probes positive path clipping,
 the 10 mm/s wipe-speed floor, and the inward-offset clamp. The clipping probe
 does not challenge the separate zero-distance gate.
+
+`[RetractionE]` checks emitted E-only retract and recovery moves for ordinary
+restart extra and toolchange retract length in a two-filament Type1 tower print.
+The zero and positive slots are verified separately. A direct `GCodeWriter`
+case isolates `retract_restart_extra_toolchange` before another retract can
+replace its stored recovery amount. The mutation catalog
+`tests/mutations/retraction_restart_settings.json` probes all three paths.

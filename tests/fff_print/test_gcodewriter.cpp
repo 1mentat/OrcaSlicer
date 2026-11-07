@@ -610,6 +610,32 @@ SCENARIO("Extruder reads the injected config column", "[GCodeWriter][H2C]") {
     }
 }
 
+TEST_CASE("Toolchange restart extra reaches the direct writer unretract", "[GCodeWriter][SettingsVariance][RetractionE]")
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    writer.config.use_relative_e_distances.value = true;
+    writer.config.filament_map.values = {1, 2};
+    writer.config.filament_diameter.values = {1.75, 1.75};
+    writer.config.retraction_length.values = {0.8, 0.8};
+    writer.config.retract_length_toolchange.values = {0.0, 2.4};
+    writer.config.retract_restart_extra.values = {0.0, 0.2};
+    writer.config.retract_restart_extra_toolchange.values = {0.0, 0.35};
+    writer.config.retraction_speed.values = {30.0, 30.0};
+    writer.config.deretraction_speed.values = {30.0, 30.0};
+    writer.set_extruders({0, 1});
+
+    writer.toolchange(0, 0);
+    CHECK(writer.retract_for_toolchange().empty());
+    CHECK(writer.unretract().empty());
+
+    writer.toolchange(1, 1);
+    const std::string retract = writer.retract_for_toolchange();
+    REQUIRE_THAT(retract, Catch::Matchers::ContainsSubstring("E-2.4"));
+    const std::string unretract = writer.unretract();
+    CHECK_THAT(unretract, Catch::Matchers::ContainsSubstring("E2.75"));
+}
+
 // Numeric argument of every line starting with `prefix`, in file order.
 static std::vector<int> collect_line_args(const std::string &gcode, const std::string &prefix)
 {
