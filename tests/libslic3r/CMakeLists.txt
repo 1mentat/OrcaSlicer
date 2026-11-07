@@ -88,6 +88,7 @@ add_executable(${_TEST_NAME}_tests
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
     test_texture_to_color_contracts.cpp
+    test_texture_painting.cpp
     test_measure_contracts.cpp
     test_lay_on_face.cpp
     test_model.cpp
