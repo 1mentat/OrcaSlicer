@@ -1654,6 +1654,28 @@ DynamicPrintConfig seam_slope_config(const std::string &type,
     return config;
 }
 
+TriangleMesh conditional_overhang_frustum()
+{
+    // Each 0.2 mm slice expands 0.3 mm per side. The estimated unsupported
+    // perimeter width therefore falls above the 40% default and below 100% of
+    // the pinned 0.45 mm outer-wall width after the line-center allowance.
+    std::vector<Vec3f> vertices{
+        { -10.f, -10.f, 0.f }, {  10.f, -10.f, 0.f },
+        {  10.f,  10.f, 0.f }, { -10.f,  10.f, 0.f },
+        { -13.f, -13.f, 2.f }, {  13.f, -13.f, 2.f },
+        {  13.f,  13.f, 2.f }, { -13.f,  13.f, 2.f },
+    };
+    std::vector<Vec3i32> faces{
+        { 0, 2, 1 }, { 0, 3, 2 }, // bottom
+        { 4, 5, 6 }, { 4, 6, 7 }, // top
+        { 0, 1, 5 }, { 0, 5, 4 }, // -Y
+        { 1, 2, 6 }, { 1, 6, 5 }, // +X
+        { 2, 3, 7 }, { 2, 7, 6 }, // +Y
+        { 3, 0, 4 }, { 3, 4, 7 }, // -X
+    };
+    return TriangleMesh(std::move(vertices), std::move(faces));
+}
+
 struct SeamSlopeEvidence {
     size_t layer_changes = 0;
     size_t outer_moves = 0;
@@ -2169,4 +2191,36 @@ TEST_CASE("Scarf numeric settings change public G-code",
     CHECK(speed_default.max_rising_outer_feedrate_mm_s > speed_representative.max_rising_outer_feedrate_mm_s);
     CHECK(speed_default.max_rising_outer_feedrate_mm_s <= 60.0 + 0.05);
 
+}
+
+TEST_CASE("Scarf overhang threshold gates estimated unsupported perimeter width",
+          "[SeamSlopeSettings][SeamOverhangThreshold][GCodeExport]")
+{
+    const auto export_threshold = [](const char *threshold) {
+        return export_seam_slope(
+            seam_slope_config("external", true, "0", 8.0, 4, 0, false,
+                              "0", "100%", 1.0, threshold),
+            conditional_overhang_frustum());
+    };
+
+    // Threshold zero bypasses the overhang estimate. At the registered 40%
+    // default, each ramp edge is too unsupported; 100% admits the same path
+    // because the estimated width remains below one outer-wall line width.
+    const SeamSlopeEvidence disabled_gate = export_threshold("0");
+    const SeamSlopeEvidence registered_default = export_threshold("40%");
+    const SeamSlopeEvidence one_line_width = export_threshold("100%");
+
+    REQUIRE(disabled_gate.layer_changes == 10);
+    REQUIRE(registered_default.layer_changes == disabled_gate.layer_changes);
+    REQUIRE(one_line_width.layer_changes == disabled_gate.layer_changes);
+    REQUIRE(disabled_gate.scarf_distance > 0.0);
+    CHECK_THAT(registered_default.scarf_distance,
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK(one_line_width.scarf_distance > registered_default.scarf_distance);
+    CHECK_THAT(one_line_width.scarf_distance,
+               Catch::Matchers::WithinAbs(disabled_gate.scarf_distance, 0.05));
+    CHECK_THAT(registered_default.print_outer_geometry,
+               Catch::Matchers::WithinAbs(disabled_gate.print_outer_geometry, 1e-6));
+    CHECK_THAT(one_line_width.print_outer_geometry,
+               Catch::Matchers::WithinAbs(disabled_gate.print_outer_geometry, 1e-6));
 }

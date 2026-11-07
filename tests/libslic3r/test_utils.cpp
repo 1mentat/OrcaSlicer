@@ -110,6 +110,24 @@ TEST_CASE("write_file_atomically reports a missing directory and writes nothing"
     REQUIRE_FALSE(boost::filesystem::exists(target));
 }
 
+TEST_CASE("write_file_atomically rejects a directory target and preserves its contents", "[Utils][UtilsIOContracts][UtilsAtomicTarget]") {
+    ScopedTemporaryDir dir;
+    const boost::filesystem::path target = dir.path() / "preset.json";
+    boost::filesystem::create_directory(target);
+    const boost::filesystem::path existing = target / "keep.json";
+    std::ofstream(existing.string()) << "keep";
+
+    std::string content;
+    load_string_file(existing, content);
+    REQUIRE(content == "keep");
+
+    const std::error_code ec = write_file_atomically(target.string(), "replacement");
+    REQUIRE(static_cast<bool>(ec));
+    REQUIRE(boost::filesystem::is_directory(target));
+    load_string_file(existing, content);
+    CHECK(content == "keep");
+}
+
 #ifndef _WIN32
 // The read-only bit on a directory stops file creation only on POSIX.
 TEST_CASE("write_file_atomically writes in place when no temporary can be created beside an existing target", "[utils]") {

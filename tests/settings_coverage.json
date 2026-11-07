@@ -3986,6 +3986,15 @@
       ],
       "reason": "The 0 and 2 endpoints plus default 1 are checked by rising outer-wall G-code E/XY. Continuous values between the endpoints are not exhaustively tested."
     },
+    "scarf_overhang_threshold": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A public conditional-scarf G-code export uses a 2 mm square frustum whose perimeter expands 0.3 mm per side per 0.2 mm layer. Threshold 0 bypasses the estimated-overhang gate and emits scarf distance; the registered 40% default suppresses the ramp; 100% of the pinned 0.45 mm outer-wall width admits the same ramp as threshold 0. The test preserves layer count and pre-export geometry across rows. No maximum is registered, so 100% is a representative value rather than an upper-bound claim."
+    },
     "seam_slope_conditional": {
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamSlopeSettings]",
@@ -4009,10 +4018,11 @@
       "test": "tests/fff_print/test_precise_seam.cpp",
       "tag": "[SeamSlopeSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Start heights 0 mm and 50% distinguish the minimum rising outer-wall flow while scarf distance, layer count and pre-export geometry remain stable; the forced-zero percent mutant fails this comparison. The consumer clamps ratios at or above 1 to 0.99. The declared evidence does not establish 100%/above or positive absolute-height behavior, so numeric boundary coverage remains incomplete."
+      "reason": "The existing ramp test applies the registered 0 mm minimum and a 50% representative. Their emitted rising outer-wall flow differs while scarf distance, layer count, and pre-export geometry stay fixed; forcing the percent ratio to zero fails the comparison. The consumer clamps ratios at or above 1 to 0.99. Positive absolute-height behavior and values above 100% remain unclaimed."
     },
     "seam_slope_steps": {
       "test": "tests/fff_print/test_precise_seam.cpp",
