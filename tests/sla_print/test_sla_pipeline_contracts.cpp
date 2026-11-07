@@ -3685,12 +3685,16 @@ struct AroundPadRun {
     double footprint_x = 0.;
     double footprint_y = 0.;
     double support_volume = 0.;
+    double support_max_x_mm = 0.;
+    double configured_base_safety_distance_mm = 0.;
+    double mapped_base_safety_distance_mm = 0.;
     double model_area = 0.;
 };
 
 AroundPadRun run_around_pad(double object_gap, double connector_stride,
                             double connector_width, double connector_penetration,
-                            double support_base_safety_distance)
+                            std::optional<double> support_base_safety_distance,
+                            double island_bottom_z = 5.0)
 {
     DynamicPrintConfig config = sla_config(1.0);
     config.set_key_value("supports_enable", new ConfigOptionBool(true));
@@ -3706,14 +3710,16 @@ AroundPadRun run_around_pad(double object_gap, double connector_stride,
     config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
     config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
     config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
-    config.set_key_value("support_base_safety_distance",
-                         new ConfigOptionFloat(support_base_safety_distance));
+    if (support_base_safety_distance.has_value())
+        config.set_key_value("support_base_safety_distance",
+                             new ConfigOptionFloat(*support_base_safety_distance));
 
     TriangleMesh model_mesh = make_cube(10.0, 10.0, 1.0);
     TriangleMesh elevated_island = make_cube(6.0, 6.0, 2.0);
-    elevated_island.translate(12.f, 2.f, 5.f);
+    elevated_island.translate(12.f, 2.f, float(island_bottom_z));
     model_mesh.merge(elevated_island);
-    sla::SupportPoints points{sla::SupportPoint(15.f, 5.f, 5.f, 0.5f, true)};
+    sla::SupportPoints points{
+        sla::SupportPoint(15.f, 5.f, float(island_bottom_z), 0.5f, true)};
 
     SlaCubeFixture fixture(std::move(config), std::move(model_mesh), std::move(points));
     REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
@@ -3737,6 +3743,12 @@ AroundPadRun run_around_pad(double object_gap, double connector_stride,
     result.support_volume = std::abs(static_cast<double>(support.volume()));
     REQUIRE(std::isfinite(result.support_volume));
     REQUIRE(result.support_volume > 0.);
+    const BoundingBoxf3 support_bounds = support.bounding_box();
+    result.support_max_x_mm = support_bounds.max.x();
+    result.configured_base_safety_distance_mm =
+        object->config().support_base_safety_distance.getFloat();
+    result.mapped_base_safety_distance_mm =
+        make_support_cfg(object->config()).pillar_base_safety_distance_mm;
     if (!result.empty) {
         result.volume = std::abs(static_cast<double>(pad.volume()));
         const auto bbox = pad.bounding_box();
@@ -3782,9 +3794,92 @@ void check_same_model_and_support(const AroundPadRun &reference,
 
 } // namespace sla_pad_geometry_boundary_contracts
 
+namespace sla_pad_merge_variance_contracts {
+
+struct PadMergeRun {
+    double configured_merge_distance_mm = 0.;
+    std::size_t cross_section_islands = 0;
+    double cross_section_area_mm2 = 0.;
+    double pad_volume_mm3 = 0.;
+};
+
+PadMergeRun run_pad_merge(std::optional<double> max_merge_distance)
+{
+    DynamicPrintConfig config = sla_config(0.5);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    if (max_merge_distance.has_value())
+        config.set_key_value("pad_max_merge_distance",
+                             new ConfigOptionFloat(*max_merge_distance));
+
+    TriangleMesh model = make_cube(10.0, 10.0, 4.0);
+    TriangleMesh second_island = make_cube(10.0, 10.0, 4.0);
+    second_island.translate(Vec3f(40.f, 0.f, 0.f));
+    model.merge(second_island);
+
+    SlaCubeFixture fixture(std::move(config), std::move(model));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA pad max merge distance validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(pad.empty());
+    const BoundingBoxf3 bounds = pad.bounding_box();
+    const double sample_z = bounds.min.z() + 0.5 * (bounds.max.z() - bounds.min.z());
+    const std::vector<ExPolygons> sections = pad.slice({sample_z});
+    REQUIRE(sections.size() == 1);
+
+    PadMergeRun result;
+    result.configured_merge_distance_mm = object->config().pad_max_merge_distance.getFloat();
+    result.pad_volume_mm3 = std::abs(static_cast<double>(pad.volume()));
+    REQUIRE(std::isfinite(result.pad_volume_mm3));
+    REQUIRE(result.pad_volume_mm3 > 0.0);
+    for (const ExPolygon &region : sections.front()) {
+        if (region.empty() || region.area() <= 0.0)
+            continue;
+        ++result.cross_section_islands;
+        result.cross_section_area_mm2 += region.area() /
+            (scaled<double>(1.0) * scaled<double>(1.0));
+    }
+    REQUIRE(std::isfinite(result.cross_section_area_mm2));
+    REQUIRE(result.cross_section_islands > 0);
+    REQUIRE(result.cross_section_area_mm2 > 0.0);
+    return result;
+}
+
+} // namespace sla_pad_merge_variance_contracts
+
 // pad_blueprint samples from the ground plane in layer_height steps below the
 // full-height endpoint. A 1 mm stack at a 1 mm stride has no interior sample,
 // so these endpoint sweeps use 0.5 mm layers to exercise generated geometry.
+TEST_CASE("SLA pad max merge distance joins nearby pad islands through the public pipeline",
+          "[SLAPrint][SLAFeatures][SLAPadMaxMergeDistance][SettingsVariance]")
+{
+    const auto minimum = sla_pad_merge_variance_contracts::run_pad_merge(0.0);
+    const auto representative = sla_pad_merge_variance_contracts::run_pad_merge(40.0);
+    const auto defaults = sla_pad_merge_variance_contracts::run_pad_merge(std::nullopt);
+
+    CHECK_THAT(minimum.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(representative.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(40.0, 1e-6));
+    CHECK_THAT(defaults.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(50.0, 1e-6));
+    CHECK(minimum.cross_section_islands == 2);
+    CHECK(representative.cross_section_islands == 1);
+    CHECK(defaults.cross_section_islands == 1);
+    CHECK(representative.pad_volume_mm3 > minimum.pad_volume_mm3);
+    CHECK(defaults.pad_volume_mm3 > minimum.pad_volume_mm3);
+}
+
 TEST_CASE("SLA pad wall thickness honors its registered boundaries",
           "[SLAPrint][SLAFeatures][SLAPadWallThicknessBoundary]")
 {
@@ -3907,6 +4002,43 @@ TEST_CASE("SLA around-object connector boundaries change pad geometry",
     sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, no_width);
     sla_pad_geometry_boundary_contracts::check_same_model_and_support(reference, zero_penetration);
 }
+TEST_CASE("SLA support base safety distance changes public support routing",
+          "[SLAPrint][SLAFeatures][SLASupportBaseSafetyDistance][SettingsVariance]")
+{
+    // The zero setting maps to the tree's 0.5 mm fallback. Keep pad gap below it
+    // so the public validator allows the registered minimum boundary.
+    const auto minimum = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 0.0, 20.0);
+    const auto defaults = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, std::nullopt, 20.0);
+    const auto representative = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 4.0, 20.0);
+    const auto maximum = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 10.0, 20.0);
+
+    CHECK_THAT(minimum.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(minimum.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(sla::SupportTreeConfig{}.safety_distance_mm, 1e-6));
+    CHECK_THAT(defaults.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(defaults.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(representative.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(4.0, 1e-6));
+    CHECK_THAT(representative.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(4.0, 1e-6));
+    CHECK_THAT(maximum.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(10.0, 1e-6));
+    CHECK_THAT(maximum.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(10.0, 1e-6));
+
+    // The tree can select a different route direction as clearance changes.
+    // Compare the resulting geometry without requiring the X bound to be monotonic.
+    CHECK(std::abs(representative.support_max_x_mm - defaults.support_max_x_mm) > 0.5);
+    CHECK(std::abs(maximum.support_max_x_mm - representative.support_max_x_mm) > 0.5);
+}
+
 TEST_CASE("SLA zero critical angle links equal-height support pillars once",
           "[SLAPrint][SLASupportCriticalAngleZero][SettingsVariance]")
 {

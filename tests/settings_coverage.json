@@ -138,6 +138,16 @@
       ],
       "reason": "PrintConfig.cpp registers minimum 0 mm and default 1 mm with no maximum. On the same public SLAPrint manual-point fixture, the support-mesh section 0.5 mm above ground has 1, 2.5 and 3.25 mm span for heights 0, 1 and selected 2 mm, derived from the pillar and frustum dimensions. This is a bounded geometry claim at those values; no upper range is registered or claimed."
     },
+    "support_base_safety_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportBaseSafetyDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..10 mm with default 1 mm. In a public SLAPrint around-object-pad fixture, a manual support under an island 20 mm above the bed routes around a separate ground-level model footprint. The test keeps pad object gap at 0.25 mm so the tree's 0.5 mm fallback at configured zero passes public validation. It checks the zero fallback mapping, implicit default, representative 4 mm and registered 10 mm maximum through the resolved SupportTreeConfig, then requires the public support-mesh X extent to differ between default and representative settings and again between representative and maximum. The tree's route direction is not assumed to be monotonic. This claim is limited to this pad fixture; other model layouts and support-tree interactions are unclaimed."
+    },
     "support_head_penetration": {
       "test": "tests/sla_print/sla_supptgen_tests.cpp",
       "tag": "[SLAPrint][SLASupportSettingsVariance]",
@@ -4022,7 +4032,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The existing ramp test applies the registered 0 mm minimum and a 50% representative. Their emitted rising outer-wall flow differs while scarf distance, layer count, and pre-export geometry stay fixed; forcing the percent ratio to zero fails the comparison. The consumer clamps ratios at or above 1 to 0.99. Positive absolute-height behavior and values above 100% remain unclaimed."
+      "reason": "The existing ramp test applies the registered 0 mm minimum and 50% representative; their emitted rising outer-wall flow differs while scarf distance, layer count, and pre-export geometry stay fixed. A separate public G-code export checks 0.1 mm absolute against 50% on the pinned 0.2 mm layer height; the two branches must produce equal minimum rising flow, scarf distance, positive-E XY length, and pre-export geometry. The consumer clamps ratios at or above 1 to 0.99. Other positive absolute values and ratios above 100% remain unclaimed."
     },
     "seam_slope_steps": {
       "test": "tests/fff_print/test_precise_seam.cpp",
@@ -4109,7 +4119,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Support ironing flow 10 and 25 percent changes deposited filament by the independently computed bead cross-section ratio. Positive geometry, moves, layers and interface width/height remain unchanged, with analytic quantization bounds. Ignoring the configured ironing-flow value fails the material-ratio assertion. Numeric boundaries remain unclaimed."
+      "reason": "Support ironing flow 10%, 25%, and the registered 100% maximum change deposited filament by independently computed bead cross-section ratios on the same public support-interface export. Positive geometry, moves, layers, and interface width/height remain stable within analytic G-code quantization bounds. The registered 0% minimum currently causes FlowErrorNegativeFlow before G-code export in this fixture, so that boundary remains unclaimed."
     },
     "support_ironing_pattern": {
       "test": "tests/fff_print/test_support_material.cpp",
@@ -4124,10 +4134,11 @@
       "test": "tests/fff_print/test_support_material.cpp",
       "tag": "[SupportIroningSettings]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Spacing 0.08 versus 0.30 mm changes ironing move count, XY path length and extruded filament in the expected density order, with positive ironing and unchanged support geometry/layers. Swapping spacings reverses all three witnesses. Numeric boundaries remain unclaimed."
+      "reason": "The registered 0 and 1 mm endpoints are checked alongside 0.05, 0.08, and 0.30 mm. The 0 mm minimum clamps to the consumer's 0.05 mm floor and matches explicit 0.05 mm output; path count, XY length, and E length decrease through the representatives to the 1 mm maximum while support geometry and layer count remain fixed."
     },
     "small_area_infill_flow_compensation": {
       "test": "tests/fff_print/test_gcode.cpp",
@@ -5732,6 +5743,16 @@
       "reason": "At width 0 and a positive width, the same elevated-support fixture compares public pad volume and footprint while stride, penetration, object gap, support geometry, and model slices stay fixed. No upper domain endpoint is claimed because PrintConfig declares none.",
       "tag": "[SLAPadConnectorBoundary]",
       "test": "tests/sla_print/test_sla_pipeline_contracts.cpp"
+    },
+    "pad_max_merge_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPadMaxMergeDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 mm, default 50 mm and no maximum. A public SLAPrint pad fixture has two 10x10 mm model islands separated by 30 mm (40 mm between their centroids). With fixed wall, brim and slope settings, the public pad-mesh midsection has two islands at 0 mm, while representative 40 mm and the implicit 50 mm default join them into one. The claim is limited to this fixture and pad-generation stage; no upper endpoint or general layout behavior is claimed."
     },
     "pad_object_gap": {
       "dimensions": [

@@ -1930,6 +1930,27 @@ TEST_CASE("Scarf length and steps have independent geometric witnesses", "[SeamS
                Catch::Matchers::WithinAbs(few_steps.print_outer_geometry, 1e-6));
 }
 
+TEST_CASE("Scarf absolute and percent start heights agree on a half layer",
+          "[SeamSlopeSettings][SeamStartHeightUnits][GCodeExport]")
+{
+    const SeamSlopeEvidence percent = export_seam_slope(
+        seam_slope_config("external", false, "50%", 8.0, 4));
+    const SeamSlopeEvidence absolute = export_seam_slope(
+        seam_slope_config("external", false, "0.1", 8.0, 4));
+
+    REQUIRE(percent.layer_changes == absolute.layer_changes);
+    REQUIRE(percent.has_rising_outer_flow);
+    REQUIRE(absolute.has_rising_outer_flow);
+    CHECK_THAT(absolute.min_rising_outer_flow,
+               Catch::Matchers::WithinAbs(percent.min_rising_outer_flow, 1e-5));
+    CHECK_THAT(absolute.scarf_distance,
+               Catch::Matchers::WithinAbs(percent.scarf_distance, 0.05));
+    CHECK_THAT(absolute.output_outer_xy,
+               Catch::Matchers::WithinAbs(percent.output_outer_xy, 0.05));
+    CHECK_THAT(absolute.print_outer_geometry,
+               Catch::Matchers::WithinAbs(percent.print_outer_geometry, 1e-6));
+}
+
 TEST_CASE("Scarf start height changes rising flow and conditional mode can disable it", "[SeamSlopeSettings][GCodeExport]")
 {
     const SeamSlopeEvidence start_at_layer = export_seam_slope(
