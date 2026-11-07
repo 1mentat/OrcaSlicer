@@ -2929,3 +2929,40 @@ TEST_CASE("Model reusable collection detaches volumes and preserves ownership me
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model repaired mesh error counts aggregate each stored diagnostic", "[Model][ModelLifecycle7][ModelRepairedErrors]")
+{
+    const auto mesh_with_errors = [](const RepairedMeshErrors &errors) {
+        TriangleMesh source = make_cube(4., 4., 4.);
+        indexed_triangle_set its = source.its;
+        return TriangleMesh(std::move(its), errors);
+    };
+
+    RepairedMeshErrors first_errors;
+    first_errors.degenerate_facets = 1;
+    first_errors.edges_fixed = 2;
+    first_errors.facets_removed = 3;
+    first_errors.facets_reversed = 4;
+    first_errors.backwards_edges = 5;
+    RepairedMeshErrors second_errors;
+    second_errors.facets_reversed = 2;
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *first = object->add_volume(mesh_with_errors(first_errors), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(first != nullptr);
+    ModelVolume *second = object->add_volume(mesh_with_errors(second_errors), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(second != nullptr);
+
+    REQUIRE(object->volumes.size() == 2);
+    CHECK(first->get_repaired_errors_count() == 15);
+    CHECK(second->get_repaired_errors_count() == 2);
+    CHECK(object->get_repaired_errors_count(0) == 15);
+    CHECK(object->get_repaired_errors_count(1) == 2);
+    CHECK(object->get_repaired_errors_count() == 17);
+}
+
+} // namespace model_lifecycle_contracts
