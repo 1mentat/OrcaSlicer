@@ -817,3 +817,29 @@ TEST_CASE("Texture atlas gives base colors an isolated color swatch", "[TextureP
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas uses the first decoded row for a material-less encoded-image face", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_ids = { -1, 1 };
+    mesh.material_texture_map = { 0, 1 };
+    mesh.textures = {
+        encoded_solid_texture(2, 3, { 255, 0, 0 }, ".png"),
+        encoded_solid_texture(2, 5, { 0, 0, 255 }, ".png"),
+    };
+    const PaintedMesh output = paint(mesh);
+    bool first_face_red = false;
+    for (size_t i = 0; i < output.face_colors.size(); ++i) {
+        if (face_center_x(output, i) < 1.5) {
+            CHECK(output.face_colors[i][0] > 180);
+            CHECK(output.face_colors[i][1] < 40);
+            CHECK(output.face_colors[i][2] < 40);
+            first_face_red = true;
+        }
+    }
+    REQUIRE(first_face_red);
+}
+
+} // namespace texture_atlas_contracts
