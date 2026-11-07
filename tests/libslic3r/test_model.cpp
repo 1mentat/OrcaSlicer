@@ -2554,3 +2554,49 @@ TEST_CASE("Model STEP wrapper classifies malformed input as a load failure",
 }
 
 } // namespace model_step_wrapper_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model lifecycle transfers project metadata and the backup path",
+          "[Model][ModelLifecycle1][ModelLifecycle][Bbs3mfLifecycle]")
+{
+    ScopedSlic3rTemporaryDir temporary("model-backup-transfer");
+    ScopedTemporaryDir backup{"orca_model_lifecycle_transfer"};
+    Model source;
+    source.set_backup_path(backup.string());
+    source.design_info = std::make_shared<ModelDesignInfo>();
+    source.design_info->Designer = "source-designer";
+    source.model_info = std::make_shared<ModelInfo>();
+    source.model_info->model_name = "source-model";
+    source.profile_info = std::make_shared<ModelProfileInfo>();
+    source.profile_info->ProfileTile = "source-profile";
+    source.mk_name = "maker";
+    source.md_name = {"key"};
+    source.md_value = {"value"};
+
+    Model destination;
+    destination.load_from(source);
+    CHECK(destination.get_backup_path() == backup.string());
+    REQUIRE(destination.design_info != nullptr);
+    CHECK(destination.design_info->Designer == "source-designer");
+    REQUIRE(destination.model_info != nullptr);
+    CHECK(destination.model_info->model_name == "source-model");
+    REQUIRE(destination.profile_info != nullptr);
+    CHECK(destination.profile_info->ProfileTile == "source-profile");
+    CHECK(destination.mk_name == "maker");
+    CHECK(destination.md_name == std::vector<std::string>{"key"});
+    CHECK(destination.md_value == std::vector<std::string>{"value"});
+    CHECK(source.design_info == nullptr);
+    CHECK(source.model_info == nullptr);
+    CHECK(source.profile_info == nullptr);
+
+    const std::string auxiliary = destination.get_auxiliary_file_temp_path();
+    CHECK(boost::filesystem::is_directory(auxiliary));
+    destination.set_need_backup();
+    CHECK(destination.is_need_backup());
+    REQUIRE(boost::filesystem::is_directory(backup.path()));
+    destination.remove_backup_path_if_exist();
+    CHECK_FALSE(boost::filesystem::exists(backup.path()));
+}
+
+} // namespace model_lifecycle_contracts
