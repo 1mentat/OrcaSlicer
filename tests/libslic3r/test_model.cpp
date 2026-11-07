@@ -3135,3 +3135,44 @@ TEST_CASE("Named object insertion keeps source mesh geometry and records volume 
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Shifting painted filament states moves only states at or above the threshold", "[Model][ModelLifecycle12][ModelPainting][ModelOwnership]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+
+    REQUIRE(volume->mesh().its.indices.size() >= 3);
+    REQUIRE_FALSE(volume->mesh().its.vertices.empty());
+    for (const Vec3f &vertex : volume->mesh().its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const Vec3i32 &face : volume->mesh().its.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE(static_cast<std::size_t>(face.maxCoeff()) < volume->mesh().its.vertices.size());
+    }
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    selector.set_facet(1, EnforcerBlockerType::Extruder3);
+    selector.set_facet(2, EnforcerBlockerType::Extruder4);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder2));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder3));
+    REQUIRE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder4));
+
+    volume->mmu_segmentation_facets.shift_states_above(*volume, EnforcerBlockerType::Extruder3, 2);
+
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder2));
+    CHECK_FALSE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder3));
+    CHECK_FALSE(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder4));
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder5));
+    CHECK(volume->mmu_segmentation_facets.has_facets(*volume, EnforcerBlockerType::Extruder6));
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2).indices.size() == 1);
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder5).indices.size() == 1);
+    CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder6).indices.size() == 1);
+}
+
+} // namespace model_lifecycle_contracts
