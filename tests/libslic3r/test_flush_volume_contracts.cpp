@@ -1,3 +1,7 @@
+#include <string>
+#include <boost/filesystem/operations.hpp>
+#include "test_utils.hpp"
+#include "libslic3r/Utils.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 #include "libslic3r/FlushVolCalc.hpp"
@@ -72,3 +76,46 @@ TEST_CASE("Flush volume is directional for a luminance change", "[FlushVolCalcul
     CHECK(light_to_dark >= 60);
 }
 
+namespace {
+
+constexpr int no_predictor_dataset = -1;
+
+} // namespace
+
+TEST_CASE("Flush volume treats transparent colors as white and applies limits", "[FlushVolCalculator]")
+{
+    ScopedTemporaryDir resources("flush-calculator-empty-resources");
+    REQUIRE(boost::filesystem::is_directory(resources.path()));
+    REQUIRE(boost::filesystem::is_empty(resources.path()));
+    const std::string previous_resources = resources_dir();
+    ScopeGuard restore_resources([&previous_resources] { set_resources_dir(previous_resources); });
+    set_resources_dir(resources.path().string());
+
+    // GenericFlushPredictor caches by dataset ID. No other test populates -1; its
+    // first lookup here sees this private empty directory, so prediction fails
+    // and all calculators below use the analytic fallback. Restoring resources_dir
+    // does not clear that process-static cache; this test adds no valid -1 dataset.
+    FlushVolCalculator calculator(37, 10000, no_predictor_dataset);
+
+    const int opaque_white_source = calculator.calc_flush_vol(
+        255, 255, 255, 255, 255, 0, 0, 0);
+    const int transparent_source = calculator.calc_flush_vol(
+        0, 0, 0, 0, 255, 0, 0, 0);
+    const int opaque_white_destination = calculator.calc_flush_vol(
+        255, 0, 0, 0, 255, 255, 255, 255);
+    const int transparent_destination = calculator.calc_flush_vol(
+        255, 0, 0, 0, 0, 0, 0, 0);
+
+    CHECK(transparent_source == opaque_white_source);
+    CHECK(transparent_destination == opaque_white_destination);
+
+    FlushVolCalculator without_minimum(0, 10000, no_predictor_dataset);
+    CHECK(opaque_white_source == without_minimum.calc_flush_vol(
+        255, 255, 255, 255, 255, 0, 0, 0) + 37);
+
+    FlushVolCalculator capped(0, 100, no_predictor_dataset);
+    const int uncapped = without_minimum.calc_flush_vol(
+        255, 255, 255, 255, 255, 0, 0, 0);
+    CHECK(uncapped > 100);
+    CHECK(capped.calc_flush_vol(255, 255, 255, 255, 255, 0, 0, 0) == 100);
+}
