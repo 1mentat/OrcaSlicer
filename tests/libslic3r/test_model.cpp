@@ -2966,3 +2966,48 @@ TEST_CASE("Model repaired mesh error counts aggregate each stored diagnostic", "
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model unit heuristics distinguish cut groups and unrestricted conversion", "[Model][ModelLifecycle8][ModelUnitConversion]")
+{
+    Model only_small_cut;
+    ModelObject *small_cut_object = only_small_cut.add_object();
+    REQUIRE(small_cut_object != nullptr);
+    REQUIRE(small_cut_object->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false) != nullptr);
+    small_cut_object->cut_id = CutObjectBase(ObjectID(7001), 1, 0);
+    CHECK(only_small_cut.looks_like_imperial_units());
+
+    Model mixed_cut_group;
+    ModelObject *small_part = mixed_cut_group.add_object();
+    REQUIRE(small_part != nullptr);
+    REQUIRE(small_part->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false) != nullptr);
+    small_part->cut_id = CutObjectBase(ObjectID(7002), 1, 0);
+    ModelObject *large_part = mixed_cut_group.add_object();
+    REQUIRE(large_part != nullptr);
+    REQUIRE(large_part->add_volume(make_cube(3., 3., 3.), ModelVolumeType::MODEL_PART, false) != nullptr);
+    large_part->cut_id = CutObjectBase(ObjectID(7002), 1, 0);
+    CHECK_FALSE(mixed_cut_group.looks_like_imperial_units());
+
+    Model imperial;
+    ModelObject *imperial_object = imperial.add_object();
+    REQUIRE(imperial_object != nullptr);
+    ModelVolume *imperial_volume = imperial_object->add_volume(make_cube(3., 3., 3.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(imperial_volume != nullptr);
+    REQUIRE(imperial_volume->get_convex_hull_shared_ptr() != nullptr);
+    imperial.convert_from_imperial_units(false);
+    CHECK_THAT(imperial_volume->mesh().bounding_box().size().x(), Catch::Matchers::WithinAbs(76.2, 1e-4));
+    CHECK(imperial_volume->source.is_converted_from_inches);
+
+    Model metric;
+    ModelObject *metric_object = metric.add_object();
+    REQUIRE(metric_object != nullptr);
+    ModelVolume *metric_volume = metric_object->add_volume(make_cube(.3, .3, .3), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(metric_volume != nullptr);
+    REQUIRE(metric_volume->get_convex_hull_shared_ptr() != nullptr);
+    metric.convert_from_meters(false);
+    CHECK_THAT(metric_volume->mesh().bounding_box().size().x(), Catch::Matchers::WithinAbs(300., 1e-3));
+    CHECK(metric_volume->source.is_converted_from_meters);
+}
+
+} // namespace model_lifecycle_contracts
