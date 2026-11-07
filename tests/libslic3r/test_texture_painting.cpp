@@ -348,7 +348,7 @@ TextureImage solid_texture(int width, int height, RGB rgb)
     REQUIRE(width > 0);
     REQUIRE(width <= 4);
     REQUIRE(height > 0);
-    REQUIRE(height <= 4);
+    REQUIRE(height <= 8);
     TextureImage image;
     image.width = width;
     image.height = height;
@@ -860,6 +860,24 @@ TEST_CASE("Texture atlas preserves input surface area while subdividing", "[Text
 {
     const PaintedMesh output = paint(two_material_faces());
     CHECK_THAT(painted_area(output), Catch::Matchers::WithinAbs(1., 1e-5));
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas remaps the vertical coordinate for unequal texture heights", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = vertical_texture(1, 2, { 255, 0, 0 }, { 255, 0, 0 });
+    mesh.textures[1] = solid_texture(1, 8, { 0, 0, 0 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.5f });
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 100);
+    CHECK((*left)[1] < 80);
+    CHECK((*left)[2] < 80);
 }
 
 } // namespace texture_atlas_contracts
