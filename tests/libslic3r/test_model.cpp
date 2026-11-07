@@ -3011,3 +3011,40 @@ TEST_CASE("Model unit heuristics distinguish cut groups and unrestricted convers
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model instance auto brim width varies with adhesion at fixed speed and geometry", "[Model][ModelLifecycle9][ModelAutoBrim]")
+{
+    const GlobalSpeedMap saved_speed_map = Model::printSpeedMap;
+    const std::map<size_t, ExtruderParams> saved_extruder_params = Model::extruderParamsMap;
+    ScopeGuard restore_model_static_state([&]() {
+        Model::printSpeedMap = saved_speed_map;
+        Model::extruderParamsMap = saved_extruder_params;
+    });
+    Model::printSpeedMap = {};
+    Model::printSpeedMap.maxSpeed = 100.;
+    Model::printSpeedMap.perimeterSpeed = 100.;
+    Model::printSpeedMap.externalPerimeterSpeed = 100.;
+    Model::printSpeedMap.infillSpeed = 100.;
+    Model::printSpeedMap.solidInfillSpeed = 100.;
+    Model::printSpeedMap.topSolidInfillSpeed = 100.;
+    Model::printSpeedMap.supportSpeed = 100.;
+    Model::printSpeedMap.smallPerimeterSpeed = 100.;
+    Model::printSpeedMap.smallSupportPerimeterSpeed = 100.;
+    Model::extruderParamsMap.clear();
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->add_volume(make_cube(2., 2., 100.), ModelVolumeType::MODEL_PART, false) != nullptr);
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+
+    const double narrow_brim = instance->get_auto_brim_width(0., 0.225);
+    const double wide_brim = instance->get_auto_brim_width(0., 1.);
+    CHECK_THAT(narrow_brim, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(wide_brim, Catch::Matchers::WithinAbs(3. * std::sqrt(2.), 1e-9));
+}
+
+} // namespace model_lifecycle_contracts
