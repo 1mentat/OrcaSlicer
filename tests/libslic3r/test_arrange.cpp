@@ -498,6 +498,7 @@ TEST_CASE("ArrangePolygon applies its setter once and records that it was applie
     int calls = 0;
     item.setter = [&](const ArrangePolygon &observed) {
         ++calls;
+        CHECK(observed.poly.area() > 0.);
         CHECK(observed.bed_idx == 0);
     };
     item.apply();
@@ -511,7 +512,10 @@ TEST_CASE("Arrange dispatches an empty point bed as an infinite bed centred on t
     // A 1 m square fits no finite printer bed, so only the infinite bed places it.
     ArrangePolygons items{rectangle(1000., 1000., 300., 400.)};
     arrange(items, Points{}, serial_params());
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
     REQUIRE(items.front().bed_idx == 0);
+    CHECK(items.front().transformed_poly().area() > 0.);
     const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
     CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(0., .01));
     CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(0., .01));
@@ -521,8 +525,11 @@ TEST_CASE("Arrange dispatches a one-point bed as an infinite bed around that poi
 {
     ArrangePolygons items{rectangle(1000., 1000.)};
     arrange(items, Points{Point(scaled(100.), scaled(75.))}, serial_params());
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
     REQUIRE(items.front().bed_idx == 0);
     const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK(box.defined);
     CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(100., .01));
     CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(75., .01));
 }
@@ -590,10 +597,16 @@ TEST_CASE("Arrange keeps footprints inside a CircleBed and disjoint", "[Arrange]
 {
     // The origin lies outside this circle, so the parts must be moved onto it.
     ArrangePolygons items{rectangle(20., 10.), rectangle(12., 18.), rectangle(9., 9.)};
+    const std::vector<double> original_areas{
+        items[0].transformed_poly().area(), items[1].transformed_poly().area(), items[2].transformed_poly().area()};
     const Point center(scaled(100.), scaled(100.));
     arrange(items, CircleBed(center, scaled(100.)), serial_params(scaled(1.)));
-    for (const ArrangePolygon &item : items) {
+    REQUIRE(items.size() == original_areas.size());
+    for (size_t i = 0; i < items.size(); ++i) {
+        const ArrangePolygon &item = items[i];
+        REQUIRE(std::isfinite(item.rotation));
         REQUIRE(item.bed_idx == 0);
+        CHECK_THAT(item.transformed_poly().area(), WithinRel(original_areas[i], 1e-8));
         CHECK(inside_circle(item.transformed_poly().contour.bounding_box(), center, scaled(100.01)));
     }
     require_no_overlap(items);
@@ -607,9 +620,14 @@ TEST_CASE("Arrange keeps convex polygon-bed footprints inside and disjoint", "[A
                             Point(scaled(10.), scaled(190.)), Point(0, scaled(100.))}};
     ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
     arrange(items, bed_poly, serial_params(scaled(1.)));
+    REQUIRE(items.size() == 2);
     for (const ArrangePolygon &item : items) {
+        REQUIRE(std::isfinite(item.rotation));
         REQUIRE(item.bed_idx == 0);
-        CHECK(diff_ex(item.transformed_poly(), bed_poly).empty());
+        const ExPolygon transformed = item.transformed_poly();
+        REQUIRE_FALSE(transformed.contour.points.empty());
+        REQUIRE(transformed.contour.bounding_box().defined);
+        CHECK(diff_ex(transformed, bed_poly).empty());
     }
     require_no_overlap(items);
 }
@@ -635,14 +653,28 @@ TEST_CASE("Arrange rotates an oversized item to fit only when rotations are allo
     ArrangeParams no_rotations = serial_params();
     no_rotations.allow_rotations = false;
     arrange(disabled, bed(50., 130.), no_rotations);
+    REQUIRE(disabled.size() == 1);
+    REQUIRE(std::isfinite(disabled.front().rotation));
     CHECK(disabled.front().bed_idx == UNARRANGED);
 
+    ArrangePolygons fitting{rectangle(35., 12.)};
+    arrange(fitting, bed(100., 100.), no_rotations);
+    REQUIRE(fitting.size() == 1);
+    REQUIRE(std::isfinite(fitting.front().rotation));
+    REQUIRE(fitting.front().bed_idx == 0);
+    CHECK_THAT(fitting.front().rotation, WithinAbs(0., 1e-12));
+
     ArrangePolygons enabled{rectangle(120., 30.)};
+    const double source_area = enabled.front().transformed_poly().area();
     ArrangeParams rotations = serial_params();
     rotations.allow_rotations = true;
     arrange(enabled, bed(50., 130.), rotations);
+    REQUIRE(enabled.size() == 1);
+    REQUIRE(std::isfinite(enabled.front().rotation));
     REQUIRE(enabled.front().bed_idx == 0);
     CHECK(std::abs(std::sin(enabled.front().rotation)) > .9);
+    CHECK_THAT(enabled.front().transformed_poly().area(), WithinRel(source_area, 1e-6));
+    CHECK(enabled.front().transformed_poly().contour.bounding_box().defined);
     CHECK(bed(50., 130.).contains(enabled.front().transformed_poly().contour.bounding_box()));
 }
 
@@ -688,17 +720,23 @@ TEST_CASE("Axis alignment turns the long axis of an asymmetric contour onto Y", 
 {
     ArrangePolygons items{rectangle(20., 60.)};
     items.front().rotation = .37;
+    const double source_area = items.front().transformed_poly().area();
     ArrangeParams params = quiet_params();
 
     // The alignment only runs when it is requested.
     update_selected_items_axis_align(items, nullptr, params);
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
     CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
 
     params.align_to_y_axis = true;
     update_selected_items_axis_align(items, nullptr, params);
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
     const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
     CHECK_THAT(unscaled<double>(box.size().x()), WithinAbs(20., .01));
     CHECK_THAT(unscaled<double>(box.size().y()), WithinAbs(60., .01));
+    CHECK_THAT(items.front().transformed_poly().area(), WithinRel(source_area, 1e-6));
 }
 
 TEST_CASE("Axis alignment leaves a contour without a dominant axis unrotated", "[Arrange][ArrangeParams]")
@@ -805,6 +843,7 @@ TEST_CASE("Arrange parameter update adds the real skirt clearance and sequential
     SECTION("sequential printing also gives back half the clearance radius") {
         params.is_seq_print = true;
         update_arrange_params(params, &config, {});
+        CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
         CHECK_THAT(params.bed_shrink_x, WithinAbs(11.8, 1e-5));
         CHECK_THAT(params.bed_shrink_y, WithinAbs(12.8, 1e-5));
     }
