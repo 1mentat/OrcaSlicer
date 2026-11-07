@@ -949,6 +949,8 @@ TEST_CASE("Emboss vertical offsets use the metrics record at the requested colle
 
 } // namespace emboss_font_contracts
 
+using Catch::Matchers::WithinAbs;
+
 TEST_CASE("Emboss projections preserve surface orientation and round trips", "[Emboss]")
 {
     const std::array<Vec3d, 3> normals{Vec3d::UnitZ(), -Vec3d::UnitZ(), Vec3d::UnitX()};
@@ -981,7 +983,7 @@ TEST_CASE("Emboss projections preserve surface orientation and round trips", "[E
 
 TEST_CASE("Emboss font contracts cover real glyph caching and style variance", "[Emboss]")
 {
-    const std::filesystem::path font_path = repo_font_path();
+    const std::filesystem::path font_path = emboss_font_contracts::font_path();
     REQUIRE(std::filesystem::exists(font_path));
     std::string font_path_string = font_path.string();
     std::unique_ptr<Emboss::FontFile> font_file = Emboss::create_font_file(font_path_string.c_str());
@@ -1020,11 +1022,11 @@ TEST_CASE("Emboss font contracts cover real glyph caching and style variance", "
     CHECK(nonempty_glyphs == 3); // A, B, and C; space and newline have no outline.
     const size_t cache_size = cached.cache->size();
     REQUIRE(cache_size >= 3);
-    const double first_area = glyph_area(first);
+    const double first_area = emboss_font_contracts::glyph_area(first);
 
     const ExPolygonsWithIds repeated = Emboss::text2vshapes(cached, text, regular);
     CHECK(cached.cache->size() == cache_size);
-    CHECK_THAT(glyph_area(repeated), Catch::Matchers::WithinAbs(first_area, 1e-9));
+    CHECK_THAT(emboss_font_contracts::glyph_area(repeated), Catch::Matchers::WithinAbs(first_area, 1e-9));
     const HealedExPolygons healed = Emboss::text2shapes(cached, "A B\nC", regular);
     REQUIRE_FALSE(healed.expolygons.empty());
     CHECK(healed.is_healed);
@@ -1054,22 +1056,22 @@ TEST_CASE("Emboss font contracts cover real glyph caching and style variance", "
     Emboss::FontFileWithCache bold_cache(std::move(bold_font));
     FontProp bold(10.f);
     bold.boldness = 0.2f;
-    const double plain_area = glyph_area(Emboss::text2vshapes(plain_cache, L"A", regular));
-    const double bold_area = glyph_area(Emboss::text2vshapes(bold_cache, L"A", bold));
+    const double plain_area = emboss_font_contracts::glyph_area(Emboss::text2vshapes(plain_cache, L"A", regular));
+    const double bold_area = emboss_font_contracts::glyph_area(Emboss::text2vshapes(bold_cache, L"A", bold));
     CHECK(bold_area > plain_area);
 }
 
 TEST_CASE("Emboss normal calculation handles crossing into both adjacent edges", "[Emboss][EmbossLayout]")
 {
-    const Polygon polygon = square();
-    const double angle    = Emboss::calculate_angle(int32_t(scaled(12.)), PolygonPoint{0, xy(0, -10)}, polygon);
+    const Polygon polygon = emboss_layout_contracts::square();
+    const double angle    = Emboss::calculate_angle(int32_t(scaled(12.)), PolygonPoint{0, emboss_layout_contracts::xy(0, -10)}, polygon);
     CHECK_THAT(std::cos(angle), WithinAbs(0., 1e-8));
     CHECK_THAT(std::sin(angle), WithinAbs(-1., 1e-8));
 }
 
 TEST_CASE("Emboss layout selects metrics from the requested font collection entry", "[Emboss][EmbossLayout]")
 {
-    auto face   = font();
+    auto face   = emboss_font_contracts::load_font();
     face->infos = {{800, -200, 200, 1000}, {1200, -400, 100, 2000}};
     FontProp prop(20.f);
     prop.collection_number = 1;
@@ -1079,7 +1081,7 @@ TEST_CASE("Emboss layout selects metrics from the requested font collection entr
 
 TEST_CASE("Font loading supports raw data, glyph extraction, and invalid collection selection", "[Emboss][EmbossExtra]")
 {
-    const std::filesystem::path path = repo_font_path();
+    const std::filesystem::path path = emboss_font_contracts::font_path();
     REQUIRE(std::filesystem::exists(path));
     std::ifstream input(path, std::ios::binary);
     REQUIRE(input.good());

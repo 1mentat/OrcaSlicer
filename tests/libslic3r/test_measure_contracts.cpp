@@ -153,6 +153,52 @@ void check_parallel_pair(const SurfaceFeature &a, const SurfaceFeature &b, doubl
     check_circle_pair_witness(reversed.distance_infinite, b, a);
 }
 
+void require_distance(const std::optional<DistAndPoints> &distance, double expected, double tolerance = 1e-8)
+{
+    REQUIRE(distance.has_value());
+    CHECK_THAT(distance->dist, WithinAbs(expected, tolerance));
+}
+
+void require_point_circle_witness(const std::optional<DistAndPoints> &distance,
+                                  const SurfaceFeature &circle_feature, const Vec3d &point)
+{
+    REQUIRE(distance.has_value());
+    check_vec(distance->from, point);
+    check_on_circle(distance->to, circle_feature);
+}
+
+void require_reversed_point_circle_witness(const std::optional<DistAndPoints> &distance,
+                                           const SurfaceFeature &circle_feature, const Vec3d &point)
+{
+    REQUIRE(distance.has_value());
+    check_on_circle(distance->from, circle_feature);
+    check_vec(distance->to, point);
+}
+
+void require_circle_pair_witness(const std::optional<DistAndPoints> &distance, const SurfaceFeature &from_circle,
+                                const SurfaceFeature &to_circle)
+{
+    check_circle_pair_witness(distance, from_circle, to_circle);
+}
+
+namespace skew_oracle {
+
+struct CircleInput {
+    Vec3d center;
+    Vec3d normal;
+    double radius;
+};
+
+void check_pair(const CircleInput &a, const CircleInput &b)
+{
+    check_against_oracle(circle(a.center, a.normal, a.radius), circle(b.center, b.normal, b.radius));
+}
+
+} // namespace skew_oracle
+
+using skew_oracle::CircleInput;
+using skew_oracle::check_pair;
+
 } // namespace
 
 TEST_CASE("Measure projection and feature transforms preserve analytic geometry", "[Measure][MeasureContracts]")

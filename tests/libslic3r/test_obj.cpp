@@ -585,6 +585,9 @@ TEST_CASE("OBJ material lookup records an unknown material without dropping geom
 
 } // namespace obj_parser_contracts
 
+using obj_parser_contracts::parse_obj_stream;
+using obj_parser_contracts::write_text;
+
 namespace obj_binary_contracts {
 namespace {
 
@@ -858,6 +861,9 @@ TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJ
 
 } // namespace obj_binary_contracts
 
+using obj_binary_contracts::append_raw;
+using obj_binary_contracts::write_bytes;
+
 TEST_CASE("OBJ parsing keeps geometry after malformed records", "[OBJParser]")
 {
     const ObjParser::ObjData data = parse_obj_stream(
@@ -1011,7 +1017,6 @@ TEST_CASE("OBJ textured import keeps geometry when its only texture is missing",
 
 TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -1026,7 +1031,6 @@ TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OB
 
 TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -1053,7 +1057,6 @@ TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJP
 
 TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;

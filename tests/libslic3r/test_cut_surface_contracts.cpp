@@ -136,9 +136,12 @@ void check_contours(const SurfaceCut &cut)
 void check_mesh_indices(const indexed_triangle_set &mesh)
 {
     for (const stl_triangle_vertex_indices &face : mesh.indices) {
-        REQUIRE(face[0] >= 0 && size_t(face[0]) < mesh.vertices.size());
-        REQUIRE(face[1] >= 0 && size_t(face[1]) < mesh.vertices.size());
-        REQUIRE(face[2] >= 0 && size_t(face[2]) < mesh.vertices.size());
+        REQUIRE(face[0] >= 0);
+        REQUIRE(size_t(face[0]) < mesh.vertices.size());
+        REQUIRE(face[1] >= 0);
+        REQUIRE(size_t(face[1]) < mesh.vertices.size());
+        REQUIRE(face[2] >= 0);
+        REQUIRE(size_t(face[2]) < mesh.vertices.size());
         CHECK(face[0] != face[1]);
         CHECK(face[1] != face[2]);
         CHECK(face[0] != face[2]);

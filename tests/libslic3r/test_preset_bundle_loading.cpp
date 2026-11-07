@@ -1154,6 +1154,10 @@ void set_dual_printer_layout(ConstructInputs &in)
 
 } // namespace preset_full_config_contracts
 
+// The merged test cases import this support namespace directly, so re-export the
+// construct_full_config fixtures from their contract namespace here.
+using namespace preset_full_config_contracts;
+
 namespace preset_lifecycle_contracts {
 
 namespace {
@@ -1237,6 +1241,9 @@ DynamicPrintConfig printer_config(PresetBundle &bundle, const std::string &model
 
 
 } // namespace preset_lifecycle_contracts
+
+// Keep lifecycle fixtures available to tests that import this support namespace.
+using namespace preset_lifecycle_contracts;
 
 namespace preset_bundle_workflow_contracts {
 using namespace Slic3r;
@@ -3860,6 +3867,9 @@ void load_selection_fixture(PresetBundle &bundle)
 
 
 } // namespace preset_lifecycle_contracts
+
+// The merged tests use the outer support namespace as their fixture scope.
+using namespace preset_lifecycle_contracts;
 
 // The filament combo box shows a dirty preset as Preset::label(), which carries the
 // "modified" marker; storing that label as the slot's preset name would point at no preset.

@@ -1110,15 +1110,15 @@ TEST_CASE("Mesh color clustering assigns every face to a supplied center", "[Col
     std::vector<Color> input_face_colors;
     input_face_colors.reserve(mesh.indices.size());
     for (std::size_t i = 0; i < mesh.indices.size(); ++i)
-        input_face_colors.push_back(i % 2 == 0 ? RED : BLUE);
+        input_face_colors.push_back(i % 2 == 0 ? red : blue);
     std::vector<Color> face_colors = input_face_colors;
 
     std::vector<std::size_t> face_ids;
-    REQUIRE(mesh_cluster(mesh, {RED, BLUE}, face_colors, face_ids));
+    REQUIRE(mesh_cluster(mesh, {red, blue}, face_colors, face_ids));
     REQUIRE(face_colors.size() == mesh.indices.size());
     REQUIRE(face_ids.size() == mesh.indices.size());
     for (std::size_t i = 0; i < face_colors.size(); ++i) {
-        const std::size_t expected_id = input_face_colors[i] == RED ? 0 : 1;
+        const std::size_t expected_id = input_face_colors[i] == red ? 0 : 1;
         CHECK(face_ids[i] == expected_id);
         CHECK(face_colors[i] == input_face_colors[i]);
     }
@@ -1129,8 +1129,8 @@ TEST_CASE("Mesh color clustering assigns every face to a supplied center", "[Col
     for (const Color &color : one_center_colors)
         CHECK(color == Color{{12, 34, 56}});
 
-    std::vector<Color> malformed_colors(1, RED);
-    CHECK_FALSE(mesh_cluster(mesh, {RED, BLUE}, malformed_colors, face_ids));
+    std::vector<Color> malformed_colors(1, red);
+    CHECK_FALSE(mesh_cluster(mesh, {red, blue}, malformed_colors, face_ids));
     CHECK_FALSE(mesh_cluster(mesh, {}, one_center_colors, face_ids));
 }
 
@@ -1150,21 +1150,21 @@ TEST_CASE("Color region smoothing preserves topology and legal labels", "[ColorU
     CHECK(labels.size() == face_count);
     CHECK(labels == original_labels);
     CHECK(is_closed(mesh));
-    require_finite_mesh(mesh);
+    check_finite_mesh(mesh);
     for (std::size_t label : labels)
         CHECK(label < 2);
 
     TriMesh smoothed = cube_mesh();
     std::vector<Color> colors(face_count);
     for (std::size_t i = 0; i < colors.size(); ++i)
-        colors[i] = i % 2 == 0 ? RED : BLUE;
+        colors[i] = i % 2 == 0 ? red : blue;
     SmoothParameters geometry_smoothing;
     geometry_smoothing.smooth_weight = 0.8;
     REQUIRE(smooth_region(smoothed, colors, geometry_smoothing));
     CHECK(smoothed.indices.size() == face_count);
     CHECK(is_closed(smoothed));
-    require_finite_mesh(smoothed);
-    const std::set<Color> allowed_colors{RED, BLUE};
+    check_finite_mesh(smoothed);
+    const std::set<Color> allowed_colors{red, blue};
     for (const Color &color : colors) {
         CHECK(allowed_colors.count(color) == 1);
     }
@@ -1335,7 +1335,7 @@ TEST_CASE("Remeshing a closed colored cube preserves volume, closure, and label 
     CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(before, 0.2));
     for (std::size_t label : labels)
         CHECK(label <= 1);
-    require_finite_mesh(mesh);
+    check_finite_mesh(mesh);
 }
 
 TEST_CASE("Remeshing target ratios order the resulting tessellation by edge scale", "[ColorUtils][ColorUtilsExtended]")

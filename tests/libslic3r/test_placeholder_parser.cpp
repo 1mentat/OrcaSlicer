@@ -1023,8 +1023,9 @@ TEST_CASE("Placeholder parser validates legacy indexes and optional vector eleme
         nil_error = e.what();
     }
     REQUIRE_FALSE(nil_error.empty());
-    CHECK((nil_error.find("undefined (nil)") != std::string::npos) ||
-          (nil_error.find("element of vector of optional values") != std::string::npos));
+    const bool expected_nil_error = nil_error.find("undefined (nil)") != std::string::npos ||
+                                    nil_error.find("element of vector of optional values") != std::string::npos;
+    CHECK(expected_nil_error);
 }
 
 TEST_CASE("Placeholder parser resolves point and enum vector elements",

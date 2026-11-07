@@ -351,9 +351,9 @@ using RGB = Color;
 TextureImage solid_texture(int width, int height, RGB rgb)
 {
     REQUIRE(width > 0);
-    REQUIRE(width <= 4);
+    REQUIRE(width <= 8);
     REQUIRE(height > 0);
-    REQUIRE(height <= 4);
+    REQUIRE(height <= 8);
     TextureImage image;
     image.width = width;
     image.height = height;
@@ -367,6 +367,55 @@ TextureImage solid_texture(int width, int height, RGB rgb)
             image.data[offset + 2] = static_cast<unsigned char>(rgb[2]);
         }
     return image;
+}
+
+TextureImage horizontal_texture(int width, RGB left, RGB right)
+{
+    REQUIRE(width > 0);
+    REQUIRE(width <= 8);
+    TextureImage image;
+    image.width = width;
+    image.height = 1;
+    image.channels = 3;
+    image.data.resize(static_cast<size_t>(width) * 3);
+    for (int x = 0; x < width; ++x) {
+        const RGB &rgb = x < width / 2 ? left : right;
+        const size_t offset = static_cast<size_t>(x) * 3;
+        for (size_t channel = 0; channel < 3; ++channel)
+            image.data[offset + channel] = static_cast<unsigned char>(rgb[channel]);
+    }
+    return image;
+}
+
+TextureImage vertical_texture(int width, int height, RGB top, RGB bottom)
+{
+    REQUIRE(width > 0);
+    REQUIRE(width <= 8);
+    REQUIRE(height > 0);
+    REQUIRE(height <= 8);
+    TextureImage image;
+    image.width = width;
+    image.height = height;
+    image.channels = 3;
+    image.data.resize(static_cast<size_t>(width) * height * 3);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const RGB &rgb = y < height / 2 ? top : bottom;
+            const size_t offset = (static_cast<size_t>(y) * width + x) * 3;
+            for (size_t channel = 0; channel < 3; ++channel)
+                image.data[offset + channel] = static_cast<unsigned char>(rgb[channel]);
+        }
+    return image;
+}
+
+TextureImage rgba_texture(RGB rgb, unsigned char alpha)
+{
+    return TextureImage{1, 1, 4, {
+        static_cast<unsigned char>(rgb[0]),
+        static_cast<unsigned char>(rgb[1]),
+        static_cast<unsigned char>(rgb[2]),
+        alpha,
+    }};
 }
 
 TexturedMesh two_material_faces()
@@ -417,9 +466,9 @@ std::vector<unsigned char> encode_image(const cv::Mat &bgr, const char *extensio
     REQUIRE_FALSE(bgr.empty());
     REQUIRE(bgr.type() == CV_8UC3);
     REQUIRE(bgr.rows > 0);
-    REQUIRE(bgr.rows <= 4);
+    REQUIRE(bgr.rows <= 8);
     REQUIRE(bgr.cols > 0);
-    REQUIRE(bgr.cols <= 4);
+    REQUIRE(bgr.cols <= 8);
     std::vector<unsigned char> bytes;
     REQUIRE(cv::imencode(extension, bgr, bytes));
     REQUIRE_FALSE(bytes.empty());
@@ -429,9 +478,9 @@ std::vector<unsigned char> encode_image(const cv::Mat &bgr, const char *extensio
 TextureImage encoded_solid_texture(int width, int height, RGB rgb, const char *extension)
 {
     REQUIRE(width > 0);
-    REQUIRE(width <= 4);
+    REQUIRE(width <= 8);
     REQUIRE(height > 0);
-    REQUIRE(height <= 4);
+    REQUIRE(height <= 8);
     cv::Mat bgr(height, width, CV_8UC3);
     REQUIRE_FALSE(bgr.empty());
     for (int y = 0; y < height; ++y)
@@ -539,6 +588,28 @@ const RGB *color_near_x(const PaintedMesh &mesh, double x, double tolerance = 0.
     return nullptr;
 }
 
+void require_red_blue_by_side(const PaintedMesh &mesh)
+{
+    bool red_seen = false;
+    bool blue_seen = false;
+    for (size_t i = 0; i < mesh.face_colors.size(); ++i) {
+        const RGB &color = mesh.face_colors[i];
+        if (face_center_x(mesh, i) < 1.5) {
+            CHECK(color[0] > 180);
+            CHECK(color[1] < 40);
+            CHECK(color[2] < 40);
+            red_seen = true;
+        } else if (face_center_x(mesh, i) > 2.5) {
+            CHECK(color[0] < 40);
+            CHECK(color[1] < 40);
+            CHECK(color[2] > 180);
+            blue_seen = true;
+        }
+    }
+    REQUIRE(red_seen);
+    REQUIRE(blue_seen);
+}
+
 } // namespace
 
 TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas][!shouldfail]")
@@ -561,6 +632,8 @@ TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture",
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
 
 TEST_CASE("Texture atlas decodes encoded PNGs for separate material rows", "[TexturePainting][TextureAtlas]")
 {
@@ -678,7 +751,7 @@ TEST_CASE("Texture atlas gives base colors an isolated color swatch", "[TextureP
     bool base_color_seen = false;
     bool blue = false;
     for (size_t i = 0; i < output.face_colors.size(); ++i) {
-        const RGB &color = output.face_colors[i];
+        const Color &color = output.face_colors[i];
         if (face_center_x(output, i) < 1.5) {
             CHECK(color[0] > 150);
             CHECK(color[1] > 20);
@@ -925,3 +998,5 @@ TEST_CASE("Texture atlas rejects raw images whose dimensions exceed their pixel 
         REQUIRE_FALSE(texture_to_painting(input, output, atlas_settings()));
     }
 }
+
+} // namespace texture_atlas_contracts

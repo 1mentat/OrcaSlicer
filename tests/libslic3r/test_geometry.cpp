@@ -2077,12 +2077,12 @@ TEST_CASE("Transformation component access and axis setters preserve signed scal
     axis_scale.set_scaling_factor(Y, 5.);
     Matrix3d expected_axis_scale;
     expected_axis_scale << 0., -5., 0., 4., 0., 0., 0., 0., 2.;
-    math_gap_contracts::check_linear_and_offset(axis_scale.get_matrix(), expected_axis_scale, offset);
+    check_linear_and_offset(axis_scale.get_matrix(), expected_axis_scale, offset);
 
     Geometry::Transformation no_full_turn;
     no_full_turn.set_offset(offset);
     no_full_turn.set_rotation(Z, -1e-10);
-    math_gap_contracts::check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
+    check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
 }
 
 TEST_CASE("Transformation resets preserve offset and the selected geometric components",
@@ -2102,12 +2102,12 @@ TEST_CASE("Transformation resets preserve offset and the selected geometric comp
     Geometry::Transformation rotation_cleared(matrix);
     rotation_cleared.reset_rotation();
     const Matrix3d expected_unrotated = scale.asDiagonal();
-    math_gap_contracts::check_linear_and_offset(rotation_cleared.get_matrix(), expected_unrotated, offset);
+    check_linear_and_offset(rotation_cleared.get_matrix(), expected_unrotated, offset);
 
     Geometry::Transformation skew_cleared(matrix);
     skew_cleared.reset_skew();
     const double volume_preserving_uniform_scale = std::cbrt(scale.prod());
-    math_gap_contracts::check_linear_and_offset(
+    check_linear_and_offset(
         skew_cleared.get_matrix(), rotation * (volume_preserving_uniform_scale * Matrix3d::Identity()), offset);
 
     Geometry::Transformation cleared(matrix);

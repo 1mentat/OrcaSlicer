@@ -25,11 +25,13 @@
 #include "libslic3r/TextureToColor/ColorUtils.hpp"
 #include "libslic3r/TextureToColor/TextureToColor.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "texture_to_color_fixtures.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
-using namespace Slic3r::tex2color::test;
+using Slic3r::tex2color::test::Color;
+using Slic3r::tex2color::test::red;
 using Catch::Matchers::WithinAbs;
 
 namespace {
@@ -73,7 +75,7 @@ TextureToColorSettings repair_import_settings(std::size_t &callback_calls,
             progress("private repair callback", 37);
             callback_progress_seen = true;
         }
-        TriMesh fixed = closed_tetrahedron();
+        TriMesh fixed = Slic3r::tex2color::test::closed_tetrahedron();
         repaired = fixed;
         if (callback_finished != nullptr)
             *callback_finished = true;
