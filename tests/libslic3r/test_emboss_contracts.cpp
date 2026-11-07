@@ -372,9 +372,14 @@ MeshSummary inspect_projected_shell(const indexed_triangle_set &mesh, double bac
 {
     MeshSummary summary;
     for (const stl_triangle_vertex_indices &triangle : mesh.indices) {
+        for (int corner = 0; corner < 3; ++corner) {
+            REQUIRE(triangle[corner] >= 0);
+            REQUIRE(static_cast<size_t>(triangle[corner]) < mesh.vertices.size());
+        }
         const Vec3f &a = mesh.vertices[triangle[0]];
         const Vec3f &b = mesh.vertices[triangle[1]];
         const Vec3f &c = mesh.vertices[triangle[2]];
+        REQUIRE((b - a).cross(c - a).squaredNorm() > 1e-8f);
         const auto on_plane = [&](double z) {
             return std::abs(a.z() - z) < 1e-5 && std::abs(b.z() - z) < 1e-5 && std::abs(c.z() - z) < 1e-5;
         };
@@ -434,8 +439,8 @@ TEST_CASE("Emboss polygons2model preserves hole area and closes the projected sh
     const indexed_triangle_set mesh = Emboss::polygons2model(shape, Emboss::ProjectZ(depth));
 
     check_surface_vertices(mesh, depth, 8);
-    REQUIRE(its_num_open_edges(mesh) == 0);
     const MeshSummary summary = inspect_projected_shell(mesh, depth);
+    REQUIRE(its_num_open_edges(mesh) == 0);
     const double expected_area = shape.front().area();
     CHECK_THAT(summary.front_area, Catch::Matchers::WithinAbs(expected_area, 1e-3));
     CHECK_THAT(summary.back_area, Catch::Matchers::WithinAbs(expected_area, 1e-3));
