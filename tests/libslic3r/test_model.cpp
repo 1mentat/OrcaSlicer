@@ -2395,6 +2395,29 @@ TEST_CASE("Shifting painted filament states moves only states at or above the th
     CHECK(volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder6).indices.size() == 1);
 }
 
+TEST_CASE("Model volumes report painted and assigned extruders", "[Model][ModelPainting]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *unpainted = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *painted = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(unpainted != nullptr);
+    REQUIRE(painted != nullptr);
+
+    CHECK(unpainted->get_extruders() == std::vector<int>{ 1 });
+
+    painted->config.set("extruder", 4);
+    TriangleSelector selector(painted->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    selector.set_facet(1, EnforcerBlockerType::Extruder32);
+    REQUIRE(painted->mmu_segmentation_facets.set(selector));
+
+    const std::vector<int> expected_extruders{ 2, 32, 4 };
+    CHECK(painted->get_extruders() == expected_extruders);
+    CHECK(unpainted->get_extruders() == std::vector<int>{ 1 });
+}
+
 } // namespace model_next_active_contracts
 
 namespace volume_bed_transformation_contracts {

@@ -473,18 +473,32 @@ TEST_CASE("Inward wipe is retained across layers with a back seam", "[Wipe][Regr
     }
 }
 
-TEST_CASE("Literal inward wipe distance is clamped to the outer wall width", "[Wipe][Regression]")
+TEST_CASE("Literal inward wipe distance is clamped to the outer wall width",
+          "[Wipe][Regression][WipeInwardDistanceBoundary]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
     INFO("wall generator: " << wall_generator);
 
-    const std::vector<Vec2d> regular = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(wall_generator, false)));
-    const std::vector<Vec2d> full_width = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(wall_generator, true, "100%")));
-    const std::vector<Vec2d> oversized = wipe_destinations(
-        slice({make_cube(10., 10., 1.)}, wipe_config(wall_generator, true, "2")));
+    const auto export_destinations = [&](const bool inward, const char *distance) {
+        DynamicPrintConfig config = wipe_config(wall_generator, inward, distance);
+        config.set_deserialize_strict({{"layer_change_gcode", "G92 E0"}});
+        Print print;
+        Model model;
+        init_print({make_cube(10., 10., 1.)}, print, model, config);
+        const auto validation = print.validate();
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        return wipe_destinations(output);
+    };
+    const std::vector<Vec2d> regular = export_destinations(false, "50%");
+    const std::vector<Vec2d> zero_distance = export_destinations(true, "0");
+    const std::vector<Vec2d> full_width = export_destinations(true, "100%");
+    const std::vector<Vec2d> oversized = export_destinations(true, "2");
 
+    REQUIRE_FALSE(regular.empty());
+    CHECK_FALSE(trajectories_differ(regular, zero_distance));
     REQUIRE_FALSE(full_width.empty());
     REQUIRE(trajectories_differ(regular, full_width));
     REQUIRE(oversized.size() == full_width.size());
@@ -1044,9 +1058,10 @@ TEST_CASE("Before and after wipe percentages change where retraction is emitted"
     }
 }
 
-TEST_CASE("Wipe distance controls the retraction partition and path length", "[Wipe][SettingsRetractionVariance][Pipeline]")
+TEST_CASE("Wipe distance controls the retraction partition and path length",
+          "[Wipe][WipeDistanceBoundary][SettingsRetractionVariance][Pipeline]")
 {
-    for (const double distance : {0.75, 2.0}) {
+    for (const double distance : {0., 0.75, 2.0}) {
         DynamicPrintConfig config = retraction_config();
         config.set_deserialize_strict({{"wipe", "1"}, {"wipe_distance", std::to_string(distance)},
                                        {"top_shell_layers", "0"}, {"bottom_shell_layers", "0"},
@@ -1055,6 +1070,11 @@ TEST_CASE("Wipe distance controls the retraction partition and path length", "[W
                                        {"retract_before_wipe", "0%"}, {"retract_after_wipe", "0%"}});
         const std::string output = export_mesh(short_cube(), config);
         const WipeStats stats = first_wipe_stats(output, config);
+        if (distance == 0.) {
+            CHECK_FALSE(stats.saw_wipe);
+            CHECK_THAT(stats.path, Catch::Matchers::WithinAbs(0., 0.001));
+            continue;
+        }
         REQUIRE(stats.saw_wipe);
         CHECK_THAT(stats.path, Catch::Matchers::WithinAbs(distance, 0.01));
         const double expected_during = std::min(0.8, 30. * distance / 100.);
@@ -1065,7 +1085,8 @@ TEST_CASE("Wipe distance controls the retraction partition and path length", "[W
     }
 }
 
-TEST_CASE("Role based wipe speed selects role speed instead of wipe speed", "[Wipe][SettingsRetractionVariance][Pipeline]")
+TEST_CASE("Role based wipe speed selects role speed instead of wipe speed",
+          "[Wipe][WipeSpeedBoundary][SettingsRetractionVariance][Pipeline]")
 {
     for (const bool role_based : {false, true}) {
         DynamicPrintConfig config = retraction_config();
@@ -1104,6 +1125,17 @@ TEST_CASE("Role based wipe speed selects role speed instead of wipe speed", "[Wi
                 }));
             }
     }
+
+    DynamicPrintConfig zero_speed = retraction_config();
+    zero_speed.set_deserialize_strict({{"wipe", "1"}, {"wipe_distance", "1"}, {"wipe_speed", "0"},
+                                       {"top_shell_layers", "0"}, {"bottom_shell_layers", "0"},
+                                       {"sparse_infill_density", "0%"}, {"role_based_wipe_speed", "0"},
+                                       {"outer_wall_speed", "60"}, {"retract_before_wipe", "0%"},
+                                       {"retract_after_wipe", "0%"}});
+    const std::string zero_output = export_mesh(short_cube(), zero_speed);
+    const WipeStats zero_stats = first_wipe_stats(zero_output, zero_speed);
+    REQUIRE(zero_stats.saw_wipe);
+    CHECK_THAT(zero_stats.feedrate, Catch::Matchers::WithinAbs(10. * 60., 0.1));
 }
 
 TEST_CASE("Layer-change retraction is independently gated", "[Wipe][SettingsRetractionVariance][Pipeline]")

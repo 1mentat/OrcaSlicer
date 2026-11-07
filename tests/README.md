@@ -2357,3 +2357,11 @@ compare inclusive layer-plane bounds with adjacent blocked controls, retaining
 unaffected lifts and deposited material. Each boundary exercises machine values
 and nullable filament overrides. `tests/mutations/retraction_boundaries.json`
 challenges the three inclusive comparisons using the `Wipe` CTest label.
+
+`[WipeDistanceBoundary]`, `[WipeSpeedBoundary]`, and
+`[WipeInwardDistanceBoundary]` check emitted G-code at the registered zero
+distance and speed boundaries and at the inward-offset width clamp. The wipe
+distance case also compares positive path lengths and retraction partitioning.
+`tests/mutations/wipe_setting_boundaries.json` probes positive path clipping,
+the 10 mm/s wipe-speed floor, and the inward-offset clamp. The clipping probe
+does not challenge the separate zero-distance gate.

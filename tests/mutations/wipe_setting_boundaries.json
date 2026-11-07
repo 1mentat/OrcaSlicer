@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Assertion-based mutations for wipe path length, the minimum wipe speed, and the inward-offset width clamp.",
+  "mutants": [
+    {
+      "id": "wipe-distance-clip-ignores-requested-length",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "wipe_path.clip_end(wipe_path.length() - wipe_dist);",
+      "new": "wipe_path.clip_end(0);",
+      "description": "The positive 0.75 and 2 mm rows must clip the stored wipe path to the requested length. This mutation does not exercise the separate zero-distance gate.",
+      "test_filter": "^WipeDistanceBoundary$"
+    },
+    {
+      "id": "zero-wipe-speed-drops-below-floor",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if(_wipe_speed < 10)\n            _wipe_speed = 10;",
+      "new": "        if(_wipe_speed < 1)\n            _wipe_speed = 1;",
+      "description": "The registered zero speed boundary must still emit the consumer's F600 floor; lowering it to F60 is observed in parsed wipe G-code.",
+      "test_filter": "^WipeSpeedBoundary$"
+    },
+    {
+      "id": "inward-wipe-exceeds-wall-width",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const double offset_dist = scale_(std::min(requested_offset, outer_wall_line_width));",
+      "new": "const double offset_dist = scale_(requested_offset);",
+      "description": "A literal 2 mm inward offset must remain geometrically equivalent to the 100% wall-width clamp rather than overshooting the emitted wipe trajectory.",
+      "test_filter": "^WipeInwardDistanceBoundary$"
+    }
+  ]
+}
