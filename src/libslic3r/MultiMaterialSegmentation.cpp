@@ -1431,7 +1431,15 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
         return out;
     };
 
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers), [&num_layers, &num_facets_states, &layer_color_stat, &top_raw, &triangles_by_color_top,
+    // A shell projection keeps only what lies within the painted area, and the trimmed slices it is cut by shrink by at
+    // most `max_shrink` in total, so only the slices near the painted area matter. They are clipped to its bounding box
+    // grown by more than that before the intersections and offsets.
+    auto slices_near = [](const ExPolygons &painted, float max_shrink) {
+        BoundingBox bbox = get_extents(painted);
+        bbox.offset(max_shrink + scale_(1.));
+        return [bbox](const ExPolygons &slices) { return ClipperUtils::clip_clipper_polygons_with_subject_bbox(slices, bbox); };
+    };
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers), [&num_layers, &num_facets_states, &layer_color_stat, &top_raw, &triangles_by_color_top, &slices_near,
                                                                   &throw_on_cancel_callback, &input_expolygons, &bottom_raw, &triangles_by_color_bottom,
                                                                   &shell_triangles_by_color_top, &shell_triangles_by_color_bottom](const tbb::blocked_range<size_t> &range) {
         for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
@@ -1445,12 +1453,13 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                         if (! top_ex.empty()) {
                             append(triangles_by_color_top[color_idx][layer_idx], top_ex);
                             float offset = 0.f;
-                            ExPolygons layer_slices_trimmed = input_expolygons[layer_idx];
+                            const auto clip = slices_near(top_ex, stat.top_shell_layers * (stat.extrusion_spacing + stat.extrusion_width));
+                            Polygons layer_slices_trimmed = clip(input_expolygons[layer_idx]);
                             for (int last_idx = int(layer_idx) - 1; last_idx > std::max(int(layer_idx - stat.top_shell_layers), int(0)); --last_idx) {
                                 //BBS: offset width should be 2*spacing to avoid too narrow area which has overlap of wall line
                                 //offset -= stat.extrusion_width ;
                                 offset -= (stat.extrusion_spacing + stat.extrusion_width);
-                                layer_slices_trimmed = intersection_ex(layer_slices_trimmed, input_expolygons[last_idx]);
+                                layer_slices_trimmed = intersection(layer_slices_trimmed, clip(input_expolygons[last_idx]));
                                 ExPolygons last = opening_ex(intersection_ex(top_ex, offset_ex(layer_slices_trimmed, offset)), stat.small_region_threshold);
                                 if (last.empty())
                                     break;
@@ -1465,12 +1474,13 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                         if (! bottom_ex.empty()) {
                             append(triangles_by_color_bottom[color_idx][layer_idx], bottom_ex);
                             float offset = 0.f;
-                            ExPolygons layer_slices_trimmed = input_expolygons[layer_idx];
+                            const auto clip = slices_near(bottom_ex, stat.bottom_shell_layers * (stat.extrusion_spacing + stat.extrusion_width));
+                            Polygons layer_slices_trimmed = clip(input_expolygons[layer_idx]);
                             for (size_t last_idx = layer_idx + 1; last_idx < std::min(layer_idx + stat.bottom_shell_layers, num_layers); ++last_idx) {
                                 //BBS: offset width should be 2*spacing to avoid too narrow area which has overlap of wall line
                                 //offset -= stat.extrusion_width;
                                 offset -= (stat.extrusion_spacing + stat.extrusion_width);
-                                layer_slices_trimmed = intersection_ex(layer_slices_trimmed, input_expolygons[last_idx]);
+                                layer_slices_trimmed = intersection(layer_slices_trimmed, clip(input_expolygons[last_idx]));
                                 ExPolygons last = opening_ex(intersection_ex(bottom_ex, offset_ex(layer_slices_trimmed, offset)), stat.small_region_threshold);
                                 if (last.empty())
                                     break;
