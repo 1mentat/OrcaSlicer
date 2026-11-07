@@ -2600,3 +2600,60 @@ TEST_CASE("Model lifecycle transfers project metadata and the backup path",
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model object lifecycle records source metadata, material copies, and transforms",
+          "[Model][ModelLifecycle2][ModelLifecycle]")
+{
+    Model model;
+    ModelObject *object = model.add_object("named-part", "source.stl", make_cube(10., 10., 10.));
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    REQUIRE(object->add_instance() != nullptr);
+    CHECK(object->name == "named-part");
+    CHECK(object->input_file == "source.stl");
+    CHECK(object->volumes.front()->name == "named-part");
+    CHECK(object->volumes.front()->source.input_file == "source.stl");
+
+    ModelMaterial *base = model.add_material("base");
+    REQUIRE(base != nullptr);
+    base->attributes["color"] = "#ff0000";
+    ModelMaterial *copy = model.add_material("copy", *base);
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy->attributes.count("color") == 1);
+    CHECK(copy->attributes.at("color") == "#ff0000");
+
+    CHECK_THAT(model.bounding_box_approx().max.z(), Catch::Matchers::WithinAbs(10., 1e-6));
+    CHECK_THAT(model.max_z(), Catch::Matchers::WithinAbs(10., 1e-6));
+    ModelVolume *volume = object->volumes.front();
+    REQUIRE(volume != nullptr);
+    volume->set_offset(Vec3d(1., 2., 3.));
+    volume->set_rotation(Z, Geometry::deg2rad(15.));
+    volume->set_scaling_factor(Vec3d(1.5, 1.25, 1.));
+    const Vec3d offset = volume->get_offset();
+    CHECK_THAT(offset.x(), Catch::Matchers::WithinAbs(1., 1e-9));
+    CHECK_THAT(offset.y(), Catch::Matchers::WithinAbs(2., 1e-9));
+    CHECK_THAT(offset.z(), Catch::Matchers::WithinAbs(3., 1e-9));
+    CHECK_THAT(volume->get_rotation(Z), Catch::Matchers::WithinAbs(Geometry::deg2rad(15.), 1e-9));
+    CHECK_THAT(volume->get_scaling_factor(X), Catch::Matchers::WithinAbs(1.5, 1e-9));
+    const Transform3d before_mirror = volume->get_transformation().get_matrix();
+    volume->set_mirror(X, -1.);
+    const Transform3d after_mirror = volume->get_transformation().get_matrix();
+    CHECK(after_mirror.linear().col(0).isApprox(-before_mirror.linear().col(0), 1e-9));
+    CHECK(after_mirror.linear().col(1).isApprox(before_mirror.linear().col(1), 1e-9));
+    CHECK(after_mirror.linear().col(2).isApprox(before_mirror.linear().col(2), 1e-9));
+    CHECK(after_mirror.translation().isApprox(before_mirror.translation(), 1e-9));
+    CHECK(volume->is_left_handed());
+
+    object->scale(2.);
+    object->mirror(Y);
+    CHECK_FALSE(object->is_multiparts());
+    model.delete_material("copy");
+    CHECK(model.get_material("copy") == nullptr);
+    model.clear_materials();
+    CHECK(model.materials.empty());
+}
+
+} // namespace model_lifecycle_contracts
