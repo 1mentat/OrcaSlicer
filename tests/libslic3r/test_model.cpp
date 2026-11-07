@@ -2385,3 +2385,37 @@ TEST_CASE("Model archive progress cancellation is honored at each post-load stag
 }
 
 } // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_archive rejects malformed archives and unsupported suffixes", "[Model][ModelImport][Archive][ModelArchiveErrors][Errors]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_errors");
+    ScopedTemporaryFile malformed(".3mf");
+    write_text(malformed.string(), "not a zip archive");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+
+    CHECK_THROWS_AS(Model::read_from_archive(malformed.string(), &config, &substitutions, type,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig, &plates, &presets), Slic3r::RuntimeError);
+
+    ScopedTemporaryFile unknown(".obj");
+    write_text(unknown.string(), plain_obj());
+    CHECK_THROWS_AS(Model::read_from_archive(unknown.string(), &config, &substitutions, type,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig, &plates, &presets), Slic3r::RuntimeError);
+
+    ScopedTemporaryFile amf(".zip.amf");
+    write_text(amf.string(), "not an amf archive");
+    CHECK_THROWS_AS(Model::read_from_archive(amf.string(), &config, &substitutions, type,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig, &plates, &presets), Slic3r::RuntimeError);
+}
+
+} // namespace model_import_contracts
