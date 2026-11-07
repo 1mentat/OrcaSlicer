@@ -3700,3 +3700,28 @@ TEST_CASE("Model fuzzy-skin query follows painted volume state", "[Model][ModelP
 }
 
 } // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("Cut connector query distinguishes connector volumes", "[Model][ModelPaintGeometry7][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->cut_id = CutObjectBase(ObjectID(91001), 1, 0);
+    ModelVolume *part = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *connector = object->add_volume(make_cube(1., 1., 1.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(part != nullptr);
+    REQUIRE(connector != nullptr);
+
+    CHECK_FALSE(object->has_connectors());
+    connector->cut_info.is_connector = true;
+    CHECK(object->has_connectors());
+    connector->cut_info.is_connector = false;
+    part->cut_info.is_connector = true;
+    CHECK(object->has_connectors());
+    part->cut_info.is_connector = false;
+    CHECK_FALSE(object->has_connectors());
+}
+
+} // namespace model_painted_geometry_contracts
