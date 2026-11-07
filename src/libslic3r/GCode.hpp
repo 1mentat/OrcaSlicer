@@ -746,6 +746,21 @@ protected:
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;
 
+    // Layers and overhang extents tested by the overhang check in needs_retraction(). They depend
+    // only on the Z range below the current layer, so they are gathered once per range instead of
+    // once per travel.
+    struct OverhangCheckCache {
+        const Print                                         *print{ nullptr };
+        std::pair<float, float>                              z_range{ -1.f, -1.f };
+        std::vector<LayerPtrs>                               layers_of_objects;
+        std::vector<BoundingBox>                             object_bboxes;
+        std::vector<size_t>                                  idx_of_object_sorted;
+        VecOfPoints                                          objects_instances_shift;
+        // Per object: whether its layers were sorted already, and the extents of each layer's overhangs.
+        std::vector<bool>                                    layers_sorted;
+        std::vector<std::vector<std::vector<BoundingBox>>>   overhang_bboxes;
+    } m_overhang_check_cache;
+
     // Farthest-point timelapse context. Corexy-only refinement layered on top of the existing
     // timelapse_type. All fields default to the inert state; `enabled` is (re)computed each layer in
     // process_layer and is false whenever the farthest_point_timelapse config toggle is off, the printer
