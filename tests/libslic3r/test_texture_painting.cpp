@@ -19,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Slic3r;
@@ -632,6 +633,28 @@ TEST_CASE("Texture atlas converts RGBA material textures without using alpha as 
 
     const PaintedMesh output = paint(mesh);
     require_red_blue_by_side(output);
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas preserves encoded PNG mapping after texture permutation", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    TexturedMesh first = two_material_faces();
+    first.textures = {
+        encoded_solid_texture(3, 2, { 255, 0, 0 }, ".png"),
+        encoded_solid_texture(2, 5, { 0, 0, 255 }, ".png"),
+    };
+    TexturedMesh permuted = first;
+    std::swap(permuted.textures[0], permuted.textures[1]);
+    permuted.material_texture_map = { 1, 0 };
+
+    const PaintedMesh a = paint(first);
+    const PaintedMesh b = paint(permuted);
+    REQUIRE(a.face_colors.size() == b.face_colors.size());
+    for (size_t i = 0; i < a.face_colors.size(); ++i)
+        CHECK(a.face_colors[i] == b.face_colors[i]);
 }
 
 } // namespace texture_atlas_contracts
