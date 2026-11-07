@@ -717,3 +717,41 @@ TEST_CASE("Texture atlas wraps negative U before scaling a narrower texture", "[
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+namespace {
+
+TextureImage vertical_texture(int width, int height, RGB top, RGB bottom)
+{
+    TextureImage image = solid_texture(width, height, top);
+    for (int y = height / 2; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 3;
+            image.data[offset + 0] = static_cast<unsigned char>(bottom[0]);
+            image.data[offset + 1] = static_cast<unsigned char>(bottom[1]);
+            image.data[offset + 2] = static_cast<unsigned char>(bottom[2]);
+        }
+    return image;
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas wraps negative V against a nonuniform texture", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = vertical_texture(1, 2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(1, 2, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.f });
+    mesh.uvs[0] = { 0.f, -0.5f };
+    mesh.uvs[1] = { 0.f, -0.5f };
+    mesh.uvs[2] = { 0.f, -0.5f };
+
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
+    CHECK((*left)[2] < 80);
+}
+
+} // namespace texture_atlas_contracts
