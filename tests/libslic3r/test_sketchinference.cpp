@@ -210,12 +210,14 @@ TEST_CASE("Snapping projects the cursor onto wrapped and clockwise arcs", "[infe
     const InferenceSnap wrapped_snap = infer_point_snap({wrapped}, near_rim(wrapped_angle), 0.5, false);
     REQUIRE(wrapped_snap.kind == K::OnEdge);
     CHECK(wrapped_snap.entity == 0);
+    CHECK(wrapped_snap.role == SketchPointRole::Center);
     CHECK_THAT((wrapped_snap.point - rim(wrapped_angle)).norm(), WithinAbs(0.0, 1e-9));
 
     // The mid-arc snap of the same arc.
     const double mid_angle = 0.5 * (wrapped.start_angle + wrapped.end_angle);
     const InferenceSnap mid_snap = infer_point_snap({wrapped}, rim(mid_angle), 0.1, false);
     REQUIRE(mid_snap.kind == K::Midpoint);
+    CHECK(mid_snap.role == SketchPointRole::P0);
     CHECK_THAT((mid_snap.point - rim(mid_angle)).norm(), WithinAbs(0.0, 1e-9));
 
     // A clockwise half arc (negative sweep) from 135 to -45 degrees passes through 90 degrees.
@@ -223,6 +225,7 @@ TEST_CASE("Snapping projects the cursor onto wrapped and clockwise arcs", "[infe
     const InferenceSnap clockwise_snap = infer_point_snap({clockwise}, near_rim(M_PI / 2.0), 0.5, false);
     REQUIRE(clockwise_snap.kind == K::OnEdge);
     CHECK(clockwise_snap.entity == 0);
+    CHECK(clockwise_snap.role == SketchPointRole::Center);
     CHECK_THAT((clockwise_snap.point - rim(M_PI / 2.0)).norm(), WithinAbs(0.0, 1e-9));
 }
 
@@ -276,6 +279,7 @@ TEST_CASE("Snapping reaches point, ellipse and spline targets and ranks Center a
     const InferenceSnap priority_snap = infer_point_snap({circle(Vec2d(0.0, 0.0), 5.0), ellipse}, Vec2d(5.05, 0.0), 0.2, false);
     REQUIRE(priority_snap.kind == K::Center);
     CHECK(priority_snap.entity == 1);
+    CHECK(priority_snap.role == SketchPointRole::Center);
     CHECK_THAT((priority_snap.point - ellipse.center).norm(), WithinAbs(0.0, 1e-9));
 }
 
