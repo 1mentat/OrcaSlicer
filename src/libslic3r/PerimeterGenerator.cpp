@@ -2598,12 +2598,39 @@ void PerimeterGenerator::process_arachne()
         Polygons   last_p = to_polygons(last);
         Arachne::WallToolPaths wallToolPaths(last_p, bead_width_0, perimeter_spacing, coord_t(loop_number + 1),
                                                wall_0_inset, layer_height, input_params_tmp);
-        std::vector<Arachne::VariableWidthLines>   perimeters = wallToolPaths.getToolPaths();
-        ExPolygons  infill_contour = union_ex(wallToolPaths.getInnerContour());
+
+        // The single wall pass is kept only where the upper layer leaves part of its inner contour uncovered; otherwise the
+        // walls are generated with the full count. That inner contour lies inside the outer wall, at least half a minimum
+        // bead width inside the outline once Arachne's outline simplification and the outer wall inset are allowed for.
+        // When the upper layer covers the island shrunk by that much, the single wall pass is skipped.
+        bool covered_from_above = false;
+        if (inner_loop_number >= 0) {
+            const coord_t inside = std::min<coord_t>(bead_width_0, scaled<coord_t>(input_params.min_bead_width)) / 2 -
+                                   std::abs(wall_0_inset) - 4 * input_params.wall_maximum_deviation;
+            if (inside > 0) {
+                const ExPolygons inner = offset_ex(last, -float(inside));
+                BoundingBox      bbox  = get_extents(inner);
+                bbox.offset(SCALED_EPSILON);
+                const Polygons upper = object_config->interface_shells ?
+                    ClipperUtils::clip_clipper_polygons_with_subject_bbox(to_expolygons(this->upper_slices_same_region->surfaces), bbox) :
+                    ClipperUtils::clip_clipper_polygons_with_subject_bbox(*upper_slices, bbox);
+                covered_from_above = diff_ex(inner, upper).empty();
+            }
+        }
+        std::vector<Arachne::VariableWidthLines> perimeters;
+        ExPolygons                               infill_contour;
+        if (covered_from_above) {
+            Arachne::WallToolPaths full_tool_paths(last_p, bead_width_0, perimeter_spacing, coord_t(inner_loop_number + 2), wall_0_inset, layer_height, input_params_tmp);
+            perimeters     = full_tool_paths.getToolPaths();
+            infill_contour = union_ex(full_tool_paths.getInnerContour());
+        } else {
+            perimeters     = wallToolPaths.getToolPaths();
+            infill_contour = union_ex(wallToolPaths.getInnerContour());
+        }
 
         // Check if there are some remaining perimeters to generate (the number of perimeters
         // is greater than one together with enabled the single perimeter on top surface feature).
-        if (inner_loop_number >= 0) {
+        if (inner_loop_number >= 0 && ! covered_from_above) {
             assert(upper_slices != nullptr);
 
             coord_t perimeter_width = this->perimeter_flow.scaled_width();
