@@ -3727,6 +3727,44 @@ std::string cube_model_xml(const std::string &application = "ThirdParty",
     return xml;
 }
 
+std::string interleaved_multi_volume_model_xml(const std::string &application)
+{
+    static const int vertices[][3] = {
+        {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+        {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10}
+    };
+    static const int triangles[][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n"
+        " <metadata name=\"Application\">" + application + "</metadata>\n"
+        " <resources><object id=\"1\" type=\"model\" name=\"Two volumes\"><mesh><vertices>\n";
+    // Interleave the meshes so each volume's min/max vertex range also contains
+    // its sibling's vertices.
+    for (const auto &vertex : vertices) {
+        for (int volume = 0; volume < 2; ++volume) {
+            xml += "  <vertex x=\"" + std::to_string(vertex[0] + 20 * volume) + "\" y=\"" +
+                   std::to_string(vertex[1]) + "\" z=\"" + std::to_string(vertex[2]) + "\"/>\n";
+        }
+    }
+    xml += " </vertices><triangles>\n";
+    for (int volume = 0; volume < 2; ++volume) {
+        for (const auto &triangle : triangles) {
+            xml += "  <triangle v1=\"" + std::to_string(2 * triangle[0] + volume) + "\" v2=\"" +
+                   std::to_string(2 * triangle[1] + volume) + "\" v3=\"" +
+                   std::to_string(2 * triangle[2] + volume) + "\"/>\n";
+        }
+    }
+    xml += " </triangles></mesh></object></resources>\n"
+           " <build><item objectid=\"1\"/></build>\n</model>\n";
+    return xml;
+}
+
 bool write_archive(const std::string &path, const std::string &model_xml,
                    const std::string &model_config = "")
 {
@@ -3837,6 +3875,37 @@ TEST_CASE("Legacy importer scales coordinates and defaults absent vertex attribu
     CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
     CHECK_THAT(double(bbox.max.y() - bbox.min.y()), Catch::Matchers::WithinAbs(scale, std::max(1e-7, scale * 1e-6)));
     CHECK_THAT(double(bbox.max.z() - bbox.min.z()), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("Legacy importer trims unused volume vertices for affected Prusa prereleases",
+          "[Legacy3MF][Compatibility][Alpha2Geometry]")
+{
+    const auto [application, compacted] = GENERATE(
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha1", true},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha2", true},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha3", false},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0", false},
+        std::pair<const char *, bool>{"ThirdParty-1.0", false});
+    CAPTURE(application);
+
+    const std::string model_config =
+        "<config><object id=\"1\">"
+        "<volume firstid=\"0\" lastid=\"11\"/>"
+        "<volume firstid=\"12\" lastid=\"23\"/>"
+        "</object></config>";
+    ScopedTemporaryFile archive(".3mf");
+    const std::string model_xml = interleaved_multi_volume_model_xml(application);
+    REQUIRE(write_archive(archive.string(), model_xml, model_config));
+
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+
+    const size_t expected_vertices = compacted ? 8 : 15;
+    for (const ModelVolume *volume : model.objects.front()->volumes)
+        CHECK(volume->mesh().its.vertices.size() == expected_vertices);
 }
 
 TEST_CASE("Legacy importer expands a component alias with its transform", "[Legacy3MF][Geometry][Components]")
