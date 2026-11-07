@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
+#include <initializer_list>
 #include <ios>
 #include <iterator>
 #include <string>
@@ -127,6 +128,11 @@ TEST_CASE("SurfaceCollection simplify preserves surface metadata and holes", "[S
     CHECK_THAT(simplified.expolygon.area(), WithinAbs(original_area, 1e-6));
     REQUIRE(simplified.expolygon.holes.size() == 1);
     CHECK(simplified.expolygon.contour.points.size() < 5);
+    // Only the collinear (40, 0) vertex is redundant; the four corners must survive.
+    const Points &contour = simplified.expolygon.contour.points;
+    CHECK(contour.size() == 4);
+    for (const Point &corner : { Point { 0, 0 }, Point { 100, 0 }, Point { 100, 100 }, Point { 0, 100 } })
+        CHECK(std::find(contour.begin(), contour.end(), corner) != contour.end());
     CHECK(simplified.expolygon.contains(Point { 10, 10 }));
     CHECK_FALSE(simplified.expolygon.contains(Point { 45, 45 }));
     CHECK_THAT(simplified.thickness, WithinAbs(0.3, 1e-12));
@@ -269,7 +275,7 @@ TEST_CASE("SurfaceCollection SVG export colors surfaces and optionally labels th
     CHECK(count_text(plain, ">1</text>") == 0);
 }
 
-TEST_CASE("Surface conversions preserve contour and hole order across copies and moves", "[SurfaceCollection]")
+void check_surface_conversion_contracts()
 {
     Surface holed(stTop, rectangle_with_hole(-100, -100, 0, 0));
     holed.thickness = 0.35;
@@ -351,6 +357,16 @@ TEST_CASE("Surface conversions preserve contour and hole order across copies and
     holed.clear();
     CHECK(holed.empty());
     CHECK_THAT(holed.area(), WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("Surface conversions preserve contour and hole order across copies and moves", "[SurfaceCollection]")
+{
+    check_surface_conversion_contracts();
+}
+
+TEST_CASE("Surface conversions preserve contour and hole order across overloads", "[SurfaceCollection]")
+{
+    check_surface_conversion_contracts();
 }
 
 TEST_CASE("Surface collections preserve geometry and metadata across set append and retag", "[SurfaceCollection]")

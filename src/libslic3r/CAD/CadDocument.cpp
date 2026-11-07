@@ -3109,8 +3109,9 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             // outward into its wall.
             const double bore_r = std::max(0.5, f.thread_radius - f.thread_depth);
             TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(ax2, bore_r, f.thread_height).Shape();
-            // Cut the unchanged legacy groove before opening the bore. OCCT can
-            // otherwise return only the bore and omit the helical groove.
+            // Cut the existing groove before opening the bore. At depth >= 0.25 the groove base
+            // (radius - over) meets the bore wall (radius - depth); cutting after boring can make OCCT
+            // return only the bore and drop the groove.
             if (have_ridge) cut_from(result, ridge);
             try {
                 BRepAlgoAPI_Cut cut_bore(result, bore);

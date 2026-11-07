@@ -7,10 +7,9 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
 
-#include <catch2/catch_all.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstddef>
 #include <set>
 #include <tuple>

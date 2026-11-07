@@ -1,41 +1,42 @@
-#include "libslic3r/Polyline.hpp"
-#include <regex>
-#include "libslic3r/Format/svg.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/TriangleMesh.hpp"
-#include <cmath>
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
-#include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/BoundingBox.hpp"
-#include "libslic3r/Line.hpp"
-#include <ios>
-#include <catch2/catch_all.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
-#include "libslic3r/SVG.hpp"
-#include "libslic3r/Surface.hpp"
-#include "test_utils.hpp"
-
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
+#include <ios>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Line.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/SVG.hpp"
+#include "libslic3r/Surface.hpp"
+#include "libslic3r/libslic3r.h"
+#include "test_utils.hpp"
+
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
+namespace pt = boost::property_tree;
 
 namespace {
+
 ExPolygon square(double x0, double y0, double x1, double y1)
 {
     ExPolygon result;
@@ -58,20 +59,105 @@ ExPolygon square_with_hole()
     return result;
 }
 
+// Parses the written file as XML, so the assertions read elements and attributes
+// rather than the writer's byte layout. Throws if the output is not well formed.
+pt::ptree read_svg(const ScopedTemporaryFile &file)
+{
+    boost::nowide::ifstream in(file.string(), std::ios::binary);
+    REQUIRE(in.good());
+    pt::ptree tree;
+    pt::read_xml(in, tree);
+    return tree.get_child("svg");
+}
+
+// Direct children of <svg> with the given tag, in document order.
+std::vector<pt::ptree> elements(const pt::ptree &svg, const std::string &tag)
+{
+    std::vector<pt::ptree> out;
+    for (const auto &child : svg)
+        if (child.first == tag)
+            out.push_back(child.second);
+    return out;
+}
+
+std::string attr(const pt::ptree &element, const std::string &name)
+{
+    return element.get<std::string>("<xmlattr>." + name, "");
+}
+
+std::string text(const pt::ptree &element) { return boost::algorithm::trim_copy(element.get_value<std::string>()); }
+
+// Declarations of the style attribute, e.g. {"fill": "red", "stroke-width": "2.000000"}.
+std::map<std::string, std::string> style(const pt::ptree &element)
+{
+    std::map<std::string, std::string> out;
+    std::istringstream in(attr(element, "style"));
+    for (std::string declaration; std::getline(in, declaration, ';');) {
+        const size_t colon = declaration.find(':');
+        if (colon != std::string::npos)
+            out[boost::algorithm::trim_copy(declaration.substr(0, colon))] =
+                boost::algorithm::trim_copy(declaration.substr(colon + 1));
+    }
+    return out;
+}
+
+double style_number(const pt::ptree &element, const std::string &name) { return std::stod(style(element).at(name)); }
+
+bool is_filled(const pt::ptree &path) { return style(path).at("fill") != "none"; }
+
+// Coordinates of a path "d" attribute or a polygon "points" attribute, with the
+// M / z commands and the comma separators dropped.
+std::vector<double> coordinates(std::string data)
+{
+    std::replace(data.begin(), data.end(), ',', ' ');
+    std::istringstream in(data);
+    std::vector<double> out;
+    for (std::string token; in >> token;)
+        if (token != "M" && token != "z")
+            out.push_back(std::stod(token));
+    return out;
+}
+
+size_t subpath_count(const std::string &d)
+{
+    std::istringstream in(d);
+    size_t count = 0;
+    for (std::string token; in >> token;)
+        count += token == "M";
+    return count;
+}
+
+void check_x_range(const std::string &d, double min_x, double max_x)
+{
+    const std::vector<double> c = coordinates(d);
+    REQUIRE(c.size() >= 2);
+    double lo = c[0];
+    double hi = c[0];
+    for (size_t i = 0; i < c.size(); i += 2) {
+        lo = std::min(lo, c[i]);
+        hi = std::max(hi, c[i]);
+    }
+    CHECK_THAT(lo, WithinAbs(min_x, 1e-4));
+    CHECK_THAT(hi, WithinAbs(max_x, 1e-4));
+}
+
+void check_coordinates(const std::string &data, const std::vector<double> &expected)
+{
+    const std::vector<double> actual = coordinates(data);
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(actual[i], WithinAbs(expected[i], 1e-4));
+}
+
+} // namespace
+
+namespace {
+
 std::string read_text(const std::string &path)
 {
     std::ifstream in(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
-
-size_t count_text(const std::string &text, const std::string &needle)
-{
-    size_t count = 0;
-    for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + needle.size()))
-        ++count;
-    return count;
-}
-
 } // namespace
 
 TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG][SLASVGFormatExtended]")
@@ -80,12 +166,19 @@ TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG
     const ExPolygons shapes{square_with_hole()};
     SVG::export_expolygons(output.string(), get_extents(shapes), shapes, "outer", "hole", scaled(.2));
 
-    const std::string text = read_text(output.string());
-    CHECK(text.find("<?xml version=\"1.0\"") != std::string::npos);
-    CHECK(text.find("fill-type: evenodd") != std::string::npos);
-    CHECK(text.find("stroke: outer") != std::string::npos);
-    CHECK(text.find("stroke: hole") != std::string::npos);
-    CHECK(count_text(text, "<path ") >= 3);
+    const std::vector<pt::ptree> paths = elements(read_svg(output), "path");
+    REQUIRE(paths.size() == 3);
+    // The fill is a single path holding both the contour and the hole.
+    CHECK(is_filled(paths[0]));
+    CHECK(subpath_count(attr(paths[0], "d")) == 2);
+
+    // The export box (2,2)-(18,14) gets a 1 mm margin, so x maps to (x - 1) * 10 SVG units.
+    CHECK_FALSE(is_filled(paths[1]));
+    CHECK(style(paths[1]).at("stroke") == "outer");
+    check_x_range(attr(paths[1], "d"), 10., 170.);
+    CHECK_FALSE(is_filled(paths[2]));
+    CHECK(style(paths[2]).at("stroke") == "hole");
+    check_x_range(attr(paths[2], "d"), 60., 120.);
 }
 
 TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG][SLASVGFormatExtended]")
@@ -96,13 +189,29 @@ TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG][SL
         "fixture legend", "crimson", "green", "blue", scaled(.1), .35f, "yellow", scaled(.2));
     SVG::export_expolygons(output.string(), {{shapes, attributes}});
 
-    const std::string text = read_text(output.string());
-    CHECK(text.find("fill: crimson") != std::string::npos);
-    CHECK(text.find("stroke: green") != std::string::npos);
-    CHECK(text.find("fixture legend") != std::string::npos);
-    CHECK(text.find("fill-opacity=\"0.350000\"") != std::string::npos);
-    CHECK(text.find("fill: yellow") != std::string::npos);
-    CHECK(count_text(text, "<circle ") >= 5);
+    const pt::ptree svg = read_svg(output);
+    const std::vector<pt::ptree> paths = elements(svg, "path");
+    REQUIRE(paths.size() == 2);
+    CHECK(style(paths[0]).at("fill") == "crimson");
+    CHECK_THAT(std::stod(attr(paths[0], "fill-opacity")), WithinAbs(.35, 1e-6));
+    CHECK_FALSE(is_filled(paths[1]));
+    CHECK(style(paths[1]).at("stroke") == "green");
+
+    // One marker per contour point with the requested 0.2 mm radius, then the legend swatch.
+    size_t markers = 0;
+    size_t swatches = 0;
+    for (const pt::ptree &circle : elements(svg, "circle")) {
+        if (style(circle)["fill"] == "yellow") {
+            ++markers;
+            CHECK_THAT(std::stod(attr(circle, "r")), WithinAbs(2., 1e-6));
+        } else if (attr(circle, "fill") == "crimson")
+            ++swatches;
+    }
+    CHECK(markers == shapes.front().contour.size());
+    CHECK(swatches == 1);
+    const std::vector<pt::ptree> texts = elements(svg, "text");
+    REQUIRE(texts.size() == 1);
+    CHECK(text(texts.front()) == "fixture legend");
 }
 
 TEST_CASE("SVG skips an empty attribute export without creating a file", "[SVG][SLASVGFormatExtended]")
@@ -121,17 +230,286 @@ TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG][SLASV
         svg.draw_grid(box, "grid", scaled(.1), scaled(5.));
         svg.Close();
     }
-    const std::string text = read_text(output.string());
-    CHECK(count_text(text, "<line ") == 6);
+    // Rows and columns at 0, 5 and 10 mm.
+    const std::vector<pt::ptree> lines = elements(read_svg(output), "line");
+    CHECK(lines.size() == 6);
+    for (const pt::ptree &line : lines)
+        CHECK(style(line).at("stroke") == "grid");
 
     ScopedTemporaryFile too_small(".svg");
-    const BoundingBox tiny(Point(0, 0), Point(scaled(2.), scaled(10.)));
+    const BoundingBox narrow(Point(0, 0), Point(scaled(2.), scaled(10.)));
     {
-        SVG svg(too_small.string(), tiny, scaled(1.), false);
-        svg.draw_grid(tiny, "grid", scaled(.1), scaled(5.));
+        SVG svg(too_small.string(), narrow, scaled(1.), false);
+        svg.draw_grid(narrow, "grid", scaled(.1), scaled(5.));
         svg.Close();
     }
-    CHECK(count_text(read_text(too_small.string()), "<line ") == 0);
+    CHECK(elements(read_svg(too_small), "line").empty());
+}
+
+TEST_CASE("SVG paints counter-clockwise polygons with their fill and clockwise ones white", "[SVG]")
+{
+    Polygon ccw = square(1., 1., 8., 8.).contour;
+    if (!ccw.is_counter_clockwise())
+        ccw.reverse();
+    Polygon cw = square(10., 10., 18., 18.).contour;
+    if (!cw.is_clockwise())
+        cw.reverse();
+
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), BoundingBox(Point(0, 0), Point(scaled(20.), scaled(20.))), scaled(1.), false);
+        svg.draw(Polygons{ccw, cw}, "red");
+        svg.Close();
+    }
+    // A clockwise polygon is painted white, as a hole, instead of the requested fill.
+    const std::vector<pt::ptree> paths = elements(read_svg(output), "path");
+    REQUIRE(paths.size() == 2);
+    CHECK(style(paths[0]).at("fill") == "red");
+    CHECK(style(paths[1]).at("fill") == "white");
+}
+
+TEST_CASE("SVG writes line arrows, text, legends and comments", "[SVG]")
+{
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), BoundingBox(Point(0, 0), Point(scaled(20.), scaled(20.))), scaled(1.), false);
+        svg.arrows = true;
+        svg.draw(Line(Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))), "orange", scaled(.1));
+        svg.draw_text(Point(scaled(2.), scaled(4.)), "text", "purple", 3);
+        svg.draw_legend(Point(scaled(2.), scaled(6.)), "legend", "teal");
+        svg.add_comment("metadata");
+        svg.Close();
+    }
+    const pt::ptree svg = read_svg(output);
+
+    const std::vector<pt::ptree> lines = elements(svg, "line");
+    REQUIRE(lines.size() == 1);
+    CHECK(style(lines.front()).at("stroke") == "orange");
+    CHECK(attr(lines.front(), "marker-end") == "url(#endArrow)");
+
+    // draw_text scales the font size by 10; the legend is a swatch plus a black label.
+    const std::vector<pt::ptree> texts = elements(svg, "text");
+    REQUIRE(texts.size() == 2);
+    CHECK(text(texts[0]) == "text");
+    CHECK(attr(texts[0], "fill") == "purple");
+    CHECK(attr(texts[0], "font-size") == "30px");
+    CHECK(text(texts[1]) == "legend");
+    const std::vector<pt::ptree> circles = elements(svg, "circle");
+    REQUIRE(circles.size() == 1);
+    CHECK(attr(circles.front(), "fill") == "teal");
+
+    const std::vector<pt::ptree> comments = elements(svg, "<xmlcomment>");
+    REQUIRE(comments.size() == 1);
+    CHECK(text(comments.front()) == "metadata");
+}
+
+TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG][SVGExportContracts]")
+{
+    ScopedTemporaryDir directory("orca-svg-open");
+    const boost::filesystem::path nested_output = directory.path() / "nested" / "output.svg";
+    {
+        SVG svg(nested_output.string());
+        REQUIRE(svg.is_opened());
+        svg.add_comment("created nested parent");
+        svg.Close();
+    }
+    boost::nowide::ifstream nested(nested_output.string(), std::ios::binary);
+    REQUIRE(nested.good());
+    pt::ptree nested_tree;
+    pt::read_xml(nested, nested_tree);
+    CHECK(text(nested_tree.get_child("svg.<xmlcomment>")) == "created nested parent");
+
+    // A regular file where the parent directory should be cannot be opened through.
+    ScopedTemporaryFile blocker(".file");
+    {
+        boost::nowide::ofstream file(blocker.string(), std::ios::binary);
+        REQUIRE(file.good());
+        file << "not a directory";
+    }
+    SVG unopenable((blocker.path() / "child.svg").string());
+    CHECK_FALSE(unopenable.is_opened());
+
+    const BoundingBox box(Point(0, 0), Point(scaled(1.), scaled(1.)));
+    SVG unopenable_with_bbox((blocker.path() / "boxed-child.svg").string(), box, 0, false);
+    CHECK_FALSE(unopenable_with_bbox.is_opened());
+}
+
+TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG][SVGExportContracts]")
+{
+    const Surface top(stTop, square(1., 1., 8., 8.));
+    const Surface holed(stInternal, square_with_hole());
+    const Surfaces surfaces{top, holed};
+    const SurfacesPtr surface_refs{&surfaces[0], &surfaces[1]};
+
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), box, 0, false);
+        svg.draw(top, "single-fill", .4f);
+        svg.draw_outline(top, "single-rim", "single-hole", scaled(.2));
+        svg.draw(surfaces, "collection-fill", .6f);
+        svg.draw_outline(surfaces, "collection-rim", "collection-hole", scaled(.2));
+        svg.draw(surface_refs, "pointer-fill", .8f);
+        svg.draw_outline(surface_refs, "pointer-rim", "pointer-hole", scaled(.2));
+        svg.Close();
+    }
+
+    // Each expolygon fill is one path; each outline is one path per contour and hole.
+    std::map<std::string, size_t> fills;
+    std::map<std::string, size_t> outlines;
+    for (const pt::ptree &path : elements(read_svg(output), "path")) {
+        if (is_filled(path))
+            ++fills[style(path).at("fill")];
+        else
+            ++outlines[style(path).at("stroke")];
+    }
+    const std::map<std::string, size_t> expected_fills{
+        {"single-fill", 1}, {"collection-fill", 2}, {"pointer-fill", 2}};
+    const std::map<std::string, size_t> expected_outlines{
+        {"single-rim", 1}, {"collection-rim", 2}, {"collection-hole", 1}, {"pointer-rim", 2}, {"pointer-hole", 1}};
+    CHECK(fills == expected_fills);
+    CHECK(outlines == expected_outlines);
+}
+
+TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG][SVGExportContracts]")
+{
+    // Zero margin and no Y flip: SVG coordinates are millimetres * 10.
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    ScopedTemporaryFile output(".svg");
+    {
+        SVG svg(output.string(), box, 0, false);
+        svg.draw(Lines{Line(Point(scaled(0.), scaled(1.)), Point(scaled(2.), scaled(1.)))}, "line");
+        svg.draw(Polylines{Polyline{Point(scaled(1.), scaled(4.)), Point(scaled(3.), scaled(4.))}}, "polyline", scaled(.1));
+
+        const ThickLine thick_line(Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.)),
+                                   scaled(1.), scaled(3.));
+        svg.draw(ThickLines{thick_line}, "direct-fill", "direct-stroke", scaled(.1));
+
+        ThickPolyline thick_polyline;
+        thick_polyline.points = {Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.))};
+        thick_polyline.width = {static_cast<coordf_t>(scaled(1.)), static_cast<coordf_t>(scaled(3.))};
+        const ThickPolylines thick_polylines{thick_polyline};
+        svg.draw(thick_polylines, "thin-stroke", scaled(.1));
+        svg.draw(thick_polylines, "taper-fill", "taper-stroke", scaled(.1));
+
+        svg.draw(Points{Point(scaled(2.), scaled(8.)), Point(scaled(3.), scaled(8.))}, "marker", 0);
+
+        const Points scaled_path{Point(scaled(2.), scaled(3.)), Point(scaled(4.), scaled(3.)), Point(scaled(4.), scaled(5.))};
+        svg.draw(scaled_path, .5, "scaled-path", scaled(.2));
+        VecOfPoints scaled_groups;
+        scaled_groups.push_back(scaled_path);
+        scaled_groups.push_back(Points{Point(scaled(6.), scaled(3.)), Point(scaled(8.), scaled(3.))});
+        svg.draw(scaled_groups, .5, "scaled-group", scaled(.2));
+        svg.Close();
+    }
+
+    const pt::ptree svg = read_svg(output);
+    CHECK(elements(svg, "line").size() == 1);
+    CHECK(elements(svg, "circle").size() == 2);
+
+    // Both thick-line paths draw the same trapezoid: 1 mm wide at x = 1, 3 mm wide at x = 5.
+    const std::vector<pt::ptree> polygons = elements(svg, "polygon");
+    REQUIRE(polygons.size() == 2);
+    CHECK(style(polygons[0]).at("fill") == "direct-fill");
+    CHECK(style(polygons[1]).at("fill") == "taper-fill");
+    for (const pt::ptree &polygon : polygons)
+        check_coordinates(attr(polygon, "points"), {10., 15., 50., 5., 50., 35., 10., 25.});
+
+    const std::vector<pt::ptree> paths = elements(svg, "path");
+    REQUIRE(paths.size() == 5);
+    CHECK(style(paths[0]).at("stroke") == "polyline");
+    // Without a fill colour a thick polyline is drawn as its untapered centreline.
+    CHECK(style(paths[1]).at("stroke") == "thin-stroke");
+    check_coordinates(attr(paths[1], "d"), {10., 20., 50., 20.});
+    // The scaled overloads multiply the input coordinates by 0.5 before mapping them.
+    const std::vector<double> expected_scaled{10., 15., 20., 15., 20., 25.};
+    CHECK(style(paths[2]).at("stroke") == "scaled-path");
+    check_coordinates(attr(paths[2], "d"), expected_scaled);
+    CHECK(style(paths[3]).at("stroke") == "scaled-group");
+    check_coordinates(attr(paths[3], "d"), expected_scaled);
+    CHECK(style(paths[4]).at("stroke") == "scaled-group");
+    check_coordinates(attr(paths[4], "d"), {30., 15., 40., 15.});
+}
+
+TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG][SVGExportContracts]")
+{
+    const ExPolygons with_hole{square_with_hole()};
+    const ExPolygons plain{square(20., 2., 28., 10.)};
+
+    // No contour or hole colour: both outlines fall back to the fill colour.
+    SVG::ExPolygonAttributes fill_fallback("fill fallback", "magenta", .35f);
+    fill_fallback.outline_width = scaled(.2);
+    // Empty hole colour: the hole outline falls back to the contour colour.
+    SVG::ExPolygonAttributes hole_fallback("hole fallback", "orange", "teal", "", scaled(.2), .45f);
+    // No outline width: no outline is drawn.
+    SVG::ExPolygonAttributes third_legend("third legend", "gold", .55f);
+    SVG::ExPolygonAttributes fourth_legend("fourth legend", "navy", .65f);
+    const std::vector<std::pair<ExPolygons, SVG::ExPolygonAttributes>> layers{
+        {with_hole, fill_fallback},
+        {with_hole, hole_fallback},
+        {plain, third_legend},
+        {plain, fourth_legend},
+    };
+
+    ScopedTemporaryFile output(".svg");
+    SVG::export_expolygons(output.string(), layers);
+    const pt::ptree svg = read_svg(output);
+
+    std::map<std::string, size_t> outlines;
+    for (const pt::ptree &path : elements(svg, "path"))
+        if (!is_filled(path))
+            ++outlines[style(path).at("stroke")];
+    const std::map<std::string, size_t> expected_outlines{{"magenta", 2}, {"teal", 2}};
+    CHECK(outlines == expected_outlines);
+
+    const std::vector<pt::ptree> texts = elements(svg, "text");
+    REQUIRE(texts.size() == 4);
+    CHECK(text(texts[0]) == "fill fallback");
+    CHECK(text(texts[1]) == "hole fallback");
+    CHECK(text(texts[2]) == "third legend");
+    CHECK(text(texts[3]) == "fourth legend");
+
+    const std::vector<pt::ptree> circles = elements(svg, "circle");
+    REQUIRE(circles.size() == 4);
+    std::vector<std::pair<double, double>> centers;
+    for (const pt::ptree &circle : circles)
+        centers.emplace_back(std::stod(attr(circle, "cx")), std::stod(attr(circle, "cy")));
+    // Three columns 20 mm (200 SVG units) apart on the first row.
+    for (size_t i = 1; i < 3; ++i)
+        CHECK_THAT(centers[i].second, WithinAbs(centers[0].second, 1e-4));
+    CHECK_THAT(centers[1].first - centers[0].first, WithinAbs(200., 1e-4));
+    CHECK_THAT(centers[2].first - centers[1].first, WithinAbs(200., 1e-4));
+    // The fourth legend wraps to the first column of a row 1.3 mm (13 units) further;
+    // the flipped Y axis makes its screen coordinate smaller.
+    CHECK_THAT(centers[3].first, WithinAbs(centers[0].first, 1e-4));
+    CHECK_THAT(centers[3].second - centers[0].second, WithinAbs(-13., 1e-4));
+}
+
+TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG][SVGStrokeWidth]")
+{
+    ScopedTemporaryFile output(".svg");
+    const Polygon polygon({Point(scaled(1.), scaled(1.)), Point(scaled(5.), scaled(1.)),
+                           Point(scaled(5.), scaled(5.)), Point(scaled(1.), scaled(5.))});
+    {
+        const BoundingBox bounds(Point(0, 0), Point(scaled(10.), scaled(10.)));
+        SVG svg(output.string(), bounds, scaled(1.), false);
+        svg.draw(Polygons{polygon}, "red");
+        svg.draw_outline(polygon, "blue", scaled(.3));
+        svg.draw(Polyline({Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))}), "green");
+        svg.Close();
+    }
+
+    const std::vector<pt::ptree> paths = elements(read_svg(output), "path");
+    REQUIRE(paths.size() == 3);
+    CHECK(style(paths[0]).at("fill") == "red");
+    CHECK_THAT(style_number(paths[0], "stroke-width"), WithinAbs(0., 1e-6));
+    // An explicit 0.3 mm outline is 3 SVG units; a polyline without a width gets the 2 unit default.
+    CHECK_FALSE(is_filled(paths[1]));
+    CHECK(style(paths[1]).at("stroke") == "blue");
+    CHECK_THAT(style_number(paths[1], "stroke-width"), WithinAbs(3., 1e-6));
+    CHECK_FALSE(is_filled(paths[2]));
+    CHECK(style(paths[2]).at("stroke") == "green");
+    CHECK_THAT(style_number(paths[2], "stroke-width"), WithinAbs(2., 1e-6));
 }
 
 TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVGFormatExtended]")
@@ -173,435 +551,3 @@ TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVG
     CHECK(cw_text.find("fill: white") != std::string::npos);
     CHECK(cw_text.find("fill: red") == std::string::npos);
 }
-
-TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG][SVGExportContracts]")
-{
-    ScopedTemporaryDir directory("orca-svg-open");
-    const std::string nested_output = (directory.path() / "nested" / "output.svg").string();
-    {
-        SVG svg(nested_output);
-        REQUIRE(svg.is_opened());
-        svg.add_comment("created nested parent");
-        svg.Close();
-    }
-    CHECK(boost::filesystem::exists(directory.path() / "nested"));
-    CHECK(read_text(nested_output).find("<!-- created nested parent -->") != std::string::npos);
-
-    ScopedTemporaryFile blocker(".file");
-    {
-        std::ofstream file(blocker.string(), std::ios::binary);
-        REQUIRE(file.good());
-        file << "not a directory";
-    }
-    SVG unopenable((blocker.path() / "child.svg").string());
-    CHECK_FALSE(unopenable.is_opened());
-
-    const BoundingBox box(Point(0, 0), Point(scaled(1.), scaled(1.)));
-    SVG unopenable_with_bbox((blocker.path() / "boxed-child.svg").string(), box, 0, false);
-    CHECK_FALSE(unopenable_with_bbox.is_opened());
-}
-
-TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG][SVGExportContracts]")
-{
-    const Surface top(stTop, square(1., 1., 8., 8.));
-    const Surface holed(stInternal, square_with_hole());
-    const Surfaces surfaces{top, holed};
-    const SurfacesPtr surface_refs{&surfaces[0], &surfaces[1]};
-
-    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
-    ScopedTemporaryFile output(".svg");
-    {
-        SVG svg(output.string(), box, 0, false);
-        svg.draw(top, "single-fill", .4f);
-        svg.draw_outline(top, "single-rim", "single-hole", scaled(.2));
-        svg.draw(surfaces, "collection-fill", .6f);
-        svg.draw_outline(surfaces, "collection-rim", "collection-hole", scaled(.2));
-        svg.draw(surface_refs, "pointer-fill", .8f);
-        svg.draw_outline(surface_refs, "pointer-rim", "pointer-hole", scaled(.2));
-        svg.Close();
-    }
-
-    const std::string text = read_text(output.string());
-    // Each expolygon fill is one even-odd path; each outline is one path per contour and hole.
-    CHECK(count_text(text, "<path ") == 12);
-    CHECK(count_text(text, "fill: single-fill;") == 1);
-    CHECK(count_text(text, "fill: none;") == 7);
-    CHECK(count_text(text, "fill: collection-fill;") == 2);
-    CHECK(count_text(text, "fill: pointer-fill;") == 2);
-    CHECK(count_text(text, "fill: none; stroke: collection-rim;") == 2);
-    CHECK(count_text(text, "fill: none; stroke: collection-hole;") == 1);
-    CHECK(count_text(text, "fill: none; stroke: pointer-rim;") == 2);
-    CHECK(count_text(text, "fill: none; stroke: pointer-hole;") == 1);
-    CHECK(count_text(text, "fill: none; stroke: single-rim;") == 1);
-}
-
-TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG][SVGExportContracts]")
-{
-    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
-    ScopedTemporaryFile output(".svg");
-    {
-        SVG svg(output.string(), box, 0, false);
-        svg.draw(Lines{Line(Point(scaled(0.), scaled(1.)), Point(scaled(2.), scaled(1.)))}, "line");
-        svg.draw(Polylines{Polyline{Point(scaled(1.), scaled(4.)), Point(scaled(3.), scaled(4.))}}, "polyline", scaled(.1));
-
-        const ThickLine thick_line(Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.)),
-                                   scaled(1.), scaled(3.));
-        svg.draw(ThickLines{thick_line}, "direct-fill", "direct-stroke", scaled(.1));
-
-        ThickPolyline thick_polyline;
-        thick_polyline.points = {Point(scaled(1.), scaled(2.)), Point(scaled(5.), scaled(2.))};
-        thick_polyline.width = {static_cast<coordf_t>(scaled(1.)), static_cast<coordf_t>(scaled(3.))};
-        const ThickPolylines thick_polylines{thick_polyline};
-        svg.draw(thick_polylines, "thin-stroke", scaled(.1));
-        svg.draw(thick_polylines, "taper-fill", "taper-stroke", scaled(.1));
-
-        const Points markers{Point(scaled(2.), scaled(8.)), Point(scaled(3.), scaled(8.))};
-        svg.draw(markers, "marker", 0);
-
-        const Points scaled_path{Point(scaled(2.), scaled(3.)), Point(scaled(4.), scaled(3.)), Point(scaled(4.), scaled(5.))};
-        svg.draw(scaled_path, .5, "scaled-path", scaled(.2));
-        VecOfPoints scaled_groups;
-        scaled_groups.push_back(scaled_path);
-        scaled_groups.push_back(Points{Point(scaled(6.), scaled(3.)), Point(scaled(8.), scaled(3.))});
-        svg.draw(scaled_groups, .5, "scaled-group", scaled(.2));
-        svg.Close();
-    }
-
-    const std::string text = read_text(output.string());
-    CHECK(count_text(text, "<line ") == 1);
-    CHECK(count_text(text, "<circle cx=") == 2);
-    CHECK(count_text(text, "<polygon points=\"10.000000,15.000000 50.000000,5.000000 50.000000,35.000000 10.000000,25.000000\"") == 2);
-    CHECK(count_text(text, "<path d=\"") == 5);
-    const std::regex scaled_path_regex(
-        R"svg(<path d="([^"]*)" style="fill: none; stroke: (scaled-path|scaled-group);[^"]*"[^>]*>)svg");
-    std::vector<std::vector<double>> single_scaled_paths;
-    std::vector<std::vector<double>> scaled_groups;
-    for (std::sregex_iterator it(text.begin(), text.end(), scaled_path_regex), end; it != end; ++it) {
-        std::istringstream path_data((*it)[1].str());
-        std::string command;
-        path_data >> command;
-        REQUIRE(command == "M");
-
-        std::vector<double> coordinates;
-        double coordinate;
-        while (path_data >> coordinate)
-            coordinates.push_back(coordinate);
-        path_data.clear();
-        path_data >> command;
-        CHECK(command == "z");
-
-        if ((*it)[2].str() == "scaled-path")
-            single_scaled_paths.push_back(std::move(coordinates));
-        else
-            scaled_groups.push_back(std::move(coordinates));
-    }
-    REQUIRE(single_scaled_paths.size() == 1);
-    REQUIRE(scaled_groups.size() == 2);
-    const std::vector<double> expected_single{10., 15., 20., 15., 20., 25.};
-    const std::vector<double> expected_second_group{30., 15., 40., 15.};
-    CHECK(single_scaled_paths.front() == expected_single);
-    CHECK(scaled_groups.front() == expected_single);
-    CHECK(scaled_groups.back() == expected_second_group);
-}
-
-TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG][SVGExportContracts]")
-{
-    const ExPolygons with_hole{square_with_hole()};
-    const ExPolygons plain{square(20., 2., 28., 10.)};
-
-    SVG::ExPolygonAttributes fill_fallback("fill fallback", "magenta", .35f);
-    fill_fallback.outline_width = scaled(.2);
-
-    SVG::ExPolygonAttributes hole_fallback("hole fallback", "orange", "teal", "", scaled(.2), .45f);
-    SVG::ExPolygonAttributes third_legend("third legend", "gold", .55f);
-    SVG::ExPolygonAttributes fourth_legend("fourth legend", "navy", .65f);
-    const std::vector<std::pair<ExPolygons, SVG::ExPolygonAttributes>> layers{
-        {with_hole, fill_fallback},
-        {with_hole, hole_fallback},
-        {plain, third_legend},
-        {plain, fourth_legend},
-    };
-
-    ScopedTemporaryFile output(".svg");
-    SVG::export_expolygons(output.string(), layers);
-
-    const std::string text = read_text(output.string());
-    CHECK(count_text(text, "stroke: magenta;") == 2);
-    CHECK(count_text(text, "stroke: teal;") == 2);
-    CHECK(count_text(text, "stroke: orange;") == 0);
-    CHECK(text.find("fill fallback") != std::string::npos);
-    CHECK(text.find("hole fallback") != std::string::npos);
-    CHECK(text.find("third legend") != std::string::npos);
-    CHECK(text.find("fourth legend") != std::string::npos);
-    CHECK(count_text(text, "<circle cx=") == 4);
-    CHECK(count_text(text, "<text x=") == 4);
-
-    const std::regex legend_circle(R"svg(<circle cx="([0-9.]+)" cy="([0-9.]+)" r="10" fill="[^"]*"/>)svg");
-    std::vector<std::pair<double, double>> legend_centers;
-    for (std::sregex_iterator it(text.begin(), text.end(), legend_circle), end; it != end; ++it)
-        legend_centers.emplace_back(std::stod((*it)[1].str()), std::stod((*it)[2].str()));
-    REQUIRE(legend_centers.size() == 4);
-    for (size_t i = 1; i < 3; ++i)
-        CHECK_THAT(legend_centers[i].second, WithinAbs(legend_centers[0].second, 1e-4));
-    CHECK_THAT(legend_centers[1].first - legend_centers[0].first, WithinAbs(200., 1e-4));
-    CHECK_THAT(legend_centers[2].first - legend_centers[1].first, WithinAbs(200., 1e-4));
-    CHECK_THAT(legend_centers[3].first, WithinAbs(legend_centers[0].first, 1e-4));
-    // The columns are 20 mm apart (200 SVG units); a 1.3 mm row step is 13 units.
-    // SVG's flipped Y axis makes the next row's screen coordinate smaller.
-    CHECK_THAT(legend_centers[3].second - legend_centers[0].second, WithinAbs(-13., 1e-4));
-}
-
-namespace svg_import_contracts {
-using namespace Slic3r;
-using Catch::Matchers::WithinAbs;
-
-namespace {
-
-constexpr double PX_TO_MM = 25.4 / 96.0;
-
-bool write_svg(const ScopedTemporaryFile &file, const std::string &body)
-{
-    std::ofstream out(file.string(), std::ios::binary);
-    out << body;
-    return out.good();
-}
-
-const TriangleMesh &single_mesh(const Model &model)
-{
-    REQUIRE(model.objects.size() == 1);
-    REQUIRE(model.objects.front()->volumes.size() == 1);
-    return model.objects.front()->volumes.front()->mesh();
-}
-
-void check_box(const TriangleMesh &mesh, double x, double y, double z, double expected_volume)
-{
-    TriangleMesh volume_probe(mesh);
-    const Vec3d size = mesh.size();
-    CHECK_THAT(size.x(), WithinAbs(x, 0.15));
-    CHECK_THAT(size.y(), WithinAbs(y, 0.15));
-    CHECK_THAT(size.z(), WithinAbs(z, 0.15));
-    CHECK(std::isfinite(volume_probe.volume()));
-    CHECK(volume_probe.volume() > 0.f);
-    CHECK_THAT(double(volume_probe.volume()),
-               WithinAbs(expected_volume, expected_volume * 0.05 + 0.2));
-}
-
-} // namespace
-
-TEST_CASE("SVG importer reports missing and malformed files", "[SvgFormat]")
-{
-    ScopedTemporaryFile missing(".svg");
-    Model model;
-    std::string message;
-    CHECK_FALSE(load_svg(missing.string().c_str(), &model, message));
-    CHECK(message.find("could not open") != std::string::npos);
-
-    ScopedTemporaryFile malformed(".svg");
-    REQUIRE(write_svg(malformed, "<svg xmlns=\"http://www.w3.org/2000/svg\"><path"));
-    model.clear_objects();
-    message.clear();
-    CHECK_FALSE(load_svg(malformed.string().c_str(), &model, message));
-    CHECK(message.find("could not parse") != std::string::npos);
-}
-
-TEST_CASE("SVG importer creates a physical rectangle", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"20mm\">"
-        "<path fill=\"#112233\" d=\"M0 0 L10 0 L10 20 L0 20 Z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    const TriangleMesh &mesh = single_mesh(model);
-    check_box(mesh, 10. * PX_TO_MM, 20. * PX_TO_MM, 10., 10. * 20. * PX_TO_MM * PX_TO_MM * 10.);
-    CHECK(model.objects.front()->volumes.front()->name == "part_1");
-}
-
-TEST_CASE("SVG importer preserves separate filled components", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"red\" d=\"M0 0 L4 0 L4 5 L0 5 Z\"/>"
-        "<path fill=\"blue\" d=\"M8 0 L14 0 L14 3 L8 3 Z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    REQUIRE(model.objects.size() == 1);
-    REQUIRE(model.objects.front()->volumes.size() == 2);
-    CHECK(model.objects.front()->volumes[0]->name == "part_1");
-    CHECK(model.objects.front()->volumes[1]->name == "part_2");
-    check_box(model.objects.front()->volumes[0]->mesh(), 4. * PX_TO_MM, 5. * PX_TO_MM, 10.,
-              4. * 5. * PX_TO_MM * PX_TO_MM * 10.);
-    check_box(model.objects.front()->volumes[1]->mesh(), 6. * PX_TO_MM, 3. * PX_TO_MM, 10.,
-              6. * 3. * PX_TO_MM * PX_TO_MM * 10.);
-}
-
-TEST_CASE("SVG importer turns an open stroke into a solid", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" "
-        "d=\"M0 0 L10 0\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    const TriangleMesh &mesh = single_mesh(model);
-    const Vec3d size = mesh.size();
-    CHECK_THAT(size.x(), WithinAbs(11. * PX_TO_MM, 0.15));
-    CHECK_THAT(size.y(), WithinAbs(1. * PX_TO_MM, 0.15));
-    CHECK_THAT(size.z(), WithinAbs(10., 0.15));
-}
-
-TEST_CASE("SVG importer evaluates cubic path geometry", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"#40a0ff\" d=\"M0 0 C0 10 10 10 10 0 Z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    const TriangleMesh &mesh = single_mesh(model);
-    const Vec3d size = mesh.size();
-    CHECK_THAT(size.x(), WithinAbs(10. * PX_TO_MM, 0.15));
-    CHECK_THAT(size.y(), WithinAbs(7.5 * PX_TO_MM, 0.15));
-    CHECK_THAT(size.z(), WithinAbs(10., 0.15));
-    TriangleMesh volume_probe(mesh);
-    CHECK_THAT(double(volume_probe.volume()), WithinAbs(60. * PX_TO_MM * PX_TO_MM * 10., 2.0));
-}
-
-TEST_CASE("SVG importer keeps an inner contour as a hole", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"#bbbbbb\" d=\"M0 0 L20 0 L20 20 L0 20 Z "
-        "M5 5 L5 15 L15 15 L15 5 Z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    const TriangleMesh &mesh = single_mesh(model);
-    check_box(mesh, 20. * PX_TO_MM, 20. * PX_TO_MM, 10.,
-              (20. * 20. - 10. * 10.) * PX_TO_MM * PX_TO_MM * 10.);
-    TriangleMesh volume_probe(mesh);
-    const double bounding_volume = mesh.size().x() * mesh.size().y() * mesh.size().z();
-    CHECK(volume_probe.volume() < 0.85 * bounding_volume);
-    CHECK(volume_probe.volume() > 0.65 * bounding_volume);
-}
-
-TEST_CASE("SVG importer accepts gradient-backed shapes", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs>"
-        "<linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>"
-        "<stop offset=\"1\" stop-color=\"blue\"/></linearGradient></defs>"
-        "<path fill=\"url(#g)\" d=\"M0 0 L6 0 L6 7 L0 7\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    check_box(single_mesh(model), 6. * PX_TO_MM, 7. * PX_TO_MM, 10.,
-              6. * 7. * PX_TO_MM * PX_TO_MM * 10.);
-}
-
-TEST_CASE("SVG importer handles a self-intersecting contour", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"#ffffff\" d=\"M0 0 L10 10 L0 10 L10 0 Z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    REQUIRE(model.objects.size() == 1);
-    CHECK(model.objects.front()->volumes.size() == 1);
-    const TriangleMesh &mesh = model.objects.front()->volumes.front()->mesh();
-    CHECK(mesh.facets_count() > 0);
-    TriangleMesh volume_probe(mesh);
-    CHECK(std::isfinite(volume_probe.volume()));
-}
-
-TEST_CASE("SVG importer rejects an SVG with no drawable shapes", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"));
-    Model model;
-    std::string message;
-    CHECK_FALSE(load_svg(file.string().c_str(), &model, message));
-    CHECK(message.find("could not parse") != std::string::npos);
-}
-
-TEST_CASE("SVG importer accepts a path with a relative command mix", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<path fill=\"#00cc88\" d=\"m2 3 h8 v4 h-8 z\"/></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    check_box(single_mesh(model), 8. * PX_TO_MM, 4. * PX_TO_MM, 10.,
-              8. * 4. * PX_TO_MM * PX_TO_MM * 10.);
-}
-
-TEST_CASE("SVG importer keeps distinct element names for styled paths", "[SvgFormat]")
-{
-    ScopedTemporaryFile file(".svg");
-    REQUIRE(write_svg(file,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
-        "<g><path fill=\"red\" d=\"M0 0 L2 0 L2 2 L0 2 Z\"/></g>"
-        "<g><path fill=\"blue\" d=\"M4 0 L7 0 L7 1 L4 1 Z\"/></g></svg>"));
-    Model model;
-    std::string message;
-    REQUIRE(load_svg(file.string().c_str(), &model, message));
-    REQUIRE(model.objects.size() == 1);
-    REQUIRE(model.objects.front()->volumes.size() == 2);
-    CHECK(model.objects.front()->volumes[0]->name != model.objects.front()->volumes[1]->name);
-    CHECK(model.objects.front()->volumes[0]->mesh().facets_count() > 0);
-    CHECK(model.objects.front()->volumes[1]->mesh().facets_count() > 0);
-}
-
-} // namespace svg_import_contracts
-
-namespace svg_stroke_contracts {
-using namespace Slic3r;
-
-TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG][SVGStrokeWidth]")
-{
-    ScopedTemporaryFile output(".svg");
-    const Polygon polygon({Point(scaled(1.), scaled(1.)), Point(scaled(5.), scaled(1.)),
-                           Point(scaled(5.), scaled(5.)), Point(scaled(1.), scaled(5.))});
-    {
-        const BoundingBox bounds(Point(0, 0), Point(scaled(10.), scaled(10.)));
-        SVG svg(output.string(), bounds, scaled(1.), false);
-        svg.draw(Polygons{polygon}, "red");
-        svg.draw_outline(polygon, "blue", scaled(.3));
-        svg.draw(Polyline({Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))}), "green");
-        svg.Close();
-    }
-    std::ifstream input(output.string());
-    REQUIRE(input.good());
-    const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    const std::regex path_style(R"svg(<path\b[^>]*style="([^"]*)")svg");
-    const std::regex stroke_width(R"svg((?:^|;)\s*stroke-width:\s*([0-9.]+))svg");
-    std::vector<std::string> styles;
-    for (std::sregex_iterator it(text.begin(), text.end(), path_style), end; it != end; ++it)
-        styles.push_back((*it)[1].str());
-    REQUIRE(styles.size() == 3);
-    const std::vector<double> expected_widths{0., 3., 2.}; // SVG coordinates use 10 units per mm.
-    for (size_t i = 0; i < styles.size(); ++i) {
-        std::smatch match;
-        REQUIRE(std::regex_search(styles[i], match, stroke_width));
-        CHECK_THAT(std::stod(match[1].str()), Catch::Matchers::WithinAbs(expected_widths[i], 1e-6));
-    }
-    CHECK(styles[0].find("fill: red") != std::string::npos);
-    CHECK(styles[1].find("fill: none") != std::string::npos);
-    CHECK(styles[1].find("stroke: blue") != std::string::npos);
-    CHECK(styles[2].find("fill: none") != std::string::npos);
-    CHECK(styles[2].find("stroke: green") != std::string::npos);
-}
-
-} // namespace svg_stroke_contracts

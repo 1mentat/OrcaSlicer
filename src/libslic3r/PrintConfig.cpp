@@ -1084,6 +1084,7 @@ void PrintConfigDef::init_common_params()
     def->min      = 0;
     def->max      = 1000;
     def->mode     = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{0});
 
     def = this->add("preferred_orientation", coFloat);
@@ -2660,6 +2661,7 @@ void PrintConfigDef::init_fff_params()
     def->ratio_over = "outer_wall_speed";
     def->min = 1;
     def->mode = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsOrPercentsNullable{FloatOrPercent(50, true)});
 
     def = this->add("small_support_perimeter_threshold", coFloats);
@@ -2670,6 +2672,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
     def->min = 0;
     def->mode = comAdvanced;
+    def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{0});
 
     def = this->add("wall_sequence", coEnum);
@@ -12311,12 +12314,8 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
     // extrusion widths
     {
         double max_nozzle_diameter = 0.;
-        double min_nozzle_diameter = std::numeric_limits<double>::max();
         for (double dmr : cfg.nozzle_diameter.values)
-        {
             max_nozzle_diameter = std::max(max_nozzle_diameter, dmr);
-            min_nozzle_diameter = std::min(min_nozzle_diameter, dmr);
-        }
         const char *widths[] = {
             "outer_wall_line_width",
             "inner_wall_line_width",
@@ -12330,13 +12329,22 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
             "skeleton_infill_line_width"};
         for (size_t i = 0; i < sizeof(widths) / sizeof(widths[i]); ++ i) {
             std::string key(widths[i]);
+            if (key == "bridge_line_width") {
+                // Printing resolves a percentage against the nozzle of the extruder that prints the bridge
+                // (LayerRegion::bridging_flow), so every nozzle is checked against its own diameter.
+                for (double nozzle_diameter : cfg.nozzle_diameter.values) {
+                    const double bridge_width = cfg.get_abs_value(key, nozzle_diameter);
+                    if (bridge_width > nozzle_diameter) {
+                        error_message.emplace(key, L("Bridge line width must not exceed nozzle diameter: ") + std::to_string(bridge_width));
+                        break;
+                    }
+                }
+                continue;
+            }
             double abs_width = cfg.get_abs_value(key, max_nozzle_diameter);
-            double allowed_max = (key == "bridge_line_width") ? min_nozzle_diameter : MAX_LINE_WIDTH_MULTIPLIER * max_nozzle_diameter;
+            double allowed_max = MAX_LINE_WIDTH_MULTIPLIER * max_nozzle_diameter;
             if (abs_width > allowed_max) {
-                if (key == "bridge_line_width")
-                    error_message.emplace(key, L("Bridge line width must not exceed nozzle diameter: ") + std::to_string(abs_width));
-                else
-                    error_message.emplace(key, L("too large line width ") + std::to_string(abs_width));
+                error_message.emplace(key, L("too large line width ") + std::to_string(abs_width));
                 //return std::string("Too Large line width: ") + key;
             }
         }
@@ -13282,7 +13290,7 @@ OtherPresetsConfigDef::OtherPresetsConfigDef()
     def->label = L("Print preset name");
     def->tooltip = L("Name of the print preset used for slicing.");
 
-    def = this->add("filament_preset", coString);
+    def = this->add("filament_preset", coStrings);
     def->label = L("Filament preset name");
     def->tooltip = L("Names of the filament presets used for slicing. The variable is a vector "
                      "containing one name for each extruder.");
@@ -13518,11 +13526,11 @@ float get_real_skirt_dist(const DynamicPrintConfig& cfg) {
 
     float dist = cfg.opt_float("skirt_distance");
 
-    int loops = cfg.opt_int("skirt_loops");
-    auto opt_draft_shield = cfg.option("draft_shield");
-    if (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled && loops == 0) {
-        loops = 1;
-    }
+    // Print::_make_skirt() emits skirt_loops loops, none for zero loops (a draft shield does not add one),
+    // so there is nothing to keep clear of without loops.
+    const int loops = cfg.opt_int("skirt_loops");
+    if (loops <= 0)
+        return 0.f;
 
     float width = cfg.opt_float("initial_layer_line_width");
     if (width <= 0.f) {

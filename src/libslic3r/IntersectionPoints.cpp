@@ -22,6 +22,8 @@ IntersectionsLines compute_intersections(const Lines &lines)
         const Line &l = lines[li];
         auto intersections = AABBTreeLines::get_intersections_with_line<false, Point, Line>(lines, tree, l);
         for (const auto &[p, node_index] : intersections) {
+            // Report each pair once, from its lower index. Polygon neighbours are not
+            // skipped by index: they share an endpoint and are filtered below.
             if (node_index <= li)
                 continue;            
             if (const Line &l_ = lines[node_index];

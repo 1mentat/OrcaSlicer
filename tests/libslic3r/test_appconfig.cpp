@@ -1,28 +1,36 @@
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <map>
-#include "libslic3r/calib.hpp"
-#include "libslic3r/PrintConfig.hpp"
-#include <boost/filesystem/path.hpp>
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <ios>
-#include "libslic3r/Thread.hpp"
 #include <boost/filesystem.hpp>
 #include <fstream>
-#include <string>
-#include <utility>
-#include <vector>
 #include "catch2/matchers/catch_matchers.hpp"
 #include "catch2/matchers/catch_matchers_floating_point.hpp"
-#include "libslic3r/Utils.hpp"
-#include "test_utils.hpp"
+#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Thread.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/calib.hpp"
+#include "test_utils.hpp"
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include <ios>
+#include <iterator>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace Slic3r;
 
@@ -142,7 +150,9 @@ struct ScopedAppConfigDataDir {
 
     ScopedAppConfigDataDir()
     {
-        // Match application startup before exercising main-thread-only saves.
+        // AppConfig::save() throws unless it runs on the main thread, as recorded
+        // at application startup.  The Catch2 runner is single-threaded, so
+        // recording the current thread is idempotent across test cases.
         save_main_thread_id();
         set_data_dir(directory.string());
     }
@@ -151,22 +161,31 @@ struct ScopedAppConfigDataDir {
     const fs::path &path() const { return directory.path(); }
 };
 
-bool uses_json(const fs::path &path)
-{
-    return fs::extension(path) == ".conf";
-}
-
+// JSON fixtures end in "\n" like the files save() writes: on Windows, load()
+// expects a line (the MD5 checksum) after the closing brace.
 void write_text(const fs::path &path, const std::string &text)
 {
-    std::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
+    boost::nowide::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
     REQUIRE(out.good());
     out << text;
     REQUIRE(out.good());
 }
 
+bool uses_json(const fs::path &path)
+{
+    return fs::extension(path) == ".conf";
+}
+
 void write_config(const fs::path &path, const std::string &json, const std::string &ini)
 {
     write_text(path, uses_json(path) ? json : ini);
+}
+
+std::string read_text(const fs::path &path)
+{
+    boost::nowide::ifstream in(path.string(), std::ios::binary);
+    REQUIRE(in.good());
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
 void require_mouse_device(const AppConfig &config)
@@ -211,6 +230,7 @@ TEST_CASE("AppConfig save/load preserves typed sections and collections", "[AppC
     source.set_recent_projects({"first.3mf", "second.3mf"});
     source.set_mouse_device("Draft Space Mouse", 1.25, 0.15f, 2.0f, 0.25f, 3.5, true, false, true, false, true, false, true);
     source.set_variant("Vendor \"Draft\"", "Model\\Draft", "0.4\\special", true);
+    source.set_variant("Vendor \"Draft\"", "Model\\Draft", "0.6;\"quoted\"", true);
     source.set_printer_setting("Draft Printer", PRESET_PRINTER_NAME, "Draft Printer");
     source.set_printer_setting("Draft Printer", "curr_bed_type", "Textured PEI");
     source.set_filament_presets({"Draft PLA", "Draft PETG"});
@@ -226,7 +246,10 @@ TEST_CASE("AppConfig save/load preserves typed sections and collections", "[AppC
     source.update_local_machine(machine);
 
     const fs::path config_path(source.config_path());
+    REQUIRE(config_path.parent_path() == scoped_dir.path());
+    REQUIRE_FALSE(source.exists());
     source.save();
+    REQUIRE(source.exists());
     REQUIRE(fs::exists(config_path));
 
     AppConfig loaded;
@@ -238,6 +261,7 @@ TEST_CASE("AppConfig save/load preserves typed sections and collections", "[AppC
     REQUIRE(loaded.get_recent_projects() == std::vector<std::string>{"first.3mf", "second.3mf"});
     require_mouse_device(loaded);
     REQUIRE(loaded.get_variant("Vendor \"Draft\"", "Model\\Draft", "0.4\\special"));
+    REQUIRE(loaded.vendors() == source.vendors());
     REQUIRE(loaded.get_printer_setting("Draft Printer", "curr_bed_type") == "Textured PEI");
     REQUIRE(loaded.get_filament_presets() == std::vector<std::string>{"Draft PLA", "Draft PETG"});
     REQUIRE(loaded.get_filament_colors() == std::vector<std::string>{"#112233", "#445566"});
@@ -251,9 +275,14 @@ TEST_CASE("AppConfig missing load is side-effect free", "[AppConfig][AppConfigCo
     AppConfig config;
     const fs::path missing = scoped_dir.path() / "missing.conf";
     config.set_loading_path(missing.string());
+    config.set("app", "draft_marker", "kept");
 
     REQUIRE(config.load_if_exists().empty());
     REQUIRE_FALSE(fs::exists(missing));
+    // Nothing is written to the data directory (no config, lock or backup
+    // file) and the in-memory state is left as it was.
+    REQUIRE(fs::is_empty(scoped_dir.path()));
+    REQUIRE(config.get("app", "draft_marker") == "kept");
     REQUIRE(config.get_bool("drop_project_action"));
 }
 
@@ -261,13 +290,16 @@ TEST_CASE("AppConfig malformed input reports an error and keeps the file", "[App
 {
     ScopedAppConfigDataDir scoped_dir;
     AppConfig config;
-    const fs::path malformed = scoped_dir.path() / (uses_json(fs::path(config.config_path())) ? "malformed.conf" : "malformed.ini");
-    const std::string json = R"({"app":{"draft_malformed":true})";
+    const bool json_format = uses_json(fs::path(config.config_path()));
+    const fs::path malformed = scoped_dir.path() / (json_format ? "malformed.conf" : "malformed.ini");
+    const std::string json = R"({"app":{"draft_malformed":true})" "\n";
     const std::string ini = "[app\n draft_malformed = true\n";
+    const std::string original = json_format ? json : ini;
     write_config(malformed, json, ini);
     config.set_loading_path(malformed.string());
 
     REQUIRE_FALSE(config.load().empty());
+    REQUIRE(read_text(malformed) == original);
     REQUIRE(fs::exists(malformed));
     REQUIRE(config.get("app", "draft_malformed").empty());
 }
@@ -278,7 +310,7 @@ TEST_CASE("AppConfig numeric defaults clamp and write back", "[AppConfig][AppCon
     AppConfig config;
     const fs::path config_path(config.config_path());
     const std::string json =
-        R"({"app":{"opengl_fps_cap":"999","plugin_pages_visible_count":"abc","speed_dial_recent_count":"-3"}})";
+        R"({"app":{"opengl_fps_cap":"999","plugin_pages_visible_count":"abc","speed_dial_recent_count":"-3"}})" "\n";
     const std::string ini =
         "[app]\n"
         "opengl_fps_cap = 999\n"
@@ -287,6 +319,8 @@ TEST_CASE("AppConfig numeric defaults clamp and write back", "[AppConfig][AppCon
     write_config(config_path, json, ini);
     REQUIRE(config.load().empty());
     REQUIRE(config.get(SETTING_OPENGL_FPS_CAP) == "240");
+    REQUIRE(config.get(SETTING_PLUGIN_PAGES_VISIBLE_COUNT) == std::to_string(PLUGIN_PAGES_VISIBLE_COUNT_DEFAULT));
+    REQUIRE(config.get(SETTING_SPEED_DIAL_RECENT_COUNT) == std::to_string(SPEED_DIAL_RECENT_COUNT_MIN));
     REQUIRE(config.get_plugin_pages_visible_count() == PLUGIN_PAGES_VISIBLE_COUNT_DEFAULT);
     REQUIRE(config.get_speed_dial_recent_count() == SPEED_DIAL_RECENT_COUNT_MIN);
 
@@ -307,20 +341,38 @@ TEST_CASE("AppConfig numeric defaults clamp and write back", "[AppConfig][AppCon
 TEST_CASE("AppConfig Editor load migrates legacy physical printer", "[AppConfig][AppConfigContract]")
 {
     ScopedAppConfigDataDir scoped_dir;
-    AppConfig config;
-    const fs::path config_path(config.config_path());
-    const std::string json = R"({"extras":{"physical_printer":"Legacy Draft Printer"},"app":{"installed_networking":false}})";
-    const std::string ini =
-        "[extras]\n"
-        "physical_printer = Legacy Draft Printer\n"
-        "\n[app]\n"
-        "installed_networking = false\n";
-    write_config(config_path, json, ini);
+    const fs::path config_path(AppConfig().config_path());
 
-    REQUIRE(config.load().empty());
-    REQUIRE(config.get("presets", "physical_printer") == "Legacy Draft Printer");
-    REQUIRE_FALSE(config.has_section("extras"));
-    REQUIRE_FALSE(config.get_bool("app", "installed_networking"));
+    SECTION("an emptied extras section is dropped") {
+        const std::string json =
+            R"({"extras":{"physical_printer":"Legacy Draft Printer"},"app":{"installed_networking":false}})" "\n";
+        const std::string ini =
+            "[extras]\n"
+            "physical_printer = Legacy Draft Printer\n"
+            "\n[app]\n"
+            "installed_networking = false\n";
+        write_config(config_path, json, ini);
+        AppConfig config;
+        REQUIRE(config.load().empty());
+        REQUIRE(config.get("presets", "physical_printer") == "Legacy Draft Printer");
+        REQUIRE_FALSE(config.has_section("extras"));
+        REQUIRE_FALSE(config.get_bool("app", "installed_networking"));
+    }
+
+    SECTION("other extras keys are kept") {
+        const std::string json =
+            R"({"extras":{"physical_printer":"Legacy Draft Printer","draft_extra":"kept"}})" "\n";
+        const std::string ini =
+            "[extras]\n"
+            "physical_printer = Legacy Draft Printer\n"
+            "draft_extra = kept\n";
+        write_config(config_path, json, ini);
+        AppConfig config;
+        REQUIRE(config.load().empty());
+        REQUIRE(config.get("presets", "physical_printer") == "Legacy Draft Printer");
+        REQUIRE(config.get("extras", "physical_printer").empty());
+        REQUIRE(config.get("extras", "draft_extra") == "kept");
+    }
 }
 
 namespace appconfig_extended_contracts {
@@ -384,12 +436,17 @@ TEST_CASE("calibration records survive save and load", "[AppConfig][AppConfigExt
     source.save_printer_cali_infos(initial);
     REQUIRE(source.get_printer_cali_infos().size() == 1);
 
+    // An update for the same device replaces the cached results in place; the
+    // finished flag only changes when the caller asks for it.
     PrinterCaliInfo update = initial;
     update.cali_finished = true;
     update.cache_flow_ratio = 1.023f;
     update.selected_presets.front().name = "Calibration preset 7 updated";
     source.save_printer_cali_infos(update, false);
+    REQUIRE(source.get_printer_cali_infos().size() == 1);
     REQUIRE(source.get_printer_cali_infos().front().cali_finished == false);
+    require_close(source.get_printer_cali_infos().front().cache_flow_ratio, 1.023f);
+    REQUIRE(source.get_printer_cali_infos().front().selected_presets.front().name == "Calibration preset 7 updated");
     source.save_printer_cali_infos(update, true);
     REQUIRE(source.get_printer_cali_infos().front().cali_finished);
 
@@ -430,16 +487,22 @@ TEST_CASE("vendor records filter empty models and preserve escaped variants", "[
     AppConfig::VendorMap vendors;
     vendors["Skipped Vendor"]["Skipped Model"] = {};
     vendors["Mixed Vendor"]["Empty Model"] = {};
-    vendors["Mixed Vendor"]["Model\\with\\slashes"] = {"0.4\\draft", "0.6,quoted"};
+    vendors["Mixed Vendor"]["Model\\with\\slashes"] = {"0.4\\draft", "0.6,quoted", "0.6;quoted"};
     source.set_vendors(vendors);
     source.save();
 
+    // Empty models and vendors with no enabled variant are not written at all.
+    const std::string saved = read_text(fs::path(source.config_path()));
+    REQUIRE(saved.find("Skipped Vendor") == std::string::npos);
+    REQUIRE(saved.find("Empty Model") == std::string::npos);
+
     AppConfig loaded;
     REQUIRE(loaded.load().empty());
+    const AppConfig::VendorMap expected {{"Mixed Vendor", {{"Model\\with\\slashes", {"0.4\\draft", "0.6,quoted", "0.6;quoted"}}}}};
+    REQUIRE(loaded.vendors() == expected);
     REQUIRE(loaded.get_variant("Mixed Vendor", "Model\\with\\slashes", "0.4\\draft"));
     REQUIRE(loaded.get_variant("Mixed Vendor", "Model\\with\\slashes", "0.6,quoted"));
-    REQUIRE_FALSE(loaded.get_variant("Mixed Vendor", "Empty Model", "0.4"));
-    REQUIRE_FALSE(loaded.get_variant("Skipped Vendor", "Skipped Model", "0.4"));
+    REQUIRE(loaded.get_variant("Mixed Vendor", "Model\\with\\slashes", "0.6;quoted"));
 }
 
 TEST_CASE("cloud and skipped-version collections persist their public invariants", "[AppConfig][AppConfigExtended]")
@@ -579,9 +642,16 @@ TEST_CASE("Custom palette updates retain color order after reload",
     REQUIRE(source.get_custom_color_from_config().empty());
 
     const std::vector<std::string> initial {"#112233", "#AABBCC"};
-    const std::vector<std::string> updated {"#445566", "#DDEEFF", "#778899"};
+    const std::vector<std::string> short_update {"#445566", "#DDEEFF", "#778899"};
+    // A full palette, as the colour dialogs write it (16 entries), so entries
+    // past the tenth must still come back in insertion order.
+    std::vector<std::string> updated;
+    for (const char digit : std::string("0123456789ABCDEF"))
+        updated.push_back(std::string("#0000") + digit + "0");
     source.save_custom_color_to_config(initial);
     REQUIRE(source.get_custom_color_from_config() == initial);
+    source.save_custom_color_to_config(short_update);
+    REQUIRE(source.get_custom_color_from_config() == short_update);
     source.save_custom_color_to_config(updated);
     REQUIRE(source.get_custom_color_from_config() == updated);
     source.save();
@@ -627,6 +697,9 @@ TEST_CASE("AppConfig normalizes language codes", "[AppConfig][AppConfigPreferenc
 TEST_CASE("AppConfig uses the stable HMS host", "[AppConfig][AppConfigPreferences]")
 {
     AppConfig config;
+    const std::string environment = GENERATE(std::string(ENV_DEV_HOST), std::string(ENV_QAT_HOST),
+                                             std::string(ENV_PRE_HOST), std::string(ENV_PRODUCT_HOST));
+    config.set("iot_environment", environment);
     REQUIRE(config.get_hms_host() == "e.bambulab.com");
 }
 
@@ -696,6 +769,18 @@ TEST_CASE("AppConfig round-trips network update state", "[AppConfig][AppConfigPr
     REQUIRE(config.should_remind_network_update_later());
     config.clear_remind_network_update_later();
     REQUIRE_FALSE(config.should_remind_network_update_later());
+}
+
+TEST_CASE("AppConfig resolves endpoint overrides", "[AppConfig][AppConfigPreferences]")
+{
+    AppConfig config;
+    REQUIRE(config.version_check_url() == "https://check-version.orcaslicer.com/latest");
+    REQUIRE(config.profile_update_url() == "https://check-version.orcaslicer.com/profile");
+
+    config.set("version_check_url", "https://example.invalid/version");
+    config.set("orca_updater_url", "https://example.invalid/profile");
+    REQUIRE(config.version_check_url() == "https://example.invalid/version");
+    REQUIRE(config.profile_update_url() == "https://example.invalid/profile");
 }
 
 TEST_CASE("AppConfig resolves endpoint overrides and config existence", "[AppConfig][AppConfigPreferences]")

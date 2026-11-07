@@ -1,5 +1,3 @@
-#include <catch2/catch_all.hpp>
-
 #include <algorithm>
 #include <cstddef>
 #include <vector>

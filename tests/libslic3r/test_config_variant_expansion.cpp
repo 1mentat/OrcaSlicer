@@ -6,6 +6,7 @@
 #include <vector>
 #include <set>
 #include <cmath>
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -51,17 +52,18 @@ void add_print_variant_columns(DynamicPrintConfig &config)
 void round_trip_registered_option_archives(const ConfigDef &definition)
 {
     std::set<std::pair<ConfigOptionType, bool>> seen_dispatches;
+    size_t round_trips = 0;
     for (const auto &entry : definition.options) {
         const ConfigOptionDef &option_def = entry.second;
         if (option_def.default_value.get() == nullptr)
             continue;
         INFO("registered option: " << option_def.opt_key);
-        REQUIRE(option_def.default_value->type() == option_def.type);
-        REQUIRE(option_def.default_value->nullable() == option_def.nullable);
-
-        const auto dispatch = std::make_pair(option_def.type, option_def.nullable);
-        if (!seen_dispatches.insert(dispatch).second)
+        CHECK(option_def.default_value->type() == option_def.type);
+        CHECK(option_def.default_value->nullable() == option_def.nullable);
+        if (option_def.default_value->type() != option_def.type ||
+            option_def.default_value->nullable() != option_def.nullable)
             continue;
+        seen_dispatches.emplace(option_def.type, option_def.nullable);
         std::unique_ptr<ConfigOption> materialized(option_def.create_default_option());
         REQUIRE(materialized != nullptr);
         REQUIRE(materialized->type() == option_def.type);
@@ -84,8 +86,10 @@ void round_trip_registered_option_archives(const ConfigDef &definition)
             CHECK(*restored == *materialized);
             CHECK(*restored == *option_def.default_value);
         }
+        ++round_trips;
     }
     REQUIRE_FALSE(seen_dispatches.empty());
+    REQUIRE(round_trips > 0);
 }
 
 } // namespace
@@ -870,7 +874,6 @@ TEST_CASE("Incomplete extruder ID maps resolve variant slots with the configured
                                         "print_extruder_variant", 2) == 4);
     CHECK(config.get_index_for_extruder(2, "print_extruder_id", etBowden, nvtHighFlow,
                                         "print_extruder_variant", 2) == 6);
-
     DynamicPrintConfig without_variant_list;
     without_variant_list.option<ConfigOptionInts>("print_extruder_id", true)->values = {1};
     without_variant_list.option<ConfigOptionStrings>("print_extruder_variant", true)->values = {
@@ -1083,10 +1086,12 @@ TEST_CASE("Support filament identity follows vendor identifiers and generic mate
         std::string display;
     };
     const std::vector<Row> rows{
+        {"GFS00", "PETG", true, "PLA-S", "Sup.PLA"},
         {"GFS01", "PETG", true, "PA-S", "Sup.PA"},
         {"generic", "PLA", true, "PLA-S", "Sup.PLA"},
         {"generic", "PA", true, "PA-S", "Sup.PA"},
         {"generic", "PVA", true, "PVA", "PVA"},
+        {"", "PLA", true, "PLA-S", "Sup.PLA"},
         {"", "PA", true, "PA-S", "Sup.PA"},
         {"", "PVA", true, "PVA", "PVA"},
         {"GFS01", "PETG", false, "PETG", "PETG"},

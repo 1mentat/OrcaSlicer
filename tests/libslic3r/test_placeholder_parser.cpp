@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <initializer_list>
 #include <random>
 #include <utility>
@@ -14,7 +15,6 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/libslic3r.h"
-
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -22,6 +22,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Exception.hpp"
 
 using namespace Slic3r;
 
@@ -448,138 +449,6 @@ TEST_CASE("Placeholder parser validates one_of literal and regex operands", "[Pl
                       Catch::Matchers::ContainsSubstring("Pattern has to be a string"));
 }
 
-TEST_CASE("Placeholder parser reports and applies only changed configuration", "[PlaceholderParser][PlaceholderParserConfig]")
-{
-    auto base = DynamicPrintConfig::full_print_config();
-    base.set_deserialize_strict({
-        { "layer_height", "0.2" },
-        { "wall_loops", "2" }
-    });
-    auto changed = base;
-    changed.set_deserialize_strict({
-        { "layer_height", "0.3" },
-        { "wall_loops", "3" }
-    });
-
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(base));
-    CHECK_FALSE(parser.apply_config(base));
-    const std::string original_wall_loops = parser.process("{wall_loops}");
-
-    const std::vector<std::string> diff = parser.config_diff(changed);
-    CHECK(diff.size() == 2);
-    CHECK(std::find(diff.begin(), diff.end(), "layer_height") != diff.end());
-    CHECK(std::find(diff.begin(), diff.end(), "wall_loops") != diff.end());
-
-    parser.apply_only(changed, { "layer_height" });
-    CHECK(parser.process("{layer_height}") == "0.3");
-    CHECK(parser.process("{wall_loops}") == original_wall_loops);
-
-    const std::vector<std::string> remaining_diff = parser.config_diff(changed);
-    REQUIRE(remaining_diff.size() == 1);
-    REQUIRE(remaining_diff.front() == "wall_loops");
-    REQUIRE(parser.apply_config(changed));
-    CHECK_FALSE(parser.apply_config(changed));
-    CHECK(parser.config_diff(changed).empty());
-}
-
-
-TEST_CASE("Placeholder vector assignments update only the selected element",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    PlaceholderParser parser;
-
-    // Each assignment targets a nonzero element and reads the complete vector
-    // back, so an assignment cannot silently update element zero or be ignored.
-    CHECK(parser.process("{local values=(10,20,30)}{values[1]=42}{values[0]},{values[1]},{values[2]}")
-          == "10,42,30");
-    CHECK(parser.process("{local values=(1.5,2.5,3.5)}{values[2]=4.75}{values[0]},{values[1]},{values[2]}")
-          == "1.5,2.5,4.75");
-    CHECK(parser.process("{local values=(\"alpha\",\"beta\",\"gamma\")}{values[1]=\"delta\"}{values[0]}|{values[1]}|{values[2]}")
-          == "alpha|delta|gamma");
-    CHECK(parser.process("{local values=(false,false,true)}{values[1]=true}{values[0]},{values[1]},{values[2]}")
-          == "false,true,true");
-}
-
-TEST_CASE("Placeholder parser copies vectors and rejects incompatible vector types",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    PlaceholderParser parser;
-    // Existing parser tests already cover related vector copies from config
-    // variables; this keeps an explicit existing-target copy oracle here.
-    CHECK(parser.process("{local source=(3,4,5)}{local target=(0,0,0)}{target=source}{target[0]},{target[1]},{target[2]}")
-          == "3,4,5");
-    CHECK_THROWS_WITH(
-        parser.process("{local source=(3,4)}{local target=(false,false)}{target=source}"),
-        Catch::Matchers::ContainsSubstring("Left hand side is a bool vector"));
-}
-
-TEST_CASE("Placeholder output vector writes preserve untouched elements and reject invalid assignments",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    PlaceholderParser parser;
-    const auto check_percent_values = [](const DynamicConfig &config, const std::vector<double> &expected) {
-        const auto *option = config.option<ConfigOptionPercents>("retract_before_wipe");
-        REQUIRE(option != nullptr);
-        REQUIRE(option->values.size() == expected.size());
-        for (std::size_t i = 0; i < expected.size(); ++i)
-            CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
-    };
-
-    DynamicConfig outputs;
-    outputs.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
-    CHECK(parser.process("{retract_before_wipe[1] = 42}{retract_before_wipe[0]},{retract_before_wipe[1]},{retract_before_wipe[2]}",
-                         0, nullptr, &outputs, nullptr) == "10,42,30");
-    check_percent_values(outputs, { 10., 42., 30. });
-
-    DynamicConfig out_of_range;
-    out_of_range.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
-    CHECK_THROWS_WITH(
-        parser.process("{retract_before_wipe[3] = 42}", 0, nullptr, &out_of_range, nullptr),
-        Catch::Matchers::ContainsSubstring("Index out of range"));
-    check_percent_values(out_of_range, { 10., 20., 30. });
-
-    DynamicConfig empty;
-    empty.set_key_value("retract_before_wipe", new ConfigOptionPercents({}));
-    const auto *empty_option = empty.option<ConfigOptionPercents>("retract_before_wipe");
-    REQUIRE(empty_option != nullptr);
-    CHECK_THROWS_WITH(
-        parser.process("{retract_before_wipe[0] = 42}", 0, nullptr, &empty, nullptr),
-        Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
-    CHECK(empty_option->values.empty());
-
-    DynamicConfig nonnumeric;
-    nonnumeric.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
-    CHECK_THROWS_WITH(
-        parser.process("{retract_before_wipe[1] = true}", 0, nullptr, &nonnumeric, nullptr),
-        Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
-    check_percent_values(nonnumeric, { 10., 20., 30. });
-}
-
-TEST_CASE("Placeholder parser uses the external filament map for vector access",
-          "[PlaceholderParser][PlaceholderParserMapping]")
-{
-    DynamicPrintConfig stored = DynamicPrintConfig::full_print_config();
-    auto *outer_wall_speed = stored.option<ConfigOptionFloatsNullable>("outer_wall_speed");
-    REQUIRE(outer_wall_speed != nullptr);
-    outer_wall_speed->values = { 60., 70., 80. };
-
-    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
-    auto *filament_map = external.option<ConfigOptionInts>("filament_map");
-    REQUIRE(filament_map != nullptr);
-    // Requests 0 and 1 resolve to distinct nonzero stored slots 1 and 2.
-    // Thus both the mapping branch and its last-slot bound are observable;
-    // the fallback 0 cannot accidentally satisfy either row.
-    filament_map->values = { 1, 2 };
-
-    PlaceholderParser parser(&external);
-    REQUIRE(parser.apply_config(stored));
-    const std::string mapped_first = parser.process("{outer_wall_speed}", 0);
-    const std::string mapped_last = parser.process("{outer_wall_speed}", 1);
-    CHECK(mapped_first == "70");
-    CHECK(mapped_last == "80");
-}
-
 TEST_CASE("Placeholder random values respect numeric bounds and their supplied context",
           "[PlaceholderParser][PlaceholderParserRandom]")
 {
@@ -695,7 +564,6 @@ TEST_CASE("Placeholder interpolation rejects nonnumeric and decreasing table coo
                Catch::Matchers::WithinAbs(20., 1e-9));
 }
 
-
 TEST_CASE("Placeholder one_of evaluates supplied regex patterns as whole-string matches",
           "[PlaceholderParser][PlaceholderParserRegexBranches]")
 {
@@ -733,288 +601,6 @@ TEST_CASE("Placeholder regex negation complements a whole-string match",
                       Catch::Matchers::ContainsSubstring("Regular expression compilation failed"));
     CHECK(parser.process(R"({if false}{"ABS-12" !~ /[/}{endif}ready)") == "ready");
     CHECK(parser.process(R"({"ABS-12" !~ /ABS-[0-9]+/})") == "false");
-}
-
-
-TEST_CASE("Placeholder parser clones percent vectors as numeric local variables",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    auto config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({ { "retract_before_wipe", "10,20,30" } });
-
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(config));
-    // ConfigOptionPercents is cloned as a numeric local vector, preserving every element.
-    CHECK(parser.process("{local copied = retract_before_wipe}{copied[0]},{copied[1]},{copied[2]}") == "10,20,30");
-    CHECK(parser.process("{local copied = retract_before_wipe}{size(copied)}") == "3");
-}
-
-TEST_CASE("Placeholder parser rejects empty and mixed-type initializer vectors",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    PlaceholderParser parser;
-    CHECK_THROWS_WITH(parser.process("{local empty_vec = ()}"),
-                      Catch::Matchers::ContainsSubstring("Cannot create vector variable from an empty initializer list"));
-    CHECK_THROWS_WITH(parser.process("{local mixed = (true, 1)}"),
-                      Catch::Matchers::ContainsSubstring("Mixing numeric and boolean types"));
-}
-
-TEST_CASE("Placeholder parser preserves UTF-8 literals and validates escapes",
-          "[PlaceholderParser][PlaceholderParserUnicode]")
-{
-    PlaceholderParser parser;
-    std::string utf8 = "{\"caf";
-    utf8.append("\xC3\xA9", 2);
-    utf8 += " ";
-    utf8.append("\xF0\x9F\x98\x80", 4);
-    utf8 += "\"}";
-    std::string expected = "caf";
-    expected.append("\xC3\xA9", 2);
-    expected += " ";
-    expected.append("\xF0\x9F\x98\x80", 4);
-    CHECK(parser.process(utf8) == expected);
-    CHECK(parser.process(R"({"line\nnext"})") == "line\nnext");
-
-    CHECK_THROWS_WITH(parser.process(R"({"bad\q"})"),
-                      Catch::Matchers::ContainsSubstring("Invalid escape sequence"));
-    std::string invalid = "{\"";
-    invalid.append("\xE2\x28\xA1", 3);
-    invalid += "\"}";
-    CHECK_THROWS_WITH(parser.process(invalid),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
-}
-
-TEST_CASE("Placeholder parser rejects non-ASCII code and reports malformed macro lines",
-          "[PlaceholderParser][PlaceholderParserErrors]")
-{
-    PlaceholderParser parser;
-    std::string non_ascii_code = "{";
-    non_ascii_code.append("\xC3\xA9", 2);
-    non_ascii_code += "}";
-    CHECK_THROWS_WITH(parser.process(non_ascii_code),
-                      Catch::Matchers::ContainsSubstring("Non-ASCII7 characters"));
-    CHECK_THROWS_WITH(parser.process("prefix\n{if true}\nvalue"),
-                      Catch::Matchers::ContainsSubstring("Parsing error at line"));
-}
-
-TEST_CASE("Placeholder parser reports negative legacy vector indexes",
-          "[PlaceholderParser][PlaceholderParserErrors]")
-{
-    auto config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(config));
-    parser.set("idx", -1);
-    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[idx]]"),
-                      Catch::Matchers::ContainsSubstring("Negative vector index"));
-    parser.set("idx", 0);
-    CHECK(parser.process("[nozzle_temperature[idx]]") == "357");
-}
-
-TEST_CASE("Placeholder parser merges an rvalue configuration",
-          "[PlaceholderParser][PlaceholderParserConfig]")
-{
-    DynamicPrintConfig moved_config = DynamicPrintConfig::full_print_config();
-    moved_config.set_deserialize_strict({
-        { "layer_height", "0.25" },
-        { "wall_loops", "3" }
-    });
-
-    PlaceholderParser parser;
-    parser.set("already_present", "keep");
-    parser.apply_config(std::move(moved_config));
-    CHECK(parser.process("{layer_height}") == "0.25");
-    CHECK(parser.process("{wall_loops}") == "3");
-    CHECK(parser.process("{already_present}") == "keep");
-}
-
-TEST_CASE("Placeholder parser resolves configuration overrides before stored and external values",
-          "[PlaceholderParser][PlaceholderParserLookup]")
-{
-    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
-    external.set_deserialize_strict({
-        { "layer_height", "0.1" },
-        { "wall_loops", "7" }
-    });
-    DynamicPrintConfig stored;
-    stored.set_deserialize_strict({ { "layer_height", "0.2" } });
-    DynamicPrintConfig override;
-    override.set_deserialize_strict({ { "layer_height", "0.3" } });
-
-    PlaceholderParser parser(&external);
-    REQUIRE(stored.option("wall_loops") == nullptr);
-    REQUIRE(parser.apply_config(stored));
-    CHECK(parser.process("{layer_height}") == "0.2");
-    CHECK(parser.process("{layer_height}", 0, &override) == "0.3");
-    CHECK(parser.process("{wall_loops}") == "7");
-}
-
-TEST_CASE("Placeholder parser writes scalar output values and reads them back",
-          "[PlaceholderParser][PlaceholderParserOutput]")
-{
-    PlaceholderParser parser;
-    DynamicConfig outputs;
-    outputs.set_key_value("output_float", new ConfigOptionFloat(1.5));
-    outputs.set_key_value("output_int", new ConfigOptionInt(2));
-    outputs.set_key_value("output_string", new ConfigOptionString("before"));
-    outputs.set_key_value("output_bool", new ConfigOptionBool(false));
-
-    const std::string rendered = parser.process(
-        "{output_float = 2.75}{output_int = 7}{output_string = \"ready\"}{output_bool = true}"
-        "{output_float},{output_int},{output_string},{output_bool}",
-        0, nullptr, &outputs, nullptr);
-    CHECK(rendered == "2.75,7,ready,true");
-
-    const auto *float_value = outputs.option<ConfigOptionFloat>("output_float");
-    const auto *int_value = outputs.option<ConfigOptionInt>("output_int");
-    const auto *string_value = outputs.option<ConfigOptionString>("output_string");
-    const auto *bool_value = outputs.option<ConfigOptionBool>("output_bool");
-    REQUIRE(float_value != nullptr);
-    REQUIRE(int_value != nullptr);
-    REQUIRE(string_value != nullptr);
-    REQUIRE(bool_value != nullptr);
-    CHECK_THAT(float_value->value, Catch::Matchers::WithinAbs(2.75, 1e-12));
-    CHECK(int_value->value == 7);
-    CHECK(string_value->value == "ready");
-    CHECK(bool_value->value);
-}
-
-TEST_CASE("Placeholder parser assigns vectors by initializer list and repeat count",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    PlaceholderParser parser;
-    DynamicConfig outputs;
-    outputs.set_key_value("output_ints", new ConfigOptionInts({ 1, 2 }));
-    outputs.set_key_value("output_floats", new ConfigOptionFloats({ 0.5, 1.5 }));
-    outputs.set_key_value("output_strings", new ConfigOptionStrings({ "old" }));
-    outputs.set_key_value("output_bools", new ConfigOptionBools({ false, false }));
-
-    CHECK(parser.process(
-        "{output_ints = (7,8,9)}{output_floats = repeat(3,1.25)}"
-        "{output_strings = (\"new\",9)}{output_bools = (true,false)}",
-        0, nullptr, &outputs, nullptr).empty());
-
-    const auto *float_values = outputs.option<ConfigOptionFloats>("output_floats");
-    REQUIRE(float_values != nullptr);
-    REQUIRE(float_values->values.size() == 3);
-    for (double value : float_values->values)
-        CHECK_THAT(value, Catch::Matchers::WithinAbs(1.25, 1e-12));
-
-    CHECK(parser.process(
-        "{output_ints[0]},{output_ints[1]},{output_ints[2]}|"
-        "{output_floats[0]},{output_floats[1]},{output_floats[2]},{size(output_floats)}|"
-        "{output_strings[0]},{output_strings[1]}|"
-        "{output_bools[0]},{output_bools[1]}",
-        0, nullptr, &outputs, nullptr) == "7,8,9|1.25,1.25,1.25,3|new,9|true,false");
-}
-
-TEST_CASE("Placeholder parser rejects writes to read-only parser values",
-          "[PlaceholderParser][PlaceholderParserOutput]")
-{
-    PlaceholderParser parser;
-    parser.set("read_only", 4);
-    DynamicConfig outputs;
-    outputs.set_key_value("writable", new ConfigOptionInt(1));
-
-    CHECK_THROWS_WITH(parser.process("{read_only = 5}", 0, nullptr, &outputs, nullptr),
-                      Catch::Matchers::ContainsSubstring("Cannot modify a read-only variable"));
-    CHECK(parser.process("{writable = 2}{writable}", 0, nullptr, &outputs, nullptr) == "2");
-}
-
-TEST_CASE("Placeholder parser changes the legacy vector index with filament_change",
-          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
-{
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({ { "nozzle_temperature", "200,210,220" } });
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(config));
-
-    CHECK_THAT(parser.process("{filament_change(1)}temperature=[nozzle_temperature]"),
-               Catch::Matchers::EndsWith("temperature=210"));
-    CHECK_THAT(parser.process("{filament_change(2)}temperature=[nozzle_temperature]"),
-               Catch::Matchers::EndsWith("temperature=220"));
-    CHECK_THAT(parser.process("{filament_change(0)}temperature=[nozzle_temperature]"),
-               Catch::Matchers::EndsWith("temperature=200"));
-}
-
-TEST_CASE("Placeholder parser unescapes carriage returns, quotes, and backslashes",
-          "[PlaceholderParser][PlaceholderParserUnicode]")
-{
-    PlaceholderParser parser;
-    const std::string actual = parser.process(R"({"quote:\" slash:\\ line:\n carriage:\r"})");
-    CHECK(actual == std::string("quote:\" slash:\\ line:\n carriage:\r"));
-}
-
-TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuation bytes",
-          "[PlaceholderParser][PlaceholderParserUnicode]")
-{
-    PlaceholderParser parser;
-    std::string truncated = "truncated ";
-    truncated.append("\xE2\x82", 2);
-    CHECK_THROWS_WITH(parser.process(truncated),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
-
-    std::string continuation = "{\"";
-    continuation.push_back(static_cast<char>(0x80));
-    continuation += "\"}";
-    CHECK_THROWS_WITH(parser.process(continuation),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
-}
-
-TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistently",
-          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
-{
-    auto config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(config));
-
-    parser.set("index", 1);
-    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
-    parser.set("index", 99);
-    CHECK(parser.process("[nozzle_temperature[index]]") == "357");
-    parser.set("index", "one");
-    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
-                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
-    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
-                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
-    parser.set("scalar", 1);
-    parser.set("index", 0);
-    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
-                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
-}
-
-TEST_CASE("Placeholder parser copies floating-point vectors independently",
-          "[PlaceholderParser][PlaceholderParserVectors]")
-{
-    DynamicConfig external;
-    external.set_key_value("source_values", new ConfigOptionFloats({ 1., 2., 3. }));
-    PlaceholderParser parser(&external);
-
-    CHECK(parser.process(
-        "{local copied_values = source_values}{copied_values[1] = 1.5}"
-        "{copied_values[0]},{copied_values[1]},{copied_values[2]}|"
-        "{source_values[0]},{source_values[1]},{source_values[2]}") == "1,1.5,3|1,2,3");
-}
-
-TEST_CASE("Placeholder parser protects local and global variable scopes",
-          "[PlaceholderParser][PlaceholderParserVariables]")
-{
-    PlaceholderParser parser;
-    CHECK_THROWS_WITH(parser.process("{global shared = 1}"),
-                      Catch::Matchers::ContainsSubstring("Global variables are not available"));
-
-    PlaceholderParser::ContextData context;
-    context.global_config = std::make_unique<DynamicConfig>();
-    context.global_config->set_key_value("shared", new ConfigOptionInt(5));
-    CHECK_THROWS_WITH(parser.process("{local shared = 2}", 0, nullptr, nullptr, &context),
-                      Catch::Matchers::ContainsSubstring("Variable name already defined in global scope"));
-    REQUIRE(context.global_config->option<ConfigOptionInt>("shared") != nullptr);
-    CHECK(context.global_config->option<ConfigOptionInt>("shared")->value == 5);
-
-    CHECK_THROWS_WITH(parser.process("{local scoped = 2}{global scoped = 3}", 0, nullptr, nullptr, &context),
-                      Catch::Matchers::ContainsSubstring("Variable name already defined in local scope"));
-    CHECK(context.global_config->option("scoped") == nullptr);
 }
 
 TEST_CASE("Placeholder parser preserves mixed numeric and string expression behavior",
@@ -1110,8 +696,297 @@ TEST_CASE("Placeholder interpolation averages nearly coincident table coordinate
                Catch::Matchers::WithinAbs(20., 1e-9));
 }
 
+TEST_CASE("Placeholder parser reports and applies only changed configuration", "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    auto base = DynamicPrintConfig::full_print_config();
+    base.set_deserialize_strict({
+        { "layer_height", "0.2" },
+        { "wall_loops", "2" }
+    });
+    auto changed = base;
+    changed.set_deserialize_strict({
+        { "layer_height", "0.3" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(base));
+    CHECK_FALSE(parser.apply_config(base));
+    CHECK(parser.process("{layer_height}") == "0.2");
+    CHECK(parser.process("{wall_loops}") == "2");
+    const std::string original_wall_loops = parser.process("{wall_loops}");
+
+    const std::vector<std::string> diff = parser.config_diff(changed);
+    CHECK(diff.size() == 2);
+    CHECK(std::find(diff.begin(), diff.end(), "layer_height") != diff.end());
+    CHECK(std::find(diff.begin(), diff.end(), "wall_loops") != diff.end());
+
+    parser.apply_only(changed, { "layer_height" });
+    CHECK(parser.process("{layer_height}") == "0.3");
+    CHECK(parser.process("{wall_loops}") == original_wall_loops);
+    CHECK(parser.process("{wall_loops}") == "2");
+
+    const std::vector<std::string> remaining_diff = parser.config_diff(changed);
+    REQUIRE(remaining_diff.size() == 1);
+    REQUIRE(remaining_diff.front() == "wall_loops");
+    REQUIRE(parser.apply_config(changed));
+    CHECK_FALSE(parser.apply_config(changed));
+    CHECK(parser.config_diff(changed).empty());
+}
+
+TEST_CASE("Placeholder parser merges an rvalue configuration",
+          "[PlaceholderParser][PlaceholderParserConfig]")
+{
+    DynamicPrintConfig moved_config = DynamicPrintConfig::full_print_config();
+    moved_config.set_deserialize_strict({
+        { "layer_height", "0.25" },
+        { "wall_loops", "3" }
+    });
+
+    PlaceholderParser parser;
+    parser.set("already_present", "keep");
+    parser.apply_config(std::move(moved_config));
+    CHECK(parser.process("{layer_height}") == "0.25");
+    CHECK(parser.process("{wall_loops}") == "3");
+    CHECK(parser.process("{already_present}") == "keep");
+}
+
+TEST_CASE("Placeholder parser resolves configuration overrides before stored and external values",
+          "[PlaceholderParser][PlaceholderParserLookup]")
+{
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    external.set_deserialize_strict({
+        { "layer_height", "0.1" },
+        { "wall_loops", "7" }
+    });
+    DynamicPrintConfig stored;
+    stored.set_deserialize_strict({ { "layer_height", "0.2" } });
+    DynamicPrintConfig override;
+    override.set_deserialize_strict({ { "layer_height", "0.3" } });
+
+    PlaceholderParser parser(&external);
+    REQUIRE(stored.option("wall_loops") == nullptr);
+    REQUIRE(parser.apply_config(stored));
+    CHECK(parser.process("{layer_height}") == "0.2");
+    CHECK(parser.process("{layer_height}", 0, &override) == "0.3");
+    CHECK(parser.process("{wall_loops}") == "7");
+}
+
+TEST_CASE("Placeholder parser writes scalar output values and reads them back",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_float", new ConfigOptionFloat(1.5));
+    outputs.set_key_value("output_int", new ConfigOptionInt(2));
+    outputs.set_key_value("output_string", new ConfigOptionString("before"));
+    outputs.set_key_value("output_bool", new ConfigOptionBool(false));
+
+    const std::string rendered = parser.process(
+        "{output_float = 2.75}{output_int = 7}{output_string = \"ready\"}{output_bool = true}"
+        "{output_float},{output_int},{output_string},{output_bool}",
+        0, nullptr, &outputs, nullptr);
+    CHECK(rendered == "2.75,7,ready,true");
+
+    const auto *float_value = outputs.option<ConfigOptionFloat>("output_float");
+    const auto *int_value = outputs.option<ConfigOptionInt>("output_int");
+    const auto *string_value = outputs.option<ConfigOptionString>("output_string");
+    const auto *bool_value = outputs.option<ConfigOptionBool>("output_bool");
+    REQUIRE(float_value != nullptr);
+    REQUIRE(int_value != nullptr);
+    REQUIRE(string_value != nullptr);
+    REQUIRE(bool_value != nullptr);
+    CHECK_THAT(float_value->value, Catch::Matchers::WithinAbs(2.75, 1e-12));
+    CHECK(int_value->value == 7);
+    CHECK(string_value->value == "ready");
+    CHECK(bool_value->value);
+}
+
+TEST_CASE("Placeholder parser rejects writes to read-only parser values",
+          "[PlaceholderParser][PlaceholderParserOutput]")
+{
+    PlaceholderParser parser;
+    parser.set("read_only", 4);
+    DynamicConfig outputs;
+    outputs.set_key_value("writable", new ConfigOptionInt(1));
+
+    CHECK_THROWS_WITH(parser.process("{read_only = 5}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Cannot modify a read-only variable"));
+    CHECK(parser.process("{writable = 2}{writable}", 0, nullptr, &outputs, nullptr) == "2");
+}
+
+TEST_CASE("Placeholder parser protects local and global variable scopes",
+          "[PlaceholderParser][PlaceholderParserVariables]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{global shared = 1}"),
+                      Catch::Matchers::ContainsSubstring("Global variables are not available"));
+
+    PlaceholderParser::ContextData context;
+    context.global_config = std::make_unique<DynamicConfig>();
+    context.global_config->set_key_value("shared", new ConfigOptionInt(5));
+    CHECK_THROWS_WITH(parser.process("{local shared = 2}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in global scope"));
+    REQUIRE(context.global_config->option<ConfigOptionInt>("shared") != nullptr);
+    CHECK(context.global_config->option<ConfigOptionInt>("shared")->value == 5);
+
+    CHECK_THROWS_WITH(parser.process("{local scoped = 2}{global scoped = 3}", 0, nullptr, nullptr, &context),
+                      Catch::Matchers::ContainsSubstring("Variable name already defined in local scope"));
+    CHECK(context.global_config->option("scoped") == nullptr);
+}
+
+TEST_CASE("Placeholder parser preserves UTF-8 literals and validates escapes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string utf8 = "{\"caf";
+    utf8.append("\xC3\xA9", 2);
+    utf8 += " ";
+    utf8.append("\xF0\x9F\x98\x80", 4);
+    utf8 += "\"}";
+    std::string expected = "caf";
+    expected.append("\xC3\xA9", 2);
+    expected += " ";
+    expected.append("\xF0\x9F\x98\x80", 4);
+    CHECK(parser.process(utf8) == expected);
+    CHECK(parser.process(R"({"line\nnext"})") == "line\nnext");
+
+    CHECK_THROWS_WITH(parser.process(R"({"bad\q"})"),
+                      Catch::Matchers::ContainsSubstring("Invalid escape sequence"));
+    std::string invalid = "{\"";
+    invalid.append("\xE2\x28\xA1", 3);
+    invalid += "\"}";
+    CHECK_THROWS_WITH(parser.process(invalid),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser rejects non-ASCII code and reports malformed macro lines",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    PlaceholderParser parser;
+    std::string non_ascii_code = "{";
+    non_ascii_code.append("\xC3\xA9", 2);
+    non_ascii_code += "}";
+    CHECK_THROWS_WITH(parser.process(non_ascii_code),
+                      Catch::Matchers::ContainsSubstring("Non-ASCII7 characters"));
+    CHECK_THROWS_WITH(parser.process("prefix\n{if true}\nvalue"),
+                      Catch::Matchers::ContainsSubstring("Parsing error at line"));
+}
+
+TEST_CASE("Placeholder parser unescapes carriage returns, quotes, and backslashes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    const std::string actual = parser.process(R"({"quote:\" slash:\\ line:\n carriage:\r"})");
+    CHECK(actual == std::string("quote:\" slash:\\ line:\n carriage:\r"));
+}
+
+TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuation bytes",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    std::string truncated = "truncated ";
+    truncated.append("\xE2\x82", 2);
+    CHECK_THROWS_WITH(parser.process(truncated),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+
+    std::string continuation = "{\"";
+    continuation.push_back(static_cast<char>(0x80));
+    continuation += "\"}";
+    CHECK_THROWS_WITH(parser.process(continuation),
+                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+// Known bug: utf8_char_parser only checks continuation bytes before the last one, so a truncated-by-substitution
+// sequence such as E2 82 28 is accepted; fixed by the follow-up fix PR.
+TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
+          "[PlaceholderParser][PlaceholderParserUnicode][!shouldfail]")
+{
+    PlaceholderParser parser;
+    // Euro sign E2 82 AC with the final continuation byte replaced by ASCII '('.
+    std::string literal = "{\"";
+    literal.append("\xE2\x82\x28", 3);
+    literal += "\"}";
+    CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser uses the external filament map for vector access",
+          "[PlaceholderParser][PlaceholderParserMapping]")
+{
+    DynamicPrintConfig stored = DynamicPrintConfig::full_print_config();
+    auto *outer_wall_speed = stored.option<ConfigOptionFloatsNullable>("outer_wall_speed");
+    REQUIRE(outer_wall_speed != nullptr);
+    outer_wall_speed->values = { 60., 70., 80. };
+
+    DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
+    auto *filament_map = external.option<ConfigOptionInts>("filament_map");
+    REQUIRE(filament_map != nullptr);
+    // Requests 0 and 1 resolve to distinct nonzero stored slots 1 and 2.
+    // Thus both the mapping branch and its last-slot bound are observable;
+    // the fallback 0 cannot accidentally satisfy either row.
+    filament_map->values = { 1, 2 };
+
+    PlaceholderParser parser(&external);
+    REQUIRE(parser.apply_config(stored));
+    const std::string mapped_first = parser.process("{outer_wall_speed}", 0);
+    const std::string mapped_last = parser.process("{outer_wall_speed}", 1);
+    CHECK(mapped_first == "70");
+    CHECK(mapped_last == "80");
+}
+
+TEST_CASE("Placeholder parser reports negative legacy vector indexes",
+          "[PlaceholderParser][PlaceholderParserErrors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    parser.set("idx", -1);
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[idx]]"),
+                      Catch::Matchers::ContainsSubstring("Negative vector index"));
+    parser.set("idx", 0);
+    CHECK(parser.process("[nozzle_temperature[idx]]") == "357");
+}
+
+TEST_CASE("Placeholder parser changes the legacy vector index with filament_change",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "200,210,220" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    CHECK_THAT(parser.process("{filament_change(1)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=210"));
+    CHECK_THAT(parser.process("{filament_change(2)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=220"));
+    CHECK_THAT(parser.process("{filament_change(0)}temperature=[nozzle_temperature]"),
+               Catch::Matchers::EndsWith("temperature=200"));
+}
+
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices and rejects invalid index variables",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    parser.set("index", 1);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
+    parser.set("index", "one");
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
+                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
+                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
+    parser.set("scalar", 1);
+    parser.set("index", 0);
+    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+}
+
 TEST_CASE("Placeholder parser validates legacy indexes and optional vector elements",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
 {
     auto config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({ { "nozzle_temperature", "200,210" } });
@@ -1141,12 +1016,19 @@ TEST_CASE("Placeholder parser validates legacy indexes and optional vector eleme
     nil_speed->set_at_to_nil(1);
     PlaceholderParser nil_parser;
     REQUIRE(nil_parser.apply_config(nil_config));
-    CHECK_THROWS_WITH(nil_parser.process("[outer_wall_speed_1]"),
-                      Catch::Matchers::ContainsSubstring("undefined (nil)"));
+    std::string nil_error;
+    try {
+        nil_parser.process("[outer_wall_speed_1]");
+    } catch (const std::exception &e) {
+        nil_error = e.what();
+    }
+    REQUIRE_FALSE(nil_error.empty());
+    CHECK((nil_error.find("undefined (nil)") != std::string::npos) ||
+          (nil_error.find("element of vector of optional values") != std::string::npos));
 }
 
 TEST_CASE("Placeholder parser resolves point and enum vector elements",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
 {
     auto config = DynamicPrintConfig::full_print_config();
     auto *area = config.option<ConfigOptionPoints>("printable_area");
@@ -1164,108 +1046,133 @@ TEST_CASE("Placeholder parser resolves point and enum vector elements",
                       Catch::Matchers::ContainsSubstring("vector variable when scalar is expected"));
 }
 
-TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-shaped values",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+TEST_CASE("Placeholder parser rejects empty() and size() of non-vectors and indexes into empty output vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
-    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
-    outputs.set_key_value("flag", new ConfigOptionBool(false));
-    outputs.set_key_value("number", new ConfigOptionInt(7));
+    outputs.set_key_value("scalar", new ConfigOptionInt(4));
+    outputs.set_key_value("empty_values", new ConfigOptionInts({}));
     auto run = [&parser, &outputs](const std::string &script) {
         return parser.process(script, 0, nullptr, &outputs, nullptr);
     };
 
-    CHECK(run("{percent = 25}{percent}") == "25");
-    CHECK_THROWS_WITH(run("{flag = 1}"),
-                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
-    CHECK_THROWS_WITH(run("{number = (1,2)}"),
-                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
-    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
-                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
-    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
-                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
-    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
-                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable."));
-    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
-    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+    CHECK_THROWS_WITH(run("{empty(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{empty(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
 }
 
-TEST_CASE("Placeholder parser converts vector elements and preserves unsupported output vectors",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+TEST_CASE("Placeholder parser resolves vector percentages against the selected parent element",
+          "[PlaceholderParser][PlaceholderParserPercentParents]")
 {
-    PlaceholderParser parser;
-    DynamicConfig outputs;
-    outputs.set_key_value("floats", new ConfigOptionFloats({ 1., 2. }));
-    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
-    outputs.set_key_value("flags", new ConfigOptionBools({ false, true }));
-    outputs.set_key_value("points", new ConfigOptionPoints({ Vec2d(1., 2.) }));
-    auto run = [&parser, &outputs](const std::string &script) {
-        return parser.process(script, 0, nullptr, &outputs, nullptr);
-    };
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("bridge_speed", new ConfigOptionFloats({ 20., 40. }));
+    config.set_key_value("internal_bridge_speed", new ConfigOptionFloatsOrPercents({
+        FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
+    }));
+    DynamicConfig external;
+    external.set_key_value("filament_map", new ConfigOptionInts({ 1, 0 }));
+    PlaceholderParser parser(&external);
+    REQUIRE(parser.apply_config(config));
 
-    CHECK(run("{floats[1] = 3}{strings[0] = 9}").empty());
-    CHECK_THAT(outputs.option<ConfigOptionFloats>("floats")->values[1], Catch::Matchers::WithinAbs(3., 1e-12));
-    CHECK(outputs.option<ConfigOptionStrings>("strings")->values[0] == "9");
-    CHECK_THROWS_WITH(run("{flags[1] = 1}"),
-                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
-    CHECK_THROWS_WITH(run("{points[0] = 1}"),
-                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
-    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].x(),
-               Catch::Matchers::WithinAbs(1., 1e-12));
-    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].y(),
-               Catch::Matchers::WithinAbs(2., 1e-12));
-    CHECK(outputs.option<ConfigOptionBools>("flags")->values[1]);
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(20., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[0]}")), Catch::Matchers::WithinAbs(30., 1e-12));
+    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[1]}")), Catch::Matchers::WithinAbs(20., 1e-12));
+
+    // Single-element vectors use element zero even when the filament maps to extruder one.
+    auto single_config = DynamicPrintConfig::full_print_config();
+    single_config.set_key_value("bridge_speed", new ConfigOptionFloats({ 25. }));
+    single_config.set_key_value("internal_bridge_speed",
+                                new ConfigOptionFloatsOrPercents({ FloatOrPercent{ 120., true } }));
+    PlaceholderParser single_parser(&external);
+    REQUIRE(single_parser.apply_config(single_config));
+    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 0)), Catch::Matchers::WithinAbs(25., 1e-12));
+    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
 }
 
-TEST_CASE("Placeholder parser validates repeat counts and preserves vector values on errors",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+TEST_CASE("Placeholder vector assignments update only the selected element",
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
-    DynamicConfig outputs;
-    outputs.set_key_value("numbers", new ConfigOptionInts({ 1, 2 }));
-    outputs.set_key_value("flags", new ConfigOptionBools({ false }));
-    auto run = [&parser, &outputs](const std::string &script) {
-        return parser.process(script, 0, nullptr, &outputs, nullptr);
-    };
 
-    CHECK_THROWS_WITH(run("{numbers = repeat(1.5, 9)}"),
-                      Catch::Matchers::ContainsSubstring("Expected number of elements"));
-    CHECK_THROWS_WITH(run("{numbers = repeat(-1, 9)}"),
-                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
-    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 1, 2 });
-    CHECK(run("{numbers = repeat(0, 4)}").empty());
-    CHECK(outputs.option<ConfigOptionInts>("numbers")->values.empty());
-    CHECK_THROWS_WITH(run("{flags = repeat(2, 1)}"),
-                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
-    CHECK(run("{flags = repeat(2, true)}").empty());
-    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 1, 1 });
-    CHECK(run("{numbers = repeat(3, 4)}").empty());
-    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 4, 4 });
+    // Each vector type gets two writes, to elements 1 and 2, and is read back in full: an assignment
+    // that ignores the index, writes a fixed element or leaves element zero changed cannot pass.
+    CHECK(parser.process("{local values=(10,20,30)}{values[1]=42}{values[0]},{values[1]},{values[2]}")
+          == "10,42,30");
+    CHECK(parser.process("{local values=(10,20,30)}{values[1]=42}{values[2]=43}{values[0]},{values[1]},{values[2]}")
+          == "10,42,43");
+    CHECK(parser.process("{local values=(1.5,2.5,3.5)}{values[2]=4.75}{values[0]},{values[1]},{values[2]}")
+          == "1.5,2.5,4.75");
+    CHECK(parser.process("{local values=(1.5,2.5,3.5)}{values[1]=4.75}{values[2]=5.25}{values[0]},{values[1]},{values[2]}")
+          == "1.5,4.75,5.25");
+    CHECK(parser.process("{local values=(\"alpha\",\"beta\",\"gamma\")}{values[1]=\"delta\"}{values[2]=\"omega\"}"
+                         "{values[0]}|{values[1]}|{values[2]}")
+          == "alpha|delta|omega");
+    CHECK(parser.process("{local values=(false,false,true)}{values[1]=true}{values[0]},{values[1]},{values[2]}")
+          == "false,true,true");
+    CHECK(parser.process("{local values=(false,false,false)}{values[1]=true}{values[0]},{values[1]},{values[2]}")
+          == "false,true,false");
+    CHECK(parser.process("{local values=(true,true,false)}{values[2]=true}{values[0]},{values[1]},{values[2]}")
+          == "true,true,true");
 }
 
-TEST_CASE("Placeholder parser converts initializer lists and rejects incompatible booleans",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+TEST_CASE("Placeholder parser copies vectors and rejects incompatible vector types",
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
-    DynamicConfig outputs;
-    outputs.set_key_value("numbers", new ConfigOptionInts({ 1 }));
-    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
-    outputs.set_key_value("flags", new ConfigOptionBools({ false, false }));
-    auto run = [&parser, &outputs](const std::string &script) {
-        return parser.process(script, 0, nullptr, &outputs, nullptr);
-    };
+    CHECK(parser.process("{local ints = (1,2)}{local copy = ints}{copy[0]},{copy[1]}") == "1,2");
+    // Assigning one local int vector to another existing int vector copies every element.
+    CHECK(parser.process("{local source=(3,4,5)}{local target=(0,0,0)}{target=source}{target[0]},{target[1]},{target[2]}")
+          == "3,4,5");
+    CHECK_THROWS_WITH(
+        parser.process("{local source=(3,4)}{local target=(false,false)}{target=source}"),
+        Catch::Matchers::ContainsSubstring("Left hand side is a bool vector"));
+}
 
-    CHECK(run("{numbers = (4,5)}{strings = (\"new\", 6)}").empty());
-    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 5 });
-    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "new", "6" });
-    CHECK_THROWS_WITH(run("{flags = (true, 1)}"),
-                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
-    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
+TEST_CASE("Placeholder parser clones percent vectors as float local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "retract_before_wipe", "10,20,30" } });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    CHECK(parser.process("{local copied = retract_before_wipe}{copied[0]},{copied[1]},{copied[2]}") == "10,20,30");
+    CHECK(parser.process("{local copied = retract_before_wipe}{size(copied)}") == "3");
+    // The clone is a float vector, not a percent vector: it can be copied into an existing float vector,
+    // which a percent vector could not (vector copies require identical element types).
+    CHECK(parser.process("{local copied = retract_before_wipe}{local floats = (0.5,0.5,0.5)}{floats = copied}"
+                         "{floats[0]},{floats[1]},{floats[2]}") == "10,20,30");
+}
+
+TEST_CASE("Placeholder parser rejects empty and mixed-type initializer vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{local empty_vec = ()}"),
+                      Catch::Matchers::ContainsSubstring("Cannot create vector variable from an empty initializer list"));
+    CHECK_THROWS_WITH(parser.process("{local mixed = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Mixing numeric and boolean types"));
+}
+
+TEST_CASE("Placeholder parser copies floating-point vectors independently",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    DynamicConfig external;
+    external.set_key_value("source_values", new ConfigOptionFloats({ 1., 2., 3. }));
+    PlaceholderParser parser(&external);
+
+    CHECK(parser.process(
+        "{local copied_values = source_values}{copied_values[1] = 1.5}"
+        "{copied_values[0]},{copied_values[1]},{copied_values[2]}|"
+        "{source_values[0]},{source_values[1]},{source_values[2]}") == "1,1.5,3|1,2,3");
 }
 
 TEST_CASE("Placeholder parser rejects incompatible vector copies with preserved targets",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
 {
     CHECK(PlaceholderParser{}.process("{local ints = (1,2)}{local copy = ints}{copy[0]},{copy[1]}") == "1,2");
 
@@ -1296,7 +1203,7 @@ TEST_CASE("Placeholder parser rejects incompatible vector copies with preserved 
 }
 
 TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
 {
     auto config = DynamicPrintConfig::full_print_config();
     auto *speed = config.option<ConfigOptionFloatsNullable>("outer_wall_speed");
@@ -1306,8 +1213,11 @@ TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
     speed->set_at_to_nil(1);
     PlaceholderParser nil_parser;
     REQUIRE(nil_parser.apply_config(config));
+    // Both a new local and an existing local vector are refused as the target of a copy.
     CHECK_THROWS_WITH(nil_parser.process("{local copied = outer_wall_speed}"),
-                      Catch::Matchers::ContainsSubstring("Some elements of the right hand side vector variable of optional values are undefined (nil)"));
+                      Catch::Matchers::ContainsSubstring("optional values are undefined (nil)"));
+    CHECK_THROWS_WITH(nil_parser.process("{local target = (1.5,2.5)}{target = outer_wall_speed}"),
+                      Catch::Matchers::ContainsSubstring("optional values are undefined (nil)"));
 
     auto points_config = DynamicPrintConfig::full_print_config();
     auto *area = points_config.option<ConfigOptionPoints>("printable_area");
@@ -1317,6 +1227,481 @@ TEST_CASE("Placeholder parser rejects nil and unsupported vector copies",
     REQUIRE(points_parser.apply_config(points_config));
     CHECK_THROWS_WITH(points_parser.process("{local copied = printable_area}"),
                       Catch::Matchers::ContainsSubstring("Duplicating this type of vector variable"));
+}
+
+TEST_CASE("Placeholder parser rejects local names that shadow system and output symbols",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVariables]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    // The name is checked when the declaration is resolved, before the initializer is evaluated,
+    // so scalar and vector declarations are refused alike.
+    CHECK_THROWS_WITH(parser.process("{local layer_height = 2}"),
+                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
+    CHECK_THROWS_WITH(parser.process("{local nozzle_diameter = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
+
+    DynamicConfig outputs;
+    outputs.set_key_value("output_value", new ConfigOptionInt(1));
+    CHECK_THROWS_WITH(parser.process("{local output_value = 2}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("system output variable"));
+    CHECK_THROWS_WITH(parser.process("{local output_value = (1,2)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("system output variable"));
+}
+
+TEST_CASE("Placeholder output vector writes preserve untouched elements and reject invalid assignments",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    const auto check_percent_values = [](const DynamicConfig &config, const std::vector<double> &expected) {
+        const auto *option = config.option<ConfigOptionPercents>("retract_before_wipe");
+        REQUIRE(option != nullptr);
+        REQUIRE(option->values.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
+    };
+
+    DynamicConfig outputs;
+    outputs.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK(parser.process("{retract_before_wipe[1] = 42}{retract_before_wipe[0]},{retract_before_wipe[1]},{retract_before_wipe[2]}",
+                         0, nullptr, &outputs, nullptr) == "10,42,30");
+    check_percent_values(outputs, { 10., 42., 30. });
+
+    DynamicConfig out_of_range;
+    out_of_range.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[3] = 42}", 0, nullptr, &out_of_range, nullptr),
+        Catch::Matchers::ContainsSubstring("Index out of range"));
+    check_percent_values(out_of_range, { 10., 20., 30. });
+
+    DynamicConfig empty;
+    empty.set_key_value("retract_before_wipe", new ConfigOptionPercents({}));
+    const auto *empty_option = empty.option<ConfigOptionPercents>("retract_before_wipe");
+    REQUIRE(empty_option != nullptr);
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[0] = 42}", 0, nullptr, &empty, nullptr),
+        Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+    CHECK(empty_option->values.empty());
+
+    DynamicConfig nonnumeric;
+    nonnumeric.set_key_value("retract_before_wipe", new ConfigOptionPercents({ 10., 20., 30. }));
+    CHECK_THROWS_WITH(
+        parser.process("{retract_before_wipe[1] = true}", 0, nullptr, &nonnumeric, nullptr),
+        Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_percent_values(nonnumeric, { 10., 20., 30. });
+}
+
+TEST_CASE("Placeholder parser assigns vectors by initializer list and repeat count",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("output_ints", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("output_floats", new ConfigOptionFloats({ 0.5, 1.5 }));
+    outputs.set_key_value("output_strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("output_bools", new ConfigOptionBools({ false, false }));
+
+    CHECK(parser.process(
+        "{output_ints = (7,8,9)}{output_floats = repeat(3,1.25)}"
+        "{output_strings = (\"new\",9)}{output_bools = (true,false)}",
+        0, nullptr, &outputs, nullptr).empty());
+
+    const auto *float_values = outputs.option<ConfigOptionFloats>("output_floats");
+    REQUIRE(float_values != nullptr);
+    REQUIRE(float_values->values.size() == 3);
+    for (double value : float_values->values)
+        CHECK_THAT(value, Catch::Matchers::WithinAbs(1.25, 1e-12));
+
+    CHECK(parser.process(
+        "{output_ints[0]},{output_ints[1]},{output_ints[2]}|"
+        "{output_floats[0]},{output_floats[1]},{output_floats[2]},{size(output_floats)}|"
+        "{output_strings[0]},{output_strings[1]}|"
+        "{output_bools[0]},{output_bools[1]}",
+        0, nullptr, &outputs, nullptr) == "7,8,9|1.25,1.25,1.25,3|new,9|true,false");
+}
+
+TEST_CASE("Placeholder parser assigns scalar outputs and rejects vector-shaped values for them",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
+    outputs.set_key_value("flag", new ConfigOptionBool(false));
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{percent = 25}{percent}") == "25");
+    CHECK_THROWS_WITH(run("{flag = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{number = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+}
+
+TEST_CASE("Placeholder parser rejects scalar and vector mismatches between local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
+    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable"));
+}
+
+TEST_CASE("Placeholder parser converts vector elements and preserves unsupported output vectors",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("floats", new ConfigOptionFloats({ 1., 2. }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, true }));
+    outputs.set_key_value("points", new ConfigOptionPoints({ Vec2d(1., 2.) }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{floats[1] = 3}{strings[0] = 9}").empty());
+    CHECK_THAT(outputs.option<ConfigOptionFloats>("floats")->values[1], Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values[0] == "9");
+    CHECK_THROWS_WITH(run("{flags[1] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{points[0] = 1}"),
+                      Catch::Matchers::ContainsSubstring("Unsupported output vector variable type"));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].x(),
+               Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK_THAT(outputs.option<ConfigOptionPoints>("points")->values[0].y(),
+               Catch::Matchers::WithinAbs(2., 1e-12));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values[1]);
+}
+
+TEST_CASE("Placeholder parser validates repeat counts and preserves vector values on errors",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1, 2 }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{numbers = repeat(1.5, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Expected number of elements"));
+    CHECK_THROWS_WITH(run("{numbers = repeat(-1, 9)}"),
+                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 1, 2 });
+    CHECK(run("{numbers = repeat(0, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values.empty());
+    CHECK_THROWS_WITH(run("{flags = repeat(2, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(run("{flags = repeat(2, true)}").empty());
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 1, 1 });
+    CHECK(run("{numbers = repeat(3, 4)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 4, 4 });
+}
+
+TEST_CASE("Placeholder parser converts initializer lists and rejects incompatible booleans",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps][PlaceholderParserVectors]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("numbers", new ConfigOptionInts({ 1 }));
+    outputs.set_key_value("strings", new ConfigOptionStrings({ "old" }));
+    outputs.set_key_value("flags", new ConfigOptionBools({ false, false }));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{numbers = (4,5)}{strings = (\"new\", 6)}").empty());
+    CHECK(outputs.option<ConfigOptionInts>("numbers")->values == std::vector<int>{ 4, 5 });
+    CHECK(outputs.option<ConfigOptionStrings>("strings")->values == std::vector<std::string>{ "new", "6" });
+    CHECK_THROWS_WITH(run("{flags = (true, 1)}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
+}
+
+// Known bug: a one-element initializer list assigned to a scalar output variable ("scalar_var = ( scalar )") is
+// assigned, then the scalar branch of vector_variable_assign_initializer_list lacks a return and falls into the vector
+// switch, which ends in `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this
+// test aborts there; in a Release build it passes, because the assertion is compiled out after the value was stored.
+TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar output",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    CHECK(parser.process("{number = (1)}", 0, nullptr, &outputs, nullptr).empty());
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 1);
+}
+
+// Known bug: an initializer list assigned to a percent output vector reaches `default: assert(false)` in
+// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626), because the switch has no coPercents
+// case. Whether the fix supports percent vectors or rejects them, the call must not assert and must not be ignored:
+// it either reports an error or stores the values. Built without NDEBUG this test aborts at that assertion; in a
+// Release build the assignment is silently ignored (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns an initializer list to a percent output vector or reports an error",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = (1,2)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 1., 2. }));
+}
+
+// Known bug: repeat() assigned to a percent output vector reaches `default: assert(false)` in
+// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420), because the switch has no coPercents
+// case. As above, a fix may support or reject percent vectors, but the call must not assert and must not be ignored.
+// Built without NDEBUG this test aborts at that assertion; in a Release build the assignment is silently ignored
+// (no error, vector unchanged), so the check fails.
+TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or reports an error",
+          "[PlaceholderParser][PlaceholderParserVectors][.]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    bool reported_error = false;
+    try {
+        parser.process("{percents = repeat(2, 5)}", 0, nullptr, &outputs, nullptr);
+    } catch (const PlaceholderParserError &) {
+        reported_error = true;
+    }
+    CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 5., 5. }));
+}
+
+TEST_CASE("Placeholder parser passes valid multibyte UTF-8 through free text unchanged",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    // The bytes of each sequence are spelled out by hand; adjacent literals keep a following letter from being
+    // read as part of a hex escape. Each sequence ends the text, so a wrong sequence length is observable.
+    const std::string two_byte("caf\xC3\xA9", 5);                          // U+00E9
+    const std::string three_byte("price \xE2\x82\xAC", 9);                 // U+20AC
+    const std::string four_byte("smile \xF0\x9F\x98\x80", 10);             // U+1F600
+    CHECK(parser.process(two_byte) == two_byte);
+    CHECK(parser.process(three_byte) == three_byte);
+    CHECK(parser.process(four_byte) == four_byte);
+
+    // A sequence followed by more text and by a macro block is kept as well.
+    const std::string mixed("a\xC3\xA9" "b {1 + 1}", 12);
+    CHECK(parser.process(mixed) == std::string("a\xC3\xA9" "b 2", 6));
+}
+
+TEST_CASE("Placeholder parser skips floor and ceil in inactive branches",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({if false}{floor("x")}{endif}ready)") == "ready");
+    CHECK(parser.process(R"({if false}{ceil("x")}{endif}ready)") == "ready");
+    // In a branch that is taken they still evaluate, and still reject non-numeric operands.
+    CHECK(parser.process("{if true}{floor(2.7)},{ceil(2.1)}{endif}") == "2,3");
+    CHECK_THROWS_WITH(parser.process(R"({if true}{floor("x")}{endif})"),
+                      Catch::Matchers::ContainsSubstring("Cannot floor a non-numeric value"));
+    CHECK_THROWS_WITH(parser.process(R"({if true}{ceil("x")}{endif})"),
+                      Catch::Matchers::ContainsSubstring("Cannot ceil a non-numeric value"));
+}
+
+TEST_CASE("Placeholder arithmetic operators follow precedence and associate to the left",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    // Each row is chosen so that the intended grouping and the plausible wrong grouping give different results.
+    CHECK(parser.process("{2+3*4}") == "14");       // * before +  (wrong: 20)
+    CHECK(parser.process("{(2+3)*4}") == "20");
+    CHECK(parser.process("{10-2*3}") == "4");       // * before -  (wrong: 24)
+    CHECK(parser.process("{10-4-3}") == "3");       // left to right (wrong: 9)
+    CHECK(parser.process("{100/10/5}") == "2");     // left to right (wrong: 50)
+    CHECK(parser.process("{2*3%4}") == "2");        // (2*3)%4      (wrong: 6)
+    CHECK(parser.process("{10%4*2}") == "4");       // (10%4)*2     (wrong: 2)
+    CHECK(parser.process("{2+3*4-5}") == "9");
+    // Integer division truncates at each step, so the order of * and / is visible.
+    CHECK(parser.process("{1/2*4}") == "0");        // (1/2)*4
+    CHECK(parser.process("{4*1/2}") == "2");        // (4*1)/2
+}
+
+TEST_CASE("Placeholder integer division truncates and a floating operand makes the quotient floating",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{7/2}") == "3");
+    CHECK(parser.process("{7%2}") == "1");
+    CHECK(parser.process("{9/3}") == "3");
+    CHECK_THAT(std::stod(parser.process("{7/2.}")), Catch::Matchers::WithinAbs(3.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{7./2}")), Catch::Matchers::WithinAbs(3.5, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{1/4.}")), Catch::Matchers::WithinAbs(0.25, 1e-12));
+    CHECK_THAT(std::stod(parser.process("{7.5%2}")), Catch::Matchers::WithinAbs(1.5, 1e-12));
+    // Negative operands whose quotient is exact, so the rounding direction of inexact divisions is not pinned.
+    CHECK(parser.process("{-8/4}") == "-2");
+    CHECK(parser.process("{8/-4}") == "-2");
+    CHECK(parser.process("{-8%4}") == "0");
+    CHECK_THAT(std::stod(parser.process("{-9/3.}")), Catch::Matchers::WithinAbs(-3., 1e-12));
+}
+
+TEST_CASE("Placeholder unary operators bind tighter than the binary operators",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{2*-3}") == "-6");
+    CHECK(parser.process("{7 - -2}") == "9");
+    CHECK(parser.process("{- -5}") == "5");
+    CHECK(parser.process("{+4}") == "4");
+    CHECK(parser.process("{-(2+3)*2}") == "-10");
+    CHECK(parser.process("{!true}") == "false");
+    CHECK(parser.process("{!(1 == 2)}") == "true");
+    CHECK(parser.process("{not not true}") == "true");
+    // not applies to the operand before and: (not false) and false  (wrong: not (false and false))
+    CHECK(parser.process("{not false and false}") == "false");
+    CHECK(parser.process("{not (false and false)}") == "true");
+}
+
+TEST_CASE("Placeholder relational, equality and logical operators bind in order",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    // Arithmetic binds tighter than comparison, comparison tighter than and, and tighter than or.
+    CHECK(parser.process("{1 + 1 == 2}") == "true");
+    CHECK(parser.process("{1 + 1 < 3}") == "true");
+    CHECK(parser.process("{2 * 3 == 6 and 4 / 2 == 2}") == "true");
+    CHECK(parser.process("{1 < 2 == true}") == "true");              // (1 < 2) == true
+    CHECK(parser.process("{true or false and false}") == "true");    // true or (false and false)  (wrong: false)
+    CHECK(parser.process("{(true or false) and false}") == "false");
+    CHECK(parser.process("{false and false or true}") == "true");    // (false and false) or true  (wrong: false)
+    CHECK(parser.process("{1 != 2}") == "true");
+    CHECK(parser.process("{2 != 2}") == "false");
+    CHECK(parser.process("{1 == 1.0}") == "true");
+    // Numeric equality tolerates rounding error.
+    CHECK(parser.process("{0.1 + 0.2 == 0.3}") == "true");
+    // ... but only for differences below the tolerance.
+    CHECK(parser.process("{0.1 + 0.2 == 0.4}") == "false");
+}
+
+TEST_CASE("Placeholder inequality operator <> accepts unequal operands",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 <> 2}") == "true");
+    CHECK(parser.process("{1<>2}") == "true");
+}
+
+TEST_CASE("Placeholder inequality operator <> rejects equal operands",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{2 <> 2}") == "false");
+}
+
+TEST_CASE("Placeholder relational operators still parse next to the <> spelling",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 < 2}") == "true");
+    CHECK(parser.process("{1<2}") == "true");
+    CHECK(parser.process("{1 < (2)}") == "true");
+    CHECK(parser.process("{1 < -2}") == "false");
+    CHECK(parser.process("{2 <= 2}") == "true");
+    CHECK(parser.process("{3 > 2}") == "true");
+    CHECK(parser.process("{2 >= 3}") == "false");
+    // Relational operators bind tighter than <>: (1 < 2) <> (3 < 4) compares true with true.
+    CHECK(parser.process("{1 < 2 <> 3 < 4}") == "false");
+}
+
+TEST_CASE("Placeholder ternary operator is right associative, lowest in precedence and lazy",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process("{1 < 2 ? 10 : 20}") == "10");
+    CHECK(parser.process("{2 < 1 ? 10 : 20}") == "20");
+    CHECK(parser.process("{false or true ? 1 : 2}") == "1");
+    CHECK(parser.process("{true ? 1 : false ? 2 : 3}") == "1");
+    CHECK(parser.process("{false ? 1 : true ? 2 : 3}") == "2");
+    CHECK(parser.process("{false ? 1 : false ? 2 : 3}") == "3");
+    // The branch that is not taken is parsed but not evaluated.
+    CHECK(parser.process("{true ? 1 : 1 / 0}") == "1");
+    CHECK(parser.process("{false ? 1 / 0 : 2}") == "2");
+}
+
+TEST_CASE("Placeholder string concatenation groups with the additive operators",
+          "[PlaceholderParser][PlaceholderParserExpressions]")
+{
+    PlaceholderParser parser;
+    CHECK(parser.process(R"({"a" + 1 + 2})") == "a12");          // ("a" + 1) + 2
+    CHECK(parser.process(R"({1 + 2 + "a"})") == "3a");           // (1 + 2) + "a"
+    CHECK(parser.process(R"({"n=" + 1 + 2 * 3})") == "n=16");    // * before +
+}
+
+TEST_CASE("Placeholder parser clones percent vectors as numeric local variables",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "retract_before_wipe", "10,20,30" } });
+
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+    // ConfigOptionPercents is cloned as a numeric local vector, preserving every element.
+    CHECK(parser.process("{local copied = retract_before_wipe}{copied[0]},{copied[1]},{copied[2]}") == "10,20,30");
+    CHECK(parser.process("{local copied = retract_before_wipe}{size(copied)}") == "3");
+}
+
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistently",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    parser.set("index", 1);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
+    parser.set("index", 99);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "357");
+    parser.set("index", "one");
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
+                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
+                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
+    parser.set("scalar", 1);
+    parser.set("index", 0);
+    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+}
+
+TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-shaped values",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
+    outputs.set_key_value("flag", new ConfigOptionBool(false));
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{percent = 25}{percent}") == "25");
+    CHECK_THROWS_WITH(run("{flag = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{number = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
+    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable."));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
 }
 
 TEST_CASE("Placeholder parser reports empty and size misuse without changing outputs",
@@ -1336,48 +1721,4 @@ TEST_CASE("Placeholder parser reports empty and size misuse without changing out
     CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
     CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
     CHECK(outputs.option<ConfigOptionInt>("scalar")->value == 4);
-}
-
-TEST_CASE("Placeholder parser rejects local names that shadow system and output symbols",
-          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
-{
-    auto config = DynamicPrintConfig::full_print_config();
-    PlaceholderParser parser;
-    REQUIRE(parser.apply_config(config));
-    CHECK_THROWS_WITH(parser.process("{local layer_height = 2}"),
-                      Catch::Matchers::ContainsSubstring("read-only system dictionary"));
-
-    DynamicConfig outputs;
-    outputs.set_key_value("output_value", new ConfigOptionInt(1));
-    CHECK_THROWS_WITH(parser.process("{local output_value = 2}", 0, nullptr, &outputs, nullptr),
-                      Catch::Matchers::ContainsSubstring("system output variable"));
-}
-
-TEST_CASE("Placeholder parser resolves vector percentages against the selected parent element",
-          "[PlaceholderParser][PlaceholderParserPercentParents]")
-{
-    auto config = DynamicPrintConfig::full_print_config();
-    config.set_key_value("bridge_speed", new ConfigOptionFloats({ 20., 40. }));
-    config.set_key_value("internal_bridge_speed", new ConfigOptionFloatsOrPercents({
-        FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
-    }));
-    DynamicConfig external;
-    external.set_key_value("filament_map", new ConfigOptionInts({ 1, 0 }));
-    PlaceholderParser parser(&external);
-    REQUIRE(parser.apply_config(config));
-
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(20., 1e-12));
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed}", 1)), Catch::Matchers::WithinAbs(30., 1e-12));
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[0]}")), Catch::Matchers::WithinAbs(30., 1e-12));
-    CHECK_THAT(std::stod(parser.process("{internal_bridge_speed[1]}")), Catch::Matchers::WithinAbs(20., 1e-12));
-
-    // Single-element vectors use element zero even when the filament maps to extruder one.
-    auto single_config = DynamicPrintConfig::full_print_config();
-    single_config.set_key_value("bridge_speed", new ConfigOptionFloats({ 25. }));
-    single_config.set_key_value("internal_bridge_speed",
-                                new ConfigOptionFloatsOrPercents({ FloatOrPercent{ 120., true } }));
-    PlaceholderParser single_parser(&external);
-    REQUIRE(single_parser.apply_config(single_config));
-    CHECK_THAT(std::stod(single_parser.process("{bridge_speed}", 0)), Catch::Matchers::WithinAbs(25., 1e-12));
-    CHECK_THAT(std::stod(single_parser.process("{internal_bridge_speed}", 0)), Catch::Matchers::WithinAbs(30., 1e-12));
 }

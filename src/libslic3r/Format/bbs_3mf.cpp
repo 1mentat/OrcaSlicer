@@ -165,9 +165,9 @@ struct ZipUnicodePathExtraField
 
 // miniz's BBS extension returns the copied extra-field byte count plus one and
 // writes a trailing NUL when a destination buffer is supplied.  Query the
-// central-directory size first so fields larger than the old 1024-byte buffer
-// are not silently truncated, then remove exactly that API terminator before
-// parsing ZIP field framing.
+// central-directory size first so fields larger than the old fixed 1024-byte
+// buffer are not silently truncated, then remove exactly that API terminator
+// before parsing ZIP field framing.
 static std::string read_zip_extra(mz_zip_archive &archive, mz_uint file_index)
 {
     const mz_uint reported_size = mz_zip_reader_get_extra(&archive, file_index, nullptr, 0);
@@ -5259,13 +5259,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             //set transform from 3mf
             Slic3r::Geometry::Transformation comp_transformatino(sub_comp.transform);
-            volume->set_transformation(comp_transformatino * volume->get_transformation());
+            // A volume that shares an already loaded mesh starts with an identity transform, but the
+            // shared mesh is centered: its init shift has to be carried by the component transform
+            // (comp * T(shift)), like the first use of the mesh gets from center_geometry_after_creation,
+            // rather than added in world space, which is wrong as soon as the component rotates or scales.
+            Slic3r::Geometry::Transformation shift_transformation;
             if (shared_volume) {
-                const TriangleMesh& trangle_mesh = volume->mesh();
-                Vec3d shift = trangle_mesh.get_init_shift();
+                const Vec3d shift = volume->mesh().get_init_shift();
                 if (!shift.isApprox(Vec3d::Zero()))
-                    volume->translate(shift);
+                    shift_transformation.set_offset(shift);
             }
+            volume->set_transformation(comp_transformatino * shift_transformation * volume->get_transformation());
 
             // recreate custom supports, seam and mmu segmentation from previously loaded attribute
             {

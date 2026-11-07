@@ -1,4 +1,3 @@
-#include <catch2/matchers/catch_matchers.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -9,8 +8,10 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <admesh/stl.h>
 #include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"

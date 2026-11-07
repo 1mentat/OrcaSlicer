@@ -1,3 +1,7 @@
+#include <gp_Cylinder.hxx>
+#include <gp_Ax3.hxx>
+#include "libslic3r/CAD/SketchEngine.hpp"
+#include "libslic3r/Point.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -21,9 +25,6 @@
 #include <gp_Vec.hxx>
 #include <cmath>
 #include <stdexcept>
-
-#include "libslic3r/CAD/SketchEngine.hpp"
-#include "libslic3r/Point.hpp"
 
 using namespace Slic3r;
 
@@ -86,6 +87,30 @@ TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine
     const Vec3d radial(radial_x / radial_length, radial_y / radial_length, 0.);
     CHECK_THAT(plane.normal.dot(radial), Catch::Matchers::WithinAbs(1., 1e-6));
     CHECK_THAT(plane.y_axis.dot(Vec3d(0., 0., 1.)), Catch::Matchers::WithinAbs(1., 1e-6));
+
+    // Right-handed: x cross y gives the normal, not its opposite.
+    CHECK_THAT((plane.x_axis.cross(plane.y_axis) - plane.normal).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
+    // The frame is tangent to the wall: the normal is radial (perpendicular to the cylinder axis).
+    CHECK_THAT(plane.normal.z(), Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(std::abs(plane.y_axis.z()), Catch::Matchers::WithinAbs(1., 1e-9));
+
+    // Also compare with the analytic cylinder directions at the surface's first U parameter.
+    const BRepAdaptor_Surface surface(side);
+    REQUIRE(surface.GetType() == GeomAbs_Cylinder);
+    const gp_Cylinder analytic_cylinder = surface.Cylinder();
+    const gp_Ax3 &placement = analytic_cylinder.Position();
+    REQUIRE(placement.Direct());
+    const double u = surface.FirstUParameter();
+    REQUIRE(std::isfinite(u));
+    const gp_Dir &x_direction = placement.XDirection();
+    const gp_Dir &y_direction = placement.YDirection();
+    const gp_Dir &z_direction = placement.Direction();
+    const Vec3d analytic_x(x_direction.X(), x_direction.Y(), x_direction.Z());
+    const Vec3d analytic_y(y_direction.X(), y_direction.Y(), y_direction.Z());
+    const Vec3d analytic_axis(z_direction.X(), z_direction.Y(), z_direction.Z());
+    const Vec3d analytic_radial = std::cos(u) * analytic_x + std::sin(u) * analytic_y;
+    CHECK_THAT(plane.normal.dot(analytic_radial), Catch::Matchers::WithinAbs(1., 1e-6));
+    CHECK_THAT(plane.y_axis.dot(analytic_axis), Catch::Matchers::WithinAbs(1., 1e-9));
 }
 
 TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[SketchEngine][SketchPlaneGap]")
@@ -96,7 +121,7 @@ TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[Sketch
     REQUIRE_THROWS_AS(profile.to_occt_wire(SketchPlane::XY()), std::runtime_error);
 }
 
-TEST_CASE("SketchEngine rejects a zero-length prism direction", "[SketchEngine][SketchPlaneGap]")
+void check_make_prism_contracts()
 {
     SketchProfile profile;
     profile.points = {Vec2d(0., 0.), Vec2d(4., 0.), Vec2d(4., 3.), Vec2d(0., 3.)};
@@ -111,4 +136,14 @@ TEST_CASE("SketchEngine rejects a zero-length prism direction", "[SketchEngine][
     GProp_GProps properties;
     BRepGProp::VolumeProperties(prism, properties);
     CHECK_THAT(properties.Mass(), Catch::Matchers::WithinAbs(4. * 3. * 2., 1e-8));
+}
+
+TEST_CASE("SketchEngine rejects a zero-length prism direction", "[SketchEngine][SketchPlaneGap]")
+{
+    check_make_prism_contracts();
+}
+
+TEST_CASE("SketchEngine::make_prism rejects a zero vector and extrudes a face to area times depth", "[SketchEngine]")
+{
+    check_make_prism_contracts();
 }

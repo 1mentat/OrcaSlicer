@@ -1789,9 +1789,8 @@ public:
 
         return this->values == static_cast<const ConfigOptionVector<std::vector<int>> *>(&rhs)->values;
     }
-    bool operator<(const ConfigOptionIntsGroups &rhs) const throw() {
-        return this->values < rhs.values;
-    }
+    // Lexicographic order over the groups; a sequence that is a prefix of another is the lesser one.
+    bool operator<(const ConfigOptionIntsGroups &rhs) const throw() { return this->values < rhs.values; }
     bool nullable() const override { return false; }
     bool is_nil(size_t) const override { return false; }
 

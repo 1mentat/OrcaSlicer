@@ -452,6 +452,17 @@ static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transfor
     return { Transform3d(rotation), Transform3d(scale) };
 }
 
+// The orthogonal factor of the polar decomposition. It keeps a reflection (det < 0) whatever the
+// singular values are; right-handed (and singular) transforms use the rotation/scale split.
+static Transform3d extract_orthogonal(const Transform3d& trafo)
+{
+    if (trafo.linear().determinant() >= 0.0)
+        return extract_rotation_matrix(trafo);
+
+    const Eigen::JacobiSVD<Matrix3d> svd(trafo.linear(), Eigen::ComputeFullU | Eigen::ComputeFullV);
+    return Transform3d(Matrix3d(svd.matrixU() * svd.matrixV().transpose()));
+}
+
 static bool contains_skew(const Transform3d& trafo)
 {
     Matrix3d rotation;
@@ -540,8 +551,9 @@ void Transformation::set_scaling_factor(const Vec3d& scaling_factor)
 {
     assert(scaling_factor.x() > 0.0 && scaling_factor.y() > 0.0 && scaling_factor.z() > 0.0);
 
+    // scaling_factor holds magnitudes; a mirror stays in the orthogonal factor.
     const Vec3d offset = get_offset();
-    m_matrix = extract_rotation_matrix(m_matrix) * scale_transform(scaling_factor);
+    m_matrix = extract_orthogonal(m_matrix) * scale_transform(scaling_factor);
     m_matrix.translation() = offset;
 }
 
@@ -550,7 +562,10 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
     assert(scaling_factor > 0.0);
 
     auto [rotation, scale] = extract_rotation_scale(m_matrix);
-    scale(axis, axis) = scaling_factor;
+    // scaling_factor is a magnitude; a mirrored transform keeps the sign of the entry. That keeps
+    // the mirror when the split carries it on a coordinate axis (unskewed, distinct scales), but
+    // not in general (see the known-bug test for a rotated uniformly scaled mirror).
+    scale(axis, axis) = is_left_handed() ? std::copysign(scaling_factor, scale(axis, axis)) : scaling_factor;
 
     const Vec3d offset = get_offset();
     m_matrix = rotation * scale;

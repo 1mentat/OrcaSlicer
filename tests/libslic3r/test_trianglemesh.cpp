@@ -630,9 +630,11 @@ TEST_CASE("Empty TriangleMesh operations remain empty and finite", "[TriangleMes
     REQUIRE(mesh.convex_hull_3d().empty());
     REQUIRE(mesh.memsize() > 0);
     mesh.align_to_origin();
-    mesh.translate(0.f, 0.f, 0.f);
-    mesh.rotate_z(0.f);
+    mesh.translate(1.f, 2.f, 3.f);
+    mesh.rotate_z(float(PI / 2.));
+    mesh.scale(2.f);
     REQUIRE(mesh.empty());
+    CHECK_THAT(mesh.volume(), WithinAbs(0.f, 1e-7f));
 }
 
 TEST_CASE("Legacy center rotation keeps mesh bounds and size synchronized",

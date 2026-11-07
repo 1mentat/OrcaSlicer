@@ -18,6 +18,7 @@
 #include <fstream>
 #include <ios>
 #include <cmath>
+#include <cstddef>
 #include <set>
 #include <string>
 #include <utility>
@@ -237,6 +238,8 @@ TEST_CASE("Assimp decodes an embedded GLTF texture and bakes scene transforms", 
     std::string error;
     INFO(error);
     REQUIRE(load_assimp_textured_model(scene.string(), mesh, &error));
+    const bool loaded = load_assimp_textured_model(scene.string(), mesh, &error);
+    REQUIRE(loaded);
     check_imported_texture(mesh);
     REQUIRE(mesh.vertices.size() == 3);
     REQUIRE(mesh.indices.size() == 1);

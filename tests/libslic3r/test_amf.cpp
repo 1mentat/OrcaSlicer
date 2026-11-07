@@ -318,6 +318,16 @@ TEST_CASE("AMF empty constellation instances preserve uninstanced geometry", "[A
     CHECK(m.objects[0]->instances.empty());
 }
 
+TEST_CASE("AMF empty constellation instances still load the object geometry", "[AMF]")
+{
+    ScopedTemporaryFile f(".amf");
+    write_file(f.string(), document(instance("")));
+    Model m;
+    REQUIRE(load(f.string(), m));
+    // Whether an empty <instance> creates a ModelInstance is intentionally not asserted.
+    geometry(m, f.string());
+}
+
 TEST_CASE("AMF material attributes retain Unicode and entity decoding", "[AMF][AMFArchive]")
 {
     auto xml = document();
@@ -360,6 +370,16 @@ TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
 }
 
 TEST_CASE("AMF archived metadata requires its type attribute", "[AMF][AMFArchive]")
+{
+    auto xml = document();
+    replace(xml, "<metadata type=\"name\">", "<metadata>");
+    ScopedTemporaryFile f(".amf");
+    archive(f.string(), {{"model.amf", xml}});
+    Model m;
+    CHECK_FALSE(load(f.string(), m));
+}
+
+TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMFArchive]")
 {
     auto xml = document();
     replace(xml, "<metadata type=\"name\">", "<metadata>");

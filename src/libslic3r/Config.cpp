@@ -711,8 +711,11 @@ double ConfigBase::get_abs_value_at(const t_config_option_key &opt_key, size_t i
 {
     const ConfigOption *raw_opt = this->option(opt_key);
     assert(raw_opt != nullptr);
+    // coFloats / coFloatsOrPercents are shared by the nullable and non-nullable option classes,
+    // which are distinct types: cast to the one the option really is.
     if (raw_opt->type() == coFloats) {
-        return static_cast<const ConfigOptionFloats*>(raw_opt)->get_at(index);
+        return raw_opt->nullable() ? static_cast<const ConfigOptionFloatsNullable*>(raw_opt)->get_at(index)
+                                   : static_cast<const ConfigOptionFloats*>(raw_opt)->get_at(index);
     }
     if (raw_opt->type() == coFloatsOrPercents) {
         const ConfigDef *def = this->def();
@@ -725,8 +728,11 @@ double ConfigBase::get_abs_value_at(const t_config_option_key &opt_key, size_t i
         } else {
             const ConfigOption *ratio_opt = this->option(opt_def->ratio_over);
             assert(ratio_opt->type() == coFloats);
-            const ConfigOptionFloats *ratio_values = static_cast<const ConfigOptionFloats *>(ratio_opt);
-            return static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index).get_abs_value(ratio_values->get_at(index));
+            const double ratio = ratio_opt->nullable() ? static_cast<const ConfigOptionFloatsNullable *>(ratio_opt)->get_at(index)
+                                                       : static_cast<const ConfigOptionFloats *>(ratio_opt)->get_at(index);
+            const FloatOrPercent &value = raw_opt->nullable() ? static_cast<const ConfigOptionFloatsOrPercentsNullable *>(raw_opt)->get_at(index)
+                                                              : static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index);
+            return value.get_abs_value(ratio);
         }
     }
 
@@ -781,8 +787,10 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
     // Compute absolute value over the absolute value of the base option.
     //FIXME there are some ratio_over chains, which end with empty ratio_with.
     // For example, XXX_extrusion_width parameters are not handled by get_abs_value correctly.
-    return opt_def->ratio_over.empty() ? 0. :
-        cast_opt->get_abs_value(this->get_abs_value(opt_def->ratio_over));
+    const double ratio_base = this->get_abs_value(opt_def->ratio_over);
+    // A coPercent option is not a ConfigOptionFloatOrPercent; resolve it through its own class.
+    return raw_opt->type() == coPercent ? static_cast<const ConfigOptionPercent*>(raw_opt)->get_abs_value(ratio_base) :
+        static_cast<const ConfigOptionFloatOrPercent*>(raw_opt)->get_abs_value(ratio_base);
     
 
     throw ConfigurationError("ConfigBase::get_abs_value(): Not a valid option type for get_abs_value()");

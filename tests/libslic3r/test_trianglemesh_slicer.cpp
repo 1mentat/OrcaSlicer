@@ -1,3 +1,5 @@
+#include "libslic3r/Point.hpp"
+#include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <cmath>
 #include <catch2/catch_all.hpp>
@@ -163,20 +165,18 @@ TEST_CASE("Mirrored slab transforms preserve surface roles", "[TriangleMeshSlice
 
 TEST_CASE("Mesh projection exposes each requested surface independently", "[TriangleMeshSlicer][Projection][TriangleMeshSlicerContracts]")
 {
-    const auto cube = its_make_cube(10., 20., 30.);
+    // The upward and downward facing triangles have different footprints, so each projection
+    // shows which surface it was taken from.
+    const auto mesh = coplanar_up_and_down_mesh();
     Polygons top;
-    project_mesh(cube, Transform3d::Identity(), &top, nullptr, []{});
+    project_mesh(mesh, Transform3d::Identity(), &top, nullptr, []{});
     REQUIRE(top.size() == 1);
-    CHECK_THAT(std::abs(double(top.front().area())) * SCALING_FACTOR * SCALING_FACTOR, Catch::Matchers::WithinAbs(200.0, 1e-4));
-    CHECK_THAT(unscaled<double>(top.front().bounding_box().size().x()), Catch::Matchers::WithinAbs(10., 1e-4));
-    CHECK_THAT(unscaled<double>(top.front().bounding_box().size().y()), Catch::Matchers::WithinAbs(20., 1e-4));
+    require_xy_bounds(top.front(), 0., 10., 0., 10.);
 
     Polygons bottom;
-    project_mesh(cube, Transform3d::Identity(), nullptr, &bottom, []{});
+    project_mesh(mesh, Transform3d::Identity(), nullptr, &bottom, []{});
     REQUIRE(bottom.size() == 1);
-    CHECK_THAT(std::abs(double(bottom.front().area())) * SCALING_FACTOR * SCALING_FACTOR, Catch::Matchers::WithinAbs(200.0, 1e-4));
-    CHECK_THAT(unscaled<double>(bottom.front().bounding_box().size().x()), Catch::Matchers::WithinAbs(10., 1e-4));
-    CHECK_THAT(unscaled<double>(bottom.front().bounding_box().size().y()), Catch::Matchers::WithinAbs(20., 1e-4));
+    require_xy_bounds(bottom.front(), 20., 30., 0., 10.);
 }
 
 TEST_CASE("Single-plane slicing honors the top-inclusive bottom-exclusive solid boundary",
@@ -199,22 +199,26 @@ TEST_CASE("Single-plane slicing honors the top-inclusive bottom-exclusive solid 
 TEST_CASE("Single-plane slicing transforms both its plane classification and contour coordinates",
           "[TriangleMeshSlicer][SinglePlaneSlice]")
 {
-    const indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    // Shear the cube along x so that its cross-section moves with z (x spans 0.5z to 10+0.5z):
+    // slicing the wrong plane, or dropping the transformed Z, gives a different footprint.
+    indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    for (Vec3f &vertex : mesh.vertices)
+        vertex.x() += 0.5f * vertex.z();
     const bool rotate_axes = GENERATE(false, true);
     CAPTURE(rotate_axes);
     MeshSlicingParams params;
     float plane_z;
     if (rotate_axes) {
-        // World x=z+2, y=y+3, z=4-x.  The z=-1 section is the
-        // original x=5 plane, so its independent footprint is 30 by 20.
+        // World x=z+2, y=y+3, z=4-x.  The z=-1 section is the original x=5 plane,
+        // which the sheared cube only reaches for z in [0, 10]: a 10 by 20 footprint.
         params.trafo.matrix() << 0., 0., 1., 2.,
                                  0., 1., 0., 3.,
                                 -1., 0., 0., 4.,
                                  0., 0., 0., 1.;
         plane_z = -1.f;
     } else {
-        // World x=2x+2, y=y/2+3, z=3z/2+4; the z=19 section
-        // is the original z=10 plane, with a 20 by 10 footprint.
+        // World x=2x+2, y=y/2+3, z=3z/2+4; the z=19 section is the original z=10 plane,
+        // where the sheared cube spans x in [5, 15]: a 20 by 10 footprint at x in [12, 32].
         params.trafo.matrix() << 2., 0., 0., 2.,
                                  0., 0.5, 0., 3.,
                                  0., 0., 1.5, 4.,
@@ -223,12 +227,15 @@ TEST_CASE("Single-plane slicing transforms both its plane classification and con
     }
     const Polygons polygons = slice_mesh(mesh, plane_z, params);
     REQUIRE(polygons.size() == 1);
-    require_xy_bounds(polygons.front(), 2., rotate_axes ? 32. : 22., 3., rotate_axes ? 23. : 13.);
+    if (rotate_axes)
+        require_xy_bounds(polygons.front(), 2., 12., 3., 23.);
+    else
+        require_xy_bounds(polygons.front(), 12., 32., 3., 13.);
     CHECK_THAT(polygons.front().area() * SCALING_FACTOR * SCALING_FACTOR,
-               Catch::Matchers::WithinAbs(rotate_axes ? 600. : 200., 1e-4));
+               Catch::Matchers::WithinAbs(200., 1e-4));
 }
 
-TEST_CASE("Single-plane slicing preserves hole orientation and applies the selected contour mode",
+TEST_CASE("Single-plane slicing preserves hole orientation and applies the selected or lower-layer contour mode",
           "[TriangleMeshSlicer][SinglePlaneSlice]")
 {
     indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
@@ -240,13 +247,17 @@ TEST_CASE("Single-plane slicing preserves hole orientation and applies the selec
     its_merge(mesh, hole);
 
     using Mode = MeshSlicingParams::SlicingMode;
-    const Mode mode = GENERATE(Mode::Regular, Mode::EvenOdd, Mode::Positive, Mode::PositiveLargestContour);
+    // EvenOdd is not listed: slice_mesh() slices it as Regular, it only differs in slice_mesh_ex().
+    const Mode mode = GENERATE(Mode::Regular, Mode::Positive, Mode::PositiveLargestContour);
     const bool lower_layer_override = GENERATE(false, true);
     CAPTURE(static_cast<unsigned int>(mode), lower_layer_override);
     MeshSlicingParams params;
     if (lower_layer_override) {
+        // The single plane is layer 0, so mode_below applies. Set the regular mode to a different
+        // result so that ignoring the override is visible.
         params.slicing_mode_normal_below_layer = 1;
         params.mode_below = mode;
+        params.mode = mode == Mode::Regular ? Mode::Positive : Mode::Regular;
     } else {
         params.mode = mode;
     }
@@ -261,7 +272,7 @@ TEST_CASE("Single-plane slicing preserves hole orientation and applies the selec
     }
     const double expected_area = mode == Mode::PositiveLargestContour ? 200. : mode == Mode::Positive ? 224. : 176.;
     CHECK_THAT(signed_area, Catch::Matchers::WithinAbs(expected_area, 1e-4));
-    const unsigned int expected_holes = mode == Mode::Regular || mode == Mode::EvenOdd ? 1u : 0u;
+    const unsigned int expected_holes = mode == Mode::Regular ? 1u : 0u;
     CHECK(holes == expected_holes);
 }
 
@@ -332,6 +343,27 @@ TEST_CASE("The cut caps a nested inward-facing cavity without filling it",
     CHECK(its_num_open_edges(lower) == 0);
     CHECK_THAT(std::abs(its_volume(upper)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
     CHECK_THAT(std::abs(its_volume(lower)), Catch::Matchers::WithinAbs(1072.f, 1e-2f));
+
+    // Watertightness and signed volume would also hold for a full outer cap plus an oppositely wound
+    // cap over the cavity. A holed cap covers only the 20 x 14 section minus the 4 x 6 cavity, and
+    // none of its triangles lies inside the cavity outline.
+    for (const indexed_triangle_set *half : { &upper, &lower }) {
+        double       cap_area             = 0.;
+        unsigned int triangles_in_cavity = 0;
+        for (const Vec3i32 &face : half->indices) {
+            const Vec3f &a = half->vertices[face[0]];
+            const Vec3f &b = half->vertices[face[1]];
+            const Vec3f &c = half->vertices[face[2]];
+            if (a.z() != 4.f || b.z() != 4.f || c.z() != 4.f)
+                continue;
+            cap_area += 0.5 * double((b - a).cross(c - a).norm());
+            const Vec3f centroid = (a + b + c) / 3.f;
+            if (centroid.x() > 8.f && centroid.x() < 12.f && centroid.y() > 4.f && centroid.y() < 10.f)
+                ++triangles_in_cavity;
+        }
+        CHECK_THAT(cap_area, Catch::Matchers::WithinAbs(20. * 14. - 4. * 6., 1e-3));
+        CHECK(triangles_in_cavity == 0);
+    }
 }
 
 TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane",
@@ -364,7 +396,7 @@ TEST_CASE("The cut preserves a plane vertex when adjacent facets cross the plane
 
 namespace trianglemesh_contour_repair_contracts {
 
-indexed_triangle_set closed_box_triangle_soup(bool reverse_right_wall, bool rotate_facets)
+indexed_triangle_set closed_box_triangle_soup(bool reverse_long_walls, bool rotate_facets)
 {
     const std::vector<Vec3f> vertices {
         Vec3f(0.f, 0.f, 0.f), Vec3f(20.f, 0.f, 0.f), Vec3f(20.f, 14.f, 0.f), Vec3f(0.f, 14.f, 0.f),
@@ -376,9 +408,11 @@ indexed_triangle_set closed_box_triangle_soup(bool reverse_right_wall, bool rota
         { 0, 1, 5 }, { 0, 5, 4 }, { 1, 2, 6 }, { 1, 6, 5 },
         { 2, 3, 7 }, { 2, 7, 6 }, { 3, 0, 4 }, { 3, 4, 7 }
     };
-    if (reverse_right_wall) {
-        std::swap(facets[6][1], facets[6][2]);
-        std::swap(facets[7][1], facets[7][2]);
+    if (reverse_long_walls) {
+        // Reverse the two 20 mm walls. Their sections are the longest open chains, so they seed the
+        // repaired loop, which therefore comes out clockwise before orientation repair.
+        for (int facet : { 4, 5, 8, 9 })
+            std::swap(facets[facet][1], facets[facet][2]);
     }
     if (rotate_facets)
         std::rotate(facets.begin(), facets.begin() + 5, facets.end());
@@ -412,6 +446,58 @@ TEST_CASE("Single-plane slicing closes a box with coincident split triangle vert
     require_xy_bounds(contour, 0., 20., 0., 14.);
     CHECK_THAT(std::abs(contour.area()) * SCALING_FACTOR * SCALING_FACTOR,
                Catch::Matchers::WithinAbs(280., 1e-4));
+}
+
+TEST_CASE("Single-plane slicing joins reversed split facets into one counter-clockwise contour",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    const auto soup = trianglemesh_contour_repair_contracts::closed_box_triangle_soup(true, true);
+    const Polygons contours = slice_mesh(soup, 4.f, MeshSlicingParams{});
+
+    REQUIRE(contours.size() == 1);
+    const Polygon &contour = contours.front();
+    require_xy_bounds(contour, 0., 20., 0., 14.);
+    CHECK_THAT(std::abs(contour.area()) * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(280., 1e-4));
+    // A loop patched from pieces of mixed orientation is reoriented CCW.
+    CHECK(contour.area() > 0.);
+}
+
+TEST_CASE("Single-plane slicing preserves hole orientation and applies the selected contour mode",
+          "[TriangleMeshSlicer][SinglePlaneSlice]")
+{
+    indexed_triangle_set mesh = its_make_cube(10., 20., 30.);
+    indexed_triangle_set hole = its_make_cube(4., 6., 30.);
+    for (Vec3f &vertex : hole.vertices)
+        vertex += Vec3f(3.f, 7.f, 0.f);
+    for (Vec3i32 &face : hole.indices)
+        std::swap(face[0], face[1]);
+    its_merge(mesh, hole);
+
+    using Mode = MeshSlicingParams::SlicingMode;
+    const Mode mode = GENERATE(Mode::Regular, Mode::EvenOdd, Mode::Positive, Mode::PositiveLargestContour);
+    const bool lower_layer_override = GENERATE(false, true);
+    CAPTURE(static_cast<unsigned int>(mode), lower_layer_override);
+    MeshSlicingParams params;
+    if (lower_layer_override) {
+        params.slicing_mode_normal_below_layer = 1;
+        params.mode_below = mode;
+    } else {
+        params.mode = mode;
+    }
+    const Polygons polygons = slice_mesh(mesh, 15.f, params);
+    REQUIRE(polygons.size() == (mode == Mode::PositiveLargestContour ? 1u : 2u));
+    double signed_area = 0.;
+    unsigned int holes = 0;
+    for (const Polygon &polygon : polygons) {
+        const double area = polygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        signed_area += area;
+        holes += area < 0. ? 1u : 0u;
+    }
+    const double expected_area = mode == Mode::PositiveLargestContour ? 200. : mode == Mode::Positive ? 224. : 176.;
+    CHECK_THAT(signed_area, Catch::Matchers::WithinAbs(expected_area, 1e-4));
+    const unsigned int expected_holes = mode == Mode::Regular || mode == Mode::EvenOdd ? 1u : 0u;
+    CHECK(holes == expected_holes);
 }
 
 TEST_CASE("Single-plane slicing joins reversed split facets into one contour",

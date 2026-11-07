@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -42,6 +43,26 @@ void require_large_coordinate_spacing_progress()
         const auto pieces = source.equally_spaced_lines(300.);
         REQUIRE(pieces.size() == 2);
         REQUIRE(pieces.front().last_point() == Point(origin + 300, 37));
+    }
+}
+
+void check_translated_partitions(const Polyline &local, coord_t magnitude, const std::vector<double> &distances)
+{
+    for (const double distance : distances) {
+        const auto expected = local.equally_spaced_lines(distance);
+        for (const coord_t origin : {magnitude, -magnitude}) {
+            const Point shift(origin, -origin);
+            Polyline translated = local;
+            for (Point &point : translated.points)
+                point += shift;
+            const auto actual = translated.equally_spaced_lines(distance);
+            REQUIRE(actual.size() == expected.size());
+            for (size_t piece = 0; piece < actual.size(); ++piece) {
+                REQUIRE(actual[piece].points.size() == expected[piece].points.size());
+                for (size_t vertex = 0; vertex < actual[piece].points.size(); ++vertex)
+                    CHECK(actual[piece].points[vertex] - shift == expected[piece].points[vertex]);
+            }
+        }
     }
 }
 } // namespace
@@ -257,6 +278,14 @@ TEST_CASE("Polyline collection cleanup removes paths with fewer than two vertice
     CHECK(remove_same_neighbor(paths));
     REQUIRE(paths.size() == 1);
 }
+TEST_CASE("Polyline collection duplicate cleanup drops paths that collapse to one vertex", "[Polyline][PolylineOperations]")
+{
+    Polylines paths{elbow(), Polyline{Points{p(2, 2), p(2, 2)}}};
+    CHECK(remove_same_neighbor(paths));
+    REQUIRE(paths.size() == 1);
+    CHECK(paths.front().points == elbow().points);
+    CHECK_FALSE(remove_same_neighbor(paths));
+}
 TEST_CASE("Polyline projection identifies the closest segment and its clamped foot", "[Polyline][PolylineOperations]")
 {
     const Points path   = elbow().points;
@@ -310,6 +339,10 @@ TEST_CASE("Equally spaced line pieces handle exact boundaries and repeated verti
     CHECK(Polyline{Points{p(0, 0)}}.equally_spaced_lines(scaled(5.)).empty());
     CHECK(Polyline{Points{p(0, 0), p(0, 0)}}.equally_spaced_lines(scaled(5.)).empty());
 }
+TEST_CASE("Equally spaced pieces of an empty polyline are empty", "[Polyline][PolylineOperations]")
+{
+    CHECK(Polyline{}.equally_spaced_lines(scaled(5.)).empty());
+}
 TEST_CASE("Equally spaced line pieces retain a short path and its internal vertices", "[Polyline][PolylineOperations]")
 {
     const Polyline source = elbow();
@@ -324,6 +357,19 @@ TEST_CASE("Equally spaced line pieces reject invalid distances", "[Polyline][Pol
     for (double distance : {0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
         CHECK_THROWS_AS(source.equally_spaced_lines(distance), InvalidArgument);
 }
+
+TEST_CASE("Equally spaced pieces terminate for a non-positive distance", "[Polyline][PolylineOperations]")
+{
+    const Polyline source = elbow();
+    for (const double distance : {0., -1.}) {
+        try {
+            (void) source.equally_spaced_lines(distance);
+        } catch (const std::exception &) {
+        }
+    }
+    SUCCEED();
+}
+
 TEST_CASE("Equally spaced line pieces preserve a diagonal path within coordinate rounding", "[Polyline][PolylineOperations]")
 {
     const Polyline source{Points{p(0, 0), p(9, 12)}};
@@ -352,6 +398,18 @@ TEST_CASE("Equally spaced pieces make progress at the smallest representable uni
     }
 }
 
+TEST_CASE("Unit spacing splits a straight path at every coordinate unit", "[Polyline][PolylineOperations]")
+{
+    const Polyline source{Points{Point(0, 0), Point(10, 0)}};
+    const auto pieces = source.equally_spaced_lines(1.);
+    REQUIRE(pieces.size() == 10);
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        CHECK(pieces[i].points == Points{Point(static_cast<coord_t>(i), 0), Point(static_cast<coord_t>(i + 1), 0)});
+        if (i > 0)
+            CHECK(pieces[i - 1].last_point() == pieces[i].first_point());
+    }
+}
+
 TEST_CASE("Sub-unit spacing uses the smallest representable coordinate distance", "[Polyline][PolylineOperations]")
 {
     require_large_coordinate_spacing_progress();
@@ -367,6 +425,18 @@ TEST_CASE("Sub-unit spacing uses the smallest representable coordinate distance"
                 CHECK(pieces[i - 1].last_point() == pieces[i].first_point());
         }
     }
+}
+
+TEST_CASE("Equally spaced pieces terminate for a sub-unit distance", "[Polyline][PolylineOperations]")
+{
+    const Polyline source{Points{Point(0, 0), Point(10, 0), Point(10, 10)}};
+    for (const double distance : {0.4, std::numeric_limits<double>::min()}) {
+        try {
+            (void) source.equally_spaced_lines(distance);
+        } catch (const std::exception &) {
+        }
+    }
+    SUCCEED();
 }
 
 TEST_CASE("A split rounding onto a bend does not consume the rest of its segment", "[Polyline][PolylineOperations]")
@@ -399,12 +469,22 @@ TEST_CASE("Equally spaced pieces ignore zero-length runs between real segments",
     CHECK(pieces[1].points == Points{Point(4, 0), Point(8, 0)});
 }
 
-TEST_CASE("Foot projection skips a degenerate segment and selects the real nearest segment", "[Polyline][PolylineOperations]")
+void check_repeated_vertex_foot_projection()
 {
     const Points path{Point(0, 0), Point(0, 0), Point(10, 0)};
     const auto result = foot_pt(path, Point(6, 3));
     CHECK(result.first == 1);
     CHECK(result.second == Point(6, 0));
+}
+
+TEST_CASE("Foot projection skips a degenerate segment and selects the real nearest segment", "[Polyline][PolylineOperations]")
+{
+    check_repeated_vertex_foot_projection();
+}
+
+TEST_CASE("Foot projection past a repeated vertex selects the nearest real segment", "[Polyline][PolylineOperations]")
+{
+    check_repeated_vertex_foot_projection();
 }
 
 TEST_CASE("Compacting polylines preserves each surviving path's arc metadata", "[Polyline][PolylineOperations]")
@@ -447,24 +527,11 @@ TEST_CASE("Equally spaced pieces remain finite and exact near large positive and
 TEST_CASE("Translating a bent polyline far from the origin preserves its partitions", "[Polyline][PolylineOperations]")
 {
     require_large_coordinate_spacing_progress();
-    const Polyline local{Points{Point(0, 0), Point(2048, 0), Point(2048, 2048)}};
-    const coord_t magnitude = coord_t(1LL << 60);
-    for (const double distance : {1., 128., 513.}) {
-        const auto expected = local.equally_spaced_lines(distance);
-        for (const coord_t origin : {magnitude, -magnitude}) {
-            const Point shift(origin, -origin);
-            Polyline translated = local;
-            for (Point& point : translated.points)
-                point += shift;
-            const auto actual = translated.equally_spaced_lines(distance);
-            REQUIRE(actual.size() == expected.size());
-            for (size_t piece = 0; piece < actual.size(); ++piece) {
-                REQUIRE(actual[piece].points.size() == expected[piece].points.size());
-                for (size_t vertex = 0; vertex < actual[piece].points.size(); ++vertex)
-                    CHECK(actual[piece].points[vertex] - shift == expected[piece].points[vertex]);
-            }
-        }
-    }
+    const Polyline branch_shape{Points{Point(0, 0), Point(2048, 0), Point(2048, 2048)}};
+    check_translated_partitions(branch_shape, coord_t(1LL << 60), {1., 128., 513.});
+    // 3-4-5 diagonals put split points between grid coordinates; negative Y exercises rounding the other way.
+    const Polyline main_shape{Points{Point(0, 0), Point(3000, 4000), Point(6000, 0)}};
+    check_translated_partitions(main_shape, scaled<coord_t>(1000.), {128., 513.});
 }
 
 namespace {

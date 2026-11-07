@@ -43,6 +43,9 @@ TEST_CASE("System printer lookup rejects empty models and skips matching user pr
     printers.add_printer("B System Model B 0.4", "Model B", "0.4", true);
     printers.add_printer("C System Model A 0.4", "Model A", "0.4", true);
     printers.add_printer("D System Model A 0.6", "Model A", "0.6", true);
+    // A system preset without a model, so the empty-model lookup is rejected by
+    // the guard rather than by finding nothing.
+    printers.add_printer("E System No Model 0.4", "", "0.4", true);
 
     Preset *user = printers.find_preset("A User Model A 0.4");
     Preset *other_model = printers.find_preset("B System Model B 0.4");
@@ -69,6 +72,7 @@ TEST_CASE("Custom printer lookup finds user profiles by model and variant",
     printers.add_printer("A User Model A 0.4", "Model A", "0.4", false);
     printers.add_printer("B User Model B 0.4", "Model B", "0.4", false);
     printers.add_printer("C User Model A 0.6", "Model A", "0.6", false);
+    printers.add_printer("D User No Model 0.4", "", "0.4", false);
 
     Preset *model_a_04 = printers.find_preset("A User Model A 0.4");
     Preset *model_b_04 = printers.find_preset("B User Model B 0.4");

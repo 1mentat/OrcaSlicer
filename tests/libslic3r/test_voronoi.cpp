@@ -2494,6 +2494,10 @@ TEST_CASE("Voronoi source lookups preserve polygon endpoints and reject mismatch
     CHECK_THROWS_AS(Geometry::VoronoiUtils::get_source_point_index(*segment_cell, segments.cbegin(), segments.cend()), InvalidArgument);
 
     size_t point_cells_checked = 0;
+    // Boost merges the shared endpoints of adjacent segments, so a closed rectangle yields
+    // exactly one point cell per corner. A Voronoi vertex on the boundary of a point cell
+    // is at least as close to that cell's site as to any other corner.
+    Points source_points;
     for (const VD::cell_type &cell : diagram.cells()) {
         if (!cell.contains_point())
             continue;
@@ -2503,8 +2507,24 @@ TEST_CASE("Voronoi source lookups preserve polygon endpoints and reject mismatch
         CHECK(source_point_index.p() == source_point);
         CHECK(std::find(outline.points.begin(), outline.points.end(), source_point) != outline.points.end());
         ++point_cells_checked;
+        source_points.push_back(source_point);
+
+        const VD::edge_type *edge = cell.incident_edge();
+        do {
+            if (const VD::vertex_type *vertex = edge->vertex0(); vertex != nullptr) {
+                const Vec2d v(vertex->x(), vertex->y());
+                const double site_distance = (v - source_point.cast<double>()).norm();
+                for (const Point &corner : outline.points)
+                    CHECK(site_distance <= (v - corner.cast<double>()).norm() + 1e-6);
+            }
+            edge = edge->next();
+        } while (edge != cell.incident_edge());
     }
     REQUIRE(point_cells_checked > 0);
+    std::sort(source_points.begin(), source_points.end());
+    Points corners = outline.points;
+    std::sort(corners.begin(), corners.end());
+    CHECK(source_points == corners);
 }
 
 TEST_CASE("Parabola discretization returns its endpoints when the focus lies on the directrix", "[Voronoi][VoronoiGeometryContracts]")

@@ -1,22 +1,22 @@
-#include <utility>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "libslic3r/Geometry.hpp"
-#include <array>
-#include <cmath>
-#include <functional>
-#include <optional>
-#include <memory>
-#include "libslic3r/Point.hpp"
-#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/Point.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <utility>
 #include "libslic3r/libslic3r.h"
 #include <vector>
 #include <cstddef>
@@ -217,7 +217,7 @@ TEST_CASE("A truncated or malformed paint stream drops only the damaged triangle
     REQUIRE(std::none_of(recomputed.used_states.begin(), recomputed.used_states.end(), [](bool used) { return used; }));
 }
 
-namespace triangle_selector_extended_contracts {
+namespace triangle_selector_painting {
 
 namespace {
 
@@ -251,6 +251,15 @@ indexed_triangle_set translated_square_its(float x_offset)
     indexed_triangle_set result = square_its();
     for (stl_vertex &v : result.vertices)
         v.x() += x_offset;
+    return result;
+}
+
+// The second facet is lifted along the shared diagonal, so the two facet normals meet at
+// acos(1 / sqrt(3)), about 54.7 degrees.
+indexed_triangle_set folded_its()
+{
+    indexed_triangle_set result = square_its();
+    result.vertices[3] = vertex(0.f, 10.f, 10.f);
     return result;
 }
 
@@ -299,9 +308,32 @@ TriangleSelector::TriangleSplittingData paint_first_face(const indexed_triangle_
     return selector.serialize();
 }
 
+// Reads selector internals the same way the painting gizmo subclass does: seed fill contour
+// coordinates and the triangle storage that garbage collection compacts.
+struct InspectableSelector : TriangleSelector
+{
+    using TriangleSelector::TriangleSelector;
+
+    size_t triangle_count() const { return m_triangles.size(); }
+    size_t invalid_triangle_count() const
+    {
+        return size_t(std::count_if(m_triangles.begin(), m_triangles.end(), [](const Triangle &tr) { return !tr.valid(); }));
+    }
+
+    std::vector<Vec3f> contour_points() const
+    {
+        std::vector<Vec3f> points;
+        for (const Vec2i32 &edge : get_seed_fill_contour()) {
+            points.push_back(m_vertices[edge(0)].v);
+            points.push_back(m_vertices[edge(1)].v);
+        }
+        return points;
+    }
+};
+
 } // namespace
 
-TEST_CASE("A large sphere brush selects every connected coplanar facet", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("A sphere brush covering the whole mesh paints every facet whole", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
@@ -314,7 +346,7 @@ TEST_CASE("A large sphere brush selects every connected coplanar facet", "[Trian
     CHECK(selector.select_unsplit_triangle(Vec3f(2.f, 2.f, 0.f), 0) >= 0);
 }
 
-TEST_CASE("A partial brush conserves area across strict painted facets", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("A partial brush paints the part of the square inside its radius", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
@@ -322,8 +354,10 @@ TEST_CASE("A partial brush conserves area across strict painted facets", "[Trian
 
     const double selected = painted_area(selector, EnforcerBlockerType::ENFORCER);
     const double remaining = painted_area(selector, EnforcerBlockerType::NONE);
-    REQUIRE(selected > 0.);
-    REQUIRE(remaining > 0.);
+    // The radius-3 disk centred at (2, 2) loses two circular segments past x = 0 and y = 0
+    // (9 acos(2/3) - 2 sqrt(5) each) and gets back their small overlap below the origin.
+    const double disk_in_square = 9. * PI - 2. * (9. * std::acos(2. / 3.) - 2. * std::sqrt(5.)) + 0.03;
+    CHECK_THAT(selected, Catch::Matchers::WithinAbs(disk_in_square, 0.5));
     CHECK_THAT(selected + remaining, Catch::Matchers::WithinAbs(100., 1e-4));
 
     std::vector<int> sources;
@@ -335,11 +369,11 @@ TEST_CASE("A partial brush conserves area across strict painted facets", "[Trian
     }
 }
 
-TEST_CASE("Seed fill follows coplanar adjacency and applies its pending state", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Seed fill follows coplanar adjacency and applies its pending state", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
-    selector.seed_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0, Transform3d::Identity(),
+    selector.seed_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0, Transform3d::Identity(),
                                         TriangleSelector::ClippingPlane(), 180.f);
     // Both coplanar facets are selected, so there is no internal contour.
     CHECK(selector.get_seed_fill_contour().empty());
@@ -349,12 +383,13 @@ TEST_CASE("Seed fill follows coplanar adjacency and applies its pending state", 
     CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
 }
 
-TEST_CASE("Seed fill clipping leaves the clipped neighbor untouched", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Seed fill clipping leaves the clipped neighbor untouched", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
-    const TriangleSelector::ClippingPlane clip(std::array<float, 4>{ 0.f, 0.f, 1.f, -1.f });
-    selector.seed_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0, Transform3d::Identity(), clip, 180.f);
+    // Clips points with y - x > 5: only the far corner (0, 10) of facet 1, none of facet 0.
+    const TriangleSelector::ClippingPlane clip(std::array<float, 4>{ -1.f, 1.f, 0.f, 5.f });
+    selector.seed_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0, Transform3d::Identity(), clip, 180.f);
     const auto contour = selector.get_seed_fill_contour();
     REQUIRE_FALSE(contour.empty());
 
@@ -363,13 +398,13 @@ TEST_CASE("Seed fill clipping leaves the clipped neighbor untouched", "[Triangle
     CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 1);
 }
 
-TEST_CASE("Bucket fill distinguishes local selection from propagated selection", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Bucket fill distinguishes local selection from propagated selection", "[TriangleSelector]")
 {
     SECTION("propagate marks both coplanar facets")
     {
         const TriangleMesh mesh = square_mesh();
         TriangleSelector selector(mesh);
-        selector.bucket_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0,
+        selector.bucket_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0,
                                               TriangleSelector::ClippingPlane(), 180.f, true, true);
         selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
         CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 2);
@@ -379,7 +414,7 @@ TEST_CASE("Bucket fill distinguishes local selection from propagated selection",
     {
         const TriangleMesh mesh = square_mesh();
         TriangleSelector selector(mesh);
-        selector.bucket_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0,
+        selector.bucket_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0,
                                               TriangleSelector::ClippingPlane(), 180.f, false, true);
         selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
         CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 1);
@@ -387,7 +422,26 @@ TEST_CASE("Bucket fill distinguishes local selection from propagated selection",
     }
 }
 
-TEST_CASE("State shifts and remapping preserve threshold semantics", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Seed and bucket fill stop at a fold sharper than the angle limit", "[TriangleSelector]")
+{
+    const TriangleMesh mesh(folded_its());
+    for (const auto &[angle, expected] : {std::pair<float, int>{45.f, 1}, std::pair<float, int>{65.f, 2}}) {
+        CAPTURE(angle);
+        TriangleSelector seed(mesh);
+        seed.seed_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0, Transform3d::Identity(),
+                                        TriangleSelector::ClippingPlane(), angle);
+        seed.seed_fill_apply_on_triangles(EnforcerBlockerType::ENFORCER);
+        CHECK(seed.num_facets(EnforcerBlockerType::ENFORCER) == expected);
+
+        TriangleSelector bucket(mesh);
+        bucket.bucket_fill_select_triangles(Vec3f(7.f, 2.f, 0.f), 0,
+                                            TriangleSelector::ClippingPlane(), angle, true, true);
+        bucket.seed_fill_apply_on_triangles(EnforcerBlockerType::ENFORCER);
+        CHECK(bucket.num_facets(EnforcerBlockerType::ENFORCER) == expected);
+    }
+}
+
+TEST_CASE("State shifts and remapping preserve threshold semantics", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
@@ -408,7 +462,7 @@ TEST_CASE("State shifts and remapping preserve threshold semantics", "[TriangleS
     CHECK(selector.num_facets(EnforcerBlockerType::Extruder9) == 1);
 }
 
-TEST_CASE("Grouped facet extraction keeps each whole-face state", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Grouped facet extraction keeps each whole-face state", "[TriangleSelector]")
 {
     const TriangleMesh mesh = square_mesh();
     TriangleSelector selector(mesh);
@@ -425,7 +479,7 @@ TEST_CASE("Grouped facet extraction keeps each whole-face state", "[TriangleSele
     CHECK_THAT(area(grouped[size_t(EnforcerBlockerType::BLOCKER)]), Catch::Matchers::WithinAbs(50., 1e-4));
 }
 
-TEST_CASE("Remapping painting across a translated mesh preserves existing states", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Remapping painting across a translated mesh preserves existing states", "[TriangleSelector]")
 {
     const indexed_triangle_set source_its = square_its();
     const indexed_triangle_set target_its = translated_square_its(20.f);
@@ -449,15 +503,14 @@ TEST_CASE("Remapping painting across a translated mesh preserves existing states
 
     const double restored_enforcer = painted_area(restored, EnforcerBlockerType::ENFORCER);
     const double restored_blocker = painted_area(restored, EnforcerBlockerType::BLOCKER);
-    // Remapping rebuilds split triangles, so the partition boundary can move by a
-    // sub-millimeter amount.  The independent oracle is class preservation plus
-    // conservation of the complete translated square.
+    // Remapping repaints the source facet through a cursor that may overlap the shared diagonal
+    // slightly, so each half may move by a fraction of a square millimetre.
     CHECK_THAT(restored_enforcer + restored_blocker, Catch::Matchers::WithinAbs(100., 1e-3));
-    CHECK(restored_enforcer > 49.);
-    CHECK(restored_blocker > 49.);
+    CHECK_THAT(restored_enforcer, Catch::Matchers::WithinAbs(50., 0.5));
+    CHECK_THAT(restored_blocker, Catch::Matchers::WithinAbs(50., 0.5));
 }
 
-TEST_CASE("Remapping empty painting does not invent target facets", "[TriangleSelector][TriangleSelectorExtended]")
+TEST_CASE("Remapping empty painting does not invent target facets", "[TriangleSelector]")
 {
     const indexed_triangle_set source_its = square_its();
     const indexed_triangle_set target_its = translated_square_its(20.f);
@@ -541,7 +594,7 @@ TEST_CASE("Recursive bucket fill stops at a different-state split-tree boundary"
 TEST_CASE("Bucket fill contours follow a boundary through recursively split facets", "[TriangleSelector][TriangleSelectorRecursive]")
 {
     const TriangleMesh mesh = square_mesh();
-    TriangleSelector selector(mesh);
+    InspectableSelector selector(mesh);
     select_patch(selector, Vec3f(2.f, 2.f, 0.f), 3.f, true);
     const double enforcer_before = painted_area(selector, EnforcerBlockerType::ENFORCER);
     REQUIRE(enforcer_before > 0.);
@@ -555,6 +608,13 @@ TEST_CASE("Bucket fill contours follow a boundary through recursively split face
         CHECK(edge(1) >= 0);
         CHECK(edge(0) != edge(1));
     }
+    // The fill boundary is the edge of the radius-3 patch, not the square's outline or the
+    // shared diagonal; the slack covers the split triangles straddling the brush edge.
+    const std::vector<Vec3f> points = selector.contour_points();
+    CHECK(std::all_of(points.begin(), points.end(), [](const Vec3f &point) {
+        const float distance = (point - Vec3f(2.f, 2.f, 0.f)).norm();
+        return distance > 2.5f && distance < 3.5f;
+    }));
 
     selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
     CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER),
@@ -566,11 +626,70 @@ TEST_CASE("Bucket fill contours follow a boundary through recursively split face
                Catch::Matchers::WithinAbs(100., 1e-3));
 }
 
-} // namespace triangle_selector_extended_contracts
+TEST_CASE("Repainting split facets whole discards their split trees", "[TriangleSelector]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    select_patch(selector, Vec3f::Zero(), 2.f, true);
+    REQUIRE_FALSE(selector.serialize().triangles_to_split.empty());
+    REQUIRE(selector.num_facets(EnforcerBlockerType::ENFORCER) > 2);
+
+    selector.set_facet(0, EnforcerBlockerType::BLOCKER);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    TriangleSelector fresh(mesh);
+    fresh.set_facet(0, EnforcerBlockerType::BLOCKER);
+    fresh.set_facet(1, EnforcerBlockerType::BLOCKER);
+    CHECK(selector.serialize() == fresh.serialize());
+    CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 0);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+
+TEST_CASE("Garbage collection compacts discarded split children without changing the painting", "[TriangleSelector]")
+{
+    const TriangleMesh mesh = square_mesh();
+    InspectableSelector selector(mesh);
+    select_patch(selector, Vec3f::Zero(), 2.f, true);
+    // Collapsing facet 1 leaves its split children behind as garbage while facet 0 keeps a live
+    // split tree whose child indices garbage collection has to renumber.
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    const auto before = selector.serialize();
+    REQUIRE_FALSE(before.triangles_to_split.empty());
+    const double enforcer_before = painted_area(selector, EnforcerBlockerType::ENFORCER);
+    const double none_before     = painted_area(selector, EnforcerBlockerType::NONE);
+    REQUIRE(enforcer_before > 0.);
+    REQUIRE(none_before > 0.);
+    const size_t triangles_before = selector.triangle_count();
+    const size_t garbage_before   = selector.invalid_triangle_count();
+    REQUIRE(garbage_before > 0);
+
+    selector.garbage_collect();
+    CHECK(selector.invalid_triangle_count() == 0);
+    CHECK(selector.triangle_count() == triangles_before - garbage_before);
+    // The surviving split tree of facet 0 serializes identically only if its child indices were
+    // renumbered to the compacted positions.
+    CHECK(selector.serialize() == before);
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::ENFORCER), Catch::Matchers::WithinAbs(enforcer_before, 1e-6));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::NONE), Catch::Matchers::WithinAbs(none_before, 1e-6));
+    CHECK_THAT(painted_area(selector, EnforcerBlockerType::BLOCKER), Catch::Matchers::WithinAbs(50., 1e-4));
+}
+
+TEST_CASE("Used paint states are extracted in state order without duplicates", "[TriangleSelector]")
+{
+    TriangleSelector::TriangleSplittingData data;
+    data.used_states.assign(size_t(EnforcerBlockerType::ExtruderMax) + 1, false);
+    CHECK(TriangleSelector::extract_used_facet_states(data).empty());
+    data.used_states[32] = true;
+    data.used_states[1] = true;
+    data.used_states[17] = true;
+    const std::vector<EnforcerBlockerType> expected{
+        EnforcerBlockerType::Extruder1, EnforcerBlockerType::Extruder17, EnforcerBlockerType::Extruder32};
+    CHECK(TriangleSelector::extract_used_facet_states(data) == expected);
+}
+
+} // namespace triangle_selector_painting
 
 namespace triangle_cursor_contracts {
-
-using namespace Slic3r;
 
 namespace {
 using Selector = TriangleSelector;
@@ -756,7 +875,9 @@ TEST_CASE("Swept brushes detect edges across the middle of the stroke", "[Triang
 {
     const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto brush = swept(kind);
-    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(10, 4, 0)}));
+    // Only the x = 3 edge comes within the radius, and it stays more than a radius away from
+    // both centres (0,0,0) and (6,0,0), so only the cylinder/rectangle test can accept it.
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(3.1f, 4, 0)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 4, 0), Vec3f(3, 8, 0), Vec3f(10, 8, 0)}));
 }
 
@@ -772,7 +893,9 @@ TEST_CASE("Transformed brush edge tests agree with their world-space radius", "[
 {
     const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto brush = swept(kind, stretch());
-    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+    // In world space the stroke runs from (14,-6,20) to (26,-6,20). The positive triangle maps to
+    // x ~ 20, at least 4 from either centre, so it can only hit the middle of the stroke.
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(3.1f, 2, 0)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 1, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
 }
 
@@ -803,21 +926,11 @@ TEST_CASE("Height brushes detect triangles spanning the band without an interior
     CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 0), Vec3f(1, 0, 1), Vec3f(0, 1, 1)}));
     CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 6), Vec3f(1, 0, 8), Vec3f(0, 1, 8)}));
-    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, 5.00005f), Vec3f(1, 0, 5.00005f), Vec3f(0, 1, 5.00005f)}));
-    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, 5.0002f), Vec3f(1, 0, 5.0002f), Vec3f(0, 1, 5.0002f)}));
-}
-
-TEST_CASE("Used paint states are extracted in state order without duplicates", "[TriangleSelector][TriangleCursor]")
-{
-    Selector::TriangleSplittingData data;
-    data.used_states.assign(size_t(EnforcerBlockerType::ExtruderMax) + 1, false);
-    CHECK(Selector::extract_used_facet_states(data).empty());
-    data.used_states[32] = true;
-    data.used_states[1] = true;
-    data.used_states[17] = true;
-    const std::vector<EnforcerBlockerType> expected{
-        EnforcerBlockerType::Extruder1, EnforcerBlockerType::Extruder17, EnforcerBlockerType::Extruder32};
-    CHECK(Selector::extract_used_facet_states(data) == expected);
+    // The edge test widens the [2, 5] band by EPSILON on each side.
+    const float just_inside  = float(5. + EPSILON / 2.);
+    const float just_outside = float(5. + EPSILON * 2.);
+    CHECK(CursorInput::edge(*brush, {Vec3f(0, 0, just_inside), Vec3f(1, 0, just_inside), Vec3f(0, 1, just_inside)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(0, 0, just_outside), Vec3f(1, 0, just_outside), Vec3f(0, 1, just_outside)}));
 }
 
 namespace triangle_cursor_end_to_end_contracts {
@@ -928,8 +1041,11 @@ TEST_CASE("Coplanar paint selection reaches an adjacent facet through the shared
 }
 }
 
+
 TEST_CASE("Cursor round ends exclude exact radius while capsule middle includes its boundary", "[TriangleSelector][TriangleCursor]")
 {
+    // Pins current behavior: the round ends compare with `<` and the capsule body with `<=`.
+    // Nothing relies on the difference; update this test if the comparisons are unified.
     const auto single_kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
     const auto single_brush = single(single_kind);
     CHECK(single_brush->is_mesh_point_inside(Vec3f(1.999f, 0, 0)));

@@ -429,6 +429,9 @@ namespace client
         expr floor(const Iterator start_pos)const
         {
             switch (this->type()) {
+            case TYPE_EMPTY:
+                // Inside an if / else block to be skipped.
+                return expr();
             case TYPE_INT:
                 return expr(this->i(), start_pos, this->it_range.end());
             case TYPE_DOUBLE:
@@ -444,6 +447,9 @@ namespace client
         expr ceil(const Iterator start_pos)const
         {
             switch (this->type()) {
+            case TYPE_EMPTY:
+                // Inside an if / else block to be skipped.
+                return expr();
             case TYPE_INT:
                 return expr(this->i(), start_pos, this->it_range.end());
             case TYPE_DOUBLE:
@@ -2333,7 +2339,8 @@ namespace client
                     additive_expression(_r1)                [_val  = _1]
                 >> *(   ("<="     > additive_expression(_r1) ) [px::bind(&expr::leq,     _val, _1)]
                     |   (">="     > additive_expression(_r1) ) [px::bind(&expr::geq,     _val, _1)]
-                    |   (lit('<') > additive_expression(_r1) ) [px::bind(&expr::lower,   _val, _1)]
+                    // A '<' followed by '>' is the "<>" spelling of "!=", which equality_expression parses.
+                    |   ((lit('<') >> !lit('>')) > additive_expression(_r1) ) [px::bind(&expr::lower,   _val, _1)]
                     |   (lit('>') > additive_expression(_r1) ) [px::bind(&expr::greater, _val, _1)]
                     );
             relational_expression.name("relational_expression");

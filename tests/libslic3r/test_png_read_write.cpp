@@ -46,14 +46,17 @@ png::ReadBuf buf_of(const std::vector<uint8_t> &bytes, size_t size)
     return png::ReadBuf{ bytes.data(), size };
 }
 
+std::vector<uint8_t> read_bytes(const std::string &path)
+{
+    std::ifstream ifs(path, std::ios::binary);
+    std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>()};
+    REQUIRE_FALSE(bytes.empty());
+    return bytes;
+}
+
 png::ImageGreyscale read_gray_file(const std::string &path)
 {
-    std::vector<uint8_t> bytes;
-    {
-        std::ifstream ifs(path, std::ios::binary);
-        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
-    }
-    REQUIRE_FALSE(bytes.empty());
+    const std::vector<uint8_t> bytes = read_bytes(path);
     png::ImageGreyscale image;
     REQUIRE(png::decode_png(buf_of(bytes, bytes.size()), image));
     return image;
@@ -61,12 +64,7 @@ png::ImageGreyscale read_gray_file(const std::string &path)
 
 png::ImageColorscale read_color_file(const std::string &path)
 {
-    std::vector<uint8_t> bytes;
-    {
-        std::ifstream ifs(path, std::ios::binary);
-        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
-    }
-    REQUIRE_FALSE(bytes.empty());
+    const std::vector<uint8_t> bytes = read_bytes(path);
     png::ImageColorscale image;
     REQUIRE(png::decode_colored_png(buf_of(bytes, bytes.size()), image));
     return image;
@@ -113,7 +111,8 @@ TEST_CASE("A PNG whose body is garbage is refused", "[PNG]") {
     CHECK_FALSE(png::decode_colored_png(buf_of(bytes, bytes.size()), colour));
 }
 
-
+// Each writer has const char *, std::string + pointer and std::string + vector overloads; all three must
+// produce the same image. Scaling repeats every pixel scale x scale times without smoothing.
 TEST_CASE("Grayscale PNG writer overloads preserve pixels and nearest-neighbor scaling", "[PNG]") {
     constexpr size_t width = 2;
     constexpr size_t height = 3;
@@ -124,48 +123,39 @@ TEST_CASE("Grayscale PNG writer overloads preserve pixels and nearest-neighbor s
         177, 177, 241, 241, 177, 177, 241, 241
     };
 
-    ScopedTemporaryFile char_writer(".png");
-    ScopedTemporaryFile pointer_writer(".png");
-    ScopedTemporaryFile vector_writer(".png");
-    const std::string char_path = char_writer.string();
-    const std::string pointer_path = pointer_writer.string();
-    const std::string vector_path = vector_writer.string();
-    REQUIRE(png::write_gray_to_file(char_path.c_str(), width, height, pixels.data()));
-    REQUIRE(png::write_gray_to_file(pointer_path, width, height, pixels.data()));
-    REQUIRE(png::write_gray_to_file(vector_path, width, height, pixels));
-
-    for (const std::string &path : {char_path, pointer_path, vector_path}) {
-        const png::ImageGreyscale image = read_gray_file(path);
+    ScopedTemporaryFile by_char(".png"), by_pointer(".png"), by_vector(".png");
+    REQUIRE(png::write_gray_to_file(by_char.string().c_str(), width, height, pixels.data()));
+    REQUIRE(png::write_gray_to_file(by_pointer.string(), width, height, pixels.data()));
+    REQUIRE(png::write_gray_to_file(by_vector.string(), width, height, pixels));
+    for (const ScopedTemporaryFile *file : {&by_char, &by_pointer, &by_vector}) {
+        const png::ImageGreyscale image = read_gray_file(file->string());
         CHECK(image.cols == width);
         CHECK(image.rows == height);
         CHECK(image.buf == pixels);
     }
 
-    ScopedTemporaryFile scaled_char_writer(".png");
-    ScopedTemporaryFile scaled_pointer_writer(".png");
-    ScopedTemporaryFile scaled_vector_writer(".png");
-    ScopedTemporaryFile scale_one_writer(".png");
-    const std::string scaled_char_path = scaled_char_writer.string();
-    const std::string scaled_pointer_path = scaled_pointer_writer.string();
-    const std::string scaled_vector_path = scaled_vector_writer.string();
-    const std::string scale_one_path = scale_one_writer.string();
-    REQUIRE(png::write_gray_to_file_scaled(scaled_char_path.c_str(), width, height, pixels.data(), 2));
-    REQUIRE(png::write_gray_to_file_scaled(scaled_pointer_path, width, height, pixels.data(), 2));
-    REQUIRE(png::write_gray_to_file_scaled(scaled_vector_path, width, height, pixels, 2));
-    REQUIRE(png::write_gray_to_file_scaled(scale_one_path, width, height, pixels, 1));
-
-    for (const std::string &path : {scaled_char_path, scaled_pointer_path, scaled_vector_path}) {
-        const png::ImageGreyscale image = read_gray_file(path);
+    ScopedTemporaryFile scaled_char(".png"), scaled_pointer(".png"), scaled_vector(".png");
+    ScopedTemporaryFile scale_one_char(".png"), scale_one_vector(".png");
+    REQUIRE(png::write_gray_to_file_scaled(scaled_char.string().c_str(), width, height, pixels.data(), 2));
+    REQUIRE(png::write_gray_to_file_scaled(scaled_pointer.string(), width, height, pixels.data(), 2));
+    REQUIRE(png::write_gray_to_file_scaled(scaled_vector.string(), width, height, pixels, 2));
+    REQUIRE(png::write_gray_to_file_scaled(scale_one_char.string().c_str(), width, height, pixels.data(), 1));
+    REQUIRE(png::write_gray_to_file_scaled(scale_one_vector.string(), width, height, pixels, 1));
+    for (const ScopedTemporaryFile *file : {&scaled_char, &scaled_pointer, &scaled_vector}) {
+        const png::ImageGreyscale image = read_gray_file(file->string());
         CHECK(image.cols == width * 2);
         CHECK(image.rows == height * 2);
         CHECK(image.buf == scaled_pixels);
     }
-    const png::ImageGreyscale scale_one = read_gray_file(scale_one_path);
-    CHECK(scale_one.cols == width);
-    CHECK(scale_one.rows == height);
-    CHECK(scale_one.buf == pixels);
+    for (const ScopedTemporaryFile *file : {&scale_one_char, &scale_one_vector}) {
+        const png::ImageGreyscale unscaled = read_gray_file(file->string());
+        CHECK(unscaled.cols == width);
+        CHECK(unscaled.rows == height);
+        CHECK(unscaled.buf == pixels);
+    }
 }
 
+// decode_colored_png() hands rows back last row first, so a top-down RGB image decodes upside down.
 TEST_CASE("RGB PNG writer overloads preserve channels and decoded row order", "[PNG]") {
     constexpr size_t width = 2;
     constexpr size_t height = 3;
@@ -188,62 +178,57 @@ TEST_CASE("RGB PNG writer overloads preserve channels and decoded row order", "[
         1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6
     };
 
-    ScopedTemporaryFile char_writer(".png");
-    ScopedTemporaryFile pointer_writer(".png");
-    ScopedTemporaryFile vector_writer(".png");
-    const std::string char_path = char_writer.string();
-    const std::string pointer_path = pointer_writer.string();
-    const std::string vector_path = vector_writer.string();
-    REQUIRE(png::write_rgb_to_file(char_path.c_str(), width, height, pixels.data()));
-    REQUIRE(png::write_rgb_to_file(pointer_path, width, height, pixels.data()));
-    REQUIRE(png::write_rgb_to_file(vector_path, width, height, pixels));
-
-    for (const std::string &path : {char_path, pointer_path, vector_path}) {
-        const png::ImageColorscale image = read_color_file(path);
+    ScopedTemporaryFile by_char(".png"), by_pointer(".png"), by_vector(".png");
+    REQUIRE(png::write_rgb_to_file(by_char.string().c_str(), width, height, pixels.data()));
+    REQUIRE(png::write_rgb_to_file(by_pointer.string(), width, height, pixels.data()));
+    REQUIRE(png::write_rgb_to_file(by_vector.string(), width, height, pixels));
+    for (const ScopedTemporaryFile *file : {&by_char, &by_pointer, &by_vector}) {
+        const png::ImageColorscale image = read_color_file(file->string());
         CHECK(image.cols == width);
         CHECK(image.rows == height);
         CHECK(image.bytes_per_pixel == 3);
         CHECK(image.buf == decoded_bottom_up);
     }
 
-    ScopedTemporaryFile scaled_char_writer(".png");
-    ScopedTemporaryFile scaled_pointer_writer(".png");
-    ScopedTemporaryFile scaled_vector_writer(".png");
-    ScopedTemporaryFile scale_one_writer(".png");
-    const std::string scaled_char_path = scaled_char_writer.string();
-    const std::string scaled_pointer_path = scaled_pointer_writer.string();
-    const std::string scaled_vector_path = scaled_vector_writer.string();
-    const std::string scale_one_path = scale_one_writer.string();
-    REQUIRE(png::write_rgb_to_file_scaled(scaled_char_path.c_str(), width, height, pixels.data(), 2));
-    REQUIRE(png::write_rgb_to_file_scaled(scaled_pointer_path, width, height, pixels.data(), 2));
-    REQUIRE(png::write_rgb_to_file_scaled(scaled_vector_path, width, height, pixels, 2));
-    REQUIRE(png::write_rgb_to_file_scaled(scale_one_path.c_str(), width, height, pixels.data(), 1));
-
-    for (const std::string &path : {scaled_char_path, scaled_pointer_path, scaled_vector_path}) {
-        const png::ImageColorscale image = read_color_file(path);
+    ScopedTemporaryFile scaled_char(".png"), scaled_pointer(".png"), scaled_vector(".png"), scale_one(".png");
+    REQUIRE(png::write_rgb_to_file_scaled(scaled_char.string().c_str(), width, height, pixels.data(), 2));
+    REQUIRE(png::write_rgb_to_file_scaled(scaled_pointer.string(), width, height, pixels.data(), 2));
+    REQUIRE(png::write_rgb_to_file_scaled(scaled_vector.string(), width, height, pixels, 2));
+    REQUIRE(png::write_rgb_to_file_scaled(scale_one.string().c_str(), width, height, pixels.data(), 1));
+    for (const ScopedTemporaryFile *file : {&scaled_char, &scaled_pointer, &scaled_vector}) {
+        const png::ImageColorscale image = read_color_file(file->string());
         CHECK(image.cols == width * 2);
         CHECK(image.rows == height * 2);
         CHECK(image.bytes_per_pixel == 3);
         CHECK(image.buf == scaled_bottom_up);
     }
-    const png::ImageColorscale scale_one = read_color_file(scale_one_path);
-    CHECK(scale_one.cols == width);
-    CHECK(scale_one.rows == height);
-    CHECK(scale_one.bytes_per_pixel == 3);
-    CHECK(scale_one.buf == decoded_bottom_up);
+    const png::ImageColorscale unscaled = read_color_file(scale_one.string());
+    CHECK(unscaled.cols == width);
+    CHECK(unscaled.rows == height);
+    CHECK(unscaled.bytes_per_pixel == 3);
+    CHECK(unscaled.buf == decoded_bottom_up);
 }
 
 TEST_CASE("Colored PNG decoding rejects a non-PNG signature", "[PNG]") {
-    const std::vector<uint8_t> invalid_signature(8, 0);
+    // A valid RGB PNG whose only defect is its signature, so nothing but the signature check refuses it.
+    ScopedTemporaryFile file(".png");
+    const std::vector<uint8_t> pixels{1, 2, 3};
+    REQUIRE(png::write_rgb_to_file(file.string(), 1, 1, pixels));
+    std::vector<uint8_t> bytes = read_bytes(file.string());
+
     png::ImageColorscale image;
+    REQUIRE(png::decode_colored_png(buf_of(bytes, bytes.size()), image));
+    bytes[0] = 0;
+    CHECK_FALSE(png::decode_colored_png(buf_of(bytes, bytes.size()), image));
+
+    const std::vector<uint8_t> invalid_signature(8, 0);
     CHECK_FALSE(png::decode_colored_png(buf_of(invalid_signature, invalid_signature.size()), image));
 }
 
 TEST_CASE("PNG writing fails beneath a missing temporary child directory", "[PNG]") {
     ScopedTemporaryDir temporary_root("orca_png_writer_failure");
     const boost::filesystem::path absent_parent = temporary_root.path() / "missing-child";
-    const boost::filesystem::path absent_file = absent_parent / "image.png";
     const std::vector<uint8_t> pixel{42};
-    CHECK_FALSE(png::write_gray_to_file(absent_file.string(), 1, 1, pixel));
+    CHECK_FALSE(png::write_gray_to_file((absent_parent / "image.png").string(), 1, 1, pixel));
     CHECK_FALSE(boost::filesystem::exists(absent_parent));
 }

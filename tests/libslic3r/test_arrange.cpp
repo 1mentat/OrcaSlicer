@@ -1,10 +1,10 @@
+#include <memory>
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/TriangleMesh.hpp"
-#include <initializer_list>
-#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <catch2/catch_all.hpp>
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Polygon.hpp"
@@ -15,10 +15,12 @@
 #include <limits>
 #include <cstddef>
 #include <cmath>
+#include <initializer_list>
 
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
 #include "libslic3r/Arrange.hpp"
@@ -447,7 +449,6 @@ ArrangePolygon rectangle(double width_mm, double height_mm, double x_mm = 0., do
                                      Point(x + scaled(width_mm), y + scaled(height_mm)),
                                      Point(x, y + scaled(height_mm))}});
     result.bed_idx = 0;
-    result.extrude_ids = {1};
     return result;
 }
 
@@ -456,12 +457,12 @@ double area(const ArrangePolygon &item)
     return item.transformed_poly().area();
 }
 
-double ex_area(const ExPolygons &polygons)
+// Serial evaluation keeps the placement independent of thread scheduling.
+ArrangeParams serial_params(coord_t min_dist = 0)
 {
-    double total = 0.;
-    for (const ExPolygon &polygon : polygons)
-        total += polygon.area();
-    return total;
+    ArrangeParams params = quiet_params(min_dist);
+    params.parallel      = false;
+    return params;
 }
 
 bool inside_circle(const BoundingBox &box, const Point &center, double radius)
@@ -470,7 +471,7 @@ bool inside_circle(const BoundingBox &box, const Point &center, double radius)
                                 Point(box.max.x(), box.min.y()), box.max}) {
         const double dx = double(corner.x() - center.x());
         const double dy = double(corner.y() - center.y());
-        if (std::hypot(dx, dy) > radius + scaled(.01))
+        if (std::hypot(dx, dy) > radius)
             return false;
     }
     return true;
@@ -491,6 +492,7 @@ TEST_CASE("ArrangePolygon transforms the retained contour without mutating its s
     const double s = std::sin(item.rotation);
     REQUIRE(transformed.contour.points.size() == source.contour.points.size());
     for (size_t i = 0; i < source.contour.points.size(); ++i) {
+        // Rotation about the origin first, then translation.
         const Point &point = source.contour.points[i];
         const Point expected(
             coord_t(std::round(c * double(point.x()) - s * double(point.y()))) + item.translation.x(),
@@ -515,7 +517,185 @@ TEST_CASE("ArrangePolygon applies its setter once and records that it was applie
     CHECK(item.is_arranged());
 }
 
-TEST_CASE("ArrangeParams serializes the distance and optimization controls", "[Arrange][ArrangeSurface]")
+TEST_CASE("Arrange dispatches an empty point bed as an infinite bed centred on the origin", "[Arrange][ArrangeSurface]")
+{
+    // A 1 m square fits no finite printer bed, so only the infinite bed places it.
+    ArrangePolygons items{rectangle(1000., 1000., 300., 400.)};
+    arrange(items, Points{}, serial_params());
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
+    REQUIRE(items.front().bed_idx == 0);
+    CHECK(items.front().transformed_poly().area() > 0.);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(0., .01));
+    CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(0., .01));
+}
+
+TEST_CASE("Arrange dispatches a one-point bed as an infinite bed around that point", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygons items{rectangle(1000., 1000.)};
+    arrange(items, Points{Point(scaled(100.), scaled(75.))}, serial_params());
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
+    REQUIRE(items.front().bed_idx == 0);
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK(box.defined);
+    CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(100., .01));
+    CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(75., .01));
+}
+
+TEST_CASE("Arrange keeps every part inside a rectangular point bed", "[Arrange][ArrangeSurface]")
+{
+    // The parts start outside the bed, so staying inside requires placement.
+    ArrangePolygons items{rectangle(20., 10., -50.), rectangle(15., 15., -50.), rectangle(8., 22., -50.)};
+    const Points bed{Point(0, 0), Point(scaled(100.), 0), Point(scaled(100.), scaled(80.)), Point(0, scaled(80.))};
+    arrange(items, bed, serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(BoundingBox(bed).contains(item.transformed_poly().contour.bounding_box()));
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange treats equidistant bed points as a circular bed", "[Arrange][ArrangeSurface]")
+{
+    // The four cardinal points of a 100 mm circle. A 140x80 rectangle fits the
+    // circle (half-diagonal 80.6 mm) but not the diamond those points enclose
+    // (70 + 40 > 100), so it is placed only if the points become a CircleBed.
+    // Rotations are disabled so no fitter can hide the dispatch choice.
+    ArrangePolygons items{rectangle(140., 80.)};
+    const Point center(scaled(100.), scaled(100.));
+    const Points bed{Point(center.x() + scaled(100.), center.y()), Point(center.x(), center.y() + scaled(100.)),
+                     Point(center.x() - scaled(100.), center.y()), Point(center.x(), center.y() - scaled(100.))};
+    ArrangeParams params = serial_params();
+    params.allow_rotations = false;
+    arrange(items, bed, params);
+    REQUIRE(items.front().bed_idx == 0);
+    CHECK(inside_circle(items.front().transformed_poly().contour.bounding_box(), center, scaled(100.01)));
+}
+
+TEST_CASE("Arrange leaves an invalid contour unarranged while placing the valid contours before it", "[Arrange][ArrangeSurface]")
+{
+    ArrangePolygon invalid;
+    invalid.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    ArrangePolygons items{rectangle(10., 10., 500.), invalid};
+    arrange(items, bed(100., 100.), serial_params());
+    REQUIRE(items[0].bed_idx == 0);
+    CHECK(bed(100., 100.).contains(items[0].transformed_poly().contour.bounding_box()));
+    CHECK(items[1].bed_idx == UNARRANGED);
+}
+
+TEST_CASE("Arrange keeps results aligned with their items when an invalid contour comes first", "[Arrange][ArrangeSurface]")
+{
+    // Callers seed bed_idx to 0 before arranging (see get_arrange_polys).
+    ArrangePolygon invalid;
+    invalid.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    invalid.bed_idx = 0;
+    invalid.translation = Vec2crd(scaled(5.), scaled(6.));
+    invalid.rotation = .25;
+    ArrangePolygons items{invalid, rectangle(10., 10., 500.)};
+    arrange(items, bed(100., 100.), serial_params());
+    CHECK(items[0].bed_idx == UNARRANGED);
+    // The skipped item keeps its input transform.
+    CHECK(items[0].translation == invalid.translation);
+    CHECK_THAT(items[0].rotation, WithinAbs(.25, 1e-12));
+    REQUIRE(items[1].bed_idx == 0);
+    CHECK(bed(100., 100.).contains(items[1].transformed_poly().contour.bounding_box()));
+}
+
+TEST_CASE("Arrange keeps footprints inside a CircleBed and disjoint", "[Arrange][ArrangeSurface]")
+{
+    // The origin lies outside this circle, so the parts must be moved onto it.
+    ArrangePolygons items{rectangle(20., 10.), rectangle(12., 18.), rectangle(9., 9.)};
+    const std::vector<double> original_areas{
+        items[0].transformed_poly().area(), items[1].transformed_poly().area(), items[2].transformed_poly().area()};
+    const Point center(scaled(100.), scaled(100.));
+    arrange(items, CircleBed(center, scaled(100.)), serial_params(scaled(1.)));
+    REQUIRE(items.size() == original_areas.size());
+    for (size_t i = 0; i < items.size(); ++i) {
+        const ArrangePolygon &item = items[i];
+        REQUIRE(std::isfinite(item.rotation));
+        REQUIRE(item.bed_idx == 0);
+        CHECK_THAT(item.transformed_poly().area(), WithinRel(original_areas[i], 1e-8));
+        CHECK(inside_circle(item.transformed_poly().contour.bounding_box(), center, scaled(100.01)));
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange keeps convex polygon-bed footprints inside and disjoint", "[Arrange][ArrangeSurface]")
+{
+    // A hexagon that excludes the origin, where the parts start.
+    const Polygon bed_poly{{Point(scaled(10.), scaled(10.)), Point(scaled(190.), scaled(10.)),
+                            Point(scaled(200.), scaled(100.)), Point(scaled(190.), scaled(190.)),
+                            Point(scaled(10.), scaled(190.)), Point(0, scaled(100.))}};
+    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
+    arrange(items, bed_poly, serial_params(scaled(1.)));
+    REQUIRE(items.size() == 2);
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(std::isfinite(item.rotation));
+        REQUIRE(item.bed_idx == 0);
+        const ExPolygon transformed = item.transformed_poly();
+        REQUIRE_FALSE(transformed.contour.points.empty());
+        REQUIRE(transformed.contour.bounding_box().defined);
+        CHECK_THAT(transformed.area(), WithinRel(item.poly.area(), 1e-8));
+        CHECK(diff_ex(transformed, bed_poly).empty());
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange keeps a fixed exclusion outside every arranged footprint", "[Arrange][ArrangeSurface]")
+{
+    // The fixed item covers the bed centre, where the pile would otherwise be aligned.
+    const ArrangePolygon fixed = rectangle(30., 30., 45., 45.);
+    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
+    const ExPolygon fixed_shape = fixed.transformed_poly();
+    arrange(items, {fixed}, bed(120., 120.), serial_params(scaled(1.)));
+    for (const ArrangePolygon &item : items) {
+        REQUIRE(item.bed_idx == 0);
+        CHECK(intersection_ex(item.transformed_poly(), fixed_shape).empty());
+    }
+    require_no_overlap(items);
+}
+
+TEST_CASE("Arrange rotates an oversized item to fit only when rotations are allowed", "[Arrange][ArrangeSurface]")
+{
+    // 120 mm wide does not fit a 50 mm wide bed, but 120 mm tall fits its 130 mm height.
+    ArrangePolygons disabled{rectangle(120., 30.)};
+    ArrangeParams no_rotations = serial_params();
+    no_rotations.allow_rotations = false;
+    arrange(disabled, bed(50., 130.), no_rotations);
+    REQUIRE(disabled.size() == 1);
+    REQUIRE(std::isfinite(disabled.front().rotation));
+    CHECK(disabled.front().bed_idx == UNARRANGED);
+
+    ArrangePolygons fitting{rectangle(35., 12.)};
+    arrange(fitting, bed(100., 100.), no_rotations);
+    REQUIRE(fitting.size() == 1);
+    REQUIRE(std::isfinite(fitting.front().rotation));
+    REQUIRE(fitting.front().bed_idx == 0);
+    CHECK_THAT(fitting.front().rotation, WithinAbs(0., 1e-12));
+
+    ArrangePolygons enabled{rectangle(120., 30.)};
+    const double source_area = enabled.front().transformed_poly().area();
+    ArrangeParams rotations = serial_params();
+    rotations.allow_rotations = true;
+    arrange(enabled, bed(50., 130.), rotations);
+    REQUIRE(enabled.size() == 1);
+    REQUIRE(std::isfinite(enabled.front().rotation));
+    REQUIRE(enabled.front().bed_idx == 0);
+    CHECK(std::abs(std::sin(enabled.front().rotation)) > .9);
+    CHECK_THAT(enabled.front().transformed_poly().area(), WithinRel(source_area, 1e-6));
+    CHECK(enabled.front().transformed_poly().contour.bounding_box().defined);
+    CHECK(bed(50., 130.).contains(enabled.front().transformed_poly().contour.bounding_box()));
+}
+
+} // namespace arrange_surface_contracts
+
+namespace arrange_param_contracts {
+using Catch::Matchers::WithinAbs;
+using arrange_surface_contracts::rectangle;
+
+TEST_CASE("ArrangeParams serializes the distance and optimization controls as JSON", "[Arrange][ArrangeParams]")
 {
     ArrangeParams params = quiet_params(scaled(1.5));
     params.accuracy = .25f;
@@ -530,14 +710,8 @@ TEST_CASE("ArrangeParams serializes the distance and optimization controls", "[A
     params.clearance_height_to_lid = 6.f;
     params.clearance_radius = 7.f;
     params.printable_height = 8.f;
-    // ArrangeParams::to_json() currently returns the object body with a final
-    // comma; close that serialization fragment before parsing so
-    // field values are checked structurally rather than by substrings.
-    std::string serialized = params.to_json();
-    REQUIRE(!serialized.empty());
-    REQUIRE(serialized.back() == ',');
-    serialized.back() = '}';
-    const nlohmann::json json = nlohmann::json::parse(serialized);
+    const nlohmann::json json = nlohmann::json::parse(params.to_json(), nullptr, false);
+    REQUIRE_FALSE(json.is_discarded());
     CHECK(json.at("min_obj_distance") == params.min_obj_distance);
     CHECK_THAT(json.at("accuracy").get<double>(), WithinAbs(.25, 1e-12));
     CHECK(json.at("parallel") == 0);
@@ -553,6 +727,513 @@ TEST_CASE("ArrangeParams serializes the distance and optimization controls", "[A
     CHECK_THAT(json.at("printable_height").get<double>(), WithinAbs(8., 1e-12));
 }
 
+TEST_CASE("Axis alignment turns the long axis of an asymmetric contour onto Y", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{rectangle(20., 60.)};
+    items.front().rotation = .37;
+    const double source_area = items.front().transformed_poly().area();
+    ArrangeParams params = quiet_params();
+
+    // The alignment only runs when it is requested.
+    update_selected_items_axis_align(items, nullptr, params);
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    REQUIRE(items.size() == 1);
+    REQUIRE(std::isfinite(items.front().rotation));
+    const BoundingBox box = items.front().transformed_poly().contour.bounding_box();
+    CHECK_THAT(unscaled<double>(box.size().x()), WithinAbs(20., .01));
+    CHECK_THAT(unscaled<double>(box.size().y()), WithinAbs(60., .01));
+    CHECK_THAT(items.front().transformed_poly().area(), WithinRel(source_area, 1e-6));
+}
+
+TEST_CASE("Axis alignment leaves a contour without a dominant axis unrotated", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items{make_square(scaled(30.))};
+    items.front().rotation = .37;
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Axis alignment ignores a degenerate contour", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygon item;
+    item.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
+    item.rotation = .37;
+    ArrangePolygons items{item};
+    ArrangeParams params = quiet_params();
+    params.align_to_y_axis = true;
+    update_selected_items_axis_align(items, nullptr, params);
+    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
+}
+
+TEST_CASE("Selected inflation uses half the widest tree-support brim for the whole plate", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 20.);
+    items[0].brim_width = 1.;
+    items[1].brim_width = 4.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+
+    // Without tree support each item keeps its own brim.
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(1.));
+    CHECK(items[1].inflation == scaled(4.));
+
+    items[1].has_tree_support = true;
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items[0].inflation == scaled(2.));
+    CHECK(items[1].inflation == scaled(2.));
+}
+
+TEST_CASE("Selected inflation gives an explicit minimum distance precedence over brim", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(1, 20.);
+    items.front().brim_width = 8.;
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params(scaled(6.));
+    update_selected_items_inflation(items, &config, params);
+    CHECK(items.front().inflation == scaled(3.));
+}
+
+TEST_CASE("Unselected inflation distinguishes ordinary, virtual, and calibration regions", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(3, 10.);
+    items[0].brim_width = 3.;
+    items[1].is_virt_object = true;
+    items[2].is_virt_object = true;
+    items[2].is_extrusion_cali_object = true;
+    const ArrangeParams params = quiet_params();
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].inflation == scaled(3.));
+    CHECK(items[1].inflation == scaled(1.));
+    CHECK(items[2].inflation == 0);
+
+    const DynamicPrintConfig empty_config;
+    update_unselected_items_inflation(items, &empty_config, params);
+    CHECK(items[0].inflation == scaled(3.));
+    CHECK(items[1].inflation == scaled(1.));
+    CHECK(items[2].inflation == 0);
+}
+
+TEST_CASE("Sequential printing moves only virtual exclusion regions by the bed shrink", "[Arrange][ArrangeParams]")
+{
+    ArrangePolygons items = squares(2, 10.);
+    items[0].is_virt_object = true;
+    const Point virt_before = items[0].poly.contour.points.front();
+    const Point real_before = items[1].poly.contour.points.front();
+    ArrangeParams params = quiet_params();
+    params.is_seq_print = true;
+    params.bed_shrink_x = 4.f;
+    params.bed_shrink_y = 6.f;
+    update_unselected_items_inflation(items, nullptr, params);
+    CHECK(items[0].poly.contour.points.front() == Point(virt_before.x() + scaled(4.), virt_before.y() + scaled(6.)));
+    CHECK(items[1].poly.contour.points.front() == real_before);
+}
+
+TEST_CASE("Arrange parameter update adds the real skirt clearance and sequential correction", "[Arrange][ArrangeParams]")
+{
+    // Skirt clearance is skirt_distance plus skirt_loops line widths: 3 + 2 * 0.4 = 3.8 mm.
+    DynamicPrintConfig config;
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(2));
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.f));
+    config.set_key_value("line_width", new ConfigOptionFloat(.4f));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(.4, false));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({.4}));
+    config.set_key_value("printable_area", new ConfigOptionPoints{{0, 0}, {200, 0}, {200, 200}, {0, 200}});
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 10.f;
+    params.bed_shrink_y = 11.f;
+    params.clearance_radius = 4.f;
+
+    SECTION("by-layer printing adds the skirt clearance") {
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(13.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(14.8, 1e-5));
+    }
+    SECTION("sequential printing also gives back half the clearance radius") {
+        params.is_seq_print = true;
+        update_arrange_params(params, &config, {});
+        CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_x, WithinAbs(11.8, 1e-5));
+        CHECK_THAT(params.bed_shrink_y, WithinAbs(12.8, 1e-5));
+    }
+}
+
+TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Arrange][ArrangeParams]")
+{
+    DynamicPrintConfig config = bed_config();
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = 5.f;
+    params.bed_shrink_y = 7.f;
+    const Points points = get_shrink_bedpts(&config, params);
+    REQUIRE(points.size() == 4);
+    const BoundingBox box(points);
+    CHECK(box.min.x() == scaled(5.));
+    CHECK(box.max.x() == scaled(195.));
+    CHECK(box.min.y() == scaled(7.));
+    CHECK(box.max.y() == scaled(193.));
+}
+
+} // namespace arrange_param_contracts
+
+namespace model_arrange_contracts {
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+// One 20 mm cube object with an instance at each given XY offset.
+Model arrange_model(const std::vector<Vec2d> &offsets = {Vec2d::Zero()})
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name = "model-arrange-contract.stl";
+    ModelVolume *volume = object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
+    REQUIRE(volume != nullptr);
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    for (const Vec2d &offset : offsets) {
+        ModelInstance *instance = object->add_instance();
+        REQUIRE(instance != nullptr);
+        instance->set_offset(to_3d(offset, 0.));
+    }
+    return model;
+}
+
+Model arrange_model(size_t instance_count)
+{
+    return arrange_model(std::vector<Vec2d>(instance_count, Vec2d::Zero()));
+}
+
+// Supplies only the fields ModelArrange reads, with a distinct value per filament
+// so the tests can tell which filament's value was picked.
+DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", enable_support},
+        {"support_type", support_type},
+        {"curr_bed_type", "Cool Plate"},
+        {"cool_plate_temp", "65,66"},
+        {"cool_plate_temp_initial_layer", "70,71"},
+        {"nozzle_temperature", "205,206"},
+        {"nozzle_temperature_initial_layer", "215,216"},
+        {"temperature_vitrification", "90,91"}
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PC"}));
+    return config;
+}
+
+void require_bounded_arrange_polygon(const ArrangePolygon &polygon)
+{
+    REQUIRE_FALSE(polygon.poly.contour.points.empty());
+    REQUIRE(polygon.poly.contour.points.size() <= 10000);
+    CHECK(polygon.poly.contour.area() > 0.0);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
+}
+
+TEST_CASE("Model arrange polygon is the convex hull of every instance at its position and rotation", "[Arrange][ModelArrange]")
+{
+    // The first cube turned a quarter about Z covers x 30..50 at its offset (70 if left unrotated),
+    // the second covers 0..20, so the hull is the 50x20 rectangle spanning both. Their inner corners
+    // (x = 20 and x = 30) lie on its edges and must not be hull vertices.
+    Model model = arrange_model({Vec2d(50., 0.), Vec2d(0., 0.)});
+    model.objects.front()->instances.front()->set_rotation(Z, PI / 2.);
+
+    const ArrangePolygon polygon = get_arrange_poly(model);
+    CHECK(polygon.bed_idx == arrangement::UNARRANGED);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
+    const Polygon       &hull    = polygon.poly.contour;
+    CHECK(hull.is_counter_clockwise());
+    CHECK_THAT(hull.area() * SCALING_FACTOR * SCALING_FACTOR, WithinRel(50. * 20., 1e-6));
+    REQUIRE(hull.points.size() == 4);
+    for (const Vec2d &corner : {Vec2d(0., 0.), Vec2d(50., 0.), Vec2d(50., 20.), Vec2d(0., 20.)})
+        CHECK(std::any_of(hull.points.begin(), hull.points.end(), [&corner](const Point &p) {
+            return (unscaled(p) - corner).norm() < .01;
+        }));
+}
+
+TEST_CASE("Model object duplication copies only the original instances", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d(1., 2.), Vec2d(11., 12.)});
+    const ModelObject *object = model.objects.front();
+
+    duplicate_objects(model, 3);
+
+    REQUIRE(object->instances.size() == 6);
+    int first = 0, second = 0;
+    for (const ModelInstance *instance : object->instances) {
+        const Vec3d offset = instance->get_offset();
+        first += offset.isApprox(Vec3d(1., 2., 0.));
+        second += offset.isApprox(Vec3d(11., 12., 0.));
+    }
+    CHECK(first == 3);
+    CHECK(second == 3);
+}
+
+TEST_CASE("Model instance arrange polygon setter writes an arranged result back to the instance", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelInstance *instance = model.objects.front()->instances.front();
+
+    ArrangePolygon polygon = get_arrange_poly(instance, arrange_config("normal(auto)", false));
+    REQUIRE_FALSE(polygon.poly.contour.points.empty());
+    REQUIRE(polygon.poly.contour.points.size() <= 10000);
+    CHECK(polygon.poly.contour.area() > 0.);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
+    CHECK(polygon.bed_idx == 0);
+    REQUIRE(polygon.setter);
+
+    SECTION("an arranged result moves the instance") {
+        polygon.translation = Vec2crd{scaled(3.), scaled(4.)};
+        polygon.rotation = .5;
+        polygon.itemid = 17;
+        polygon.apply();
+
+        CHECK(polygon.is_applied == 1);
+        CHECK_THAT(instance->get_offset(X), WithinAbs(3., 1e-9));
+        CHECK_THAT(instance->get_offset(Y), WithinAbs(4., 1e-9));
+        CHECK_THAT(instance->get_rotation(Z), WithinAbs(.5, 1e-9));
+        CHECK(instance->arrange_order == 17);
+    }
+    SECTION("an unarranged result leaves the instance where it was") {
+        polygon.translation = Vec2crd{scaled(3.), scaled(4.)};
+        polygon.bed_idx = arrangement::UNARRANGED;
+        polygon.apply();
+
+        CHECK(polygon.is_applied == 1);
+        CHECK_THAT(instance->get_offset(X), WithinAbs(0., 1e-9));
+        CHECK_THAT(instance->get_offset(Y), WithinAbs(0., 1e-9));
+    }
+}
+
+TEST_CASE("Model instance arrangement reads plate and filament metadata for the instance's filament", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelObject *object = model.objects.front();
+    ModelInstance *instance = object->instances.front();
+
+    SECTION("unset object and volume assignments use the first filament") {
+        REQUIRE_FALSE(object->config.has("extruder"));
+        REQUIRE_FALSE(object->volumes.front()->config.has("extruder"));
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
+        REQUIRE(polygon.extrude_ids == std::vector<int>{1});
+        CHECK(polygon.bed_temp == 65);
+        CHECK(polygon.first_bed_temp == 70);
+        CHECK(polygon.print_temp == 205);
+        CHECK(polygon.first_print_temp == 215);
+        CHECK(polygon.vitrify_temp == 90);
+        CHECK(polygon.filament_temp_type != -1);
+        CHECK(polygon.name == object->name);
+        CHECK(polygon.height > 0.0);
+        CHECK_THAT(polygon.brim_width, WithinAbs(1., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("an explicit second filament keeps its own metadata") {
+        object->volumes.front()->config.set("extruder", 2);
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
+
+        REQUIRE(polygon.extrude_ids == std::vector<int>{2});
+        CHECK(polygon.bed_temp == 66);
+        CHECK(polygon.first_bed_temp == 71);
+        CHECK(polygon.print_temp == 206);
+        CHECK(polygon.first_print_temp == 216);
+        CHECK(polygon.vitrify_temp == 91);
+        CHECK(polygon.filament_temp_type == FilamentTempType::HighTemp); // PC
+        CHECK(polygon.name == object->name);
+        CHECK_THAT(polygon.height, WithinAbs(20., 1e-6));
+    }
+}
+
+TEST_CASE("Model instance arrangement sizes the brim margin by the support type", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model();
+    ModelInstance *instance = model.objects.front()->instances.front();
+
+    SECTION("disabled support keeps the 1 mm default even for tree support") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("tree(manual)", false));
+        CHECK_THAT(polygon.brim_width, WithinAbs(1., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("normal support adds 6 mm") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(manual)", true));
+        CHECK_THAT(polygon.brim_width, WithinAbs(6., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("tree support adds 24 mm and marks the plate") {
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("tree(manual)", true));
+        CHECK_THAT(polygon.brim_width, WithinAbs(24., 1e-9));
+        CHECK(polygon.has_tree_support);
+    }
+}
+
+TEST_CASE("Model arrange default out-of-bed callback throws with the bed index", "[Arrange][ModelArrange]")
+{
+    ArrangePolygon polygon;
+    polygon.bed_idx = 1;
+
+    REQUIRE_THROWS_AS(throw_if_out_of_bed(polygon), RuntimeError);
+    REQUIRE_THROWS_WITH(throw_if_out_of_bed(polygon), Catch::Matchers::ContainsSubstring("bed_idx==1"));
+}
+
+TEST_CASE("Model arrange collects instances and applies reachable bed results", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d::Zero(), Vec2d::Zero(), Vec2d::Zero()});
+    ModelInstancePtrs instances;
+    ArrangePolygons polygons = get_arrange_polys(model, instances);
+
+    REQUIRE(polygons.size() == 3);
+    REQUIRE(instances.size() == 3);
+    for (size_t i = 0; i < instances.size(); ++i) {
+        REQUIRE(instances[i] == model.objects.front()->instances[i]);
+        CHECK(polygons[i].bed_idx == 0);
+    }
+
+    polygons[0].translation = Vec2crd{scaled(4.), scaled(5.)};
+    polygons[1].translation = Vec2crd{scaled(8.), scaled(9.)};
+    polygons[1].bed_idx = 2;
+    polygons[2].translation = Vec2crd{scaled(12.), scaled(13.)};
+    polygons[2].bed_idx = arrangement::UNARRANGED;
+
+    std::vector<int> callback_beds;
+    const bool all_on_physical_bed = apply_arrange_polys(
+        polygons, instances, [&callback_beds](ArrangePolygon &polygon) {
+            callback_beds.push_back(polygon.bed_idx);
+        });
+
+    // Virtual and unarranged results both reach the callback, but only a
+    // result on some bed moves its instance.
+    CHECK_FALSE(all_on_physical_bed);
+    CHECK(callback_beds == std::vector<int>{2, arrangement::UNARRANGED});
+    CHECK_THAT(instances[0]->get_offset(X), WithinAbs(4., 1e-9));
+    CHECK_THAT(instances[0]->get_offset(Y), WithinAbs(5., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(X), WithinAbs(8., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(Y), WithinAbs(9., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(X), WithinAbs(0., 1e-9));
+    CHECK_THAT(instances[2]->get_offset(Y), WithinAbs(0., 1e-9));
+
+    // Reapply physical placements through the same fixture: they update the instances without virtual-bed callbacks.
+    for (ModelInstance *instance : instances)
+        instance->set_offset(Vec3d::Zero());
+    ModelInstancePtrs physical_instances;
+    ArrangePolygons physical_polygons = get_arrange_polys(model, physical_instances);
+    REQUIRE(physical_polygons.size() == 3);
+    REQUIRE(physical_instances.size() == 3);
+    for (size_t i = 0; i < physical_polygons.size(); ++i) {
+        physical_polygons[i].translation = Vec2crd{scaled(2. * i + 1.), scaled(2. * i + 2.)};
+        physical_polygons[i].bed_idx = 0;
+    }
+    callback_beds.clear();
+    REQUIRE(apply_arrange_polys(physical_polygons, physical_instances, [&callback_beds](ArrangePolygon &polygon) {
+        callback_beds.push_back(polygon.bed_idx);
+    }));
+    CHECK(callback_beds.empty());
+    for (size_t i = 0; i < physical_instances.size(); ++i) {
+        CHECK_THAT(physical_instances[i]->get_offset(X), WithinAbs(2. * i + 1., 1e-9));
+        CHECK_THAT(physical_instances[i]->get_offset(Y), WithinAbs(2. * i + 2., 1e-9));
+    }
+}
+
+TEST_CASE("Model arrange reports success when every result is on the physical bed", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d::Zero(), Vec2d::Zero()});
+    ModelInstancePtrs instances;
+    ArrangePolygons polygons = get_arrange_polys(model, instances);
+    REQUIRE(polygons.size() == 2);
+    REQUIRE(instances.size() == 2);
+    polygons[0].translation = Vec2crd{scaled(1.), scaled(2.)};
+    polygons[1].translation = Vec2crd{scaled(3.), scaled(4.)};
+
+    int callbacks = 0;
+    CHECK(apply_arrange_polys(polygons, instances, [&callbacks](ArrangePolygon &) { ++callbacks; }));
+    CHECK(callbacks == 0);
+    CHECK_THAT(instances[0]->get_offset(X), WithinAbs(1., 1e-9));
+    CHECK_THAT(instances[0]->get_offset(Y), WithinAbs(2., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(X), WithinAbs(3., 1e-9));
+    CHECK_THAT(instances[1]->get_offset(Y), WithinAbs(4., 1e-9));
+}
+
+TEST_CASE("Model arrange duplicates each source instance for every requested placement", "[Arrange][ModelArrange]")
+{
+    Model model = arrange_model({Vec2d(1., 2.), Vec2d(11., 12.)});
+    const ModelObject *object = model.objects.front();
+
+    // Each copy's translation is added to every source instance's offset.
+    ArrangePolygon first = make_square(scaled(8.));
+    first.translation = Vec2crd{scaled(4.), scaled(5.)};
+    first.bed_idx = 0;
+    ArrangePolygon virtual_bed = make_square(scaled(8.));
+    virtual_bed.translation = Vec2crd{scaled(-6.), scaled(7.)};
+    virtual_bed.bed_idx = 2;
+    ArrangePolygons copies{first, virtual_bed};
+
+    std::vector<int> callback_beds;
+    duplicate(model, copies, [&callback_beds](ArrangePolygon &polygon) {
+        callback_beds.push_back(polygon.bed_idx);
+    });
+
+    REQUIRE(object->instances.size() == 4);
+    CHECK(callback_beds == std::vector<int>{2, 2});
+    CHECK_THAT(object->instances[0]->get_offset(X), WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[0]->get_offset(Y), WithinAbs(7., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(X), WithinAbs(-5., 1e-9));
+    CHECK_THAT(object->instances[1]->get_offset(Y), WithinAbs(9., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(X), WithinAbs(15., 1e-9));
+    CHECK_THAT(object->instances[2]->get_offset(Y), WithinAbs(17., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(X), WithinAbs(5., 1e-9));
+    CHECK_THAT(object->instances[3]->get_offset(Y), WithinAbs(19., 1e-9));
+}
+
+} // namespace model_arrange_contracts
+
+namespace arrange_surface_contracts {
+TEST_CASE("ArrangeParams serializes the distance and optimization controls", "[Arrange][ArrangeSurface]")
+{
+    ArrangeParams params = quiet_params(scaled(1.5));
+    params.accuracy = .25f;
+    params.parallel = false;
+    params.allow_rotations = true;
+    params.do_final_align = false;
+    params.is_seq_print = true;
+    params.bed_shrink_x = 2.f;
+    params.bed_shrink_y = 3.f;
+    params.brim_skirt_distance = 4.f;
+    params.clearance_height_to_rod = 5.f;
+    params.clearance_height_to_lid = 6.f;
+    params.clearance_radius = 7.f;
+    params.printable_height = 8.f;
+    // Check the complete object structurally rather than matching substrings.
+    const std::string serialized = params.to_json();
+    REQUIRE(!serialized.empty());
+    REQUIRE(serialized.back() == '}');
+    const nlohmann::json json = nlohmann::json::parse(serialized);
+    CHECK(json.at("min_obj_distance") == params.min_obj_distance);
+    CHECK_THAT(json.at("accuracy").get<double>(), WithinAbs(.25, 1e-12));
+    CHECK(json.at("parallel") == 0);
+    CHECK(json.at("allow_rotations") == 1);
+    CHECK(json.at("do_final_align") == 0);
+    CHECK(json.at("is_seq_print") == 1);
+    CHECK_THAT(json.at("bed_shrink_x").get<double>(), WithinAbs(2., 1e-12));
+    CHECK_THAT(json.at("bed_shrink_y").get<double>(), WithinAbs(3., 1e-12));
+    CHECK_THAT(json.at("brim_skirt_distance").get<double>(), WithinAbs(4., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_rod").get<double>(), WithinAbs(5., 1e-12));
+    CHECK_THAT(json.at("clearance_height_to_lid").get<double>(), WithinAbs(6., 1e-12));
+    CHECK_THAT(json.at("clearance_radius").get<double>(), WithinAbs(7., 1e-12));
+    CHECK_THAT(json.at("printable_height").get<double>(), WithinAbs(8., 1e-12));
+}
+} // namespace arrange_surface_contracts
+
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange dispatches an empty point bed as an infinite bed", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(12., 8.)};
@@ -561,7 +1242,10 @@ TEST_CASE("Arrange dispatches an empty point bed as an infinite bed", "[Arrange]
     CHECK(items.front().bed_idx == 0);
     CHECK(area(items.front()) > 0.);
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange dispatches a one-point bed around its supplied center", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(12., 8.)};
@@ -573,7 +1257,10 @@ TEST_CASE("Arrange dispatches a one-point bed around its supplied center", "[Arr
     CHECK_THAT(unscaled<double>(box.center().x()), WithinAbs(100., .01));
     CHECK_THAT(unscaled<double>(box.center().y()), WithinAbs(75., .01));
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange accepts a rectangular point bed and keeps all parts inside", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(20., 10.), rectangle(15., 15.), rectangle(8., 22.)};
@@ -586,7 +1273,10 @@ TEST_CASE("Arrange accepts a rectangular point bed and keeps all parts inside", 
     }
     require_no_overlap(items);
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange uses a circular point bed for a regular polygon", "[Arrange][ArrangeSurface]")
 {
     // This rectangle fits inside the circle but cannot fit inside the
@@ -611,7 +1301,10 @@ TEST_CASE("Arrange uses a circular point bed for a regular polygon", "[Arrange][
     }
     require_no_overlap(items);
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange leaves invalid contours unarranged while placing valid contours", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygon invalid;
@@ -621,7 +1314,10 @@ TEST_CASE("Arrange leaves invalid contours unarranged while placing valid contou
     REQUIRE(items[0].bed_idx == 0);
     CHECK(items[1].bed_idx == UNARRANGED);
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange supports a CircleBed and preserves every footprint area", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(20., 10.), rectangle(12., 18.), rectangle(9., 9.)};
@@ -635,37 +1331,10 @@ TEST_CASE("Arrange supports a CircleBed and preserves every footprint area", "[A
     }
     require_no_overlap(items);
 }
+} // namespace arrange_surface_contracts
 
-TEST_CASE("Arrange keeps convex polygon-bed footprints inside and disjoint", "[Arrange][ArrangeSurface]")
-{
-    Polygon bed_poly{{Point(scaled(10.), scaled(10.)), Point(scaled(190.), scaled(10.)),
-                      Point(scaled(200.), scaled(100.)), Point(scaled(190.), scaled(190.)),
-                      Point(scaled(10.), scaled(190.)), Point(0, scaled(100.))}};
-    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
-    arrange(items, bed_poly, quiet_params(scaled(1.)));
-    const ExPolygon bed_shape(bed_poly);
-    for (const ArrangePolygon &item : items) {
-        REQUIRE(item.bed_idx == 0);
-        const BoundingBox box = item.transformed_poly().contour.bounding_box();
-        CHECK(box.defined);
-        CHECK_THAT(ex_area(intersection_ex(item.transformed_poly(), bed_shape)),
-                   WithinRel(area(item), 1e-8));
-    }
-    require_no_overlap(items);
-}
 
-TEST_CASE("Arrange keeps a fixed exclusion outside every arranged footprint", "[Arrange][ArrangeSurface]")
-{
-    ArrangePolygon fixed = rectangle(30., 30.);
-    ArrangePolygons items{rectangle(20., 20.), rectangle(18., 12.)};
-    const ExPolygon fixed_shape = fixed.transformed_poly();
-    arrange(items, {fixed}, bed(120., 120.), quiet_params(scaled(1.)));
-    for (const ArrangePolygon &item : items) {
-        REQUIRE(item.bed_idx == 0);
-        CHECK(intersection_ex(item.transformed_poly(), fixed_shape).empty());
-    }
-}
-
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange keeps an initially unrotated rectangular item unrotated when rotations are disabled", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(35., 12.)};
@@ -675,7 +1344,10 @@ TEST_CASE("Arrange keeps an initially unrotated rectangular item unrotated when 
     REQUIRE(items.front().bed_idx == 0);
     CHECK_THAT(items.front().rotation, WithinAbs(0., 1e-12));
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange may rotate a rectangular item while preserving its area", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(35., 12.)};
@@ -687,7 +1359,10 @@ TEST_CASE("Arrange may rotate a rectangular item while preserving its area", "[A
     CHECK_THAT(area(items.front()), WithinRel(source_area, 1e-6));
     CHECK(items.front().transformed_poly().contour.bounding_box().defined);
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Arrange rotates an item only when the bed requires it", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons disabled{rectangle(120., 30.)};
@@ -704,7 +1379,10 @@ TEST_CASE("Arrange rotates an item only when the bed requires it", "[Arrange][Ar
     CHECK(std::abs(std::sin(enabled.front().rotation)) > .9);
     CHECK(bed(50., 130.).contains(enabled.front().transformed_poly().contour.bounding_box()));
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Axis alignment rotates an asymmetric contour while preserving area", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(20., 60.)};
@@ -719,7 +1397,10 @@ TEST_CASE("Axis alignment rotates an asymmetric contour while preserving area", 
     CHECK_THAT(unscaled<double>(box.size().y()), WithinAbs(60., .01));
     CHECK_THAT(area(items.front()), WithinRel(source_area, 1e-6));
 }
+} // namespace arrange_surface_contracts
 
+
+namespace arrange_surface_contracts {
 TEST_CASE("Axis alignment leaves a symmetric square orientation unchanged", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(30., 30.)};
@@ -729,19 +1410,10 @@ TEST_CASE("Axis alignment leaves a symmetric square orientation unchanged", "[Ar
     update_selected_items_axis_align(items, nullptr, params);
     CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
 }
+} // namespace arrange_surface_contracts
 
-TEST_CASE("Axis alignment ignores a degenerate contour", "[Arrange][ArrangeSurface]")
-{
-    ArrangePolygon item;
-    item.poly.contour.points = {Point(0, 0), Point(scaled(10.), 0)};
-    item.rotation = .37;
-    ArrangePolygons items{item};
-    ArrangeParams params = quiet_params();
-    params.align_to_y_axis = true;
-    update_selected_items_axis_align(items, nullptr, params);
-    CHECK_THAT(items.front().rotation, WithinAbs(.37, 1e-12));
-}
 
+namespace arrange_surface_contracts {
 TEST_CASE("Selected inflation uses the maximum tree branch brim for the plate", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(20., 20.), rectangle(20., 20.)};
@@ -754,32 +1426,10 @@ TEST_CASE("Selected inflation uses the maximum tree branch brim for the plate", 
     CHECK(items[0].inflation == scaled(2.));
     CHECK(items[1].inflation == scaled(2.));
 }
+} // namespace arrange_surface_contracts
 
-TEST_CASE("Selected inflation gives an explicit minimum distance precedence over brim", "[Arrange][ArrangeSurface]")
-{
-    ArrangePolygons items{rectangle(20., 20.)};
-    items.front().brim_width = 8.;
-    DynamicPrintConfig config = bed_config();
-    ArrangeParams params = quiet_params(scaled(6.));
-    update_selected_items_inflation(items, &config, params);
-    CHECK(items.front().inflation == scaled(3.));
-}
 
-TEST_CASE("Unselected inflation distinguishes ordinary, virtual, and calibration regions", "[Arrange][ArrangeSurface]")
-{
-    ArrangePolygons items{rectangle(10., 10.), rectangle(10., 10.), rectangle(10., 10.)};
-    items[0].brim_width = 3.;
-    items[1].is_virt_object = true;
-    items[2].is_virt_object = true;
-    items[2].is_extrusion_cali_object = true;
-    const DynamicPrintConfig config;
-    const ArrangeParams params = quiet_params();
-    update_unselected_items_inflation(items, &config, params);
-    CHECK(items[0].inflation == scaled(3.));
-    CHECK(items[1].inflation == scaled(1.));
-    CHECK(items[2].inflation == 0);
-}
-
+namespace arrange_surface_contracts {
 TEST_CASE("Sequential virtual exclusion regions move by the configured shrink vector", "[Arrange][ArrangeSurface]")
 {
     ArrangePolygons items{rectangle(10., 10., 20., 30.)};
@@ -794,91 +1444,10 @@ TEST_CASE("Sequential virtual exclusion regions move by the configured shrink ve
     CHECK(after.x() == before.x() + scaled(4.));
     CHECK(after.y() == before.y() + scaled(6.));
 }
-
-TEST_CASE("Arrange parameter update adds the real skirt clearance and sequential correction", "[Arrange][ArrangeSurface]")
-{
-    DynamicPrintConfig config;
-    config.set_key_value("skirt_height", new ConfigOptionInt(1));
-    config.set_key_value("skirt_loops", new ConfigOptionInt(2));
-    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.f));
-    config.set_key_value("line_width", new ConfigOptionFloat(.4f));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(.4, false));
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({.4}));
-    config.set_key_value("printable_area", new ConfigOptionPoints{{0, 0}, {200, 0}, {200, 200}, {0, 200}});
-    ArrangeParams params = quiet_params();
-    params.bed_shrink_x = 10.f;
-    params.bed_shrink_y = 11.f;
-    params.is_seq_print = true;
-    params.clearance_radius = 4.f;
-    update_arrange_params(params, &config, {});
-    CHECK_THAT(params.brim_skirt_distance, WithinAbs(3.8, 1e-5));
-    CHECK_THAT(params.bed_shrink_x, WithinAbs(11.8, 1e-5));
-    CHECK_THAT(params.bed_shrink_y, WithinAbs(12.8, 1e-5));
-}
-
-TEST_CASE("Shrinking a rectangular bed moves every edge toward its center", "[Arrange][ArrangeSurface]")
-{
-    DynamicPrintConfig config = bed_config();
-    ArrangeParams params = quiet_params();
-    params.bed_shrink_x = 5.f;
-    params.bed_shrink_y = 7.f;
-    const Points points = get_shrink_bedpts(&config, params);
-    REQUIRE(points.size() == 4);
-    BoundingBox box(points);
-    CHECK(box.min.x() == scaled(5.));
-    CHECK(box.max.x() == scaled(195.));
-    CHECK(box.min.y() == scaled(7.));
-    CHECK(box.max.y() == scaled(193.));
-}
-
 } // namespace arrange_surface_contracts
 
+
 namespace model_arrange_contracts {
-
-Model arrange_model(size_t instance_count = 1)
-{
-    Model model;
-    ModelObject *object = model.add_object();
-    object->name += "model-arrange-contract.stl";
-    TriangleMesh cube(its_make_cube(20., 20., 20.));
-    object->add_volume(cube);
-    object->add_instance();
-    for (size_t i = 1; i < instance_count; ++i)
-        object->add_instance();
-    return model;
-}
-
-DynamicPrintConfig arrange_config(const char *support_type, bool enable_support)
-{
-    // This fixture supplies only fields read by ModelArrange metadata paths.
-    // Every per-filament value is intentionally two entries; no Print/G-code is built.
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({
-        {"enable_support", enable_support},
-        {"support_type", support_type},
-        {"support_filament", enable_support ? 1 : 0},
-        {"support_interface_filament", enable_support ? 2 : 0},
-        {"curr_bed_type", "Cool Plate"},
-        {"cool_plate_temp", "65,66"},
-        {"cool_plate_temp_initial_layer", "70,71"},
-        {"nozzle_temperature", "205,206"},
-        {"nozzle_temperature_initial_layer", "215,216"},
-        {"temperature_vitrification", "90,91"}
-    });
-    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PETG"}));
-    return config;
-}
-
-void require_bounded_arrange_polygon(const ArrangePolygon &polygon)
-{
-    REQUIRE_FALSE(polygon.poly.contour.points.empty());
-    REQUIRE(polygon.poly.contour.points.size() <= 10000);
-    CHECK(polygon.poly.contour.area() > 0.0);
-    CHECK(std::isfinite(polygon.height));
-    CHECK(std::isfinite(polygon.brim_width));
-}
-
-
 TEST_CASE("Model arrange polygon returns a bounded convex hull", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model(2);
@@ -887,7 +1456,10 @@ TEST_CASE("Model arrange polygon returns a bounded convex hull", "[Arrange][Mode
     require_bounded_arrange_polygon(polygon);
     CHECK(polygon.bed_idx == arrangement::UNARRANGED);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model arrange object duplication uses the original instance snapshot", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model();
@@ -898,7 +1470,10 @@ TEST_CASE("Model arrange object duplication uses the original instance snapshot"
     REQUIRE(object->instances.size() == 4);
     CHECK(object->instances.front() != nullptr);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model instance arrange polygon applies its bounded setter", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model();
@@ -916,7 +1491,10 @@ TEST_CASE("Model instance arrange polygon applies its bounded setter", "[Arrange
     CHECK(polygon.is_applied == 1);
     CHECK(instance->arrange_order == 17);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model instance arrangement carries plate and filament metadata", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model();
@@ -937,7 +1515,10 @@ TEST_CASE("Model instance arrangement carries plate and filament metadata", "[Ar
     CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(1.0, 1e-9));
     CHECK_FALSE(polygon.has_tree_support);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model instance normal support selects the normal brim contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model();
@@ -948,7 +1529,10 @@ TEST_CASE("Model instance normal support selects the normal brim contract", "[Ar
     CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(6.0, 1e-9));
     CHECK_FALSE(polygon.has_tree_support);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model instance tree support selects the tree brim contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     Model model = arrange_model();
@@ -959,7 +1543,10 @@ TEST_CASE("Model instance tree support selects the tree brim contract", "[Arrang
     CHECK_THAT(polygon.brim_width, Catch::Matchers::WithinAbs(24.0, 1e-9));
     CHECK(polygon.has_tree_support);
 }
+} // namespace model_arrange_contracts
 
+
+namespace model_arrange_contracts {
 TEST_CASE("Model arrange out of bed callback has a stable exception contract", "[Arrange][ModelArrange][ModelArrangeContracts]")
 {
     ArrangePolygon polygon;
@@ -967,97 +1554,4 @@ TEST_CASE("Model arrange out of bed callback has a stable exception contract", "
 
     REQUIRE_THROWS_AS(throw_if_out_of_bed(polygon), RuntimeError);
 }
-
-
-TEST_CASE("Model arrange collects instances and applies reachable bed results", "[Arrange][ModelArrange][ModelArrangeActive]")
-{
-    Model model = arrange_model(3);
-    ModelInstancePtrs instances;
-    ArrangePolygons polygons = get_arrange_polys(model, instances);
-
-    REQUIRE(polygons.size() == 3);
-    REQUIRE(instances.size() == 3);
-    for (size_t i = 0; i < instances.size(); ++i) {
-        REQUIRE(instances[i] == model.objects.front()->instances[i]);
-        CHECK(polygons[i].bed_idx == 0);
-    }
-
-    polygons[0].translation = Vec2crd{scaled(4.), scaled(5.)};
-    polygons[1].translation = Vec2crd{scaled(8.), scaled(9.)};
-    polygons[1].bed_idx = 2;
-    polygons[2].translation = Vec2crd{scaled(12.), scaled(13.)};
-    polygons[2].bed_idx = arrangement::UNARRANGED;
-
-    std::vector<int> callback_beds;
-    const bool all_on_physical_bed = apply_arrange_polys(
-        polygons, instances, [&callback_beds](ArrangePolygon &polygon) {
-            callback_beds.push_back(polygon.bed_idx);
-        });
-
-    REQUIRE_FALSE(all_on_physical_bed);
-    REQUIRE(callback_beds.size() == 2);
-    CHECK(callback_beds[0] == 2);
-    CHECK(callback_beds[1] == arrangement::UNARRANGED);
-    CHECK_THAT(instances[0]->get_offset(X), Catch::Matchers::WithinAbs(4., 1e-9));
-    CHECK_THAT(instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(5., 1e-9));
-    CHECK_THAT(instances[1]->get_offset(X), Catch::Matchers::WithinAbs(8., 1e-9));
-    CHECK_THAT(instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(9., 1e-9));
-    CHECK_THAT(instances[2]->get_offset(X), Catch::Matchers::WithinAbs(0., 1e-9));
-    CHECK_THAT(instances[2]->get_offset(Y), Catch::Matchers::WithinAbs(0., 1e-9));
-
-    Model physical_model = arrange_model(2);
-    ModelInstancePtrs physical_instances;
-    ArrangePolygons physical_polygons = get_arrange_polys(physical_model, physical_instances);
-    REQUIRE(physical_polygons.size() == 2);
-    REQUIRE(physical_instances.size() == 2);
-    physical_polygons[0].translation = Vec2crd{scaled(1.), scaled(2.)};
-    physical_polygons[1].translation = Vec2crd{scaled(3.), scaled(4.)};
-    std::vector<int> physical_callbacks;
-    REQUIRE(apply_arrange_polys(
-        physical_polygons, physical_instances, [&physical_callbacks](ArrangePolygon &polygon) {
-            physical_callbacks.push_back(polygon.bed_idx);
-        }));
-    CHECK(physical_callbacks.empty());
-    CHECK_THAT(physical_instances[0]->get_offset(X), Catch::Matchers::WithinAbs(1., 1e-9));
-    CHECK_THAT(physical_instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(2., 1e-9));
-    CHECK_THAT(physical_instances[1]->get_offset(X), Catch::Matchers::WithinAbs(3., 1e-9));
-    CHECK_THAT(physical_instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(4., 1e-9));
-}
-
-TEST_CASE("Model arrange duplicates each source instance for every requested placement", "[Arrange][ModelArrange][ModelArrangeActive]")
-{
-    Model model = arrange_model(2);
-    ModelObject *object = model.objects.front();
-    object->instances[0]->set_offset(Vec3d(1., 2., 0.));
-    object->instances[1]->set_offset(Vec3d(11., 12., 0.));
-
-    ArrangePolygon first = make_square(scaled(8.));
-    first.translation = Vec2crd{scaled(4.), scaled(5.)};
-    first.bed_idx = 0;
-    ArrangePolygon virtual_bed = make_square(scaled(8.));
-    virtual_bed.translation = Vec2crd{scaled(-6.), scaled(7.)};
-    virtual_bed.bed_idx = 2;
-    ArrangePolygons copies{first, virtual_bed};
-
-    std::vector<int> callback_beds;
-    duplicate(model, copies, [&callback_beds](ArrangePolygon &polygon) {
-        callback_beds.push_back(polygon.bed_idx);
-    });
-
-    REQUIRE(object->instances.size() == 4);
-    REQUIRE(callback_beds.size() == 2);
-    CHECK(callback_beds[0] == 2);
-    CHECK(callback_beds[1] == 2);
-
-    CHECK_THAT(object->instances[0]->get_offset(X), Catch::Matchers::WithinAbs(5., 1e-9));
-    CHECK_THAT(object->instances[0]->get_offset(Y), Catch::Matchers::WithinAbs(7., 1e-9));
-    CHECK_THAT(object->instances[1]->get_offset(X), Catch::Matchers::WithinAbs(-5., 1e-9));
-    CHECK_THAT(object->instances[1]->get_offset(Y), Catch::Matchers::WithinAbs(9., 1e-9));
-    CHECK_THAT(object->instances[2]->get_offset(X), Catch::Matchers::WithinAbs(15., 1e-9));
-    CHECK_THAT(object->instances[2]->get_offset(Y), Catch::Matchers::WithinAbs(17., 1e-9));
-    CHECK_THAT(object->instances[3]->get_offset(X), Catch::Matchers::WithinAbs(5., 1e-9));
-    CHECK_THAT(object->instances[3]->get_offset(Y), Catch::Matchers::WithinAbs(19., 1e-9));
-}
-
-
 } // namespace model_arrange_contracts

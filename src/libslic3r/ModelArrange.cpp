@@ -64,8 +64,8 @@ Slic3r::arrangement::ArrangePolygon get_arrange_poly(const Model &model)
         for (const ModelInstance *minst : mo->instances) {
             ArrangePolygon obj_ap;
             minst->get_arrange_polygon(&obj_ap);
-            ap.poly.contour.rotate(obj_ap.rotation);
-            ap.poly.contour.translate(obj_ap.translation.x(), obj_ap.translation.y());
+            obj_ap.poly.contour.rotate(obj_ap.rotation);
+            obj_ap.poly.contour.translate(obj_ap.translation.x(), obj_ap.translation.y());
             const Points &pts = obj_ap.poly.contour.points;
             std::copy(pts.begin(), pts.end(), std::back_inserter(apts));
         }

@@ -4,7 +4,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
-#include <libslic3r/CommonDefs.hpp>
+#include "libslic3r/CommonDefs.hpp"
+#include "libslic3r/Point.hpp"
 
 #include <algorithm>
 #include "libslic3r/Config.hpp"
@@ -101,6 +102,26 @@ TEST_CASE("deep_diff reports nullable transitions while shallow diff reports the
     CHECK(deep_explicit == std::vector<std::string>{"filament_retraction_length#0"});
     const auto shallow_explicit = PresetCollection::dirty_options(&explicit_value, &nil_reference, false);
     CHECK(shallow_explicit == std::vector<std::string>{"filament_retraction_length"});
+
+    // nil compares unequal to itself (NaN), so only nullable handling keeps the unchanged nil slot
+    // out of the report when another slot changes.
+    Preset nil_kept = nil_reference;
+    nil_kept.config.option<NullableFloats>("filament_retraction_length")->values[1] = 2.0;
+    CHECK(PresetCollection::dirty_options(&nil_kept, &nil_reference, true) ==
+          std::vector<std::string>{"filament_retraction_length#1"});
+}
+
+TEST_CASE("deep_diff reports nullable transitions but not slots nil on both sides",
+          "[Preset][PresetDiff][PresetDeepDiff]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+    Preset reference(Preset::TYPE_FILAMENT, "nil reference");
+    reference.config.set_key_value("filament_retraction_length",
+                                   new NullableFloats({NullableFloats::nil_value(), 1.0}));
+    Preset changed = reference;
+    changed.config.option<NullableFloats>("filament_retraction_length")->values[1] = 2.0;
+    CHECK(PresetCollection::dirty_options(&changed, &reference, true) ==
+          std::vector<std::string>{"filament_retraction_length#1"});
 }
 
 TEST_CASE("deep_diff flags a nullable vector entry added by growth",
@@ -118,6 +139,16 @@ TEST_CASE("deep_diff flags a nullable vector entry added by growth",
     CHECK(std::find(deep_diff.begin(), deep_diff.end(), "filament_retraction_length#2") != deep_diff.end());
     const auto shallow_diff = PresetCollection::dirty_options(&grown, &reference, false);
     CHECK(shallow_diff == std::vector<std::string>{"filament_retraction_length"});
+
+    // A nil already at index zero makes value comparison ambiguous; growth must still report index two.
+    Preset nil_reference(Preset::TYPE_FILAMENT, "nil reference");
+    nil_reference.config.set_key_value("filament_retraction_length",
+                                       new NullableFloats({NullableFloats::nil_value(), 1.0}));
+    Preset nil_grown = nil_reference;
+    nil_grown.config.option<NullableFloats>("filament_retraction_length")->values.push_back(
+        NullableFloats::nil_value());
+    CHECK(PresetCollection::dirty_options(&nil_grown, &nil_reference, true) ==
+          std::vector<std::string>{"filament_retraction_length#2"});
 }
 
 TEST_CASE("deep_diff reports every vector slot when an option exists on only one side",
@@ -221,4 +252,14 @@ TEST_CASE("dirty option reports preserve optional compatibility keys and filter 
               &explicitly_empty, &absent, exact_ignored_key, false).empty());
     CHECK(PresetCollection::dirty_options_without_option_list(
               &edited, &reference, exact_ignored_key, true).empty());
+
+    // Filament presets carry both compatibility keys, including compatible_printers.
+    Preset filament_reference(Preset::TYPE_FILAMENT, "filament reference");
+    filament_reference.config.set_key_value(
+        "compatible_printers", new ConfigOptionStrings{"Printer A"});
+    Preset filament_edited = filament_reference;
+    filament_edited.config.set_key_value(
+        "compatible_printers", new ConfigOptionStrings{"Printer B"});
+    CHECK(PresetCollection::dirty_options(&filament_edited, &filament_reference, true) ==
+          std::vector<std::string>{"compatible_printers"});
 }

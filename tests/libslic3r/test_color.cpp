@@ -57,6 +57,7 @@ TEST_CASE("Color channel setters clamp indexed assignments", "[Color]")
     rgb.r(-1.0f);
     rgb.g(0.4f);
     rgb.b(4.0f);
+    require_rgb(rgb, 0.0f, 0.4f, 1.0f);
     rgb.set(1, 2.0f);
     require_rgb(rgb, 0.0f, 1.0f, 1.0f);
 
@@ -197,6 +198,19 @@ TEST_CASE("Structural decode failure preserves RGB and resets RGBA", "[Color]")
     require_rgba(rgba, 0.0f, 0.0f, 0.0f, 1.0f);
 }
 
+TEST_CASE("Decoding rejects strings without a leading # or with the wrong length", "[Color]")
+{
+    // Only the result is the contract here: what is left in the output on failure differs
+    // between the RGB and RGBA overloads and is not asserted.
+    for (const char *bad : {"red", "123456", "#12345", "#1234567", "#123456789"}) {
+        INFO(bad);
+        ColorRGB rgb;
+        ColorRGBA rgba;
+        CHECK_FALSE(decode_color(bad, rgb));
+        CHECK_FALSE(decode_color(bad, rgba));
+    }
+}
+
 TEST_CASE("RGB vector decoding is all-successful and preserves order", "[Color]")
 {
     const std::vector<std::string> input{"#FF0000", "#008000", "#0000FF"};
@@ -219,6 +233,15 @@ TEST_CASE("RGBA vector decoding reports the first invalid entry without reorderi
     require_rgba(output[2], 0.0f, 0.0f, 0.0f, 1.0f);
 }
 
+TEST_CASE("RGBA vector decoding fails on an invalid entry and keeps the entries before it", "[Color]")
+{
+    const std::vector<std::string> input{"#11223344", "invalid", "#AABBCCDD"};
+    std::vector<ColorRGBA> output;
+    CHECK_FALSE(decode_colors(input, output));
+    REQUIRE(output.size() == input.size());
+    require_rgba(output[0], 17.0f / 255.0f, 34.0f / 255.0f, 51.0f / 255.0f, 68.0f / 255.0f);
+}
+
 TEST_CASE("RGB encoding uses uppercase bytes and exact padding", "[Color]")
 {
     CHECK(encode_color(ColorRGB(1.0f, 64.0f / 255.0f, 0.0f)) == "#FF4000");
@@ -226,6 +249,12 @@ TEST_CASE("RGB encoding uses uppercase bytes and exact padding", "[Color]")
 }
 
 TEST_CASE("RGBA encoding intentionally serializes only RGB", "[Color]")
+{
+    CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.1f)) == "#FF4000");
+    CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.9f)) == "#FF4000");
+}
+
+TEST_CASE("RGBA encoding writes only the RGB bytes", "[Color]")
 {
     CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.1f)) == "#FF4000");
     CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.9f)) == "#FF4000");
@@ -270,6 +299,36 @@ TEST_CASE("Color equality uses the documented component tolerance", "[Color]")
     CHECK(color_is_equal(base, near));
     CHECK_FALSE(color_is_equal(base, far));
 }
+
+TEST_CASE("Picking checksum changes when any single RGB byte changes", "[Color]")
+{
+    // The alpha checksum exists to reject picking colours altered by blending or multisampling
+    // (Color.cpp). It is deterministic, and a one-step change in any one channel changes it.
+    for (const auto bytes : {std::array<unsigned char, 3>{0, 0, 0},
+                             std::array<unsigned char, 3>{1, 2, 3},
+                             std::array<unsigned char, 3>{12, 34, 56},
+                             std::array<unsigned char, 3>{254, 128, 17}}) {
+        const unsigned char base = picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2]);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2]) == base);
+        CHECK(picking_checksum_alpha_channel(bytes[0] + 1, bytes[1], bytes[2]) != base);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1] + 1, bytes[2]) != base);
+        CHECK(picking_checksum_alpha_channel(bytes[0], bytes[1], bytes[2] + 1) != base);
+        // picking_decode() carries the checksum of the decoded bytes in alpha.
+        const ColorRGBA decoded = picking_decode(picking_encode(bytes[0], bytes[1], bytes[2]));
+        CHECK(std::lround(decoded.a() * 255.0f) == long(base));
+    }
+}
+
+TEST_CASE("Color equality allows 0.01 per component, alpha included", "[Color]")
+{
+    const RGBA base{0.2f, 0.4f, 0.6f, 0.8f};
+    const RGBA near{0.209f, 0.391f, 0.609f, 0.791f};
+    CHECK(color_is_equal(base, near));
+    // Just past the tolerance in a single channel, alpha last.
+    CHECK_FALSE(color_is_equal(base, RGBA{0.212f, 0.4f, 0.6f, 0.8f}));
+    CHECK_FALSE(color_is_equal(base, RGBA{0.2f, 0.4f, 0.6f, 0.812f}));
+}
+
 
 TEST_CASE("Named color constants expose their documented channels", "[Color]")
 {

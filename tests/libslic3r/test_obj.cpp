@@ -1,33 +1,39 @@
-#include "libslic3r/TexturePainting.hpp"
 #include "libslic3r/BoundingBox.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/Format/objparser.hpp"
-#include <catch2/catch_message.hpp>
-#include <iterator>
-#include <cstdint>
-#include <limits>
 #include <filesystem>
+#include <catch2/catch_all.hpp>
+#include "test_utils.hpp"
+#include <boost/filesystem/path.hpp>
 #include <algorithm>
-#include <vector>
-#include <utility>
-#include <map>
+#include <array>
 #include <cmath>
-#include <sstream>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
-#include <array>
-#include <catch2/catch_all.hpp>
-
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
-#include <catch2/catch_test_macros.hpp>
-#include "libslic3r/TriangleMesh.hpp"
-#include "libslic3r/Format/OBJ.hpp"
-
-#include <boost/nowide/fstream.hpp>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include <catch2/catch_all.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Format/OBJ.hpp"
+#include "libslic3r/Format/objparser.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
-#include <cstddef>
+#include "libslic3r/TexturePainting.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "test_utils.hpp"
 
@@ -324,30 +330,7 @@ TEST_CASE("OBJ parser accepts CRLF, indentation and harmless unknown records", "
     CHECK(data.vertices[2].coordIdx == 2);
 }
 
-TEST_CASE("OBJ parsing keeps geometry after malformed records", "[OBJParser]")
-{
-    const ObjParser::ObjData data = parse_obj_stream(
-        "vt0 0\n"
-        "vn0 0 1\n"
-        "vp0 0\n"
-        "v0 0 0\n"
-        "usetml invalid material command\n"
-        "o broken object name\n"
-        "s1\n"
-        "z extension record\n"
-        "v 0 0 0\n"
-        "v 1 0 0\n"
-        "v 0 1 0\n"
-        "f 1 2 3\n");
-
-    REQUIRE(data.coordinates.size() == 21);
-    REQUIRE(data.vertices.size() == 4);
-    CHECK(data.vertices[0].coordIdx == 0);
-    CHECK(data.vertices[1].coordIdx == 1);
-    CHECK(data.vertices[2].coordIdx == 2);
-}
-
-TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OBJParser][OBJ]")
+TEST_CASE("OBJ MTL parser preserves ordered materials and extracts the texture filename past option flags", "[OBJParser][OBJ]")
 {
     ScopedTemporaryFile mtl(".mtl");
     write_text(mtl,
@@ -376,38 +359,8 @@ TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OB
     CHECK_THAT(coat.Ks[0], WithinAbs(.7, 1e-5));
     CHECK_THAT(coat.Ke[2], WithinAbs(.07, 1e-5));
     CHECK_THAT(coat.Tf[0], WithinAbs(.2, 1e-5));
+    // The -o, -s and -bm options are skipped, not stored; only the filename after them is kept.
     CHECK(coat.map_Kd == "coat.png");
-}
-
-TEST_CASE("MTL texture names omit supported map options", "[OBJParser]")
-{
-    ScopedTemporaryFile mtl(".mtl");
-    write_text(mtl,
-        "newmtl coat\n"
-        "nawmaterial ignored\n"
-        "ilum 2\n"
-        "map_Kd -o 0.1 0.2 -s 1 2 3 -t 0.5 -mm 0 1 -bm 0.7 -boost 1 -texres 512 "
-        "-clamp on -blendu off -blendv on -cc on -imfchan r -type sphere coat.png  \n");
-
-    ObjParser::MtlData data;
-    REQUIRE(ObjParser::mtlparse(mtl.string().c_str(), data));
-    REQUIRE(data.new_mtl_unmap.count("coat") == 1);
-    CHECK(data.new_mtl_unmap.at("coat")->map_Kd == "coat.png");
-}
-
-TEST_CASE("OBJ and MTL parsers reject oversized records", "[OBJParser]")
-{
-    const std::string oversized_record(65537, 'x');
-
-    ScopedTemporaryFile obj(".obj");
-    write_text(obj, oversized_record);
-    ObjParser::ObjData obj_data;
-    CHECK_FALSE(ObjParser::objparse(obj.string().c_str(), obj_data));
-
-    ScopedTemporaryFile mtl(".mtl");
-    write_text(mtl, oversized_record);
-    ObjParser::MtlData mtl_data;
-    CHECK_FALSE(ObjParser::mtlparse(mtl.string().c_str(), mtl_data));
 }
 
 TEST_CASE("OBJ parser reports missing input files", "[OBJParser]")
@@ -443,6 +396,10 @@ TEST_CASE("OBJ binary loader rejects a file with an unsupported version", "[OBJP
     boost::nowide::ofstream output(cache.string(), std::ios::binary);
     const size_t unsupported_version = 99;
     output.write(reinterpret_cast<const char *>(&unsupported_version), sizeof(unsupported_version));
+    // A complete payload of ten empty vectors, so only the version check can reject the file.
+    const size_t empty_count = 0;
+    for (int i = 0; i < 10; ++i)
+        output.write(reinterpret_cast<const char *>(&empty_count), sizeof(empty_count));
     output.close();
 
     ObjParser::ObjData data;
@@ -611,71 +568,6 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     CHECK_THAT(textured.uv_coords[2][1], WithinAbs(.3, 1e-6));
 }
 
-TEST_CASE("OBJ textured import maps a shared texture once for multiple materials", "[OBJParser][OBJ]")
-{
-    ScopedTemporaryFile obj(".obj");
-    ScopedTemporaryFile mtl(".mtl");
-    ScopedTemporaryFile texture(".png");
-    write_text(texture, "shared texture bytes");
-    write_text(mtl,
-        "newmtl first\nKd 1 0 0\nmap_Kd " + texture.path().filename().string() + "\n"
-        "newmtl second\nKd 0 0 1\nmap_Kd " + texture.path().filename().string() + "\n");
-    write_text(obj,
-        "mtllib " + mtl.path().filename().string() + "\n"
-        "usemtl first\n"
-        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
-        "vt 0 0\nvt 1 0\nvt 0 1\n"
-        "f 1/1 2/2 3/3\n"
-        "usemtl second\n"
-        "v 2 0 0\nv 3 0 0\nv 2 1 0\n"
-        "vt 0 0\nvt 1 0\nvt 0 1\n"
-        "f 4/4 5/5 6/6\n");
-
-    TriangleMesh mesh;
-    ObjInfo info;
-    ObjParser::MtlData mtl_data;
-    std::string message;
-    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
-
-    TexturedMesh textured;
-    REQUIRE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
-    REQUIRE(textured.textures.size() == 1);
-    REQUIRE(textured.material_texture_map.size() == 2);
-    CHECK(textured.material_texture_map[0] == 0);
-    CHECK(textured.material_texture_map[1] == 0);
-    REQUIRE(textured.material_ids.size() == 2);
-    CHECK(textured.material_ids[0] != textured.material_ids[1]);
-}
-
-TEST_CASE("OBJ textured import keeps geometry when its only texture is missing", "[OBJParser][OBJ]")
-{
-    ScopedTemporaryFile obj(".obj");
-    ScopedTemporaryFile mtl(".mtl");
-    const std::string missing_texture = obj.path().filename().string() + ".missing.png";
-    write_text(mtl,
-        "newmtl painted\nKd 0.2 0.4 0.6\nmap_Kd " + missing_texture + "\n");
-    write_text(obj,
-        "mtllib " + mtl.path().filename().string() + "\n"
-        "usemtl painted\n"
-        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
-        "vt 0 0\nvt 1 0\nvt 0 1\n"
-        "f 1/1 2/2 3/3\n");
-
-    TriangleMesh mesh;
-    ObjInfo info;
-    ObjParser::MtlData mtl_data;
-    std::string message;
-    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
-
-    TexturedMesh textured;
-    CHECK_FALSE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
-    CHECK(textured.vertices.size() == 3);
-    CHECK(textured.indices.size() == 1);
-    CHECK(textured.textures.empty());
-    REQUIRE(textured.material_texture_map.size() == 1);
-    CHECK(textured.material_texture_map[0] == -1);
-}
-
 TEST_CASE("OBJ material lookup records an unknown material without dropping geometry", "[OBJParser][OBJ]")
 {
     ScopedTemporaryFile obj(".obj");
@@ -750,28 +642,10 @@ void save_fixture(const ScopedTemporaryFile &file)
     REQUIRE(ObjParser::objbinsave(file.string().c_str(), fixture()));
 }
 
-bool obj_binary_cache_rejects_unsupported_native_version()
-{
-    ScopedTemporaryFile cache(".objbin");
-    std::vector<unsigned char> bytes;
-    size_t unsupported_version = 99;
-    if constexpr (sizeof(size_t) > sizeof(int))
-        unsupported_version = static_cast<size_t>(UINT64_C(0x100000001));
-    append_raw(bytes, unsupported_version);
-    // Keep the older int-width reader's misaligned first coordinate bounded.
-    for (int i = 0; i < 10; ++i)
-        append_raw(bytes, size_t{0});
-    write_bytes(cache, bytes);
-
-    ObjParser::ObjData loaded;
-    return !ObjParser::objbinload(cache.string().c_str(), loaded);
-}
-
 } // namespace
 
 TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and smoothing", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     const ObjParser::ObjData original = fixture();
     REQUIRE(ObjParser::objbinsave(cache.string().c_str(), original));
@@ -807,7 +681,6 @@ TEST_CASE("OBJ binary cache roundtrips geometry, names, groups, materials and sm
 
 TEST_CASE("OBJ binary cache supports an empty data set and clears prior records", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile full(".objbin");
     ScopedTemporaryFile empty(".objbin");
     const ObjParser::ObjData original = fixture();
@@ -833,7 +706,8 @@ TEST_CASE("OBJ binary cache supports an empty data set and clears prior records"
 TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary][OBJBinarySafe][OBJParser]")
 {
     ScopedTemporaryFile short_header(".objbin");
-    write_bytes(short_header, {1, 0, 0, 0});
+    // Three bytes are shorter than the version field of any build, so the version read itself fails.
+    write_bytes(short_header, {1, 0, 0});
     ObjParser::ObjData loaded;
     CHECK_FALSE(ObjParser::objbinload(short_header.string().c_str(), loaded));
 
@@ -841,13 +715,15 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers", "[OBJBinary]
     std::vector<unsigned char> bytes;
     const size_t version = 99;
     append_raw(bytes, version);
+    // A complete payload of ten empty vectors, so only the version check can reject the file.
+    for (int i = 0; i < 10; ++i)
+        append_raw(bytes, size_t{0});
     write_bytes(unsupported, bytes);
     CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
 }
 
 TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary][OBJParser]")
 {
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
     ScopedTemporaryFile cache(".objbin");
     std::vector<unsigned char> bytes;
     const size_t version = 1;
@@ -858,6 +734,279 @@ TEST_CASE("OBJ binary cache rejects a huge count before allocating", "[OBJBinary
 
     ObjParser::ObjData loaded;
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a file cut off inside the coordinate vector", "[OBJBinary][OBJParser]")
+{
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t coordinate_count = 1;
+    append_raw(bytes, version);
+    append_raw(bytes, coordinate_count);
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a file cut off inside a material name record", "[OBJBinary][OBJParser]")
+{
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    const int vertex_index = 3;
+    const size_t name_length = 8;
+    append_raw(bytes, version);
+    // coordinates, texture coordinates, normals, parameters, and mtllibs
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    // one material name-index record with a name length but no payload
+    append_raw(bytes, one);
+    append_raw(bytes, vertex_index);
+    append_raw(bytes, name_length);
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a file cut off inside the smoothing group vector", "[OBJBinary][OBJParser]")
+{
+    // The file ends before the declared payload, so the declared size exceeds the bytes left in the file and the
+    // loader's read budget rejects it.
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    append_raw(bytes, version);
+    // first five variable-length vectors and the three name-index vectors
+    for (int i = 0; i < 8; ++i)
+        append_raw(bytes, zero);
+    append_raw(bytes, one); // smoothing group count, but no record bytes
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a truncated face vertex vector", "[OBJBinary][OBJParser]")
+{
+    // The face vertices are the last vector, so no later read can reject this file; the declared count
+    // exceeds the bytes left in the file and the loader's read budget rejects it.
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    append_raw(bytes, version);
+    // every vector before the face vertices is empty, including the smoothing groups
+    for (int i = 0; i < 9; ++i)
+        append_raw(bytes, zero);
+    append_raw(bytes, one); // face vertex count, but no record bytes
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native version", "[OBJBinary][OBJBinaryWidthControl][OBJParser]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    size_t unsupported_version = 99;
+    if constexpr (sizeof(size_t) > sizeof(int))
+        unsupported_version = static_cast<size_t>(UINT64_C(0x100000001));
+    append_raw(bytes, unsupported_version);
+    // On 64-bit systems the old int reader sees version one, then interprets
+    // the high word as one coordinate. The zero payload keeps that control
+    // bounded: it allocates only one float rather than an oversized vector.
+    for (int i = 0; i < 10; ++i)
+        append_raw(bytes, size_t{0});
+    write_bytes(cache, bytes);
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser]")
+{
+    ScopedTemporaryFile full(".objbin");
+    save_fixture(full);
+    boost::nowide::ifstream input(full.string(), std::ios::binary);
+    REQUIRE(input.good());
+    const std::vector<unsigned char> complete{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    REQUIRE_FALSE(complete.empty());
+    ScopedTemporaryFile truncated(".objbin");
+    for (size_t length = 0; length < complete.size(); ++length) {
+        const std::vector<unsigned char> prefix(complete.begin(), complete.begin() + length);
+        write_bytes(truncated, prefix);
+        ObjParser::ObjData loaded;
+        INFO("prefix length " << length);
+        CHECK_FALSE(ObjParser::objbinload(truncated.string().c_str(), loaded));
+    }
+}
+
+} // namespace obj_binary_contracts
+
+TEST_CASE("OBJ parsing keeps geometry after malformed records", "[OBJParser]")
+{
+    const ObjParser::ObjData data = parse_obj_stream(
+        "vt0 0\n"
+        "vn0 0 1\n"
+        "vp0 0\n"
+        "v0 0 0\n"
+        "usetml invalid material command\n"
+        "o broken object name\n"
+        "s1\n"
+        "z extension record\n"
+        "v 0 0 0\n"
+        "v 1 0 0\n"
+        "v 0 1 0\n"
+        "f 1 2 3\n");
+
+    REQUIRE(data.coordinates.size() == 21);
+    REQUIRE(data.vertices.size() == 4);
+    CHECK(data.vertices[0].coordIdx == 0);
+    CHECK(data.vertices[1].coordIdx == 1);
+    CHECK(data.vertices[2].coordIdx == 2);
+}
+
+TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl,
+        "# material comment\n"
+        "newmtl coat\n"
+        "Ns 12.5\nNi 1.45\nd 0.8\nTr 0.2\nillum 2\n"
+        "Ka 0.1 0.2 0.3\nKd 0.4 0.5 0.6\nKs 0.7 0.8 0.9\nKe 0.05 0.06 0.07\nTf 0.2 0.3 0.4\n"
+        "map_Kd -o 0.1 0.2 0.3 -s 1 2 3 -bm 0.7 coat.png\n"
+        "newmtl plain\nKd 0.9 0.8 0.7\n");
+
+    ObjParser::MtlData data;
+    REQUIRE(ObjParser::mtlparse(mtl.string().c_str(), data));
+    REQUIRE(data.mtl_orders.size() == 2);
+    CHECK(data.mtl_orders[0] == "coat");
+    CHECK(data.mtl_orders[1] == "plain");
+    REQUIRE(data.new_mtl_unmap.count("coat") == 1);
+    REQUIRE(data.new_mtl_unmap.at("coat") != nullptr);
+    const auto &coat = *data.new_mtl_unmap.at("coat");
+    CHECK_THAT(coat.Ns, WithinAbs(12.5, 1e-5));
+    CHECK_THAT(coat.Ni, WithinAbs(1.45, 1e-5));
+    CHECK_THAT(coat.d, WithinAbs(.8, 1e-5));
+    CHECK_THAT(coat.Tr, WithinAbs(.2, 1e-5));
+    CHECK_THAT(coat.illum, WithinAbs(2., 1e-5));
+    CHECK_THAT(coat.Ka[1], WithinAbs(.2, 1e-5));
+    CHECK_THAT(coat.Kd[2], WithinAbs(.6, 1e-5));
+    CHECK_THAT(coat.Ks[0], WithinAbs(.7, 1e-5));
+    CHECK_THAT(coat.Ke[2], WithinAbs(.07, 1e-5));
+    CHECK_THAT(coat.Tf[0], WithinAbs(.2, 1e-5));
+    CHECK(coat.map_Kd == "coat.png");
+}
+
+TEST_CASE("MTL texture names omit supported map options", "[OBJParser]")
+{
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl,
+        "newmtl coat\n"
+        "nawmaterial ignored\n"
+        "ilum 2\n"
+        "map_Kd -o 0.1 0.2 -s 1 2 3 -t 0.5 -mm 0 1 -bm 0.7 -boost 1 -texres 512 "
+        "-clamp on -blendu off -blendv on -cc on -imfchan r -type sphere coat.png  \n");
+
+    ObjParser::MtlData data;
+    REQUIRE(ObjParser::mtlparse(mtl.string().c_str(), data));
+    REQUIRE(data.new_mtl_unmap.count("coat") == 1);
+    CHECK(data.new_mtl_unmap.at("coat")->map_Kd == "coat.png");
+}
+
+TEST_CASE("OBJ and MTL parsers reject oversized records", "[OBJParser]")
+{
+    const std::string oversized_record(65537, 'x');
+
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj, oversized_record);
+    ObjParser::ObjData obj_data;
+    CHECK_FALSE(ObjParser::objparse(obj.string().c_str(), obj_data));
+
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl, oversized_record);
+    ObjParser::MtlData mtl_data;
+    CHECK_FALSE(ObjParser::mtlparse(mtl.string().c_str(), mtl_data));
+}
+
+TEST_CASE("OBJ textured import maps a shared texture once for multiple materials", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    ScopedTemporaryFile texture(".png");
+    write_text(texture, "shared texture bytes");
+    write_text(mtl,
+        "newmtl first\nKd 1 0 0\nmap_Kd " + texture.path().filename().string() + "\n"
+        "newmtl second\nKd 0 0 1\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(obj,
+        "mtllib " + mtl.path().filename().string() + "\n"
+        "usemtl first\n"
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 1/1 2/2 3/3\n"
+        "usemtl second\n"
+        "v 2 0 0\nv 3 0 0\nv 2 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 4/4 5/5 6/6\n");
+
+    TriangleMesh mesh;
+    ObjInfo info;
+    ObjParser::MtlData mtl_data;
+    std::string message;
+    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
+
+    TexturedMesh textured;
+    REQUIRE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
+    REQUIRE(textured.textures.size() == 1);
+    REQUIRE(textured.material_texture_map.size() == 2);
+    CHECK(textured.material_texture_map[0] == 0);
+    CHECK(textured.material_texture_map[1] == 0);
+    REQUIRE(textured.material_ids.size() == 2);
+    CHECK(textured.material_ids[0] != textured.material_ids[1]);
+}
+
+TEST_CASE("OBJ textured import keeps geometry when its only texture is missing", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    const std::string missing_texture = obj.path().filename().string() + ".missing.png";
+    write_text(mtl,
+        "newmtl painted\nKd 0.2 0.4 0.6\nmap_Kd " + missing_texture + "\n");
+    write_text(obj,
+        "mtllib " + mtl.path().filename().string() + "\n"
+        "usemtl painted\n"
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 1/1 2/2 3/3\n");
+
+    TriangleMesh mesh;
+    ObjInfo info;
+    ObjParser::MtlData mtl_data;
+    std::string message;
+    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
+
+    TexturedMesh textured;
+    CHECK_FALSE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
+    CHECK(textured.vertices.size() == 3);
+    CHECK(textured.indices.size() == 1);
+    CHECK(textured.textures.empty());
+    REQUIRE(textured.material_texture_map.size() == 1);
+    CHECK(textured.material_texture_map[0] == -1);
 }
 
 TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OBJParser]")
@@ -920,42 +1069,3 @@ TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJ
     ObjParser::ObjData loaded;
     CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
-
-TEST_CASE("OBJ binary cache rejects unsupported bits across its complete native version", "[OBJBinary][OBJBinaryWidthControl][OBJParser]")
-{
-    ScopedTemporaryFile cache(".objbin");
-    std::vector<unsigned char> bytes;
-    size_t unsupported_version = 99;
-    if constexpr (sizeof(size_t) > sizeof(int))
-        unsupported_version = static_cast<size_t>(UINT64_C(0x100000001));
-    append_raw(bytes, unsupported_version);
-    // On 64-bit systems the old int reader sees version one, then interprets
-    // the high word as one coordinate. The zero payload keeps that control
-    // bounded: it allocates only one float rather than an oversized vector.
-    for (int i = 0; i < 10; ++i)
-        append_raw(bytes, size_t{0});
-    write_bytes(cache, bytes);
-    ObjParser::ObjData loaded;
-    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
-}
-
-TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJBinary][OBJParser]")
-{
-    REQUIRE(obj_binary_cache_rejects_unsupported_native_version());
-    ScopedTemporaryFile full(".objbin");
-    save_fixture(full);
-    boost::nowide::ifstream input(full.string(), std::ios::binary);
-    REQUIRE(input.good());
-    const std::vector<unsigned char> complete{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    REQUIRE_FALSE(complete.empty());
-    ScopedTemporaryFile truncated(".objbin");
-    for (size_t length = 0; length < complete.size(); ++length) {
-        const std::vector<unsigned char> prefix(complete.begin(), complete.begin() + length);
-        write_bytes(truncated, prefix);
-        ObjParser::ObjData loaded;
-        INFO("prefix length " << length);
-        CHECK_FALSE(ObjParser::objbinload(truncated.string().c_str(), loaded));
-    }
-}
-
-} // namespace obj_binary_contracts

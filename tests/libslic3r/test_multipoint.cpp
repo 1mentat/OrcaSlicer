@@ -96,6 +96,16 @@ Points make_polyline()
               Point(50, 3), Point(60, 0) };
 }
 
+// At this tolerance the oracle drops (10, 1) and (50, 3) but keeps the other three interior points.
+constexpr double partial_tolerance = 80.;
+
+Points partial_reference(const Points &input)
+{
+    Points expected = reference_visivalingam(input, partial_tolerance);
+    REQUIRE(expected.size() > 2);
+    REQUIRE(expected.size() < input.size());
+    return expected;
+}
 Points transform(const Points &in, coord_t dx, coord_t dy, int scale)
 {
     Points out = in;
@@ -132,16 +142,20 @@ TEST_CASE("Visvalingam is translation invariant", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const Points translated = transform(input, 123456, -765432, 1);
-    const Points expected = transform(reference_visivalingam(input, 20.), 123456, -765432, 1);
-    check_exact(MultiPoint::visivalingam(translated, 20.), expected);
+    const Points expected_at_20 = transform(reference_visivalingam(input, 20.), 123456, -765432, 1);
+    check_exact(MultiPoint::visivalingam(translated, 20.), expected_at_20);
+    const Points expected_at_80 = transform(partial_reference(input), 123456, -765432, 1);
+    check_exact(MultiPoint::visivalingam(translated, partial_tolerance), expected_at_80);
 }
 
 TEST_CASE("Visvalingam scales tolerance with area", "[MultiPoint][Visvalingam]")
 {
     const Points input = make_polyline();
     const Points scaled = transform(input, 0, 0, 3);
-    const Points expected = transform(reference_visivalingam(input, 20.), 0, 0, 3);
-    check_exact(MultiPoint::visivalingam(scaled, 20. * 9.), expected);
+    const Points expected_at_20 = transform(reference_visivalingam(input, 20.), 0, 0, 3);
+    check_exact(MultiPoint::visivalingam(scaled, 20. * 9.), expected_at_20);
+    const Points expected_at_80 = transform(partial_reference(input), 0, 0, 3);
+    check_exact(MultiPoint::visivalingam(scaled, partial_tolerance * 9.), expected_at_80);
 }
 
 TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam]")
@@ -149,9 +163,12 @@ TEST_CASE("Visvalingam reverses the retained order", "[MultiPoint][Visvalingam]"
     const Points input = make_polyline();
     Points reversed = input;
     std::reverse(reversed.begin(), reversed.end());
-    Points expected = reference_visivalingam(input, 20.);
-    std::reverse(expected.begin(), expected.end());
-    check_exact(MultiPoint::visivalingam(reversed, 20.), expected);
+    Points expected_at_20 = reference_visivalingam(input, 20.);
+    std::reverse(expected_at_20.begin(), expected_at_20.end());
+    check_exact(MultiPoint::visivalingam(reversed, 20.), expected_at_20);
+    Points expected_at_80 = partial_reference(input);
+    std::reverse(expected_at_80.begin(), expected_at_80.end());
+    check_exact(MultiPoint::visivalingam(reversed, partial_tolerance), expected_at_80);
 }
 
 TEST_CASE("Visvalingam preserves a salient high-area turn", "[MultiPoint][Visvalingam]")
@@ -197,7 +214,7 @@ TEST_CASE("Visvalingam retains a high-area tail node", "[MultiPoint][Visvalingam
     CHECK(expected[expected.size() - 2] == input[input.size() - 2]);
 }
 
-TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point identity", "[MultiPoint][MultiPointGap]")
+void check_tolerance_lookup_contracts()
 {
     Polyline path{Point(0, 0), Point(100, 0), Point(100, 100)};
     CHECK(path.find_point(Point(100, 0)) == 1);
@@ -207,7 +224,10 @@ TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point iden
     CHECK(path.has_boundary_point(Point(50, 0)));
     // SCALED_EPSILON is 100 coordinate units; this offset is intentionally well outside it.
     CHECK_FALSE(path.has_boundary_point(Point(50, 1000)));
+}
 
+void check_duplicate_cleanup_contracts()
+{
     Polyline duplicates{Point(0, 0), Point(10, 0), Point(10, 0), Point(10, 0), Point(20, 0)};
     CHECK(duplicates.has_duplicate_points());
     CHECK(duplicates.remove_duplicate_points());
@@ -215,6 +235,22 @@ TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point iden
     CHECK(duplicates.points == expected_deduplicated);
     CHECK_FALSE(duplicates.has_duplicate_points());
     CHECK_FALSE(duplicates.remove_duplicate_points());
+}
+
+TEST_CASE("MultiPoint tolerance lookup and duplicate cleanup preserve point identity", "[MultiPoint][MultiPointGap]")
+{
+    check_tolerance_lookup_contracts();
+    check_duplicate_cleanup_contracts();
+}
+
+TEST_CASE("MultiPoint tolerance lookup finds a vertex strictly inside the radius", "[MultiPoint][MultiPointGap]")
+{
+    check_tolerance_lookup_contracts();
+}
+
+TEST_CASE("MultiPoint duplicate cleanup collapses consecutive repeated vertices", "[MultiPoint][MultiPointGap]")
+{
+    check_duplicate_cleanup_contracts();
 }
 
 TEST_CASE("MultiPoint segment intersections return every hit and the nearest hit", "[MultiPoint][MultiPointGap]")
@@ -265,6 +301,14 @@ TEST_CASE("MultiPoint line distance handles projections, endpoints, and degenera
     CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(point_segment, remote_point),
                WithinAbs(5.0, 1e-9));
 
+    // Both perpendicular feet fall outside their segments, so the clamped endpoint distance is five.
+    const Points beyond{Point(13, 4), Point(13, 8)};
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(horizontal, beyond), WithinAbs(5.0, 1e-9));
+    CHECK_THAT(MultiPoint::minimumDistanceBetweenLinesDefinedByPoints(beyond, horizontal), WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("MultiPoint concave hull keeps a concavity up to its tolerance boundary", "[MultiPoint][MultiPointGap]")
+{
     // For the concavity point (6,2), the source's boundary ratio is exactly
     // 80 / sqrt(6^2 + 8^2) = 8.  The strict boundary keeps the point; a
     // slightly larger tolerance removes it.
@@ -278,7 +322,7 @@ TEST_CASE("MultiPoint line distance handles projections, endpoints, and degenera
     CHECK(smoothed == expected_smoothed);
 }
 
-TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and deduplicating", "[MultiPoint][MultiPointGap]")
+void check_multipoint3_matching_contracts()
 {
     Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
     CHECK(path.find_point(Point3(10, 0, 7)) == 1);
@@ -287,14 +331,53 @@ TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and dedupli
     CHECK(path.remove_duplicate_points());
     CHECK(path.points.size() == 3);
     CHECK_FALSE(path.remove_duplicate_points());
-
     const BoundingBox3 bounds = path.bounding_box();
     CHECK(bounds.defined);
     CHECK(bounds.min == Point3(0, 0, 5));
     CHECK(bounds.max == Point3(10, 10, 9));
-
     path.rotate(std::acos(-1.0) / 2.0, Point3(10, 0, 100));
     CHECK(path.first_point() == Point3(10, -10, 5));
     CHECK(path.points[1] == Point3(10, 0, 7));
     CHECK(path.points[2] == Point3(0, 0, 9));
+}
+
+void check_multipoint3_coordinate_identity_contracts()
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(0, 0, 8), Point3(0, 0, 8), Point3(10, 0, 7)});
+    CHECK(path.find_point(Point3(0, 0, 8)) == 1);
+    CHECK(path.find_point(Point3(0, 0, 6)) == -1);
+    CHECK(path.find_point(Point3(0, 1, 9), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 0, 12), 2.0) == -1);
+    CHECK(path.find_point(Point(0, 0)) == 0);
+    CHECK(path.remove_duplicate_points());
+    CHECK(path.points == Points3{Point3(0, 0, 5), Point3(0, 0, 8), Point3(10, 0, 7)});
+    CHECK_FALSE(path.remove_duplicate_points());
+}
+
+void check_multipoint3_bounds_rotation_contracts()
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9)});
+    const BoundingBox3 bounds = path.bounding_box();
+    CHECK(bounds.defined);
+    CHECK(bounds.min == Point3(0, 0, 5));
+    CHECK(bounds.max == Point3(10, 10, 9));
+    path.rotate(std::acos(-1.0) / 2.0, Point3(10, 0, 100));
+    CHECK(path.first_point() == Point3(10, -10, 5));
+    CHECK(path.points[1] == Point3(10, 0, 7));
+    CHECK(path.points[2] == Point3(0, 0, 9));
+}
+
+TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and deduplicating", "[MultiPoint][MultiPointGap]")
+{
+    check_multipoint3_matching_contracts();
+}
+
+TEST_CASE("MultiPoint3 matches and deduplicates on all three coordinates", "[MultiPoint][MultiPointGap]")
+{
+    check_multipoint3_coordinate_identity_contracts();
+}
+
+TEST_CASE("MultiPoint3 bounding box and rotation keep Z coordinates", "[MultiPoint][MultiPointGap]")
+{
+    check_multipoint3_bounds_rotation_contracts();
 }

@@ -1,26 +1,35 @@
 #include <miniz.h>
-#include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
-#include <catch2/matchers/catch_matchers.hpp>
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
-#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Config.hpp"
-#include <ios>
 #include <catch2/catch_all.hpp>
+#include "libslic3r/PNGReadWrite.hpp"
+#include "test_utils.hpp"
+#include <algorithm>
+#include <fstream>
+#include <memory>
+#include <boost/nowide/fstream.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <miniz.h>
+
+#include "libslic3r/Config.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Format/SL1.hpp"
-#include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/SLA/RasterBase.hpp"
-#include "libslic3r/Zipper.hpp"
-#include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Zipper.hpp"
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/miniz_extension.hpp"
+
 #include "test_utils.hpp"
 
+#include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
 #include <array>
@@ -28,9 +37,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
+#include <ios>
 #include <map>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -81,12 +89,17 @@ std::string config_ini()
     return "jobDir = Fixture\nlayerHeight = 0.1\n";
 }
 
-sla::EncodedRaster make_layer_png(bool large = true)
+sla::EncodedRaster make_layer_png(const ExPolygon &shape)
 {
     sla::RasterBase::Trafo trafo{sla::RasterBase::roLandscape, sla::RasterBase::NoMirror};
     auto raster = sla::create_raster_grayscale_aa({32, 24}, {1., 1.}, 0., trafo);
-    raster->draw(large ? square(4., 3., 27., 20.) : square(10., 8., 20., 16.));
+    raster->draw(shape);
     return raster->encode(sla::PNGRasterEncoder{});
+}
+
+sla::EncodedRaster make_layer_png(bool large = true)
+{
+    return make_layer_png(large ? square(4., 3., 27., 20.) : square(10., 8., 20., 16.));
 }
 
 struct RawEntry {
@@ -134,82 +147,6 @@ std::vector<std::pair<std::string, size_t>> archive_entries(const std::string &p
     }
     close_zip_reader(&archive.arch);
     return result;
-}
-
-class SL1RasterArchiveReader
-{
-    MZ_Archive m_archive{};
-    bool       m_open = false;
-
-public:
-    explicit SL1RasterArchiveReader(const std::string &path)
-        : m_open(open_zip_reader(&m_archive.arch, path))
-    {}
-
-    ~SL1RasterArchiveReader()
-    {
-        if (m_open)
-            close_zip_reader(&m_archive.arch);
-    }
-
-    bool is_open() const { return m_open; }
-
-    MZ_Archive &archive() { return m_archive; }
-};
-
-std::vector<std::uint8_t> read_archive_entry(const std::string &path,
-                                            const std::string &name)
-{
-    SL1RasterArchiveReader reader(path);
-    REQUIRE(reader.is_open());
-
-    const int index = mz_zip_reader_locate_file(&reader.archive().arch, name.c_str(), nullptr, 0);
-    REQUIRE(index >= 0);
-
-    mz_zip_archive_file_stat stat;
-    REQUIRE(mz_zip_reader_file_stat(&reader.archive().arch, mz_uint(index), &stat));
-
-    size_t extracted_size = 0;
-    void *raw = mz_zip_reader_extract_to_heap(&reader.archive().arch,
-                                              mz_uint(index), &extracted_size, 0);
-    std::unique_ptr<void, decltype(&mz_free)> owner(raw, &mz_free);
-    REQUIRE(owner != nullptr);
-    REQUIRE(extracted_size == size_t(stat.m_uncomp_size));
-
-    const auto *begin = static_cast<const std::uint8_t *>(owner.get());
-    return std::vector<std::uint8_t>(begin, begin + extracted_size);
-}
-
-png::ImageGreyscale render_sl1_layer(const SLAPrinterConfig &config,
-                                     const ExPolygon &shape)
-{
-    SL1Archive archive(config);
-    archive.draw_layers(1, [&shape](sla::RasterBase &raster, size_t) {
-        raster.draw(shape);
-    }, []() { return false; });
-
-    SLAPrint print;
-    ScopedTemporaryFile output(".sl1");
-    archive.export_print(output.string(), print, "raster-settings");
-
-    const std::vector<std::uint8_t> bytes =
-        read_archive_entry(output.string(), "raster-settings00000.png");
-    png::ImageGreyscale image;
-    const png::ReadBuf input{bytes.data(), bytes.size()};
-    REQUIRE(png::decode_png(input, image));
-    return image;
-}
-
-SLAPrinterConfig raster_settings_config(double gamma)
-{
-    SLAPrinterConfig config;
-    config.display_width.value = 10.;
-    config.display_height.value = 8.;
-    config.display_orientation.value = sladoLandscape;
-    config.display_mirror_x.value = false;
-    config.display_mirror_y.value = false;
-    config.gamma_correction.value = gamma;
-    return config;
 }
 
 void require_mesh(const indexed_triangle_set &mesh)
@@ -290,6 +227,330 @@ std::vector<std::array<float, 4>> layer_bounds(const indexed_triangle_set &mesh)
 }
 
 } // namespace
+
+
+
+namespace {
+
+class SL1RasterArchiveReader
+{
+    MZ_Archive m_archive{};
+    bool       m_open = false;
+
+public:
+    explicit SL1RasterArchiveReader(const std::string &path)
+        : m_open(open_zip_reader(&m_archive.arch, path))
+    {}
+
+    ~SL1RasterArchiveReader()
+    {
+        if (m_open)
+            close_zip_reader(&m_archive.arch);
+    }
+
+    bool is_open() const { return m_open; }
+
+    MZ_Archive &archive() { return m_archive; }
+};
+} // namespace
+
+namespace {
+SLAPrinterConfig raster_settings_config(double gamma)
+{
+    SLAPrinterConfig config;
+    config.display_width.value = 10.;
+    config.display_height.value = 8.;
+    config.display_orientation.value = sladoLandscape;
+    config.display_mirror_x.value = false;
+    config.display_mirror_y.value = false;
+    config.gamma_correction.value = gamma;
+    return config;
+}
+
+std::vector<std::uint8_t> read_archive_entry(const std::string &path,
+                                            const std::string &name)
+{
+    SL1RasterArchiveReader reader(path);
+    REQUIRE(reader.is_open());
+
+    const int index = mz_zip_reader_locate_file(&reader.archive().arch, name.c_str(), nullptr, 0);
+    REQUIRE(index >= 0);
+
+    mz_zip_archive_file_stat stat;
+    REQUIRE(mz_zip_reader_file_stat(&reader.archive().arch, mz_uint(index), &stat));
+
+    size_t extracted_size = 0;
+    void *raw = mz_zip_reader_extract_to_heap(&reader.archive().arch,
+                                              mz_uint(index), &extracted_size, 0);
+    std::unique_ptr<void, decltype(&mz_free)> owner(raw, &mz_free);
+    REQUIRE(owner != nullptr);
+    REQUIRE(extracted_size == size_t(stat.m_uncomp_size));
+
+    const auto *begin = static_cast<const std::uint8_t *>(owner.get());
+    return std::vector<std::uint8_t>(begin, begin + extracted_size);
+}
+
+png::ImageGreyscale render_sl1_layer(const SLAPrinterConfig &config,
+                                     const ExPolygon &shape)
+{
+    SL1Archive archive(config);
+    archive.draw_layers(1, [&shape](sla::RasterBase &raster, size_t) {
+        raster.draw(shape);
+    }, []() { return false; });
+
+    SLAPrint print;
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "raster-settings");
+
+    const std::vector<std::uint8_t> bytes =
+        read_archive_entry(output.string(), "raster-settings00000.png");
+    png::ImageGreyscale image;
+    const png::ReadBuf input{bytes.data(), bytes.size()};
+    REQUIRE(png::decode_png(input, image));
+    return image;
+}
+} // namespace
+
+TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1][SLASVGFormatExtended]")
+{
+    SLAPrinterConfig cfg = raster_config();
+    SL1Archive archive(cfg);
+    const ExPolygon shape = square(4., 3., 27., 20.);
+    std::atomic<int> drawn{0};
+    archive.draw_layers(2, [&](sla::RasterBase &raster, size_t) {
+        raster.draw(shape);
+        ++drawn;
+    }, []() { return false; });
+    REQUIRE(drawn == 2);
+
+    SLAPrint print;
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "fixture");
+    const auto entries = archive_entries(output.string());
+    // config.ini plus two layers. prusaslicer.ini is absent: the unconfigured SLAPrint has an
+    // empty full config, and Zipper drops entries with no data.
+    REQUIRE(entries.size() == 3);
+    CHECK(std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) != entries.end());
+    const auto layer0 = std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "fixture00000.png"; });
+    const auto layer1 = std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "fixture00001.png"; });
+    REQUIRE(layer0 != entries.end());
+    REQUIRE(layer1 != entries.end());
+    CHECK(layer0->second > 0);
+    CHECK(layer1->second > 0);
+}
+
+TEST_CASE("SL1 archive configuration changes invalidate encoded layers", "[SL1][SLASVGFormatExtended]")
+{
+    SLAPrinterConfig cfg = raster_config();
+    SL1Archive archive(cfg);
+    archive.draw_layers(1, [](sla::RasterBase &raster, size_t) { raster.draw(square(2., 2., 8., 8.)); }, []() { return false; });
+
+    SLAPrinterConfig changed = cfg;
+    changed.display_width.value = 33.;
+    archive.apply(changed);
+
+    SLAPrint print;
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "invalidated");
+    const auto entries = archive_entries(output.string());
+    CHECK(std::none_of(entries.begin(), entries.end(), [](const auto &e) { return e.first.find(".png") != std::string::npos; }));
+    CHECK(std::count_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) == 1);
+}
+
+TEST_CASE("SL1 import reads profile and builds a mesh from raster layers", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster first = make_layer_png(true);
+    const sla::EncodedRaster second = make_layer_png(true);
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), profile_ini(),
+                  {raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)});
+
+    indexed_triangle_set mesh;
+    DynamicPrintConfig profile;
+    const auto substitutions = import_sla_archive(archive.string(), {1, 1}, mesh, profile);
+    REQUIRE(substitutions.empty());
+    require_mesh(mesh);
+    REQUIRE(profile.has("display_width"));
+    CHECK_THAT(profile.option<ConfigOptionFloat>("display_width")->value, WithinAbs(32., 1e-6));
+    CHECK_THAT(profile.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(.1, 1e-6));
+}
+
+TEST_CASE("SL1 import clamps a zero marching-squares window", "[SL1][SLASVGFormatExtended]")
+{
+    // Diagonal edges make the contour depend on the window size; an axis-aligned square does not.
+    ExPolygon diamond;
+    diamond.contour.points = {Point(scaled(16.), scaled(2.)), Point(scaled(29.), scaled(12.)),
+                              Point(scaled(16.), scaled(22.)), Point(scaled(3.), scaled(12.))};
+    const sla::EncodedRaster layer = make_layer_png(diamond);
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), profile_ini(),
+                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer)});
+
+    indexed_triangle_set zero_mesh, unit_mesh;
+    DynamicPrintConfig zero_profile, unit_profile;
+    import_sla_archive(archive.string(), {0, 0}, zero_mesh, zero_profile);
+    import_sla_archive(archive.string(), {1, 1}, unit_mesh, unit_profile);
+    require_mesh(zero_mesh);
+    // Unclamped, marching squares would substitute its own default window for zero.
+    CHECK(canonical_geometry(zero_mesh) == canonical_geometry(unit_mesh));
+}
+
+TEST_CASE("SL1 import honors progress cancellation without overwriting output", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster layer = make_layer_png(true);
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), profile_ini(),
+                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer), raw_entry("layer00002.png", layer)});
+
+    indexed_triangle_set mesh = its_make_cube(2., 2., 2.);
+    const float original_volume = its_volume(mesh);
+    const auto original_geometry = canonical_geometry(mesh);
+    DynamicPrintConfig profile;
+    std::atomic<int> callbacks{0};
+    import_sla_archive(archive.string(), {1, 1}, mesh, profile, [&](int) {
+        ++callbacks;
+        return false;
+    });
+    CHECK(callbacks.load() > 0);
+    CHECK_THAT(its_volume(mesh), WithinAbs(original_volume, 1e-5));
+    CHECK(canonical_geometry(mesh) == original_geometry);
+}
+
+TEST_CASE("SL1 import recovers layer height when profile is absent", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster first = make_layer_png(true);
+    const sla::EncodedRaster second = make_layer_png(true);
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), {},
+                  {raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)});
+
+    DynamicPrintConfig fallback;
+    std::string fallback_profile = profile_ini();
+    fallback_profile.replace(fallback_profile.find("layer_height = 0.1"), 18, "layer_height = 0.2");
+    fallback_profile.replace(fallback_profile.find("initial_layer_height = 0.1"), 26, "initial_layer_height = 0.2");
+    fallback.load_from_ini_string(fallback_profile, ForwardCompatibilitySubstitutionRule::Enable);
+    indexed_triangle_set mesh;
+    import_sla_archive(archive.string(), {1, 1}, mesh, fallback);
+    require_mesh(mesh);
+    CHECK(fallback.empty());
+    float max_z = 0.f;
+    for (const Vec3f &vertex : mesh.vertices)
+        max_z = std::max(max_z, vertex.z());
+    CHECK_THAT(max_z, WithinAbs(.2f, .05f));
+}
+
+TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster small = make_layer_png(false);
+    const sla::EncodedRaster large = make_layer_png(true);
+    ScopedTemporaryFile unsorted(".sl1"), sorted(".sl1");
+    const std::vector<RawEntry> unsorted_layers{
+        raw_entry("Z_LAYER.PNG", large), raw_entry("a_layer.png", small), raw_entry("thumbnail.PNG", large)};
+    const std::vector<RawEntry> sorted_layers{
+        raw_entry("a_layer.png", small), raw_entry("Z_LAYER.PNG", large)};
+    write_archive(unsorted.string(), config_ini(), profile_ini(), unsorted_layers);
+    write_archive(sorted.string(), config_ini(), profile_ini(), sorted_layers);
+
+    indexed_triangle_set unsorted_mesh, sorted_mesh;
+    DynamicPrintConfig profile_a, profile_b;
+    import_sla_archive(unsorted.string(), {1, 1}, unsorted_mesh, profile_a);
+    import_sla_archive(sorted.string(), {1, 1}, sorted_mesh, profile_b);
+    require_mesh(unsorted_mesh);
+    require_mesh(sorted_mesh);
+    CHECK_THAT(std::abs(its_volume(unsorted_mesh)), WithinAbs(std::abs(its_volume(sorted_mesh)), .05));
+    // The archive entry order differs, but case-insensitive filename sorting must make the
+    // decoded layer sequence and therefore the full triangle geometry identical.
+    CHECK(canonical_geometry(unsorted_mesh) == canonical_geometry(sorted_mesh));
+    const auto layers = layer_bounds(unsorted_mesh);
+    REQUIRE(layers.size() >= 2);
+    const float first_width = layers.front()[1] - layers.front()[0];
+    const float last_width = layers.back()[1] - layers.back()[0];
+    const float first_height = layers.front()[3] - layers.front()[2];
+    const float last_height = layers.back()[3] - layers.back()[2];
+    // The small layer is "a_layer.png" and the large one "Z_LAYER.PNG": a case-sensitive sort
+    // would put 'Z' (0x5A) before 'a' (0x61). This semantic assertion makes the filename
+    // ordering observable instead of comparing two archives that could both be decoded in
+    // the same wrong order.
+    CHECK(first_width < last_width);
+    CHECK(first_height < last_height);
+}
+
+TEST_CASE("SL1 import returns an empty mesh for undecodable raster data", "[SL1][SLASVGFormatExtended]")
+{
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), profile_ini(),
+                  {{"layer00000.png", {0, 1, 2, 3}}, {"layer00001.png", {4, 5, 6, 7}}});
+
+    indexed_triangle_set mesh;
+    DynamicPrintConfig profile;
+    import_sla_archive(archive.string(), {1, 1}, mesh, profile);
+    CHECK(mesh.empty());
+}
+
+TEST_CASE("SL1 import rejects a profile without raster dimensions", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster layer = make_layer_png(true);
+    ScopedTemporaryFile archive(".sl1");
+    write_archive(archive.string(), config_ini(), "layer_height = 0.1\ninitial_layer_height = 0.1\n",
+                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer)});
+
+    indexed_triangle_set mesh;
+    DynamicPrintConfig profile;
+    CHECK_THROWS_AS(import_sla_archive(archive.string(), {1, 1}, mesh, profile), MissingProfileError);
+}
+
+TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1][SLASVGFormatExtended]")
+{
+    const sla::EncodedRaster layer = make_layer_png(true);
+    ScopedTemporaryFile malformed_ini(".sl1");
+    write_archive(malformed_ini.string(), config_ini(), "[broken\n",
+                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer)});
+    DynamicPrintConfig profile;
+    CHECK_THROWS(import_sla_archive(malformed_ini.string(), profile));
+
+    ScopedTemporaryFile corrupt_zip(".sl1");
+    {
+        boost::nowide::ofstream out(corrupt_zip.string(), std::ios::binary);
+        out << "not a zip archive";
+    }
+    CHECK_THROWS(import_sla_archive(corrupt_zip.string(), profile));
+}
+
+TEST_CASE("SL1 import applies portrait and mirror raster transforms", "[SL1][SLASVGFormatExtended]")
+{
+    // The large fixture square is centred on the 32x24 px raster, so mirroring it is a no-op.
+    // Use an off-centre, non-square shape so mirror and portrait transforms are observable.
+    const sla::EncodedRaster first = make_layer_png(square(2., 3., 20., 16.));
+    const sla::EncodedRaster second = make_layer_png(square(2., 3., 20., 16.));
+    ScopedTemporaryFile landscape(".sl1"), portrait(".sl1"), mirror_x(".sl1"), mirror_y(".sl1");
+    const std::vector<RawEntry> layers{raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)};
+    write_archive(landscape.string(), config_ini(), profile_ini(false, false, false), layers);
+    write_archive(portrait.string(), config_ini(), profile_ini(true, false, false), layers);
+    write_archive(mirror_x.string(), config_ini(), profile_ini(false, true, false), layers);
+    write_archive(mirror_y.string(), config_ini(), profile_ini(false, false, true), layers);
+
+    indexed_triangle_set normal_mesh, portrait_mesh, mirror_x_mesh, mirror_y_mesh;
+    DynamicPrintConfig normal_profile, portrait_profile, mirror_x_profile, mirror_y_profile;
+    import_sla_archive(landscape.string(), {1, 1}, normal_mesh, normal_profile);
+    import_sla_archive(portrait.string(), {1, 1}, portrait_mesh, portrait_profile);
+    import_sla_archive(mirror_x.string(), {1, 1}, mirror_x_mesh, mirror_x_profile);
+    import_sla_archive(mirror_y.string(), {1, 1}, mirror_y_mesh, mirror_y_profile);
+    require_mesh(normal_mesh);
+    require_mesh(portrait_mesh);
+    require_mesh(mirror_x_mesh);
+    require_mesh(mirror_y_mesh);
+
+    const auto normal_bounds = xy_bounds(normal_mesh);
+    const auto portrait_bounds = xy_bounds(portrait_mesh);
+    const auto mirror_x_bounds = xy_bounds(mirror_x_mesh);
+    const auto mirror_y_bounds = xy_bounds(mirror_y_mesh);
+    CHECK_THAT(normal_bounds[0] + mirror_x_bounds[1], WithinAbs(32.f, .25f));
+    CHECK_THAT(normal_bounds[1] + mirror_x_bounds[0], WithinAbs(32.f, .25f));
+    CHECK_THAT(normal_bounds[2] + mirror_y_bounds[3], WithinAbs(24.f, .25f));
+    CHECK_THAT(normal_bounds[3] + mirror_y_bounds[2], WithinAbs(24.f, .25f));
+    CHECK_THAT(normal_bounds[1] - normal_bounds[0], WithinAbs(portrait_bounds[3] - portrait_bounds[2], .25f));
+    CHECK_THAT(normal_bounds[3] - normal_bounds[2], WithinAbs(portrait_bounds[1] - portrait_bounds[0], .25f));
+}
 
 TEST_CASE("SL1 raster dimensions and footprint follow display pixel settings",
           "[SL1][SLARasterSettings][SL1RasterResolution]")
@@ -390,234 +651,4 @@ TEST_CASE("SL1 raster gamma follows known fractional pixel coverage",
         CHECK(image.get(50, 15) == 255);
         CHECK(image.get(50, 5) == 0);
     }
-}
-
-TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1][SLASVGFormatExtended]")
-{
-    SLAPrinterConfig cfg = raster_config();
-    SL1Archive archive(cfg);
-    const ExPolygon shape = square(4., 3., 27., 20.);
-    std::atomic<int> drawn{0};
-    archive.draw_layers(2, [&](sla::RasterBase &raster, size_t) {
-        raster.draw(shape);
-        ++drawn;
-    }, []() { return false; });
-    REQUIRE(drawn == 2);
-
-    SLAPrint print;
-    ScopedTemporaryFile output(".sl1");
-    archive.export_print(output.string(), print, "fixture");
-    const auto entries = archive_entries(output.string());
-    REQUIRE(entries.size() == 3);
-    CHECK(std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) != entries.end());
-    const auto layer0 = std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "fixture00000.png"; });
-    const auto layer1 = std::find_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "fixture00001.png"; });
-    REQUIRE(layer0 != entries.end());
-    REQUIRE(layer1 != entries.end());
-    CHECK(layer0->second > 0);
-    CHECK(layer1->second > 0);
-}
-
-TEST_CASE("SL1 archive configuration changes invalidate encoded layers", "[SL1][SLASVGFormatExtended]")
-{
-    SLAPrinterConfig cfg = raster_config();
-    SL1Archive archive(cfg);
-    archive.draw_layers(1, [](sla::RasterBase &raster, size_t) { raster.draw(square(2., 2., 8., 8.)); }, []() { return false; });
-
-    SLAPrinterConfig changed = cfg;
-    changed.display_width.value = 33.;
-    archive.apply(changed);
-
-    SLAPrint print;
-    ScopedTemporaryFile output(".sl1");
-    archive.export_print(output.string(), print, "invalidated");
-    const auto entries = archive_entries(output.string());
-    CHECK(std::none_of(entries.begin(), entries.end(), [](const auto &e) { return e.first.find(".png") != std::string::npos; }));
-    CHECK(std::count_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) == 1);
-}
-
-TEST_CASE("SL1 import reads profile and builds a mesh from raster layers", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster first = make_layer_png(true);
-    const sla::EncodedRaster second = make_layer_png(true);
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), profile_ini(),
-                  {raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)});
-
-    indexed_triangle_set mesh;
-    DynamicPrintConfig profile;
-    const auto substitutions = import_sla_archive(archive.string(), {1, 1}, mesh, profile);
-    REQUIRE(substitutions.empty());
-    require_mesh(mesh);
-    REQUIRE(profile.has("display_width"));
-    CHECK_THAT(profile.option<ConfigOptionFloat>("display_width")->value, WithinAbs(32., 1e-6));
-    CHECK_THAT(profile.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(.1, 1e-6));
-}
-
-TEST_CASE("SL1 import clamps a zero marching-squares window", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster first = make_layer_png(true);
-    const sla::EncodedRaster second = make_layer_png(true);
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), profile_ini(),
-                  {raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)});
-
-    indexed_triangle_set mesh;
-    DynamicPrintConfig profile;
-    import_sla_archive(archive.string(), {0, 0}, mesh, profile);
-    require_mesh(mesh);
-}
-
-TEST_CASE("SL1 import honors progress cancellation without overwriting output", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster layer = make_layer_png(true);
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), profile_ini(),
-                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer), raw_entry("layer00002.png", layer)});
-
-    indexed_triangle_set mesh = its_make_cube(2., 2., 2.);
-    const float original_volume = its_volume(mesh);
-    const auto original_geometry = canonical_geometry(mesh);
-    DynamicPrintConfig profile;
-    std::atomic<int> callbacks{0};
-    import_sla_archive(archive.string(), {1, 1}, mesh, profile, [&](int) {
-        ++callbacks;
-        return false;
-    });
-    CHECK(callbacks.load() > 0);
-    CHECK_THAT(its_volume(mesh), WithinAbs(original_volume, 1e-5));
-    CHECK(canonical_geometry(mesh) == original_geometry);
-}
-
-TEST_CASE("SL1 import recovers layer height when profile is absent", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster first = make_layer_png(true);
-    const sla::EncodedRaster second = make_layer_png(true);
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), {},
-                  {raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)});
-
-    DynamicPrintConfig fallback;
-    std::string fallback_profile = profile_ini();
-    fallback_profile.replace(fallback_profile.find("layer_height = 0.1"), 18, "layer_height = 0.2");
-    fallback_profile.replace(fallback_profile.find("initial_layer_height = 0.1"), 26, "initial_layer_height = 0.2");
-    fallback.load_from_ini_string(fallback_profile, ForwardCompatibilitySubstitutionRule::Enable);
-    indexed_triangle_set mesh;
-    import_sla_archive(archive.string(), {1, 1}, mesh, fallback);
-    require_mesh(mesh);
-    CHECK(fallback.empty());
-    float max_z = 0.f;
-    for (const Vec3f &vertex : mesh.vertices)
-        max_z = std::max(max_z, vertex.z());
-    CHECK_THAT(max_z, WithinAbs(.2f, .05f));
-}
-
-TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster small = make_layer_png(false);
-    const sla::EncodedRaster large = make_layer_png(true);
-    ScopedTemporaryFile unsorted(".sl1"), sorted(".sl1");
-    const std::vector<RawEntry> unsorted_layers{
-        raw_entry("Z_LAYER.PNG", large), raw_entry("A_LAYER.PNG", small), raw_entry("thumbnail.PNG", large)};
-    const std::vector<RawEntry> sorted_layers{
-        raw_entry("A_LAYER.PNG", small), raw_entry("Z_LAYER.PNG", large)};
-    write_archive(unsorted.string(), config_ini(), profile_ini(), unsorted_layers);
-    write_archive(sorted.string(), config_ini(), profile_ini(), sorted_layers);
-
-    indexed_triangle_set unsorted_mesh, sorted_mesh;
-    DynamicPrintConfig profile_a, profile_b;
-    import_sla_archive(unsorted.string(), {1, 1}, unsorted_mesh, profile_a);
-    import_sla_archive(sorted.string(), {1, 1}, sorted_mesh, profile_b);
-    require_mesh(unsorted_mesh);
-    require_mesh(sorted_mesh);
-    CHECK_THAT(std::abs(its_volume(unsorted_mesh)), WithinAbs(std::abs(its_volume(sorted_mesh)), .05));
-    // The archive entry order differs, but case-insensitive filename sorting must make the
-    // decoded layer sequence and therefore the full triangle geometry identical.
-    CHECK(canonical_geometry(unsorted_mesh) == canonical_geometry(sorted_mesh));
-    const auto layers = layer_bounds(unsorted_mesh);
-    REQUIRE(layers.size() >= 2);
-    const float first_width = layers.front()[1] - layers.front()[0];
-    const float last_width = layers.back()[1] - layers.back()[0];
-    const float first_height = layers.front()[3] - layers.front()[2];
-    const float last_height = layers.back()[3] - layers.back()[2];
-    // The fixture deliberately names the small layer A and the large layer Z.  This
-    // semantic assertion makes the filename ordering observable instead of comparing
-    // two archives that could both be decoded in the same wrong order.
-    CHECK(first_width < last_width);
-    CHECK(first_height < last_height);
-}
-
-TEST_CASE("SL1 import returns an empty mesh for undecodable raster data", "[SL1][SLASVGFormatExtended]")
-{
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), profile_ini(),
-                  {{"layer00000.png", {0, 1, 2, 3}}, {"layer00001.png", {4, 5, 6, 7}}});
-
-    indexed_triangle_set mesh;
-    DynamicPrintConfig profile;
-    import_sla_archive(archive.string(), {1, 1}, mesh, profile);
-    CHECK(mesh.empty());
-}
-
-TEST_CASE("SL1 import rejects a profile without raster dimensions", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster layer = make_layer_png(true);
-    ScopedTemporaryFile archive(".sl1");
-    write_archive(archive.string(), config_ini(), "layer_height = 0.1\ninitial_layer_height = 0.1\n",
-                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer)});
-
-    indexed_triangle_set mesh;
-    DynamicPrintConfig profile;
-    CHECK_THROWS_AS(import_sla_archive(archive.string(), {1, 1}, mesh, profile), MissingProfileError);
-}
-
-TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster layer = make_layer_png(true);
-    ScopedTemporaryFile malformed_ini(".sl1");
-    write_archive(malformed_ini.string(), config_ini(), "[broken\n",
-                  {raw_entry("layer00000.png", layer), raw_entry("layer00001.png", layer)});
-    DynamicPrintConfig profile;
-    CHECK_THROWS(import_sla_archive(malformed_ini.string(), profile));
-
-    ScopedTemporaryFile corrupt_zip(".sl1");
-    {
-        std::ofstream out(corrupt_zip.string(), std::ios::binary);
-        out << "not a zip archive";
-    }
-    CHECK_THROWS(import_sla_archive(corrupt_zip.string(), profile));
-}
-
-TEST_CASE("SL1 import applies portrait and mirror raster transforms", "[SL1][SLASVGFormatExtended]")
-{
-    const sla::EncodedRaster first = make_layer_png(true);
-    const sla::EncodedRaster second = make_layer_png(true);
-    ScopedTemporaryFile landscape(".sl1"), portrait(".sl1"), mirror_x(".sl1"), mirror_y(".sl1");
-    const std::vector<RawEntry> layers{raw_entry("layer00000.png", first), raw_entry("layer00001.png", second)};
-    write_archive(landscape.string(), config_ini(), profile_ini(false, false, false), layers);
-    write_archive(portrait.string(), config_ini(), profile_ini(true, false, false), layers);
-    write_archive(mirror_x.string(), config_ini(), profile_ini(false, true, false), layers);
-    write_archive(mirror_y.string(), config_ini(), profile_ini(false, false, true), layers);
-
-    indexed_triangle_set normal_mesh, portrait_mesh, mirror_x_mesh, mirror_y_mesh;
-    DynamicPrintConfig normal_profile, portrait_profile, mirror_x_profile, mirror_y_profile;
-    import_sla_archive(landscape.string(), {1, 1}, normal_mesh, normal_profile);
-    import_sla_archive(portrait.string(), {1, 1}, portrait_mesh, portrait_profile);
-    import_sla_archive(mirror_x.string(), {1, 1}, mirror_x_mesh, mirror_x_profile);
-    import_sla_archive(mirror_y.string(), {1, 1}, mirror_y_mesh, mirror_y_profile);
-    require_mesh(normal_mesh);
-    require_mesh(portrait_mesh);
-    require_mesh(mirror_x_mesh);
-    require_mesh(mirror_y_mesh);
-
-    const auto normal_bounds = xy_bounds(normal_mesh);
-    const auto portrait_bounds = xy_bounds(portrait_mesh);
-    const auto mirror_x_bounds = xy_bounds(mirror_x_mesh);
-    const auto mirror_y_bounds = xy_bounds(mirror_y_mesh);
-    CHECK_THAT(normal_bounds[0] + mirror_x_bounds[1], WithinAbs(32.f, .25f));
-    CHECK_THAT(normal_bounds[1] + mirror_x_bounds[0], WithinAbs(32.f, .25f));
-    CHECK_THAT(normal_bounds[2] + mirror_y_bounds[3], WithinAbs(24.f, .25f));
-    CHECK_THAT(normal_bounds[3] + mirror_y_bounds[2], WithinAbs(24.f, .25f));
-    CHECK_THAT(normal_bounds[1] - normal_bounds[0], WithinAbs(portrait_bounds[3] - portrait_bounds[2], .25f));
-    CHECK_THAT(normal_bounds[3] - normal_bounds[2], WithinAbs(portrait_bounds[1] - portrait_bounds[0], .25f));
 }

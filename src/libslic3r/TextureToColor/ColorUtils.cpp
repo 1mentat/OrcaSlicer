@@ -1260,6 +1260,7 @@ bool mesh_cluster(const TriMesh& bbs_mesh, const std::vector<RGB>& cluster_cente
 
     if (cluster_centers.size() == 1) {
         std::fill(map_face_to_rgb.begin(), map_face_to_rgb.end(), cluster_centers[0]);
+        map_face_to_cluster_id.assign(map_face_to_rgb.size(), 0);
 #ifdef DEBUG_FLAG
         BOOST_LOG_TRIVIAL(debug) << "input cluster centers' size is 1, so we set all face RGB as same with it and return.\n";
 #endif

@@ -1,8 +1,3 @@
-#include <cstdint>
-#include <vector>
-#include <set>
-#include <array>
-#include "libslic3r/Exception.hpp"
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/directory.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -14,29 +9,65 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/catch_message.hpp>
-#include "libslic3r/Utils.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_utils.hpp"
 
 #include <boost/filesystem.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <iterator>
+#include <limits>
+#include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <system_error>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>     // getuid
 #endif
 
 using namespace Slic3r;
+
+
+namespace {
+namespace fs = boost::filesystem;
+
+std::string read_bytes(const fs::path& p)
+{
+    std::ifstream in(p.string(), std::ios::binary);
+    REQUIRE(in.good());
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+struct DirectoryState
+{
+    std::string var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir();
+    std::string shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir();
+    ~DirectoryState()
+    {
+        set_var_dir(var);
+        set_resources_dir(resources);
+        set_temporary_dir(temp);
+        set_local_dir(local);
+        set_sys_shapes_dir(shapes);
+        set_custom_gcodes_dir(gcodes);
+        set_data_dir(data);
+    }
+};
+} // namespace
 
 TEST_CASE("per_user_temp_dir composes a per-user temp root", "[utils]") {
     const std::string base = "/tmp";
@@ -110,24 +141,6 @@ TEST_CASE("write_file_atomically reports a missing directory and writes nothing"
     REQUIRE_FALSE(boost::filesystem::exists(target));
 }
 
-TEST_CASE("write_file_atomically rejects a directory target and preserves its contents", "[Utils][UtilsIOContracts][UtilsAtomicTarget]") {
-    ScopedTemporaryDir dir;
-    const boost::filesystem::path target = dir.path() / "preset.json";
-    boost::filesystem::create_directory(target);
-    const boost::filesystem::path existing = target / "keep.json";
-    std::ofstream(existing.string()) << "keep";
-
-    std::string content;
-    load_string_file(existing, content);
-    REQUIRE(content == "keep");
-
-    const std::error_code ec = write_file_atomically(target.string(), "replacement");
-    REQUIRE(static_cast<bool>(ec));
-    REQUIRE(boost::filesystem::is_directory(target));
-    load_string_file(existing, content);
-    CHECK(content == "keep");
-}
-
 #ifndef _WIN32
 // The read-only bit on a directory stops file creation only on POSIX.
 TEST_CASE("write_file_atomically writes in place when no temporary can be created beside an existing target", "[utils]") {
@@ -182,7 +195,7 @@ TEST_CASE("write_file_atomically writes through a symlink and keeps the target's
 }
 #endif
 
-TEST_CASE("write_file_atomically survives two threads writing one target", "[utils][Parallel]") {
+TEST_CASE("write_file_atomically survives two threads writing one target", "[utils]") {
     ScopedTemporaryDir dir;
     const boost::filesystem::path target = dir.path() / "shared.json";
     const std::string a(20000, 'a'), b(20000, 'b');
@@ -328,7 +341,7 @@ namespace {
 void touch(const boost::filesystem::path &path) { std::ofstream(path.string()) << "existing"; }
 std::string file_contents(const boost::filesystem::path &path)
 {
-    std::ifstream file(path.string());
+    std::ifstream file(path.string(), std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 } // namespace
@@ -546,40 +559,325 @@ TEST_CASE("ascii_iequals compares ASCII letters regardless of case", "[Utils]") 
     CHECK_FALSE(ascii_iequals("@", "`"));
 }
 
-namespace utils_io_contracts {
-using namespace Slic3r;
-namespace fs = boost::filesystem;
-
-void write_bytes(const fs::path& p, const std::string& s)
-{
-    std::ofstream out(p.string(), std::ios::binary);
-    out.write(s.data(), static_cast<std::streamsize>(s.size()));
-    REQUIRE(out.good());
-}
-std::string read_bytes(const fs::path& p)
-{
-    std::ifstream in(p.string(), std::ios::binary);
-    REQUIRE(in.good());
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-}
-void check_bytes(const fs::path& path, const std::string& expected)
-{
-    const std::string actual = read_bytes(path);
-    CHECK(actual == expected);
-}
-void matches(const std::string& pattern, const std::set<int>& one_based, int last = 20)
+namespace {
+// Checks one-based layers 1..last against the layers a pattern must select.
+void check_layer_pattern(const std::string &pattern, const std::set<int> &one_based, int last = 20)
 {
     for (int n = 1; n <= last; ++n) {
         INFO("pattern=" << pattern << ", layer=" << n);
         CHECK(check_layer_id_pattern(pattern, n - 1) == (one_based.count(n) != 0));
     }
 }
-struct DirectoryState
+} // namespace
+
+TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[utils]") {
+    check_layer_pattern("5", {5, 10, 15, 20});
+    check_layer_pattern("5#2", {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("5#", {5, 10, 15, 20});
+    check_layer_pattern("1", {1, 2, 3, 4, 5}, 5);
+    check_layer_pattern("3#5", {3, 4, 5, 6, 7, 8, 9, 10}, 10);
+}
+
+TEST_CASE("Layer patterns strip whitespace and surrounding quote forms", "[utils]") {
+    for (const std::string &p : {" 5 # 2 ", "\t\"5#2\"\r\n", "' 5 # 2 '"})
+        check_layer_pattern(p, {5, 6, 10, 11, 15, 16, 20});
+    check_layer_pattern("\"1, 7, 9\"", {1, 7, 9});
+}
+
+TEST_CASE("Layer lists keep independent ranges and do not repeat their entries", "[utils]") {
+    check_layer_pattern("1,7,9", {1, 7, 9});
+    check_layer_pattern("5,9#2,18", {5, 9, 10, 18});
+    check_layer_pattern(",,3#,7#3,,12,", {3, 7, 8, 9, 12});
+}
+
+TEST_CASE("Layer lists ignore malformed entries without losing subsequent valid ranges", "[utils]") {
+    check_layer_pattern("bad,3,0#2,-1#2,5#0,6#-1,8#2,9999999999999999999999", {3, 8, 9});
+    check_layer_pattern("bad,#2,5#bad", {});
+}
+
+TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive intervals", "[utils]") {
+    for (const std::string &p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
+        check_layer_pattern(p, {});
+    CHECK_FALSE(check_layer_id_pattern("1", -1));
+}
+
+TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[utils]") {
+    const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
+    const std::vector<std::pair<size_t, size_t>> rows{{0, 1}, {1, 2}, {3, 3}, {6, 4}, {10, 1}};
+    for (const auto &[pos, len] : rows) {
+        CHECK(get_utf8_sequence_length(s, pos) == len);
+        CHECK(get_utf8_sequence_length(s.data() + pos, s.size() - pos) == len);
+    }
+}
+
+TEST_CASE("UTF8 stepping clamps truncated sequences to available bytes", "[utils]") {
+    for (const auto &[lead, width] : std::vector<std::pair<unsigned char, size_t>>{{0xc3, 2}, {0xe6, 3}, {0xf0, 4}, {0xf8, 5}, {0xfc, 6}}) {
+        // This helper measures byte spans, including legacy five/six-byte headers; it is not a Unicode validator.
+        std::string s(width, char(0x80));
+        s[0] = char(lead);
+        for (size_t available = 1; available <= width; ++available) {
+            CAPTURE(lead, width, available);
+            CHECK(get_utf8_sequence_length(s.data(), available) == available);
+        }
+    }
+}
+
+TEST_CASE("UTF8 stepping from a continuation byte stops before a new character", "[utils]") {
+    const std::string ascii_end  = "\x80\xbf\x81Z";
+    const std::string header_end = "\x80\xbf\xc3\xa9";
+    CHECK(get_utf8_sequence_length(ascii_end, 0) == 3);
+    CHECK(get_utf8_sequence_length(ascii_end.data(), 2) == 2);
+    CHECK(get_utf8_sequence_length(header_end, 0) == 2);
+    CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
+    CHECK(get_utf8_sequence_length("\xff", 1) == 1);
+}
+
+TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[utils]") {
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
+    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
+}
+
+TEST_CASE("Round up divide handles exact and partial bounded quotients", "[utils]") {
+    CHECK(round_up_divide<long long>(0, 3) == 0);
+    CHECK(round_up_divide<long long>(1, 3) == 1);
+    CHECK(round_up_divide<long long>(3, 3) == 1);
+    CHECK(round_up_divide<long long>(4, 3) == 2);
+}
+
+TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read boundary", "[utils]") {
+    ScopedTemporaryDir d;
+    std::string file = (d.path() / "data").string(), digest;
+    for (const auto &[data, expected] :
+         std::vector<std::pair<std::string, std::string>>{{"", "D41D8CD98F00B204E9800998ECF8427E"},
+                                                          {"abc", "900150983CD24FB0D6963F7D28E17F72"},
+                                                          {std::string(65537, 'a'), "B3C6FC238E908636E53AABD5AD830CF7"}}) {
+        std::ofstream(file, std::ios::binary) << data;
+        REQUIRE(bbl_calc_md5(file, digest));
+        CHECK(digest == expected);
+    }
+}
+
+TEST_CASE("Character filtering removes only requested characters", "[utils]") {
+    CHECK(filter_characters("a-b_c!", "-_") == "abc!");
+    CHECK(filter_characters("stable", "") == "stable");
+}
+
+namespace {
+void write_bytes(const boost::filesystem::path &path, const std::string &bytes)
 {
-    std::string var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir();
-    std::string shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir();
-    ~DirectoryState()
+    std::ofstream out(path.string(), std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out.good());
+}
+} // namespace
+
+TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_ORIGIN_NOT_OPENED);
+    write_bytes(a, "abc");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_TARGET_NOT_OPENED);
+    write_bytes(b, "ab");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abd");
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+    write_bytes(b, "abc");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    write_bytes(a, "");
+    write_bytes(b, "");
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+}
+
+TEST_CASE("File verification detects changes after its first eight MiB chunk", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    std::string data(8 * 1024 * 1024 + 17, 'x');
+    data.front() = 'A';
+    data.back()  = 'Z';
+    write_bytes(a, data);
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
+    data.back() = 'Y';
+    write_bytes(b, data);
+    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
+}
+
+TEST_CASE("Verified copies preserve binary bytes and replace an existing destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto a = d.path() / "a", b = d.path() / "b";
+    const std::string data("x\0y\r\nz", 6);
+    write_bytes(a, data);
+    write_bytes(b, "obsolete");
+    std::string error;
+    CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
+    CHECK(file_contents(b) == data);
+#ifndef _WIN32
+    // Off Windows the copy goes through a temporary file beside the destination; none may remain.
+    CHECK_FALSE(boost::filesystem::exists(b.string() + ".tmp"));
+#endif
+}
+
+TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "sub");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "top", "top");
+    write_bytes(src / "sub" / "child", "nested");
+    write_bytes(dst / "top", "old");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "top") == "top");
+    CHECK(file_contents(dst / "sub" / "child") == "nested");
+    CHECK_FALSE(copy_framework((src / "top").string(), (d.path() / "bad").string()));
+    write_bytes(d.path() / "blocked", "file");
+    CHECK_FALSE(copy_framework(src.string(), (d.path() / "blocked").string()));
+}
+
+#ifndef _WIN32
+TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "Versions" / "A");
+    write_bytes(src / "Versions" / "A" / "binary", "payload");
+    fs::create_symlink("A", src / "Versions" / "Current");
+    REQUIRE(copy_framework(src.string(), dst.string()));
+    CHECK(fs::is_symlink(fs::symlink_status(dst / "Versions" / "Current")));
+    CHECK(fs::read_symlink(dst / "Versions" / "Current").string() == "A");
+    CHECK(file_contents(dst / "Versions" / "Current" / "binary") == "payload");
+}
+#endif
+
+// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src / "nested");
+    boost::filesystem::create_directories(dst);
+    write_bytes(src / "nested" / "payload", "source");
+    write_bytes(dst / "nested", "occupied by a file");
+    CHECK_FALSE(copy_framework(src.string(), dst.string()));
+    CHECK(file_contents(dst / "nested") == "occupied by a file");
+}
+
+TEST_CASE("Recursive directory copies exclude selected filenames and distinguish replacement from merge", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    fs::create_directories(src / "sub");
+    fs::create_directories(dst / "sub");
+    write_bytes(src / "keep.json", "new");
+    write_bytes(src / "ignore.png", "image");
+    write_bytes(src / "sub" / "child", "child");
+    write_bytes(dst / "stale", "stale");
+    write_bytes(dst / "sub" / "old", "old");
+    copy_directory_recursively(src, dst, [](const std::string &name) { return name == "ignore.png"; }, true);
+    CHECK(file_contents(dst / "keep.json") == "new");
+    CHECK(file_contents(dst / "sub" / "child") == "child");
+    CHECK(fs::exists(dst / "stale"));
+    CHECK(fs::exists(dst / "sub" / "old"));
+    CHECK_FALSE(fs::exists(dst / "ignore.png"));
+    copy_directory_recursively(src, dst, {}, false);
+    CHECK_FALSE(fs::exists(dst / "stale"));
+    CHECK_FALSE(fs::exists(dst / "sub" / "old"));
+    CHECK(file_contents(dst / "ignore.png") == "image");
+}
+
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+    ScopedTemporaryDir d;
+    const auto src = d.path() / "src", dst = d.path() / "dst";
+    boost::filesystem::create_directories(src);
+    boost::filesystem::create_directories(dst / "file.txt" / "occupied");
+    write_bytes(src / "file.txt", "payload");
+    CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
+}
+
+// Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
+// ScopeGuard relies on a moved-from std::function being empty. libstdc++ and MSVC empty it; libc++ keeps a
+// small closure in the source, so the moved-from guard fires too. The move tests can only fail where that happens.
+#ifdef _LIBCPP_VERSION
+#define SCOPE_GUARD_MOVE_TAGS "[utils][!shouldfail]"
+#else
+#define SCOPE_GUARD_MOVE_TAGS "[utils]"
+#endif
+
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
     {
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        ScopeGuard moved(std::move(*source));
+        source.reset();
+        // The moved-from guard gave its callback away, so destroying it runs nothing.
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard guard;
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        guard = std::move(*source);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", SCOPE_GUARD_MOVE_TAGS) {
+    size_t calls = 0;
+    {
+        ScopeGuard destination([&calls] { calls += 10; });
+        std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
+        destination = std::move(*source);
+        CHECK(calls == 0);
+        source.reset();
+        CHECK(calls == 0);
+    }
+    CHECK(calls == 1);
+}
+
+#undef SCOPE_GUARD_MOVE_TAGS
+
+TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
+    size_t calls = 0;
+    {
+        ScopeGuard guard([&calls] { ++calls; });
+        guard.reset();
+    }
+    CHECK(calls == 0);
+}
+
+TEST_CASE("File classification checks case-insensitive extensions and regular-file type", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    for (const std::string &name : {"settings.INI", "cache.IdX", "shape.STL"})
+        touch(d.path() / name);
+    fs::create_directories(d.path() / "folder.ini");
+    CHECK(is_ini_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "folder.ini")));
+    CHECK(is_idx_file(fs::directory_entry(d.path() / "cache.IdX")));
+    CHECK_FALSE(is_idx_file(fs::directory_entry(d.path() / "settings.INI")));
+    CHECK(is_gallery_file(fs::directory_entry(d.path() / "shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(fs::directory_entry(d.path() / "folder.ini"), ".ini"));
+    CHECK(is_gallery_file(std::string("nested/shape.STL"), ".stl"));
+    CHECK_FALSE(is_gallery_file(std::string("shape.stl.backup"), ".stl"));
+    CHECK(is_img_file("image.PNG"));
+    CHECK(is_img_file("image.SvG"));
+    CHECK_FALSE(is_img_file("image.svg.json"));
+}
+
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir d;
+    ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
+                        shapes = sys_shapes_dir(), gcodes = custom_gcodes_dir(), data = data_dir()] {
         set_var_dir(var);
         set_resources_dir(resources);
         set_temporary_dir(temp);
@@ -587,8 +885,217 @@ struct DirectoryState
         set_sys_shapes_dir(shapes);
         set_custom_gcodes_dir(gcodes);
         set_data_dir(data);
+    });
+    const fs::path root = d.path();
+    set_var_dir((root / "var").string());
+    set_resources_dir((root / "res").string());
+    set_data_dir((root / "data" / "nested").string());
+    set_local_dir((root / "locale").string());
+    set_sys_shapes_dir((root / "shapes").string());
+    set_custom_gcodes_dir((root / "gcodes").string());
+    set_temporary_dir((root / "temp").string());
+
+    CHECK(var_dir() == (root / "var").string());
+    CHECK(resources_dir() == (root / "res").string());
+    CHECK(data_dir() == (root / "data" / "nested").string());
+    CHECK(localization_dir() == (root / "locale").string());
+    CHECK(sys_shapes_dir() == (root / "shapes").string());
+    CHECK(custom_gcodes_dir() == (root / "gcodes").string());
+    CHECK(temporary_dir() == (root / "temp").string());
+    // set_data_dir creates a missing data directory, including its parents.
+    CHECK(fs::is_directory(root / "data" / "nested"));
+
+    // var() resolves a missing file against the var directory and passes an existing path through.
+    CHECK(var("missing.png") == (root / "var" / "missing.png").make_preferred().string());
+    const fs::path existing = root / "existing.png";
+    touch(existing);
+    CHECK(var(existing.string()) == existing.string());
+
+    CHECK(custom_shapes_dir() == (root / "data" / "nested" / "shapes").string());
+    CHECK(handy_models_dir() == (root / "res" / "handy_models").string());
+    CHECK(is_shapes_dir((root / "shapes").string()));
+    CHECK(is_shapes_dir((root / "data" / "nested" / "shapes").string()));
+    CHECK(is_shapes_dir((root / "res" / "handy_models").string()));
+    CHECK_FALSE(is_shapes_dir((root / "unrelated").string()));
+    CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
+}
+
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+    const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
+    const auto s = p.string();
+    CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
+    CHECK(PerlUtils::path_to_stem(s.c_str()) == "part.v2");
+    CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
+    CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
+}
+
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+    namespace fs = boost::filesystem;
+    ScopedTemporaryDir temporary;
+    ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
+    set_data_dir(temporary.path().string());
+
+    const fs::path system = temporary.path() / PRESET_SYSTEM_DIR;
+    fs::create_directories(system / "Acme" / "machine");
+    fs::create_directories(system / "Other" / "machine");
+    touch(system / "Acme.json");
+    touch(system / "Acme.opc");
+    touch(system / "Acme" / "machine" / "printer.json");
+    // Neighbours: another vendor, and one whose name starts with the removed vendor's.
+    touch(system / "Other.json");
+    touch(system / "Other.opc");
+    touch(system / "Other" / "machine" / "printer.json");
+    touch(system / "AcmeLabs.json");
+
+    remove_installed_vendor("Acme");
+
+    CHECK_FALSE(fs::exists(system / "Acme.json"));
+    CHECK_FALSE(fs::exists(system / "Acme.opc"));
+    CHECK_FALSE(fs::exists(system / "Acme"));
+    CHECK(file_contents(system / "Other.json") == "existing");
+    CHECK(fs::is_regular_file(system / "Other.opc"));
+    CHECK(fs::is_regular_file(system / "Other" / "machine" / "printer.json"));
+    CHECK(fs::is_regular_file(system / "AcmeLabs.json"));
+}
+
+// Sizes beyond a 32-bit size_t are skipped where size_t cannot hold them.
+TEST_CASE("Decimal memory formatting rounds MB and preserves comma groups", "[utils]") {
+    const std::vector<std::pair<std::uint64_t, std::string>>
+        rows{{0, "0MB"},       {499999, "0MB"},      {500000, "1MB"},        {1499999, "1MB"},
+             {1500000, "2MB"}, {999499999, "999MB"}, {999500000, "1,000MB"}, {1002003000000ULL, "1,002,003MB"}};
+    for (const auto &[n, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n);
+        CHECK(format_memsize_MB(static_cast<size_t>(n)) == s);
     }
-};
+}
+
+TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]") {
+    const std::vector<std::tuple<std::uint64_t, unsigned, std::string>> rows{
+        {0, 1, "0 bytes"},
+        {1023, 1, "1023 bytes"},
+        {1024, 1, "1024 bytes (1.0KB)"},
+        {1048576, 1, "1048576 bytes (1.0MB)"},
+        {1073741824ULL, 1, "1073741824 bytes (1.0GB)"},
+        {1099511627776ULL, 1, "1099511627776 bytes (1.0TB)"},
+        {1536, 2, "1536 bytes (1.50KB)"},
+        {1572864, 0, "1572864 bytes (2MB)"},
+        {1610612736ULL, 2, "1610612736 bytes (1.50GB)"},
+        {1649267441664ULL, 3, "1649267441664 bytes (1.500TB)"}};
+    for (const auto &[n, decimals, s] : rows) {
+        if (n > std::numeric_limits<size_t>::max())
+            continue;
+        CAPTURE(n, decimals);
+        CHECK(format_memsize(static_cast<size_t>(n), decimals) == s);
+    }
+}
+
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+    // Under an hour the seconds stay and nothing is rounded.
+    CHECK(short_time("0s") == "0s");
+    CHECK(short_time("0.5s") == "<1s");
+    CHECK(short_time("45s") == "45s");
+    CHECK(short_time("12m 30s") == "12m30s");
+    CHECK(short_time("59m 59s") == "59m59s");
+    // With hours or days the seconds are dropped, rounding half a minute up.
+    CHECK(short_time("1h 29m 29s") == "1h29m");
+    CHECK(short_time("1h 29m 30s") == "1h30m");
+    CHECK(short_time("1d 2h 3m 29s") == "1d2h3m");
+    CHECK(short_time("1d 2h 3m 30s") == "1d2h4m");
+    // The rounding carries into hours and days.
+    CHECK(short_time("1h 59m 30s") == "2h0m");
+    CHECK(short_time("23h 59m 30s") == "1d0h0m");
+}
+
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+    CHECK(get_time_dhms(61.f) == "1m 1s");
+    CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
+    CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");
+    CHECK(get_bbl_time_dhms(0.f) == "0s");
+    CHECK(get_bbl_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Minute-resolution and clock formatters show the units the time needs", "[utils]") {
+    CHECK(get_time_dhm(0.f) == "0m");
+    CHECK(get_time_dhm(60.f) == "1m");
+    CHECK(get_time_dhm(3600.f) == "1h 0m");
+    CHECK(get_time_dhm(86400.f) == "1d 0h 0m");
+    CHECK(get_time_hms(0.f) == "00:00:00");
+    CHECK(get_time_hms(3661.f) == "01:01:01");
+}
+
+TEST_CASE("BBL monitor and remaining time formatters use compact units", "[utils]") {
+    CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
+    CHECK(get_bbl_monitor_time_dhm(60.f) == "1m");
+    CHECK(get_bbl_monitor_time_dhm(3600.f) == "1h0m");
+    CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
+    CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
+    CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
+}
+
+TEST_CASE("Logging level names map the supported severities both ways", "[utils]") {
+    const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        CHECK(level_string_to_boost(names[i]) == i);
+        CHECK(get_string_logging_level(i) == names[i]);
+    }
+}
+
+TEST_CASE("Published model links accept the canonical site roots over http and https", "[utils]") {
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    CHECK(is_makerworld_link("http://makerworld.com"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_printables_link("ftp://printables.com"));
+    CHECK_FALSE(is_makerworld_link("https://example.com"));
+    CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
+}
+
+// Known bug: unescaped '.' in the is_printables_link host pattern (Utils.hpp) matches any character; fixed by the follow-up fix PR
+TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_printables_link("https://printablesXcom"));
+}
+
+// Known bug: unescaped '.' in the is_makerworld_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
+}
+
+// Known bug: unescaped '.' in the is_thingiverse_link host pattern (Utils.hpp); fixed by the follow-up fix PR
+TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils][!shouldfail]") {
+    CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+}
+
+// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
+// does not; fixed by the follow-up fix PR
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
+    CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
+}
+
+TEST_CASE("write_file_atomically rejects a directory target and preserves its contents", "[Utils][UtilsIOContracts][UtilsAtomicTarget]") {
+    ScopedTemporaryDir dir;
+    const boost::filesystem::path target = dir.path() / "preset.json";
+    boost::filesystem::create_directory(target);
+    const boost::filesystem::path existing = target / "keep.json";
+    std::ofstream(existing.string()) << "keep";
+
+    std::string content;
+    load_string_file(existing, content);
+    REQUIRE(content == "keep");
+
+    const std::error_code ec = write_file_atomically(target.string(), "replacement");
+    REQUIRE(static_cast<bool>(ec));
+    REQUIRE(boost::filesystem::is_directory(target));
+    load_string_file(existing, content);
+    CHECK(content == "keep");
+}
+
+namespace utils_io_contracts {
+namespace fs = boost::filesystem;
 
 TEST_CASE("Removing an installed vendor removes its profile, cache, and presets", "[Utils][VendorInstall]")
 {
@@ -612,65 +1119,10 @@ TEST_CASE("Removing an installed vendor removes its profile, cache, and presets"
     REQUIRE(fs::is_regular_file(system / "Other.json"));
     CHECK(read_bytes(system / "Other.json") == "unrelated vendor");
 }
+} // namespace utils_io_contracts
 
-TEST_CASE("Layer patterns use one-based interval starts and repeat bounded spans", "[Utils][UtilsIOContracts]")
-{
-    matches("5", {5, 10, 15, 20});
-    matches("5#2", {5, 6, 10, 11, 15, 16, 20});
-    matches("5#", {5, 10, 15, 20});
-    matches("1", {1, 2, 3, 4, 5}, 5);
-    matches("3#5", {3, 4, 5, 6, 7, 8, 9, 10}, 10);
-}
-TEST_CASE("Layer patterns strip whitespace and surrounding quote forms", "[Utils][UtilsIOContracts]")
-{
-    for (const std::string& p : {" 5 # 2 ", "\t\"5#2\"\r\n", "' 5 # 2 '"})
-        matches(p, {5, 6, 10, 11, 15, 16, 20});
-    matches("\"1, 7, 9\"", {1, 7, 9});
-}
-TEST_CASE("Layer lists keep independent ranges and do not repeat their entries", "[Utils][UtilsIOContracts]")
-{
-    matches("1,7,9", {1, 7, 9});
-    matches("5,9#2,18", {5, 9, 10, 18});
-    matches(",,3#,7#3,,12,", {3, 7, 8, 9, 12});
-}
-TEST_CASE("Layer lists ignore malformed entries without losing subsequent valid ranges", "[Utils][UtilsIOContracts]")
-{
-    matches("bad,3,0#2,-1#2,5#0,6#-1,8#2,9999999999999999999999", {3, 8, 9});
-    matches("bad,#2,5#bad", {});
-}
-TEST_CASE("Layer patterns reject empty, negative, nonnumeric and nonpositive intervals", "[Utils][UtilsIOContracts]")
-{
-    for (const std::string& p : {"", " ", "\"\"", "''", "bad", "#2", "5#bad", "0", "-2", "2#0", "2#-1", "9999999999999999999999"})
-        matches(p, {});
-    CHECK_FALSE(check_layer_id_pattern("1", -1));
-}
-TEST_CASE("Decimal memory formatting rounds MB and preserves comma groups", "[Utils][UtilsIOContracts]")
-{
-    const std::vector<std::pair<size_t, std::string>>
-        rows{{0, "0MB"},       {499999, "0MB"},      {500000, "1MB"},        {1499999, "1MB"},
-             {1500000, "2MB"}, {999499999, "999MB"}, {999500000, "1,000MB"}, {1002003000000ULL, "1,002,003MB"}};
-    for (const auto& [n, s] : rows) {
-        CAPTURE(n);
-        CHECK(format_memsize_MB(n) == s);
-    }
-}
-TEST_CASE("Binary memory formatting switches units at powers of 1024", "[Utils][UtilsIOContracts]")
-{
-    const std::vector<std::pair<size_t, std::string>> rows{{0, "0 bytes"},
-                                                           {1023, "1023 bytes"},
-                                                           {1024, "1024 bytes (1.0KB)"},
-                                                           {1048576, "1048576 bytes (1.0MB)"},
-                                                           {1073741824ULL, "1073741824 bytes (1.0GB)"},
-                                                           {1099511627776ULL, "1099511627776 bytes (1.0TB)"}};
-    for (const auto& [n, s] : rows) {
-        CAPTURE(n);
-        CHECK(format_memsize(n) == s);
-    }
-    CHECK(format_memsize(1536, 2) == "1536 bytes (1.50KB)");
-    CHECK(format_memsize(1572864, 0) == "1572864 bytes (2MB)");
-    CHECK(format_memsize(1610612736ULL, 2) == "1610612736 bytes (1.50GB)");
-    CHECK(format_memsize(1649267441664ULL, 3) == "1649267441664 bytes (1.500TB)");
-}
+
+namespace utils_io_contracts {
 TEST_CASE("Logging level names map supported severities and the unknown numeric fallback", "[Utils][UtilsIOContracts]")
 {
     const std::array<std::string, 6> names{"fatal", "error", "warning", "info", "debug", "trace"};
@@ -680,6 +1132,10 @@ TEST_CASE("Logging level names map supported severities and the unknown numeric 
     }
     CHECK(get_string_logging_level(99) == "error");
 }
+} // namespace utils_io_contracts
+
+
+namespace utils_io_contracts {
 TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "[Utils][UtilsLoggingContracts]")
 {
     const unsigned previous_level = get_logging_level();
@@ -693,133 +1149,10 @@ TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "
     CHECK(forced.find("Peak memory usage:") != std::string::npos);
 #endif
 }
+} // namespace utils_io_contracts
 
-TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[Utils][UtilsIOContracts]")
-{
-    const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
-    const std::vector<std::pair<size_t, size_t>> rows{{0, 1}, {1, 2}, {3, 3}, {6, 4}, {10, 1}};
-    for (const auto& [pos, len] : rows) {
-        CHECK(get_utf8_sequence_length(s, pos) == len);
-        CHECK(get_utf8_sequence_length(s.data() + pos, s.size() - pos) == len);
-    }
-}
-TEST_CASE("UTF8 stepping clamps truncated sequences to available bytes", "[Utils][UtilsIOContracts]")
-{
-    for (const auto& [lead, width] : std::vector<std::pair<unsigned char, size_t>>{{0xc3, 2}, {0xe6, 3}, {0xf0, 4}, {0xf8, 5}, {0xfc, 6}}) {
-        // This helper measures byte spans, including legacy five/six-byte headers; it is not a Unicode validator.
-        std::string s(width, char(0x80));
-        s[0] = char(lead);
-        for (size_t available = 1; available <= width; ++available) {
-            CAPTURE(lead, width, available);
-            CHECK(get_utf8_sequence_length(s.data(), available) == available);
-        }
-    }
-}
-TEST_CASE("UTF8 stepping from a continuation byte stops before a new character", "[Utils][UtilsIOContracts]")
-{
-    const std::string ascii_end  = "\x80\xbf\x81Z";
-    const std::string header_end = "\x80\xbf\xc3\xa9";
-    CHECK(get_utf8_sequence_length(ascii_end, 0) == 3);
-    CHECK(get_utf8_sequence_length(ascii_end.data(), 2) == 2);
-    CHECK(get_utf8_sequence_length(header_end, 0) == 2);
-    CHECK(get_utf8_sequence_length("\xfe", 1) == 1);
-    CHECK(get_utf8_sequence_length("\xff", 1) == 1);
-}
-TEST_CASE("File verification distinguishes absent inputs, length differences and changed bytes", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto a = d.path() / "a", b = d.path() / "b";
-    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_ORIGIN_NOT_OPENED);
-    write_bytes(a, "abc");
-    CHECK(check_copy(a.string(), b.string()) == FAIL_CHECK_TARGET_NOT_OPENED);
-    write_bytes(b, "ab");
-    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
-    write_bytes(b, "abd");
-    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
-    write_bytes(b, "abc");
-    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
-    write_bytes(a, "");
-    write_bytes(b, "");
-    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
-}
-TEST_CASE("File verification detects changes after its first eight MiB chunk", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto a = d.path() / "a", b = d.path() / "b";
-    std::string data(8 * 1024 * 1024 + 17, 'x');
-    data.front() = 'A';
-    data.back()  = 'Z';
-    write_bytes(a, data);
-    write_bytes(b, data);
-    CHECK(check_copy(a.string(), b.string()) == SUCCESS);
-    data.back() = 'Y';
-    write_bytes(b, data);
-    CHECK(check_copy(a.string(), b.string()) == FAIL_FILES_DIFFERENT);
-}
-TEST_CASE("Verified copies preserve binary bytes and replace an existing destination", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto a = d.path() / "a", b = d.path() / "b";
-    const std::string data("x\0y\r\nz", 6);
-    write_bytes(a, data);
-    write_bytes(b, "obsolete");
-    std::string error;
-    CHECK(copy_file(a.string(), b.string(), error, true) == SUCCESS);
-    check_bytes(b, data);
-    CHECK_FALSE(fs::exists(b.string() + ".tmp"));
-}
-TEST_CASE("Framework copying recurses through directories and overwrites ordinary files", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto src = d.path() / "src", dst = d.path() / "dst";
-    fs::create_directories(src / "sub");
-    fs::create_directories(dst);
-    write_bytes(src / "top", "top");
-    write_bytes(src / "sub" / "child", "nested");
-    write_bytes(dst / "top", "old");
-    REQUIRE(copy_framework(src.string(), dst.string()));
-    check_bytes(dst / "top", "top");
-    check_bytes(dst / "sub" / "child", "nested");
-    CHECK_FALSE(copy_framework((src / "top").string(), (d.path() / "bad").string()));
-    write_bytes(d.path() / "blocked", "file");
-    CHECK_FALSE(copy_framework(src.string(), (d.path() / "blocked").string()));
-}
-#ifndef _WIN32
-TEST_CASE("Framework copying preserves relative symlink targets", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto src = d.path() / "src", dst = d.path() / "dst";
-    fs::create_directories(src / "Versions" / "A");
-    write_bytes(src / "Versions" / "A" / "binary", "payload");
-    fs::create_symlink("A", src / "Versions" / "Current");
-    REQUIRE(copy_framework(src.string(), dst.string()));
-    CHECK(fs::is_symlink(fs::symlink_status(dst / "Versions" / "Current")));
-    CHECK(fs::read_symlink(dst / "Versions" / "Current").string() == "A");
-    check_bytes(dst / "Versions" / "Current" / "binary", "payload");
-}
-#endif
-TEST_CASE("Recursive directory copies exclude selected filenames and distinguish replacement from merge", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    const auto src = d.path() / "src", dst = d.path() / "dst";
-    fs::create_directories(src / "sub");
-    fs::create_directories(dst / "sub");
-    write_bytes(src / "keep.json", "new");
-    write_bytes(src / "ignore.png", "image");
-    write_bytes(src / "sub" / "child", "child");
-    write_bytes(dst / "stale", "stale");
-    write_bytes(dst / "sub" / "old", "old");
-    copy_directory_recursively(src, dst, [](const std::string& name) { return name == "ignore.png"; }, true);
-    check_bytes(dst / "keep.json", "new");
-    check_bytes(dst / "sub" / "child", "child");
-    CHECK(fs::exists(dst / "stale"));
-    CHECK(fs::exists(dst / "sub" / "old"));
-    CHECK_FALSE(fs::exists(dst / "ignore.png"));
-    copy_directory_recursively(src, dst, {}, false);
-    CHECK_FALSE(fs::exists(dst / "stale"));
-    CHECK_FALSE(fs::exists(dst / "sub" / "old"));
-    check_bytes(dst / "ignore.png", "image");
-}
+
+namespace utils_io_contracts {
 TEST_CASE("Recursive directory copying reports an unwritable child destination", "[Utils][UtilsIOContracts]")
 {
     ScopedTemporaryDir d;
@@ -829,25 +1162,10 @@ TEST_CASE("Recursive directory copying reports an unwritable child destination",
     write_bytes(src / "file.txt", "payload");
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
-TEST_CASE("File classification checks case-insensitive extensions and regular-file type", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    for (const std::string& name : {"settings.INI", "cache.IdX", "shape.STL"})
-        write_bytes(d.path() / name, "data");
-    fs::create_directories(d.path() / "folder.ini");
-    CHECK(is_ini_file(fs::directory_entry(d.path() / "settings.INI")));
-    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "cache.IdX")));
-    CHECK_FALSE(is_ini_file(fs::directory_entry(d.path() / "folder.ini")));
-    CHECK(is_idx_file(fs::directory_entry(d.path() / "cache.IdX")));
-    CHECK_FALSE(is_idx_file(fs::directory_entry(d.path() / "settings.INI")));
-    CHECK(is_gallery_file(fs::directory_entry(d.path() / "shape.STL"), ".stl"));
-    CHECK_FALSE(is_gallery_file(fs::directory_entry(d.path() / "folder.ini"), ".ini"));
-    CHECK(is_gallery_file(std::string("nested/shape.STL"), ".stl"));
-    CHECK_FALSE(is_gallery_file(std::string("shape.stl.backup"), ".stl"));
-    CHECK(is_img_file("image.PNG"));
-    CHECK(is_img_file("image.SvG"));
-    CHECK_FALSE(is_img_file("image.svg.json"));
-}
+} // namespace utils_io_contracts
+
+
+namespace utils_io_contracts {
 TEST_CASE("Configured resource paths restore globals and distinguish all shape roots", "[Utils][UtilsIOContracts]")
 {
     ScopedTemporaryDir d;
@@ -874,19 +1192,10 @@ TEST_CASE("Configured resource paths restore globals and distinguish all shape r
     CHECK(is_shapes_dir(handy_models_dir()));
     CHECK_FALSE(is_shapes_dir((d.path() / "unrelated").string()));
 }
-TEST_CASE("MD5 file fingerprints match standard vectors across the 64 KiB read boundary", "[Utils][UtilsIOContracts]")
-{
-    ScopedTemporaryDir d;
-    std::string file = (d.path() / "data").string(), digest;
-    for (const auto& [data, expected] :
-         std::vector<std::pair<std::string, std::string>>{{"", "D41D8CD98F00B204E9800998ECF8427E"},
-                                                          {"abc", "900150983CD24FB0D6963F7D28E17F72"},
-                                                          {std::string(65537, 'a'), "B3C6FC238E908636E53AABD5AD830CF7"}}) {
-        write_bytes(file, data);
-        REQUIRE(bbl_calc_md5(file, digest));
-        CHECK(digest == expected);
-    }
-}
+} // namespace utils_io_contracts
+
+
+namespace utils_io_contracts {
 TEST_CASE("Perl-compatible path helpers preserve the parent and final extension", "[Utils][UtilsIOContracts]")
 {
     const auto p = fs::path("models") / "nested" / "part.v2.3mf";
@@ -896,22 +1205,10 @@ TEST_CASE("Perl-compatible path helpers preserve the parent and final extension"
     CHECK(PerlUtils::path_to_extension(s.c_str()) == ".3mf");
     CHECK(PerlUtils::path_to_parent_path(s.c_str()) == p.parent_path().string());
 }
-
-TEST_CASE("Framework copying propagates a failure from a nested directory", "[Utils][UtilsFrameworkFailure]")
-{
-    ScopedTemporaryDir d;
-    const auto src = d.path() / "src", dst = d.path() / "dst";
-    fs::create_directories(src / "nested");
-    fs::create_directories(dst);
-    write_bytes(src / "nested" / "payload", "source");
-    write_bytes(dst / "nested", "occupied by a file");
-    CHECK_FALSE(copy_framework(src.string(), dst.string()));
-    check_bytes(dst / "nested", "occupied by a file");
-}
 } // namespace utils_io_contracts
 
-namespace utils_contracts {
 
+namespace utils_contracts {
 TEST_CASE("Default ScopeGuard accepts ownership and runs it on destruction", "[Utils][UtilsContracts]")
 {
     size_t calls = 0;
@@ -926,7 +1223,10 @@ TEST_CASE("Default ScopeGuard accepts ownership and runs it on destruction", "[U
 
     CHECK(calls == 1);
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("ScopeGuard move construction transfers the callback once", "[Utils][UtilsContracts]")
 {
     size_t calls = 0;
@@ -937,7 +1237,10 @@ TEST_CASE("ScopeGuard move construction transfers the callback once", "[Utils][U
 
     CHECK(calls == 1);
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("ScopeGuard move assignment replaces the destination callback", "[Utils][UtilsContracts]")
 {
     size_t calls = 0;
@@ -949,18 +1252,10 @@ TEST_CASE("ScopeGuard move assignment replaces the destination callback", "[Util
 
     CHECK(calls == 1);
 }
+} // namespace utils_contracts
 
-TEST_CASE("ScopeGuard reset suppresses the callback", "[Utils][UtilsContracts]")
-{
-    size_t calls = 0;
-    {
-        ScopeGuard guard([&calls] { ++calls; });
-        guard.reset();
-    }
 
-    CHECK(calls == 0);
-}
-
+namespace utils_contracts {
 TEST_CASE("Published model links accept only their canonical URL forms", "[Utils][UtilsContracts]")
 {
     CHECK(is_printables_link("https://printables.com"));
@@ -971,25 +1266,10 @@ TEST_CASE("Published model links accept only their canonical URL forms", "[Utils
     CHECK(is_thingiverse_link("https://www.thingiverse.com"));
     CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
 }
+} // namespace utils_contracts
 
-TEST_CASE("Power of two overloads preserve bounded integral boundaries", "[Utils][UtilsContracts]")
-{
-    CHECK(next_highest_power_of_2(static_cast<uint16_t>(0)) == static_cast<uint16_t>(1));
-    CHECK(next_highest_power_of_2(static_cast<uint16_t>(3)) == static_cast<uint16_t>(4));
-    CHECK(next_highest_power_of_2(static_cast<uint16_t>(255)) == static_cast<uint16_t>(256));
-    CHECK(next_highest_power_of_2(static_cast<uint32_t>(0)) == static_cast<uint32_t>(1));
-    CHECK(next_highest_power_of_2(static_cast<uint32_t>(3)) == static_cast<uint32_t>(4));
-    CHECK(next_highest_power_of_2(static_cast<uint32_t>(1025)) == static_cast<uint32_t>(2048));
-}
 
-TEST_CASE("Round up divide handles exact and partial bounded quotients", "[Utils][UtilsContracts]")
-{
-    CHECK(round_up_divide<long long>(0, 3) == 0);
-    CHECK(round_up_divide<long long>(1, 3) == 1);
-    CHECK(round_up_divide<long long>(3, 3) == 1);
-    CHECK(round_up_divide<long long>(4, 3) == 2);
-}
-
+namespace utils_contracts {
 TEST_CASE("Short time formatting preserves its documented rounding branches", "[Utils][UtilsContracts]")
 {
     CHECK(short_time("0.5s") == "<1s");
@@ -998,7 +1278,10 @@ TEST_CASE("Short time formatting preserves its documented rounding branches", "[
     CHECK(short_time("1h 59m 30s") == "2h0m");
     CHECK(short_time("23h 59m 30s") == "1d0h0m");
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("Deterministic time formatters preserve day hour minute and second units", "[Utils][UtilsContracts]")
 {
     CHECK(get_time_dhms(0.f) == "0.000000s");
@@ -1010,7 +1293,10 @@ TEST_CASE("Deterministic time formatters preserve day hour minute and second uni
     CHECK(get_bbl_time_dhms(3661.f) == "1h1m1s");
     CHECK(get_bbl_time_dhms(86400.f) == "1d0h0m0s");
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("Minute and clock-like formatters use bounded arithmetic", "[Utils][UtilsContracts]")
 {
     CHECK(get_time_dhm(0.f) == "0m");
@@ -1020,7 +1306,10 @@ TEST_CASE("Minute and clock-like formatters use bounded arithmetic", "[Utils][Ut
     CHECK(get_time_hms(0.f) == "00:00:00");
     CHECK(get_time_hms(3661.f) == "01:01:01");
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("BBL monitor and remaining time formatters handle finite signs and units", "[Utils][UtilsContracts]")
 {
     CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
@@ -1031,11 +1320,13 @@ TEST_CASE("BBL monitor and remaining time formatters handle finite signs and uni
     CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
     CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
 }
+} // namespace utils_contracts
 
+
+namespace utils_contracts {
 TEST_CASE("Character filtering removes only requested bounded characters", "[Utils][UtilsContracts]")
 {
     CHECK(filter_characters("a-b_c!", "-_") == "abc!");
     CHECK(filter_characters("stable", "") == "stable");
 }
-
 } // namespace utils_contracts

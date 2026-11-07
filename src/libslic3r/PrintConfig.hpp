@@ -1081,6 +1081,8 @@ protected:
                 const ConfigOptionDef *def = defs->get(kvp.first);
                 assert(def != nullptr);
                 if (def->default_value) {
+                    // Take the default through create_default_option(), which attaches the enum name map
+                    // of coEnums options; the stored default_value has none.
                     ConfigOptionUniquePtr default_option(def->create_default_option());
                     opt->set(default_option.get());
                 }

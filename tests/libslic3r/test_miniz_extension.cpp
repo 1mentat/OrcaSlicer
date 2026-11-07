@@ -283,8 +283,9 @@ TEST_CASE("Truncated archive path fields retain the stored ASCII filename", "[Mi
     if (incomplete_payload)
         extra[2] = 127; // Declared payload extends beyond the central extra-field bytes.
     else {
-        extra[2] = 4; // A Unicode path payload requires version plus four CRC bytes.
-        extra.resize(8);
+        // Too short for version plus four CRC bytes. The bytes after it still hold a matching CRC,
+        // so only the length check keeps them out of the field.
+        extra[2] = 4;
     }
     CHECK(decoded_entry_from_extra(stored_name, extra, false) == stored_name);
 }

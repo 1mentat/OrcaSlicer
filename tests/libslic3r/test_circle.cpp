@@ -63,6 +63,24 @@ TEST_CASE("Arc slice containment follows direction and wraps through zero", "[Ci
     CHECK_FALSE(ArcSegment::are_points_within_slice(wrap_cw, wrap_cw_outside));
 }
 
+TEST_CASE("Arc slice containment accepts several interior points and rejects one outside before the last", "[Circle][CircleArcPublic]")
+{
+    const ArcSegment ccw(p(0., 0.), scaled(5.), p(5., 0.), p(0., 5.), ArcDirection::Arc_Dir_CCW);
+    const Points3 inside{p3(5., 0., 0.), p3(4.8, 1.4, 1.), p3(4., 3., 2.), p3(3., 4., 3.), p3(0., 5., 4.)};
+    CHECK(ArcSegment::are_points_within_slice(ccw, inside));
+    const Points3 outside_before_last{p3(5., 0., 0.), p3(4., 3., 1.), p3(-5., 0., 2.), p3(3., 4., 3.), p3(0., 5., 4.)};
+    CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, outside_before_last));
+}
+
+// Known bug: are_points_within_slice only checks the last two points, so an earlier point outside the slice is accepted; fixed by the follow-up fix PR
+TEST_CASE("Arc slice containment rejects an early point outside the slice", "[Circle][CircleArcPublic][!shouldfail]")
+{
+    const ArcSegment ccw(p(0., 0.), scaled(5.), p(5., 0.), p(0., 5.), ArcDirection::Arc_Dir_CCW);
+    // (-5, 0) lies on the circle but outside the CCW quarter arc from (5, 0) to (0, 5).
+    CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, Points3{p3(5., 0., 0.), p3(-5., 0., 1.), p3(4., 3., 2.), p3(3., 4., 3.), p3(0., 5., 4.)}));
+    CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, Points{p(5., 0.), p(-5., 0.), p(4., 3.), p(3., 4.), p(0., 5.)}));
+}
+
 TEST_CASE("Points3 arc fitting recovers a known XY circle", "[Circle][CircleArcPublic]")
 {
     const bool clockwise = GENERATE(false, true);

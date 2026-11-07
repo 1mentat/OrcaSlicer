@@ -164,6 +164,9 @@ void Polyline::simplify_by_fitting_arc(double tolerance)
     ArcFitter::do_arc_fitting_and_simplify(this->points, this->fitting_result, tolerance);
 }
 
+// Partition by arc length while retaining original bends. Distances must be finite and positive;
+// values below one integer coordinate unit use one unit. Split coordinates are rounded to the
+// integer grid relative to their segment start; empty pieces are omitted.
 Polylines Polyline::equally_spaced_lines(double distance) const
 {
     if (!std::isfinite(distance) || distance <= 0.)

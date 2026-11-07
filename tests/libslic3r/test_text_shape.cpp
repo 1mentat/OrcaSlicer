@@ -308,3 +308,53 @@ TEST_CASE("OCCT font enumeration uses configured bundled fonts and filters style
     CHECK((extension == ".ttf" || extension == ".otf" || extension == ".ttc"));
 }
 #endif // defined(__linux__)
+
+TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thickness", "[TextShape]")
+{
+    const Handle(Font_SystemFont) font = register_bundled_font();
+    const char *font_name = font->FontName().ToCString();
+
+    TextResult base{};
+    load_text_shape("Ag", font_name, 10.f, 0.6f, false, false, base);
+    const TextMeshMetrics base_metrics = inspect_text_mesh(base);
+    REQUIRE(std::isfinite(base.text_width));
+    REQUIRE(base.text_width > 0.);
+    CHECK_THAT(base_metrics.depth, WithinAbs(0.6, 2e-3));
+
+    SECTION("doubling the text height doubles the outline but keeps the thickness") {
+        TextResult doubled{};
+        load_text_shape("Ag", font_name, 20.f, 0.6f, false, false, doubled);
+        const TextMeshMetrics doubled_metrics = inspect_text_mesh(doubled);
+        REQUIRE(std::isfinite(doubled.text_width));
+        REQUIRE(doubled.text_width > 0.);
+        CHECK_THAT(doubled.text_width / base.text_width, WithinRel(2., 1e-2));
+        CHECK_THAT(doubled_metrics.width / base_metrics.width, WithinRel(2., 2e-2));
+        CHECK_THAT(doubled_metrics.height / base_metrics.height, WithinRel(2., 2e-2));
+        CHECK_THAT(doubled_metrics.depth, WithinAbs(0.6, 2e-3));
+    }
+    SECTION("tripling the thickness only deepens the mesh") {
+        TextResult thicker{};
+        load_text_shape("Ag", font_name, 10.f, 1.8f, false, false, thicker);
+        const TextMeshMetrics thicker_metrics = inspect_text_mesh(thicker);
+        REQUIRE(std::isfinite(thicker.text_width));
+        REQUIRE(thicker.text_width > 0.);
+        CHECK_THAT(thicker.text_width, WithinRel(base.text_width, 1e-2));
+        CHECK_THAT(thicker_metrics.width, WithinRel(base_metrics.width, 2e-2));
+        CHECK_THAT(thicker_metrics.height, WithinRel(base_metrics.height, 2e-2));
+        CHECK_THAT(thicker_metrics.depth, WithinAbs(1.8, 2e-3));
+    }
+}
+
+TEST_CASE("OCCT text shape leaves the caller's result untouched for non-positive thickness", "[TextShape]")
+{
+    const Handle(Font_SystemFont) font = register_bundled_font();
+    const TriangleMesh sentinel = make_cube(1., 1., 1.);
+
+    const float thickness = GENERATE(0.f, -0.5f);
+    TextResult result{sentinel, 37.};
+    load_text_shape("A", font->FontName().ToCString(), 10.f, thickness, false, false, result);
+
+    CHECK(result.text_width == 37.);
+    CHECK(result.text_mesh.its.vertices == sentinel.its.vertices);
+    CHECK(result.text_mesh.its.indices == sentinel.its.indices);
+}

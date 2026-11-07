@@ -170,26 +170,8 @@ struct ArrangeParams {
 
     ArrangeParams() = default;
     explicit ArrangeParams(coord_t md) : min_obj_distance(md) {}
-    // to json format
-    std::string to_json() const{
-        std::string ret = "{";
-        ret += "\"min_obj_distance\":" + std::to_string(min_obj_distance) + ",";
-        ret += "\"accuracy\":" + std::to_string(accuracy) + ",";
-        ret += "\"parallel\":" + std::to_string(parallel) + ",";
-        ret += "\"allow_rotations\":" + std::to_string(allow_rotations) + ",";
-        ret += "\"do_final_align\":" + std::to_string(do_final_align) + ",";
-        ret += "\"allow_multi_materials_on_same_plate\":" + std::to_string(allow_multi_materials_on_same_plate) + ",";
-        ret += "\"avoid_extrusion_cali_region\":" + std::to_string(avoid_extrusion_cali_region) + ",";
-        ret += "\"is_seq_print\":" + std::to_string(is_seq_print) + ",";
-        ret += "\"bed_shrink_x\":" + std::to_string(bed_shrink_x) + ",";
-        ret += "\"bed_shrink_y\":" + std::to_string(bed_shrink_y) + ",";
-        ret += "\"brim_skirt_distance\":" + std::to_string(brim_skirt_distance) + ",";
-        ret += "\"clearance_height_to_rod\":" + std::to_string(clearance_height_to_rod) + ",";
-        ret += "\"clearance_height_to_lid\":" + std::to_string(clearance_height_to_lid) + ",";
-        ret += "\"clearance_radius\":" + std::to_string(clearance_radius) + ",";
-        ret += "\"printable_height\":" + std::to_string(printable_height) + ",";
-        return ret;
-    }
+    // The distance and optimization controls as a JSON object, for logging.
+    std::string to_json() const;
 
 };
 

@@ -25,6 +25,7 @@ add_executable(${_TEST_NAME}_tests
     test_color.cpp
     test_color_decompose_recipe.cpp
     test_rotfinder.cpp
+    test_cut_utils.cpp
     test_color_utils_contracts.cpp
     test_normal_utils_contracts.cpp
     test_config.cpp
@@ -32,7 +33,6 @@ add_executable(${_TEST_NAME}_tests
     test_parameter_utils.cpp
     test_cut_surface_contracts.cpp
     test_surface_collection.cpp
-    test_cut_utils.cpp
     test_texture_painting.cpp
     test_texture_bake_regularize.cpp
     test_texture_bake_relocate.cpp
@@ -64,7 +64,9 @@ add_executable(${_TEST_NAME}_tests
     test_aabb_mesh.cpp
     test_filament_group.cpp
     test_filament_group_utils.cpp
+    test_text_shape.cpp
     test_filament_mixer.cpp
+    test_flush_vol_predictor.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp
@@ -87,11 +89,15 @@ add_executable(${_TEST_NAME}_tests
     test_stl.cpp
     test_svg.cpp
     test_nsvg_utils.cpp
+    test_svg_import.cpp
+    test_short_edge_collapse.cpp
     test_triangle_selector.cpp
+    test_measure_utils.cpp
     test_meshboolean.cpp
     test_trianglemesh.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
+    test_texture_to_color_contracts.cpp
     test_measure_contracts.cpp
     test_lay_on_face.cpp
     test_model.cpp
@@ -111,7 +117,8 @@ add_executable(${_TEST_NAME}_tests
     test_connected_bodies.cpp
     test_conflict_checker_contracts.cpp
     test_texture_displacement.cpp
-    test_texture_to_color_contracts.cpp
+    test_texture_to_color_cluster.cpp
+    test_texture_to_color_repair.cpp
     test_instance_lock.cpp
     ../libnest2d/printer_parts.cpp
     )
@@ -147,7 +154,35 @@ endif()
 
 # libslic3r links Draco privately; test_drc.cpp encodes its own fixtures.
 find_package(Draco REQUIRED)
-target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
+# FlushVolCalc obtains RGB2HSV from this production translation unit, which also
+# contains wxColour helpers. Link only that unit and its base/core dependencies.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(wxWidgets_USE_UNICODE ON)
+    set(wxWidgets_USE_STATIC ${SLIC3R_STATIC})
+    set(wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
+    find_package(wxWidgets 3.3 REQUIRED COMPONENTS base core)
+else ()
+    find_package(wxWidgets 3.3 CONFIG REQUIRED COMPONENTS base core)
+endif ()
+add_library(slic3r_test_color_support STATIC
+    ${CMAKE_SOURCE_DIR}/src/slic3r/Utils/ColorSpaceConvert.cpp)
+target_include_directories(slic3r_test_color_support SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
+target_compile_definitions(slic3r_test_color_support PRIVATE
+    ${wxWidgets_DEFINITIONS} "$<$<CONFIG:Debug>:${wxWidgets_DEFINITIONS_DEBUG}>")
+target_compile_options(slic3r_test_color_support PRIVATE ${wxWidgets_CXX_FLAGS})
+# Preserve module-mode search/rpath usage on the final executable.
+target_link_directories(slic3r_test_color_support INTERFACE ${wxWidgets_LIBRARY_DIRS})
+if (SLIC3R_STATIC)
+    # Match the canonical static wx dependency even in Debug.
+    target_compile_definitions(slic3r_test_color_support PRIVATE wxDEBUG_LEVEL=0)
+endif ()
+target_link_libraries(slic3r_test_color_support PRIVATE Boost::headers ${wxWidgets_LIBRARIES})
+target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain
+    slic3r_test_color_support)
+# The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
+set_property(SOURCE test_color_utils_contracts.cpp test_texture_to_color_cluster.cpp test_texture_to_color_contracts.cpp
+                    test_texture_to_color_repair.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/src/libslic3r")
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # Older production revisions resolve this header relative to the library root.
@@ -329,9 +364,11 @@ set_property(TARGET libslic3r_timeutils_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_timeutils_tests)
 slicer_enable_llvm_source_coverage(libslic3r_timeutils_tests)
 
-# Focused flush predictor contracts, without duplicate CTest registration.
-add_executable(libslic3r_flush_volume_tests EXCLUDE_FROM_ALL test_flush_volume_contracts.cpp)
-target_link_libraries(libslic3r_flush_volume_tests test_common libslic3r slicer_coverage_support Catch2::Catch2WithMain)
+# Focused flush volume and predictor contracts, without duplicate CTest registration.
+add_executable(libslic3r_flush_volume_tests EXCLUDE_FROM_ALL
+    test_flush_volume_contracts.cpp
+    test_flush_vol_predictor.cpp)
+target_link_libraries(libslic3r_flush_volume_tests test_common libslic3r slic3r_test_color_support Catch2::Catch2WithMain)
 target_include_directories(libslic3r_flush_volume_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET libslic3r_flush_volume_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(libslic3r_flush_volume_tests)
@@ -359,10 +396,11 @@ if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)
     orcaslicer_discover_tests(libslic3r_sl1_raster_settings_tests TEST_PREFIX "FocusedSL1Raster::")
 endif ()
 
-# Focused SVG export contracts, without duplicate CTest registration.
+# Focused SVG export and import contracts, without duplicate CTest registration.
 # Keep the standalone NanoSVG implementation TU used by SVG import tests.
 add_executable(libslic3r_svg_tests EXCLUDE_FROM_ALL
     test_svg.cpp
+    test_svg_import.cpp
     ../fff_print/fff_print_tests.cpp)
 target_link_libraries(libslic3r_svg_tests test_common libslic3r Catch2::Catch2WithMain)
 target_include_directories(libslic3r_svg_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)

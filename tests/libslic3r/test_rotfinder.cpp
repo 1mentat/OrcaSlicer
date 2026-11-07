@@ -1,7 +1,16 @@
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/SLA/Rotfinder.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/libslic3r.h"
+
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -9,14 +18,6 @@
 #include <mutex>
 #include <vector>
 #include <utility>
-
-#include "libslic3r/Model.hpp"
-#include "libslic3r/BoundingBox.hpp"
-#include "libslic3r/Config.hpp"
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/SLA/Rotfinder.hpp"
-#include "libslic3r/TriangleMesh.hpp"
 #include "test_utils.hpp"
 
 using namespace Slic3r;
@@ -41,6 +42,34 @@ struct RotObject
 RotObject asymmetric_prism()
 {
     return RotObject(make_cube(3., 7., 11.));
+}
+
+// The X-Z profile below, extruded 20 mm along Y: a 20 mm wide top bar on two legs splaying out
+// to a 40 mm footprint, with the notch between the legs open to the bed.
+TriangleMesh splayed_frame()
+{
+    const std::vector<Vec2f> profile{{0.f, 0.f},   {2.f, 0.f},   {11.f, 18.f}, {29.f, 18.f},
+                                     {38.f, 0.f},  {40.f, 0.f},  {30.f, 20.f}, {10.f, 20.f}};
+    // The profile is not convex, so its caps are the left leg, the top bar and the right leg.
+    const std::vector<Vec3i32> cap{{0, 1, 2}, {0, 2, 7}, {7, 2, 3}, {7, 3, 6}, {3, 4, 5}, {3, 5, 6}};
+    constexpr float depth = 20.f;
+    const int n = int(profile.size());
+
+    std::vector<Vec3f> vertices;
+    for (const float y : {0.f, depth})
+        for (const Vec2f &point : profile)
+            vertices.emplace_back(point.x(), y, point.y());
+    std::vector<Vec3i32> faces;
+    for (int i = 0; i < n; ++i) {
+        const int next = (i + 1) % n;
+        faces.emplace_back(i, i + n, next + n);
+        faces.emplace_back(i, next + n, next);
+    }
+    for (const Vec3i32 &tri : cap) {
+        faces.push_back(tri);
+        faces.emplace_back(tri.x() + n, tri.z() + n, tri.y() + n);
+    }
+    return TriangleMesh(std::move(vertices), std::move(faces));
 }
 
 Transform3f rotation_transform(const Vec2d &rotation)
@@ -162,7 +191,7 @@ void check_status_values(const StatusLog &log)
 
 } // namespace
 
-TEST_CASE("Best misalignment rotation preserves the independent alignment optimum", "[Rotfinder]")
+void check_best_misalignment_contracts()
 {
     RotObject fixture = asymmetric_prism();
     StatusLog status;
@@ -181,7 +210,17 @@ TEST_CASE("Best misalignment rotation preserves the independent alignment optimu
     CHECK(result_score >= identity_score + 5.);
 }
 
-TEST_CASE("Elevated least-support rotation does not increase independent slope score", "[Rotfinder]")
+TEST_CASE("Best misalignment rotation preserves the independent alignment optimum", "[Rotfinder]")
+{
+    check_best_misalignment_contracts();
+}
+
+TEST_CASE("Best misalignment rotation tilts an axis-aligned prism away from the reference planes", "[Rotfinder]")
+{
+    check_best_misalignment_contracts();
+}
+
+void check_elevated_support_contracts()
 {
     RotObject fixture = asymmetric_prism();
     fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(4.0));
@@ -196,12 +235,29 @@ TEST_CASE("Elevated least-support rotation does not increase independent slope s
     const double identity_score = elevated_support_score(fixture.object->raw_mesh(), Vec2d::Zero());
     const double result_score = elevated_support_score(fixture.object->raw_mesh(), rotation);
     CHECK(result_score <= identity_score + 1e-3);
+
+    // Compare against all six axis-aligned poses to ensure the optimizer finds a genuine improvement.
+    double best_aligned = std::numeric_limits<double>::max();
+    for (const Vec2d &pose : {Vec2d(0., 0.), Vec2d(PI / 2., 0.), Vec2d(-PI / 2., 0.),
+                              Vec2d(PI, 0.), Vec2d(0., PI / 2.), Vec2d(0., -PI / 2.)})
+        best_aligned = std::min(best_aligned, elevated_support_score(fixture.object->raw_mesh(), pose));
+    INFO("best axis-aligned " << best_aligned << ", result " << result_score);
+    CHECK(result_score < best_aligned);
 }
 
-TEST_CASE("Floor least-support rotation chooses a substantial analytic contact face", "[Rotfinder]")
+TEST_CASE("Elevated least-support rotation does not increase independent slope score", "[Rotfinder]")
 {
-    RotObject fixture = asymmetric_prism();
-    const bool pad_around = GENERATE(false, true);
+    check_elevated_support_contracts();
+}
+
+TEST_CASE("Elevated least-support rotation beats every axis-aligned pose of the prism", "[Rotfinder]")
+{
+    check_elevated_support_contracts();
+}
+
+void check_floor_contact_contracts(bool splayed, bool pad_around)
+{
+    RotObject fixture = splayed ? RotObject(splayed_frame()) : asymmetric_prism();
     fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(pad_around ? 4.0 : 0.0));
     fixture.object->config.set_key_value("pad_around_object", new ConfigOptionBool(pad_around));
     StatusLog status;
@@ -212,13 +268,30 @@ TEST_CASE("Floor least-support rotation chooses a substantial analytic contact f
     const Vec2d rotation = sla::find_least_supports_rotation(*fixture.object, params);
     check_rotation_range(rotation);
     check_status_values(status);
-    const double identity_contact = floor_contact_area(fixture.object->raw_mesh(), Vec2d::Zero());
-    const double result_contact = floor_contact_area(fixture.object->raw_mesh(), rotation);
-    CHECK(identity_contact > 0.);
-    // The 7 x 11 face is the largest available floor contact (77 mm²), so
-    // minimizing the floor support score should choose it over the 3 x 7
-    // identity contact face.
-    CHECK(result_contact >= 70.);
+    const TriangleMesh &mesh = fixture.object->raw_mesh();
+    const double result_contact = floor_contact_area(mesh, Vec2d::Zero());
+    if (splayed) {
+        // Profile area 114 mm² times 20 mm depth; this also checks outward face orientation.
+        REQUIRE_THAT(its_volume(mesh.its), Catch::Matchers::WithinRel(114. * 20., 1e-6));
+        REQUIRE_THAT(result_contact, Catch::Matchers::WithinAbs(2. * 2. * 20., 1e-3));
+        const double optimized_contact = floor_contact_area(mesh, rotation);
+        INFO("contact " << optimized_contact);
+        CHECK(optimized_contact > 390.);
+    } else {
+        const double optimized_contact = floor_contact_area(mesh, rotation);
+        CHECK(result_contact > 0.);
+        CHECK(optimized_contact >= 70.);
+    }
+}
+
+TEST_CASE("Floor least-support rotation chooses a substantial analytic contact face", "[Rotfinder]")
+{
+    check_floor_contact_contracts(false, GENERATE(false, true));
+}
+
+TEST_CASE("Floor least-support rotation prefers full contact over the largest hull face", "[Rotfinder]")
+{
+    check_floor_contact_contracts(true, GENERATE(false, true));
 }
 
 TEST_CASE("Minimum Z rotation selects the prism's thinnest dimension", "[Rotfinder]")
@@ -245,7 +318,7 @@ TEST_CASE("Minimum Z rotation selects the prism's thinnest dimension", "[Rotfind
     CHECK_THAT(result_box.size().z(), Catch::Matchers::WithinAbs(smallest_dimension, 1e-3));
 }
 
-TEST_CASE("Canceled minimum Z search returns a finite rotation and reports cancellation", "[Rotfinder]")
+void check_canceled_min_z_contracts()
 {
     RotObject fixture = asymmetric_prism();
     StatusLog status;
@@ -262,4 +335,14 @@ TEST_CASE("Canceled minimum Z search returns a finite rotation and reports cance
         saw_cancellation = saw_cancellation || value < 0;
     CHECK(saw_cancellation);
     CHECK(std::none_of(status.values.begin(), status.values.end(), [](int value) { return value >= 0; }));
+}
+
+TEST_CASE("Canceled minimum Z search returns a finite rotation and reports cancellation", "[Rotfinder]")
+{
+    check_canceled_min_z_contracts();
+}
+
+TEST_CASE("Canceled minimum Z search stops before evaluating any rotation", "[Rotfinder]")
+{
+    check_canceled_min_z_contracts();
 }
