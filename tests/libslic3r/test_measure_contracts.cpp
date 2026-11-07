@@ -1248,7 +1248,8 @@ TEST_CASE("Edge and plane branches return finite witnesses for boundary consumer
     REQUIRE(diagonal_floor.angle.has_value());
     CHECK(std::isfinite(diagonal_floor.angle->angle));
     REQUIRE(diagonal_floor.distance_infinite.has_value());
-    CHECK_THAT(diagonal_floor.distance_infinite->dist, WithinAbs(std::sqrt(13.0), 1e-7));
+    // The minimum is interior to both segments, so endpoint candidates miss the distance.
+    CHECK_THAT(diagonal_floor.distance_infinite->dist, WithinAbs(std::sqrt(64.0 / 5.0), 1e-7));
     CHECK_THAT((diagonal_floor.distance_infinite->to - diagonal_floor.distance_infinite->from).norm(),
                WithinAbs(diagonal_floor.distance_infinite->dist, 1e-7));
 

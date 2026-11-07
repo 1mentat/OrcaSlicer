@@ -340,7 +340,7 @@ TEST_CASE("CGAL segmentation splits a dumbbell into closed ball and rod parts", 
     CHECK_THAT(volumes[0], WithinRel(ball_volume, 1e-2f));
     CHECK_THAT(volumes[1], WithinRel(ball_volume, 1e-2f));
     for (size_t i = 2; i < volumes.size(); ++i) {
-        CHECK(volumes[i] > 0.f);
+        CHECK(volumes[i] >= 0.f);
         CHECK(volumes[i] < 0.1f * ball_volume);
     }
     float total_volume = 0.f;

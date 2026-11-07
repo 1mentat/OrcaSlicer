@@ -1242,7 +1242,7 @@ TEST_CASE("Closed meshes and disconnected components retain geometric and UV inv
     CHECK(faces == input.indices.size());
 }
 
-TEST_CASE("Mesh clustering maps one center without inspecting stale face IDs", "[ColorUtils][ColorUtilsExtended]")
+TEST_CASE("Mesh clustering assigns cluster ID zero to every face for a single center", "[ColorUtils][ColorUtilsExtended]")
 {
     const TriMesh mesh = cube_mesh();
     std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
@@ -1251,7 +1251,9 @@ TEST_CASE("Mesh clustering maps one center without inspecting stale face IDs", "
     REQUIRE(colors.size() == mesh.indices.size());
     for (const Color& color : colors)
         CHECK(color == Color{{9, 8, 7}});
-    CHECK(ids.size() == 2);
+    REQUIRE(ids.size() == mesh.indices.size());
+    for (const std::size_t id : ids)
+        CHECK(id == 0);
 
     std::vector<Color> two_center_colors(mesh.indices.size());
     for (std::size_t i = 0; i < two_center_colors.size(); ++i)
