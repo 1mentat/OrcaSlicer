@@ -71,7 +71,7 @@ public:
     Point           _offset;
 
 public:
-    LinesBucket(ExtrusionLayers &&paths, const void* id, Point offset) : _piles(paths), _id(id), _offset(offset) {}
+    LinesBucket(ExtrusionLayers &&paths, const void* id, Point offset) : _piles(std::move(paths)), _id(id), _offset(offset) {}
     LinesBucket(LinesBucket &&) = default;
 
     std::pair<int, int> curRange() const
@@ -93,6 +93,12 @@ public:
     {
         auto [b, e] = curRange();
         LineWithIDs lines;
+        append_lines(b, e, lines);
+        return lines;
+    }
+    // Appends the lines of the piles in [b, e).
+    void append_lines(int b, int e, LineWithIDs &lines) const
+    {
         for (int i = b; i < e; ++i) {
             for (const ExtrusionPath &path : _piles[i].paths) {
                 if (path.is_force_no_extrusion() == false) {
@@ -103,7 +109,6 @@ public:
                 }
             }
         }
-        return lines;
     }
 
     friend bool operator>(const LinesBucket &left, const LinesBucket &right) { return left._curBottomZ > right._curBottomZ; }
@@ -127,6 +132,16 @@ public:
     bool        valid() const { return line_bucket_ptr_queue.empty() == false; }
     float       getCurrBottomZ();
     LineWithIDs getCurLines() const;
+
+    // The piles getCurLines() reads its lines from, so the lines can be collected later.
+    struct PileRange
+    {
+        const LinesBucket *bucket;
+        int                begin;
+        int                end;
+    };
+    std::vector<PileRange> getCurRanges() const;
+    static LineWithIDs     lines_of(const std::vector<PileRange> &ranges);
 };
 
 void getExtrusionPathsFromEntity(const ExtrusionEntityCollection *entity, ExtrusionPaths &paths);
