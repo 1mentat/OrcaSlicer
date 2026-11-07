@@ -223,7 +223,7 @@ SCENARIO("Support layer Z honors contact distance", "[SupportMaterial]")
                 { "enable_support",             1 },
                 { "layer_height",               0.2 },
                 { "initial_layer_print_height", 0.4 },
-                { "dont_support_bridges",       false },
+                { "bridge_no_support",          false },
 			});
 			bool first_layer_ok, layer_min_ok, layer_max_ok;
             check(print, first_layer_ok, layer_min_ok, layer_max_ok);
@@ -237,7 +237,7 @@ SCENARIO("Support layer Z honors contact distance", "[SupportMaterial]")
                 { "enable_support",             1 },
                 { "layer_height",               0.2 },
                 { "initial_layer_print_height", 0.3 },
-                { "dont_support_bridges",       false },
+                { "bridge_no_support",          false },
             });
             bool first_layer_ok, layer_min_ok, layer_max_ok;
             check(print, first_layer_ok, layer_min_ok, layer_max_ok);
