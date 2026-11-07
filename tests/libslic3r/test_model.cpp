@@ -2250,3 +2250,138 @@ TEST_CASE("Model read_from_archive identifies the generated archive origin and r
 }
 
 } // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_archive reports progress stages after loading", "[Model][ModelImport][Archive][ModelArchiveProgress]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_progress");
+    ScopedTemporaryFile archive(".3mf");
+    store_archive(archive.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    std::vector<std::tuple<int, int, int>> progress_records;
+    Import3mfProgressFn progress = [&](int stage, int current, int total, bool& cancel) {
+        progress_records.emplace_back(stage, current, total);
+        cancel = false;
+    };
+    Model model;
+    REQUIRE_NOTHROW(model = Model::read_from_archive(archive.string(), &config, &substitutions, type,
+                                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig, &plates, &presets, &version,
+                                                     progress));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front() != nullptr);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    REQUIRE(model.objects.front()->volumes.front() != nullptr);
+    REQUIRE_FALSE(progress_records.empty());
+    CHECK(std::any_of(progress_records.begin(), progress_records.end(),
+                      [](const auto& record) { return std::get<0>(record) == IMPORT_STAGE_UPDATE_GCODE; }));
+    CHECK(std::any_of(progress_records.begin(), progress_records.end(),
+                      [](const auto& record) { return std::get<0>(record) == IMPORT_STAGE_CHECK_MODE_GCODE; }));
+    for (const auto& [stage, current, total] : progress_records) {
+        CHECK(stage >= 0);
+        CHECK(current >= 0);
+        CHECK(total >= 0);
+        CHECK(current <= total);
+    }
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model read_from_archive cancellation is surfaced after archive load", "[Model][ModelImport][Archive][ModelArchiveInstanceCancel]")
+{
+    ScopedSlic3rTemporaryDir backup("orca_model_import_read");
+    const std::string archive = (boost::filesystem::path(TEST_DATA_DIR) / "test_3mf" / "Geräte" / "Büchse.3mf").string();
+    REQUIRE(boost::filesystem::is_regular_file(archive));
+    En3mfType control_type = En3mfType::From_Other;
+    Model control = read_archive(archive, control_type,
+        LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances);
+    REQUIRE_FALSE(control.objects.empty());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset* preset : presets)
+            delete preset;
+    });
+    bool callback_called         = false;
+    Import3mfProgressFn progress = [&](int stage, int, int, bool& cancel) {
+        cancel = false;
+        if (stage == IMPORT_STAGE_ADD_INSTANCE) {
+            callback_called = true;
+            cancel          = true;
+        }
+    };
+    CHECK_THROWS_AS(Model::read_from_archive(archive, &config, &substitutions, type,
+                                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances,
+                                             &plates, &presets, &version, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
+}
+
+} // namespace model_import_contracts
+
+namespace model_import_contracts {
+
+TEST_CASE("Model archive progress cancellation is honored at each post-load stage", "[Model][ModelImport][Archive][ModelArchivePostloadCancel][ModelImportCancellation]")
+{
+    const int cancelled_stage = GENERATE(IMPORT_STAGE_UPDATE_GCODE, IMPORT_STAGE_CHECK_MODE_GCODE);
+    CAPTURE(cancelled_stage);
+    ScopedSlic3rTemporaryDir backup("orca_model_import_post_load_cancel");
+    ScopedTemporaryFile archive(".3mf");
+    model_import_contracts::store_archive(archive.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    En3mfType type = En3mfType::From_Other;
+    PlateDataPtrs plates;
+    std::vector<Preset *> presets;
+    Semver version;
+    ScopeGuard cleanup([&]() {
+        release_PlateData_list(plates);
+        for (Preset *preset : presets)
+            delete preset;
+    });
+    bool callback_called = false;
+    std::vector<int> progress_stages;
+    Import3mfProgressFn progress = [&](int stage, int, int, bool &cancel) {
+        progress_stages.push_back(stage);
+        cancel = stage == cancelled_stage;
+        if (cancel)
+            callback_called = true;
+    };
+
+    CHECK_THROWS_AS(Model::read_from_archive(archive.string(), &config, &substitutions, type,
+                                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                                             &plates, &presets, &version, progress),
+                    Slic3r::RuntimeError);
+    CHECK(callback_called);
+    REQUIRE_FALSE(progress_stages.empty());
+    const auto requested_stage = std::find(progress_stages.begin(), progress_stages.end(), cancelled_stage);
+    REQUIRE(requested_stage != progress_stages.end());
+    // Cancellation is terminal: callbacks before the selected post-load stage are
+    // allowed, but no later stage may be observed. CHECK_MODE therefore proves that
+    // UPDATE ran first, while UPDATE remains a one-callback cancellation.
+    CHECK(requested_stage == progress_stages.end() - 1);
+    if (cancelled_stage == IMPORT_STAGE_CHECK_MODE_GCODE) {
+        const auto update_stage = std::find(progress_stages.begin(), progress_stages.end(), IMPORT_STAGE_UPDATE_GCODE);
+        REQUIRE(update_stage != progress_stages.end());
+        CHECK(update_stage < requested_stage);
+    }
+}
+
+} // namespace model_import_contracts
