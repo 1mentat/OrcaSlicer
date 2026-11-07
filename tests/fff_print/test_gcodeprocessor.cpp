@@ -971,15 +971,24 @@ TEST_CASE("M702 without C has no unloading side effect", "[GCodeProcessor][GCode
 
 TEST_CASE("Repetier saved positions become the origin of the next move", "[GCodeProcessor][GCodeProcessorRepetierRegression]")
 {
-    const auto result = process_buffer(
-        "M83\nG90\nG1 X10 Y20 Z0.2 F600\nM401\nG1 X30 Y40 Z1.2 F1200\nM402\nG1 X15 Y25 Z0.2 E1\n",
-        RunOptions{gcfRepetier});
+    const std::string gcode = "M83\nG90\nG1 X10 Y20 Z0.2 F600\nM401\nG1 X30 Y40 Z1.2 F1200\nM402\nG1 X15 Y25 Z0.2 E1\n";
+    const auto result = process_buffer(gcode, RunOptions{gcfRepetier});
     const auto extrusions = moves_of(result, EMoveType::Extrude);
     REQUIRE(extrusions.size() == 1);
     CHECK_THAT(extrusions.front()->position.x(), WithinAbs(15.0, 1e-4));
     CHECK_THAT(extrusions.front()->position.y(), WithinAbs(25.0, 1e-4));
     CHECK_THAT(extrusions.front()->travel_dist, WithinAbs(std::sqrt(50.0), 1e-4));
     CHECK_THAT(extrusions.front()->feedrate, WithinAbs(10.0, 1e-4));
+
+    // File processing can represent a move with several vertices; inspect the final extrusion vertex for its endpoint.
+    const auto file_result = process_file(gcode, RunOptions{gcfRepetier, true});
+    const auto extrusion = std::find_if(file_result.moves.rbegin(), file_result.moves.rend(),
+                                        [](const GCodeProcessorResult::MoveVertex &move) { return move.type == EMoveType::Extrude; });
+    REQUIRE(extrusion != file_result.moves.rend());
+    CHECK_THAT(extrusion->position.x(), WithinAbs(15.0, 1e-4));
+    CHECK_THAT(extrusion->position.y(), WithinAbs(25.0, 1e-4));
+    CHECK_THAT(extrusion->travel_dist, WithinAbs(std::sqrt(50.0), 1e-4));
+    CHECK_THAT(extrusion->feedrate, WithinAbs(10.0, 1e-4));
 }
 
 TEST_CASE("Unknown-axis G92 preserves XYZ origins while bare G92 resets them", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorUnknownAxis]")
