@@ -3238,6 +3238,7 @@ DynamicPrintConfig config(bool interface_shells)
         {"bottom_shell_layers", 2},
         {"top_shell_thickness", 0.0},
         {"bottom_shell_thickness", 0.0},
+        {"ensure_vertical_shell_thickness", "ensure_all"},
         {"sparse_infill_density", "0%"},
         {"top_surface_density", "100%"},
         {"bottom_surface_density", "100%"},
@@ -3254,13 +3255,15 @@ DynamicPrintConfig config(bool interface_shells)
     return result;
 }
 
-// The lower material ends at z=1.0 while the upper material starts at z=0.6
-// and continues above it.  Their known 8x8 material interface is hidden only
-// when regions are treated as one collective body.  The strongest-delta
-// search intentionally finds the actual transition layer after slicing,
-// rather than assuming which layer owns the overlap precedence.  A single
-// ModelObject with two MODEL_PART volumes gives Print::apply the same public
-// multi-region path used by production.
+// The lower material ends at z=6.6 while the upper material starts at z=6.2
+// and continues above it. Their known 8x8 material interface is hidden only
+// when regions are treated as one collective body. The tall geometry ensures
+// the multi-region shell cache sees at least 32 layers, where the former
+// num_layers / 16 grain heuristic differs from the default grain of one. The
+// strongest-delta search intentionally finds the actual transition layer
+// after slicing, rather than assuming which layer owns the overlap precedence.
+// A single ModelObject with two MODEL_PART volumes gives Print::apply the same
+// public multi-region path used by production.
 struct ProcessedFixture {
     Model model;
     Print print;
@@ -3268,9 +3271,9 @@ struct ProcessedFixture {
     explicit ProcessedFixture(bool interface_shells)
     {
         ModelObject *object = model.add_object();
-        auto *lower = object->add_volume(make_cube(12., 12., 1.0), ModelVolumeType::MODEL_PART, false);
+        auto *lower = object->add_volume(make_cube(12., 12., 6.6), ModelVolumeType::MODEL_PART, false);
         TriangleMesh upper_mesh = make_cube(8., 8., 1.2);
-        upper_mesh.translate(2.f, 2.f, 0.6f);
+        upper_mesh.translate(2.f, 2.f, 6.2f);
         auto *upper = object->add_volume(std::move(upper_mesh), ModelVolumeType::MODEL_PART, false);
         lower->config.set("extruder", 1);
         upper->config.set("extruder", 2);
@@ -3365,9 +3368,19 @@ TEST_CASE("Interface shells preserve a material's hidden top surface", "[Interfa
     interface_shells_followup::ProcessedFixture enabled(true);
     const PrintObject &disabled_object = *disabled.print.objects().front();
     const PrintObject &enabled_object = *enabled.print.objects().front();
+    REQUIRE_FALSE(disabled_object.config().interface_shells.value);
+    REQUIRE(enabled_object.config().interface_shells.value);
+    for (size_t region_id = 0; region_id < interface_shells_followup::expected_region_count; ++region_id) {
+        REQUIRE(disabled_object.printing_region(region_id).config().ensure_vertical_shell_thickness.value == evstAll);
+        REQUIRE(enabled_object.printing_region(region_id).config().ensure_vertical_shell_thickness.value == evstAll);
+    }
     REQUIRE_FALSE(disabled_object.layers().empty());
     REQUIRE_FALSE(enabled_object.layers().empty());
+    REQUIRE(disabled_object.layer_count() >= 32);
+    REQUIRE(enabled_object.layer_count() >= 32);
     REQUIRE(disabled_object.layers().size() == enabled_object.layers().size());
+    REQUIRE(disabled_object.num_printing_regions() == interface_shells_followup::expected_region_count);
+    REQUIRE(enabled_object.num_printing_regions() == interface_shells_followup::expected_region_count);
     REQUIRE(disabled_object.layers().front()->regions().size() == interface_shells_followup::expected_region_count);
     REQUIRE(enabled_object.layers().front()->regions().size() == interface_shells_followup::expected_region_count);
 
