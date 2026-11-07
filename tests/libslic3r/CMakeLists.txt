@@ -109,6 +109,7 @@ add_executable(${_TEST_NAME}_tests
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
+    test_conflict_checker_contracts.cpp
     test_texture_displacement.cpp
     test_texture_to_color_contracts.cpp
     test_instance_lock.cpp
