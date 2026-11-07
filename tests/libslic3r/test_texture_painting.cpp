@@ -411,7 +411,7 @@ std::vector<unsigned char> encode_image(const cv::Mat &bgr, const char *extensio
     REQUIRE_FALSE(bgr.empty());
     REQUIRE(bgr.type() == CV_8UC3);
     REQUIRE(bgr.rows > 0);
-    REQUIRE(bgr.rows <= 4);
+    REQUIRE(bgr.rows <= 6);
     REQUIRE(bgr.cols > 0);
     REQUIRE(bgr.cols <= 4);
     std::vector<unsigned char> bytes;
@@ -425,7 +425,7 @@ TextureImage encoded_solid_texture(int width, int height, RGB rgb, const char *e
     REQUIRE(width > 0);
     REQUIRE(width <= 4);
     REQUIRE(height > 0);
-    REQUIRE(height <= 4);
+    REQUIRE(height <= 6);
     cv::Mat bgr(height, width, CV_8UC3);
     REQUIRE_FALSE(bgr.empty());
     for (int y = 0; y < height; ++y)
@@ -552,6 +552,52 @@ TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture",
     CHECK((*right)[0] < 40);
     CHECK((*right)[1] < 40);
     CHECK((*right)[2] > 180);
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+namespace {
+
+void require_red_blue_by_side(const PaintedMesh &mesh)
+{
+    require_valid_painted_geometry(mesh);
+    bool red = false;
+    bool blue = false;
+    for (size_t i = 0; i < mesh.face_colors.size(); ++i) {
+        const RGB &c = mesh.face_colors[i];
+        const double x = face_center_x(mesh, i);
+        if (x < 1.5) {
+            CHECK(c[0] > 180);
+            CHECK(c[1] < 40);
+            CHECK(c[2] < 40);
+            red = true;
+        } else if (x > 2.5) {
+            CHECK(c[0] < 40);
+            CHECK(c[1] < 40);
+            CHECK(c[2] > 180);
+            blue = true;
+        }
+    }
+    REQUIRE(red);
+    REQUIRE(blue);
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas decodes encoded PNGs for separate material rows", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures = {
+        encoded_solid_texture(4, 4, { 255, 0, 0 }, ".png"),
+        encoded_solid_texture(2, 6, { 0, 0, 255 }, ".png"),
+    };
+    REQUIRE_FALSE(mesh.textures[0].data.empty());
+    REQUIRE_FALSE(mesh.textures[1].data.empty());
+
+    const PaintedMesh output = paint(mesh);
+    require_red_blue_by_side(output);
 }
 
 } // namespace texture_atlas_contracts
