@@ -3048,3 +3048,90 @@ TEST_CASE("Model instance auto brim width varies with adhesion at fixed speed an
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Copying a model object through Model preserves owned volumes and instances", "[Model][ModelLifecycle10][ModelOwnership][ModelCopy]")
+{
+    Model model;
+    ModelObject *source = model.add_object("copy-source", "source.stl", make_cube(4., 5., 6.));
+    REQUIRE(source != nullptr);
+    REQUIRE(source->volumes.size() == 1);
+    REQUIRE(source->volumes.front() != nullptr);
+    REQUIRE(source->add_instance() != nullptr);
+    ModelInstance *second = source->add_instance();
+    REQUIRE(second != nullptr);
+    second->set_offset(Vec3d(20., 3., 1.));
+    const ObjectID object_id = source->id();
+    const ObjectID volume_id = source->volumes.front()->id();
+    const Vec3d second_offset = second->get_offset();
+
+    // Model::add_object is the public ownership/copy API: the clone receives
+    // distinct IDs, remains parented by this Model, and leaves the source intact.
+    ModelObject *copy = model.add_object(*source);
+
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy != source);
+    REQUIRE(copy->id() != object_id);
+    REQUIRE(copy->volumes.size() == 1);
+    REQUIRE(copy->instances.size() == 2);
+    REQUIRE(copy->volumes.front() != nullptr);
+    REQUIRE(copy->instances.front() != nullptr);
+    REQUIRE(copy->instances.back() != nullptr);
+    CHECK(copy->name == "copy-source");
+    CHECK(copy->input_file == "source.stl");
+    CHECK(copy->volumes.front()->id() != volume_id);
+    CHECK(copy->volumes.front()->get_object() == copy);
+    CHECK(copy->instances.front()->get_object() == copy);
+    CHECK(copy->instances.back()->get_object() == copy);
+    CHECK(copy->instances.back()->get_offset().isApprox(second_offset, 1e-9));
+    CHECK(copy->get_model() == &model);
+    CHECK(source->get_model() == &model);
+    CHECK(source->volumes.size() == 1);
+    CHECK(source->instances.size() == 2);
+}
+
+} // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Named object insertion keeps source mesh geometry and records volume metadata", "[Model][ModelLifecycle11][ModelOwnership][ModelGeometry]")
+{
+    const TriangleMesh input = make_cube(4., 5., 6.);
+    const BoundingBoxf3 input_box = input.bounding_box();
+    TriangleMesh input_for_volume = input;
+    const double input_volume = std::abs(static_cast<double>(input_for_volume.volume()));
+
+    const std::string source_path = (boost::filesystem::path("input") / "source.stl").string();
+    Model model;
+    ModelObject *object = model.add_object("named-part", source_path.c_str(), input);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    const ModelVolume *volume = object->volumes.front();
+    REQUIRE(volume != nullptr);
+
+    CHECK(object->instances.empty());
+    CHECK(object->name == "named-part");
+    CHECK(object->input_file == source_path);
+    CHECK(volume->name == "named-part");
+    CHECK(volume->source.input_file == source_path);
+    CHECK(volume->source.object_idx == 0);
+    CHECK(volume->source.volume_idx == 0);
+    REQUIRE(dynamic_cast<const ConfigOptionInt *>(object->config.option("extruder")) != nullptr);
+    CHECK(object->config.extruder() == 1);
+    TriangleMesh volume_mesh = volume->mesh();
+    REQUIRE_FALSE(volume_mesh.its.vertices.empty());
+    REQUIRE_FALSE(volume_mesh.its.indices.empty());
+    for (const Vec3f &vertex : volume_mesh.its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const Vec3i32 &face : volume_mesh.its.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE(static_cast<std::size_t>(face.maxCoeff()) < volume_mesh.its.vertices.size());
+    }
+    CHECK_THAT(std::abs(static_cast<double>(volume_mesh.volume())),
+               Catch::Matchers::WithinAbs(input_volume, 1e-5));
+    CHECK_THAT(input.bounding_box().min.x(), Catch::Matchers::WithinAbs(input_box.min.x(), 1e-6));
+    CHECK_THAT(input.bounding_box().max.y(), Catch::Matchers::WithinAbs(input_box.max.y(), 1e-6));
+}
+
+} // namespace model_lifecycle_contracts
