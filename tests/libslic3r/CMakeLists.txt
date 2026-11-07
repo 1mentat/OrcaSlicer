@@ -54,6 +54,7 @@ add_executable(${_TEST_NAME}_tests
     test_aabb_mesh.cpp
     test_filament_mixer.cpp
     test_flush_vol_predictor.cpp
+    test_flush_volume_contracts.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
     test_geometry.cpp
