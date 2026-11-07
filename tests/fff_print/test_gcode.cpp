@@ -939,6 +939,128 @@ std::vector<DepositionEndpoint> deposition_endpoints(const std::string &text,
     return endpoints;
 }
 
+struct InfillPath
+{
+    std::string role;
+    double      length = 0.;
+};
+
+void collect_infill_paths(const ExtrusionEntity &entity, std::vector<InfillPath> &paths)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            collect_infill_paths(*child, paths);
+    } else if (is_infill(entity.role()) && entity.role() != erIroning) {
+        paths.push_back({ExtrusionEntity::role_to_string(entity.role()), unscale<double>(entity.length())});
+    }
+}
+
+std::vector<InfillPath> source_infill_paths(const Print &print, size_t &multi_path_no_sort_collections)
+{
+    std::vector<InfillPath> paths;
+    multi_path_no_sort_collections = 0;
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for (const ExtrusionEntity *entity : region->fills.entities) {
+                    const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+                    if (collection != nullptr && collection->no_sort && collection->entities.size() > 1)
+                        ++multi_path_no_sort_collections;
+                    collect_infill_paths(*entity, paths);
+                }
+    return paths;
+}
+
+std::vector<InfillPath> emitted_infill_paths(const std::string &gcode, const DynamicPrintConfig &config,
+                                             const std::set<std::string> &infill_roles)
+{
+    std::vector<InfillPath> paths;
+    std::string active_role;
+    std::string path_role;
+    double      path_length = 0.;
+    const auto flush_path = [&]() {
+        if (path_length > 0.)
+            paths.push_back({path_role, path_length});
+        path_role = {};
+        path_length = 0.;
+    };
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = zhop_trim_comment(line.comment());
+        if (zhop_is_layer_marker(comment))
+            flush_path();
+        if (comment.rfind("TYPE:", 0) == 0) {
+            const std::string next_role(zhop_trim_comment(comment.substr(5)));
+            if (next_role != active_role)
+                flush_path();
+            active_role = next_role;
+        } else if (comment.rfind("FEATURE:", 0) == 0) {
+            const std::string next_role(zhop_trim_comment(comment.substr(8)));
+            if (next_role != active_role)
+                flush_path();
+            active_role = next_role;
+        }
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        const double xy = line.dist_XY(self);
+        if (infill_roles.count(active_role) != 0 && line.extruding(self) && xy > EPSILON) {
+            if (path_length == 0.)
+                path_role = active_role;
+            path_length += xy;
+        } else if (path_length > 0. && xy > EPSILON) {
+            flush_path();
+        }
+    });
+    flush_path();
+    return paths;
+}
+
+TEST_CASE("Concentric infill preserves collection path order and length in exported G-code",
+          "[GCode][InfillCollections]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_pattern", "concentric"},
+        {"sparse_infill_density", "20%"},
+        {"wipe", false},
+        {"enable_arc_fitting", false},
+        {"resolution", 0.0},
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(make_cube(12., 12., 0.6));
+    Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    require_valid(print);
+    print.set_status_silent();
+    print.process();
+
+    size_t multi_path_no_sort_collections = 0;
+    const std::vector<InfillPath> expected = source_infill_paths(print, multi_path_no_sort_collections);
+    REQUIRE(multi_path_no_sort_collections > 0);
+    REQUIRE(expected.size() > 1);
+
+    std::set<std::string> infill_roles;
+    for (const InfillPath &path : expected)
+        infill_roles.insert(path.role);
+    const ExportedPrint exported = export_print(print);
+    const std::vector<InfillPath> actual = emitted_infill_paths(exported.text, config, infill_roles);
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        INFO("infill path " << i << " role " << expected[i].role);
+        CHECK(actual[i].role == expected[i].role);
+        CHECK_THAT(actual[i].length, Catch::Matchers::WithinAbs(expected[i].length, 0.02));
+    }
+}
+
 DynamicPrintConfig zhop_type_config(const ZHopType type)
 {
     DynamicPrintConfig config = base_config();
