@@ -4155,6 +4155,16 @@
       ],
       "reason": "Neutral and unequal X/Y material corrections are compared through transformed mesh dimensions and every model slice area. X=1.5 and Y=0.8 must produce independent axis factors and a 1.2 area ratio. The full numeric range is not claimed."
     },
+    "material_correction_z": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[MaterialCorrectionZ]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The existing SLA correction-validation matrix rejects material_correction_z=0 with relative_correction_z fixed at 1, exercising the registered zero minimum as an invalid effective scale. On a 10x10x4 mm cube with other correction axes at 1, the public SLAPrint pipeline checks factors 0.75, 1.0 and 1.25: X/Y extents remain fixed while Z becomes 3, 4 and 5 mm. No upper bound is registered or claimed."
+    },
     "symmetric_infill_y_axis": {
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[SymmetricInfill]",

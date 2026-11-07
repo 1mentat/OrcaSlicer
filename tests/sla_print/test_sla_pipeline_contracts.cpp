@@ -2394,8 +2394,28 @@ TEST_CASE("SLA material correction scales transformed slice geometry",
     CHECK_THAT(material.bbox_z, Catch::Matchers::WithinRel(base.bbox_z, 1e-5));
 }
 
+TEST_CASE("SLA material correction Z scales transformed mesh height",
+          "[SLAPrint][SLAMaterialCorrection][SettingsVariance][MaterialCorrectionZ]")
+{
+    using namespace sla_correction_variance_contracts;
+    const Run baseline = process_cube(correction_config());
+
+    // A 10 x 10 x 4 mm cube makes the transformed Z extent a direct oracle for
+    // this scalar correction while the other correction axes stay at unity.
+    for (const double factor : {0.75, 1.0, 1.25}) {
+        CAPTURE(factor);
+        DynamicPrintConfig config = correction_config();
+        config.set_key_value("material_correction_z", new ConfigOptionFloat(factor));
+        const Run corrected = process_cube(std::move(config));
+
+        CHECK_THAT(corrected.bbox_x, Catch::Matchers::WithinRel(baseline.bbox_x, 1e-5));
+        CHECK_THAT(corrected.bbox_y, Catch::Matchers::WithinRel(baseline.bbox_y, 1e-5));
+        CHECK_THAT(corrected.bbox_z, Catch::Matchers::WithinRel(baseline.bbox_z * factor, 1e-5));
+    }
+}
+
 TEST_CASE("SLA validation rejects nonpositive or nonfinite effective correction scales",
-          "[SLAPrint][SLACorrectionValidation][SLACorrectionScaleValidation]")
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionScaleValidation][SettingsVariance][MaterialCorrectionZ]")
 {
     SlaCubeFixture positive_scale(sla_config(1.0), make_cube(10.0, 10.0, 4.0));
     const auto positive_validation = positive_scale.print.validate();
