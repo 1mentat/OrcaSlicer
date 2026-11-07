@@ -140,6 +140,7 @@ TEST_CASE("RepairMesh cancellation stops at each published stage",
         REQUIRE(RepairMesh(input, unused, [&](AlgoProgress state) { stages.push_back(state.percent); }, nullptr));
     }
     // The final 100% report announces completion; there is nothing left to cancel after it.
+    REQUIRE_FALSE(stages.empty());
     REQUIRE(stages.back() == 100);
     stages.pop_back();
     REQUIRE(stages.size() >= 2);
