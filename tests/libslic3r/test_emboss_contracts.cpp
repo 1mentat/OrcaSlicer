@@ -270,6 +270,11 @@ TEST_CASE("Emboss normal calculation handles crossing into either adjacent edge"
     // so it tilts away from straight down (the bottom-edge normal and the clamp-to-corner result).
     const double rise = std::sqrt(39.);
     const double expected_tilt = std::atan2(-13., rise);  // -64.34 degrees
+    SECTION("both samples cross adjacent corners in the same calculation") {
+        const double angle = Emboss::calculate_angle(int32_t(scaled(12.)), PolygonPoint{0, xy(0, -10)}, square());
+        CHECK_THAT(std::cos(angle), WithinAbs(0., 1e-8));
+        CHECK_THAT(std::sin(angle), WithinAbs(-1., 1e-8));
+    }
     SECTION("the forward sample crosses the right corner") {
         const double angle = Emboss::calculate_angle(int32_t(scaled(8.)), PolygonPoint{0, xy(5, -10)}, square());
         CHECK_THAT(angle, WithinAbs(expected_tilt, 1e-6));
