@@ -679,6 +679,25 @@ static ExPolygons outer_inner_brim_area(const Print& print,
 
     }
 
+    // Only the expolygons whose bounding boxes touch bbox can overlap an area inside it, so the
+    // intersections below are tested against those alone. This keeps each test local instead of
+    // clipping against every brim piece of the plate.
+    auto expolygons_touching = [](const ExPolygons &expolys, const std::vector<BoundingBox> &bboxes, const BoundingBox &bbox, size_t skip_idx) {
+        ExPolygons out;
+        for (size_t i = 0; i < expolys.size(); ++i)
+            if (i != skip_idx && bboxes[i].overlap(bbox))
+                out.push_back(expolys[i]);
+        return out;
+    };
+    auto expolygons_bboxes = [](const ExPolygons &expolys) {
+        std::vector<BoundingBox> bboxes;
+        bboxes.reserve(expolys.size());
+        for (const ExPolygon &expoly : expolys)
+            bboxes.emplace_back(get_extents(expoly));
+        return bboxes;
+    };
+    const std::vector<BoundingBox> object_islands_bboxes = expolygons_bboxes(objectIslands);
+
     brim_area.clear();
     for (const PrintObject* object : print.objects()) {
         // BBS: brim should be contacted to at least one object's island or brim area
@@ -691,20 +710,19 @@ static ExPolygons outer_inner_brim_area(const Print& print,
             for (const auto& [other_key, other_areas] : brimAreaMap)
                 if (other_key != map_it->first)
                     expolygons_append(otherExPolys, other_areas);
+            const std::vector<BoundingBox> other_bboxes = expolygons_bboxes(otherExPolys);
 
             auto tempArea = map_it->second;
             map_it->second.clear();
+            const std::vector<BoundingBox> temp_bboxes = expolygons_bboxes(tempArea);
 
             for (int ia = 0; ia != tempArea.size(); ++ia) {
-                // find this object's other brim area
-                ExPolygons otherExPoly;
-                for (int iao = 0; iao != tempArea.size(); ++iao)
-                    if (iao != ia) otherExPoly.push_back(tempArea[iao]);
-
                 auto offsetedTa = offset_ex(tempArea[ia], print.brim_flow().scaled_spacing() * 2, jtRound, SCALED_RESOLUTION);
-                if (!intersection_ex(offsetedTa, objectIslands).empty() ||
-                    !intersection_ex(offsetedTa, otherExPoly).empty() ||
-                    !intersection_ex(offsetedTa, otherExPolys).empty())
+                const BoundingBox offseted_bbox = get_extents(offsetedTa);
+                if (!intersection_ex(offsetedTa, expolygons_touching(objectIslands, object_islands_bboxes, offseted_bbox, size_t(-1))).empty() ||
+                    // this object's other brim area
+                    !intersection_ex(offsetedTa, expolygons_touching(tempArea, temp_bboxes, offseted_bbox, size_t(ia))).empty() ||
+                    !intersection_ex(offsetedTa, expolygons_touching(otherExPolys, other_bboxes, offseted_bbox, size_t(-1))).empty())
                     map_it->second.push_back(tempArea[ia]);
             }
             expolygons_append(brim_area, map_it->second);
