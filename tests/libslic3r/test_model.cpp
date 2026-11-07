@@ -2878,3 +2878,54 @@ TEST_CASE("Model speed and material state feed public process heuristics", "[Mod
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model reusable collection detaches volumes and preserves ownership metadata", "[Model][ModelLifecycle6][ModelReusableLifecycle]")
+{
+    Model model;
+    ModelMaterial *material = model.add_material("reusable-material");
+    REQUIRE(material != nullptr);
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *part = object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(part != nullptr);
+    ModelVolume *modifier = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    REQUIRE(modifier != nullptr);
+    REQUIRE(object->add_instance() != nullptr);
+    const ObjectID part_id = part->id();
+    const ObjectID modifier_id = modifier->id();
+
+    REQUIRE(material->get_model() == &model);
+    REQUIRE(object->get_model() == &model);
+    REQUIRE(object->instances.size() == 1);
+    REQUIRE(object->instances.front() != nullptr);
+    REQUIRE(object->instances.front()->get_object() == object);
+    REQUIRE(part->get_object() == object);
+    REQUIRE(modifier->get_object() == object);
+
+    const ModelVolumePtrs original_volumes{ part, modifier };
+    const ModelObjectPtrs original_objects{ object };
+    // collect_reusable_objects transfers raw pointers without deleting them. Restore
+    // the exact original owners on every exit so retained-ownership mutants cannot
+    // create duplicate owners or double-delete the detached objects.
+    ScopeGuard restore_ownership([&]() {
+        object->volumes = original_volumes;
+        model.objects = original_objects;
+    });
+
+    std::vector<ObjectBase *> reusable;
+    model.collect_reusable_objects(reusable);
+
+    REQUIRE(model.objects.empty());
+    REQUIRE(reusable.size() == 3);
+    CHECK(reusable[0] == object);
+    CHECK(reusable[1] == part);
+    CHECK(reusable[2] == modifier);
+    CHECK(object->volumes.empty());
+    REQUIRE(object->volume_ids.size() == 2);
+    CHECK(object->volume_ids[0] == part_id);
+    CHECK(object->volume_ids[1] == modifier_id);
+}
+
+} // namespace model_lifecycle_contracts
