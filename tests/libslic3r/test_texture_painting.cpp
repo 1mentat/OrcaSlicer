@@ -1,3 +1,7 @@
+#include <opencv2/core/hal/interface.h>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/core/matx.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include <cmath>
@@ -332,3 +336,124 @@ TEST_CASE("Texture painting replaces a volume and keeps its world placement", "[
             static_cast<std::size_t>(EnforcerBlockerType::Extruder1));
     CHECK(volume->mmu_segmentation_facets.get_data().used_states[static_cast<std::size_t>(EnforcerBlockerType::Extruder1)]);
 }
+
+namespace texture_atlas_contracts {
+namespace {
+
+using RGB = Color;
+
+TextureImage solid_texture(int width, int height, RGB rgb)
+{
+    REQUIRE(width > 0);
+    REQUIRE(width <= 4);
+    REQUIRE(height > 0);
+    REQUIRE(height <= 4);
+    TextureImage image;
+    image.width = width;
+    image.height = height;
+    image.channels = 3;
+    image.data.resize(static_cast<size_t>(width) * height * 3);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const size_t offset = (static_cast<size_t>(y) * width + x) * 3;
+            image.data[offset + 0] = static_cast<unsigned char>(rgb[0]);
+            image.data[offset + 1] = static_cast<unsigned char>(rgb[1]);
+            image.data[offset + 2] = static_cast<unsigned char>(rgb[2]);
+        }
+    return image;
+}
+
+TexturedMesh two_material_faces()
+{
+    TexturedMesh mesh;
+    mesh.vertices = {
+        { 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+        { 3.f, 0.f, 0.f }, { 4.f, 0.f, 0.f }, { 3.f, 1.f, 0.f },
+    };
+    mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.f });
+    mesh.material_ids = { 0, 1 };
+    mesh.material_texture_map = { 0, 1 };
+    mesh.material_colors = {
+        { 0.f, 1.f, 0.f, 1.f },
+        { 1.f, 1.f, 0.f, 1.f },
+    };
+    mesh.textures = {
+        solid_texture(1, 1, { 255, 0, 0 }),
+        solid_texture(1, 1, { 0, 0, 255 }),
+    };
+    return mesh;
+}
+
+TexturePaintingSettings atlas_settings()
+{
+    TexturePaintingSettings settings;
+    settings.target_colors_num = 2;
+    settings.smooth_weight = 0.;
+    settings.oversampling_iters = 1;
+    return settings;
+}
+
+PaintedMesh paint(const TexturedMesh &input, TexturePaintingSettings settings = atlas_settings())
+{
+    PaintedMesh output;
+    REQUIRE(texture_to_painting(input, output, settings));
+    require_valid_painted_geometry(output);
+    REQUIRE(output.indices.size() == output.face_colors.size());
+    REQUIRE_FALSE(output.indices.empty());
+    REQUIRE(output.vertices.size() >= 3);
+    return output;
+}
+
+std::vector<unsigned char> encode_image(const cv::Mat &bgr, const char *extension)
+{
+    REQUIRE(extension != nullptr);
+    REQUIRE_FALSE(bgr.empty());
+    REQUIRE(bgr.type() == CV_8UC3);
+    REQUIRE(bgr.rows > 0);
+    REQUIRE(bgr.rows <= 4);
+    REQUIRE(bgr.cols > 0);
+    REQUIRE(bgr.cols <= 4);
+    std::vector<unsigned char> bytes;
+    REQUIRE(cv::imencode(extension, bgr, bytes));
+    REQUIRE_FALSE(bytes.empty());
+    return bytes;
+}
+
+TextureImage encoded_solid_texture(int width, int height, RGB rgb, const char *extension)
+{
+    REQUIRE(width > 0);
+    REQUIRE(width <= 4);
+    REQUIRE(height > 0);
+    REQUIRE(height <= 4);
+    cv::Mat bgr(height, width, CV_8UC3);
+    REQUIRE_FALSE(bgr.empty());
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            bgr.at<cv::Vec3b>(y, x) = cv::Vec3b(
+                static_cast<unsigned char>(rgb[2]),
+                static_cast<unsigned char>(rgb[1]),
+                static_cast<unsigned char>(rgb[0]));
+    return TextureImage{-1, -1, 0, encode_image(bgr, extension)};
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas decodes an encoded PNG in the single-texture route", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_ids.clear();
+    mesh.material_texture_map.clear();
+    mesh.textures = { encoded_solid_texture(4, 4, { 255, 0, 0 }, ".png") };
+    REQUIRE_FALSE(mesh.textures.front().data.empty());
+
+    const PaintedMesh output = paint(mesh);
+    REQUIRE_FALSE(output.face_colors.empty());
+    for (const RGB &color : output.face_colors) {
+        CHECK(color[0] > 180);
+        CHECK(color[1] < 40);
+        CHECK(color[2] < 40);
+    }
+}
+
+} // namespace texture_atlas_contracts
