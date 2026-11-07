@@ -3595,3 +3595,43 @@ TEST_CASE("OBJ face colors leave unpainted facets in the default state", "[Model
 }
 
 } // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("Volume affine transformation updates mesh and convex hull geometry", "[Model][ModelPaintGeometry4][ModelGapContracts]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(2., 4., 6.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+
+    const BoundingBoxf3 source_bounds = volume->mesh().bounding_box();
+    const ObjectID old_id = volume->id();
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+    instance->set_rotation(Vec3d(0.2, 0.3, 0.));
+    instance->set_scaling_factor(Vec3d(1.5, 2., 1.25));
+    const BoundingBoxf3 expected_bounds =
+        source_bounds.transformed(instance->get_transformation().get_matrix());
+
+    // Bake a non-quarter-turn, nonuniform instance transform through the public
+    // object API. The volume's transform_this_mesh overloads are protected.
+    object->bake_xy_rotation_into_meshes(0);
+    REQUIRE(object->volumes.size() == 1);
+    REQUIRE(object->volumes.front() != nullptr);
+    REQUIRE(object->instances.size() == 1);
+    REQUIRE(object->instances.front() != nullptr);
+    volume = object->volumes.front();
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    instance = object->instances.front();
+
+    model_bounds_contracts::check_box(volume->mesh().bounding_box(), expected_bounds.min, expected_bounds.max);
+    model_bounds_contracts::check_box(volume->get_convex_hull().bounding_box(), expected_bounds.min, expected_bounds.max);
+    CHECK(volume->id() != old_id);
+    model_bounds_contracts::check_vec3d(instance->get_scaling_factor(), Vec3d::Ones(), 1e-12);
+    model_bounds_contracts::check_vec3d(instance->get_rotation(), Vec3d::Zero(), 1e-12);
+}
+
+} // namespace model_painted_geometry_contracts
