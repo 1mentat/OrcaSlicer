@@ -3606,6 +3606,15 @@
       ],
       "reason": "An overhang fixture with an explicit 20-degree threshold activates both values and requires changed geometry plus fresh/incremental/restored equivalence."
     },
+    "make_overhang_printable_angle": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[OverhangAngleVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..90 degrees with default 55. On the 20-layer stepped overhang fixture, enabling printable-overhang treatment and changing the angle from 0 to 55 degrees must change extrusion geometry while incremental reslicing matches fresh slicing and restoration. At the registered 90-degree endpoint, toggling the feature must leave geometry unchanged, matching the consumer's early return. No intermediate-angle monotonicity is claimed."
+    },
     "precise_z_height": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SettingsReslice]",

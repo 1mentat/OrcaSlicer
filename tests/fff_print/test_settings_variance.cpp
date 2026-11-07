@@ -3531,6 +3531,16 @@ TEST_CASE("External overhang setting changes printable overhang treatment", "[Se
                      "make_overhang_printable", "0", "1");
 }
 
+TEST_CASE("Conical overhang angle limits control printable expansion",
+          "[SettingsVariance][SettingsReslice][SettingsResliceActivation][OverhangAngleVariance]")
+{
+    const TriangleMesh mesh = overhang_fixture();
+    check_variant_on(mesh, {{"make_overhang_printable", true}},
+                     "make_overhang_printable_angle", "0", "55");
+    check_variant_on(mesh, {{"make_overhang_printable_angle", 90.0}},
+                     "make_overhang_printable", "0", "1", false);
+}
+
 TEST_CASE("Extra bridge layer mode changes overhang processing", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
 {
     check_variant_on(overhang_fixture(), {{"bridge_no_support", true}},
