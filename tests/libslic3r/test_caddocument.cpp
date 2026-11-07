@@ -111,6 +111,19 @@ TEST_CASE("CadDocument legacy Rectangle sketch still works", "[CadDocument]")
 
 namespace cad_feature_editing {
 
+void require_mesh_volume_inputs(const TriangleMesh& mesh)
+{
+    REQUIRE_FALSE(mesh.its.vertices.empty());
+    REQUIRE_FALSE(mesh.its.indices.empty());
+    for (const auto& vertex : mesh.its.vertices)
+        REQUIRE(vertex.allFinite());
+    for (const auto& face : mesh.its.indices) {
+        REQUIRE(face.minCoeff() >= 0);
+        REQUIRE_NOTHROW(mesh.its.vertices.at(face.maxCoeff()));
+    }
+    REQUIRE(mesh.facets_count() > 0);
+}
+
 // A 10 x 10 x 5 box: a rectangle sketch on XY and a New extrude. Volume 500.
 void make_box(CadDocument& doc, int& sketch, int& extrude)
 {
@@ -131,6 +144,8 @@ TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "
     CadDocument doc;
     int sketch = -1, extrude = -1;
     cad_feature_editing::make_box(doc, sketch, extrude);
+    cad_feature_editing::require_mesh_volume_inputs(doc.display_mesh);
+    CHECK_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
 
     // The editor payload deliberately carries a different name, type and sketch link. Only the
     // solid parameters are taken; the feature keeps its identity and link.
@@ -149,6 +164,8 @@ TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "
     REQUIRE(doc.error.empty());
     REQUIRE(doc.bodies.size() == 1);
     CHECK_THAT(doc.body_mass_properties(0).volume, Catch::Matchers::WithinRel(800.0, 1e-9));
+    cad_feature_editing::require_mesh_volume_inputs(doc.display_mesh);
+    CHECK_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(800.0, 0.02));
 }
 
 TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument]")
@@ -156,6 +173,9 @@ TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter set
     CadDocument doc;
     int sketch = -1, extrude = -1;
     cad_feature_editing::make_box(doc, sketch, extrude);
+    // The display mesh is an independent public output; retain the source's 2% tessellation tolerance.
+    cad_feature_editing::require_mesh_volume_inputs(doc.display_mesh);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(500.0, 0.02));
 
     // Every field differs from the box: a radius-3 circle on a plane moved to x = 5, extruded
     // 4 in Add mode with the symmetric flag set.
@@ -195,6 +215,8 @@ TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter set
     CHECK_THAT(props.volume, Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 1e-6));
     CHECK_THAT(props.center_of_mass.x(), Catch::Matchers::WithinAbs(5.0, 1e-6));
     CHECK_THAT(props.center_of_mass.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
+    cad_feature_editing::require_mesh_volume_inputs(doc.display_mesh);
+    REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 0.02));
 }
 
 TEST_CASE("Feature replacement rejects bad indices and rolls back a failed rebuild", "[CadDocument]")
