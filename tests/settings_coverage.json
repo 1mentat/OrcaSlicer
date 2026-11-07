@@ -2547,12 +2547,13 @@
     },
     "wipe_inward_distance": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[Wipe][Regression]",
+      "tag": "[Wipe][Regression][WipeInwardDistanceBoundary]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "Literal inward wipe distance is clamped to the outer wall width. Compares inward100% and literal2mm trajectories; oversized literal output must match the full-width clamped geometry point by point. 100% and literal2mm representatives only; disabled inward wipe is the control."
+      "reason": "Validated G-code exports compare the registered minimum 0 mm and maximum 100% with a literal 2 mm request. At zero, inward=true emits the same wipe trajectory as inward=false; at 100%, the inward path differs from the regular path, and the oversized literal path matches the full-width clamp point by point. Both classic and Arachne wall generators are exercised. Other geometries and setting interactions remain unclaimed."
     },
     "wipe_on_loops": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2565,12 +2566,13 @@
     },
     "wipe_distance": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[Wipe]",
+      "tag": "[Wipe][WipeDistanceBoundary][SettingsRetractionVariance][Pipeline]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. With wipe_distance=2 and wipe_speed=100, parses the Wipe_Start/Wipe_End interval and checks during-wipe and before-wipe retraction totals against the configured duration split. Only 2 mm/100 mm/s representatives; no range claim. Additional retraction-variance cases: Wipe distances 0.75 and 2.0 mm are parsed from emitted XY path length and the 0.8 mm retraction is independently partitioned using 30 mm/s and 100 mm/s. No full distance range is claimed."
+      "reason": "A validated Print export compares registered minimum 0 mm with positive 0.75 and 2.0 mm distances. Parsed Wipe_Start/Wipe_End output has no wipe path at zero and emits the requested XY path for positive distances while the 0.8 mm retraction is independently partitioned. No maximum is registered."
     },
     "retraction_length": {
       "test": "tests/fff_print/test_wipe.cpp",
@@ -2645,12 +2647,13 @@
     },
     "wipe_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
-      "tag": "[Wipe]",
+      "tag": "[Wipe][WipeSpeedBoundary][SettingsRetractionVariance][Pipeline]",
       "dimensions": [
-        "representative_values",
-        "pipeline_oracle"
+        "boundary_values",
+        "pipeline_oracle",
+        "representative_values"
       ],
-      "reason": "Wipe retraction preserves fractional speed with inward wipe disabled. Sets wipe speed to 100 mm/s and uses the parsed two millimeter wipe interval to derive the expected retraction amount. One speed representative; no numeric range claim. Additional retraction-variance cases: With role_based_wipe_speed disabled, wipe speed 20 mm/s must emit F1200 and must differ from the printing-feedrate set. The enabled comparison uses the same configured wipe speed as a control."
+      "reason": "With role_based_wipe_speed disabled, a validated Print export parses the registered 0 mm/s minimum as F600 through the consumer's 10 mm/s floor, and the 20 mm/s representative as F1200. The enabled comparison confirms role-based speed comes from the preceding extrusion. No maximum is registered."
     },
     "deretraction_speed": {
       "test": "tests/fff_print/test_wipe.cpp",
