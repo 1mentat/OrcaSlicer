@@ -2794,3 +2794,87 @@ TEST_CASE("ModelObject boolean rejects a multi-volume source without mutation", 
 }
 
 } // namespace model_lifecycle_contracts
+
+namespace model_lifecycle_contracts {
+
+TEST_CASE("Model speed and material state feed public process heuristics", "[Model][ModelLifecycle5][ModelProcessHeuristics]")
+{
+    const GlobalSpeedMap saved_speed_map = Model::printSpeedMap;
+    const std::map<size_t, ExtruderParams> saved_extruder_params = Model::extruderParamsMap;
+    ScopeGuard restore_model_static_state([&]() {
+        Model::printSpeedMap = saved_speed_map;
+        Model::extruderParamsMap = saved_extruder_params;
+    });
+
+    const auto [maximum_key, global_maximum, object_maximum] = GENERATE(
+        table<const char *, double, double>({
+            { "inner_wall_speed", 160., 96. },
+            { "outer_wall_speed", 160., 96. },
+            { "sparse_infill_speed", 160., 96. },
+            { "internal_solid_infill_speed", 160., 96. },
+            { "top_surface_speed", 160., 96. },
+            { "support_speed", 160., 96. },
+        }));
+    CAPTURE(maximum_key);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints{
+        Vec2d(0., 0.), Vec2d(100., 0.), Vec2d(100., 100.), Vec2d(0., 100.)
+    });
+    config.set_deserialize_strict({
+        { "inner_wall_speed", "40" },
+        { "outer_wall_speed", "55" },
+        { "sparse_infill_speed", "70" },
+        { "internal_solid_infill_speed", "85" },
+        { "top_surface_speed", "95" },
+        { "support_speed", "110" },
+        { "nozzle_temperature", "240,210" },
+    });
+    config.set_key_value(maximum_key, new ConfigOptionFloatsNullable{ global_maximum });
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PETG", "PLA" }));
+    PrintConfig print_config = PrintConfig::defaults();
+    print_config.bed_exclude_area.values.clear();
+    Model::setPrintSpeedTable(config, print_config);
+    Model::setExtruderParams(config, 2);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *petg = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(petg != nullptr);
+    ModelVolume *pla = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(pla != nullptr);
+    petg->config.set("extruder", 1);
+    pla->config.set("extruder", 2);
+
+    // Each row makes one of the six explicit global speed keys the independently
+    // known maximum, so every aggregation branch is observable.
+    CHECK_THAT(Model::findMaxSpeed(object), Catch::Matchers::WithinAbs(global_maximum, 1e-9));
+    DynamicPrintConfig object_config;
+    object_config.set_deserialize_strict({
+        { "inner_wall_speed", "31" },
+        { "outer_wall_speed", "32" },
+        { "sparse_infill_speed", "33" },
+        { "internal_solid_infill_speed", "34" },
+        { "top_surface_speed", "35" },
+        { "support_speed", "36" },
+        { "small_perimeter_speed", "20" },
+        { "small_support_perimeter_speed", "25" },
+    });
+    object->config.assign_config(object_config);
+    object->config.set_key_value(maximum_key, new ConfigOptionFloatsNullable{ object_maximum });
+    CHECK_THAT(Model::findMaxSpeed(object), Catch::Matchers::WithinAbs(object_maximum, 1e-9));
+
+    // PETG and PLA have distinct public material thermal-length contracts; the group
+    // overload must retain the shortest member rather than an insertion-order value.
+    CHECK_THAT(Model::getThermalLength(petg), Catch::Matchers::WithinAbs(100., 1e-9));
+    CHECK_THAT(Model::getThermalLength(pla), Catch::Matchers::WithinAbs(200., 1e-9));
+    CHECK_THAT(Model::getThermalLength(std::vector<ModelVolume *>{ petg, pla }),
+               Catch::Matchers::WithinAbs(100., 1e-9));
+    CHECK_THAT(Model::getThermalLength(std::vector<ModelVolume *>{ pla, petg, nullptr }),
+               Catch::Matchers::WithinAbs(100., 1e-9));
+    CHECK_THAT(Model::getThermalLength(std::vector<ModelVolume *>{ nullptr, pla }),
+               Catch::Matchers::WithinAbs(200., 1e-9));
+}
+
+} // namespace model_lifecycle_contracts
