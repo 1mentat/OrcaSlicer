@@ -2394,6 +2394,10 @@ namespace config_getter_contracts {
 
 namespace merged_test_config_test_cases {
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+using main_merge_support_test_config::config_option_value_contracts::check_point_components;
+using main_merge_support_test_config::config_option_value_contracts::check_values;
+using main_merge_support_test_config::config_dynamic_container_contracts::dynamic_pair;
 using namespace main_merge_support_test_config::config_definition_contracts;
 
 SCENARIO("Generic config validation performs as expected.", "[Config]")
@@ -8447,6 +8451,7 @@ TEST_CASE("DynamicPrintConfig null_nullables clears nullable values without remo
 TEST_CASE("ConfigBase setenv_ exports each option as a SLIC3R_ variable with its serialized value", "[Config][ConfigContracts]")
 {
     using namespace main_merge_support_test_config;
+    using namespace main_merge_support_test_config::config_environment_contracts;
 
     DynamicConfig config;
     config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
@@ -9216,6 +9221,7 @@ TEST_CASE("PrintConfig validates mixed filament component and gradient semantics
 TEST_CASE("Single-to-multi copies variant identity and limits numeric columns", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig single;
     DynamicPrintConfig multi;
@@ -9251,6 +9257,7 @@ TEST_CASE("Single-to-multi copies variant identity and limits numeric columns", 
 TEST_CASE("Single-to-multi leaves unselected and source-missing settings untouched", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig single;
     DynamicPrintConfig multi;
@@ -9271,6 +9278,7 @@ TEST_CASE("Single-to-multi leaves unselected and source-missing settings untouch
 TEST_CASE("Single-to-multi rejects a missing variant option without changing values", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig single;
     DynamicPrintConfig multi;
@@ -9286,6 +9294,7 @@ TEST_CASE("Single-to-multi rejects a missing variant option without changing val
 TEST_CASE("Single-to-multi ignores unknown keys while applying known mappings", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig single;
     DynamicPrintConfig multi;
@@ -9302,6 +9311,7 @@ TEST_CASE("Single-to-multi ignores unknown keys while applying known mappings", 
 TEST_CASE("Multi-to-multi remaps duplicate variants and preserves numeric minima", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9342,6 +9352,7 @@ TEST_CASE("Multi-to-multi remaps duplicate variants and preserves numeric minima
 TEST_CASE("Multi-to-multi keeps destination values when no new extruder target matches", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9365,6 +9376,7 @@ TEST_CASE("Multi-to-multi keeps destination values when no new extruder target m
 TEST_CASE("Multi-to-multi skips an unmatched target row but still copies identity arrays", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9386,6 +9398,7 @@ TEST_CASE("Multi-to-multi skips an unmatched target row but still copies identit
 TEST_CASE("Multi-to-multi treats unknown keys as no-ops without suppressing known keys", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9405,6 +9418,7 @@ TEST_CASE("Multi-to-multi treats unknown keys as no-ops without suppressing know
 TEST_CASE("Multi-to-multi rejects absent identity columns without touching the source", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9422,6 +9436,7 @@ TEST_CASE("Multi-to-multi rejects absent identity columns without touching the s
 TEST_CASE("Multi-to-multi with no target extruders still copies destination arrays", "[Config][ConfigMultiMapping]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
 
     DynamicPrintConfig old_config;
     DynamicPrintConfig new_config;
@@ -9519,6 +9534,7 @@ TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", 
 TEST_CASE("ConfigBase setenv serializes the selected option using uppercase names", "[Config][ConfigContracts]")
 {
     using namespace testing_branch_support_test_config;
+    using testing_branch_support_test_config::config_residual_contracts::EnvironmentRestore;
 
     DynamicConfig config;
     config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
@@ -9835,6 +9851,7 @@ TEST_CASE("set_num_filaments resizes filament vectors while preserving the prefi
 TEST_CASE("get_bed_shape uses the shared extruder intersection for dynamic and full configs", "[PrintConfigActive][Config]")
 {
     using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_active_followup_contracts;
 
     const Vec2ds printable = {
         Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)

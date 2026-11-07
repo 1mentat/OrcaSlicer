@@ -31,6 +31,7 @@
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
 using Slic3r::tex2color::test::Color;
+using Slic3r::tex2color::test::matches_color;
 using Slic3r::tex2color::test::red;
 using Catch::Matchers::WithinAbs;
 
