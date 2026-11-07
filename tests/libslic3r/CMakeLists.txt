@@ -130,7 +130,31 @@ endif()
 
 # libslic3r links Draco privately; test_drc.cpp encodes its own fixtures.
 find_package(Draco REQUIRED)
-target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain)
+# FlushVolCalc obtains RGB2HSV from this production translation unit, which also
+# contains wxColour helpers. Link only that unit and its base/core dependencies.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(wxWidgets_USE_UNICODE ON)
+    set(wxWidgets_USE_STATIC ${SLIC3R_STATIC})
+    set(wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
+    find_package(wxWidgets 3.3 REQUIRED COMPONENTS base core)
+else ()
+    find_package(wxWidgets 3.3 CONFIG REQUIRED COMPONENTS base core)
+endif ()
+add_library(slic3r_test_color_support STATIC
+    ${CMAKE_SOURCE_DIR}/src/slic3r/Utils/ColorSpaceConvert.cpp)
+target_include_directories(slic3r_test_color_support SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
+target_compile_definitions(slic3r_test_color_support PRIVATE
+    ${wxWidgets_DEFINITIONS} "$<$<CONFIG:Debug>:${wxWidgets_DEFINITIONS_DEBUG}>")
+target_compile_options(slic3r_test_color_support PRIVATE ${wxWidgets_CXX_FLAGS})
+# Preserve module-mode search/rpath usage on the final executable.
+target_link_directories(slic3r_test_color_support INTERFACE ${wxWidgets_LIBRARY_DIRS})
+if (SLIC3R_STATIC)
+    # Match the canonical static wx dependency even in Debug.
+    target_compile_definitions(slic3r_test_color_support PRIVATE wxDEBUG_LEVEL=0)
+endif ()
+target_link_libraries(slic3r_test_color_support PRIVATE Boost::headers ${wxWidgets_LIBRARIES})
+target_link_libraries(${_TEST_NAME}_tests test_common libslic3r draco::draco Catch2::Catch2WithMain
+    slic3r_test_color_support)
 # The TextureToColor headers include "Point.hpp" without the libslic3r/ prefix.
 set_property(SOURCE test_color_utils_contracts.cpp test_texture_to_color_cluster.cpp test_texture_to_color_contracts.cpp
                     test_texture_to_color_repair.cpp APPEND PROPERTY
