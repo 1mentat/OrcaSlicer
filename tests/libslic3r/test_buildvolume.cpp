@@ -189,6 +189,15 @@ TEST_CASE("BuildVolume circular mesh states use radial containment and height", 
     REQUIRE(volume.type() == BuildVolume_Type::Circle);
     const indexed_triangle_set cylinder = its_make_cylinder(5., 4., PI / 36.);
     CHECK(object_state(volume, cylinder, 0.f, 0.f, 1.f) == BuildVolume::ObjectState::Inside);
+    // Derive the interior witness from the stored circle to avoid nominal-radius rounding.
+    const float analytic_radius = unscaled<float>(volume.circle().radius);
+    const float analytic_center_x = unscaled<float>(volume.circle().center.x());
+    const float analytic_center_y = unscaled<float>(volume.circle().center.y());
+    indexed_triangle_set tangent_witness;
+    tangent_witness.vertices = {
+        Vec3f(analytic_radius - 0.00005f, 0.f, 1.f), Vec3f(0.f, 0.f, 1.f), Vec3f(0.f, 1.f, 1.f)};
+    tangent_witness.indices.emplace_back(0, 1, 2);
+    CHECK(object_state(volume, tangent_witness, analytic_center_x, analytic_center_y) == BuildVolume::ObjectState::Inside);
     CHECK(object_state(volume, cylinder, 17.f, 0.f, 1.f) == BuildVolume::ObjectState::Colliding);
     CHECK(object_state(volume, cylinder, 30.f, 0.f, 1.f) == BuildVolume::ObjectState::Outside);
     CHECK(object_state(volume, cylinder, 0.f, 0.f, 10.f) == BuildVolume::ObjectState::Colliding);
