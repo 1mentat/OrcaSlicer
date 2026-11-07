@@ -1270,7 +1270,9 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
         for (const ModelVolume *mv : print_object.model_object()->volumes)
             if (mv->is_model_part()) {
                 const Transform3d volume_trafo = object_trafo * mv->get_matrix();
-                for (size_t extruder_idx = 0; extruder_idx < num_facets_states; ++extruder_idx) {
+                // Each state reads the volume and writes only its own top_raw / bottom_raw entry, so the states run in parallel.
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, num_facets_states, 1), [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t extruder_idx = range.begin(); extruder_idx < range.end(); ++extruder_idx) {
                     const indexed_triangle_set painted = extract_facets_info(*mv).facets_annotation.get_facets_strict(*mv, EnforcerBlockerType(extruder_idx));
 #ifdef MM_SEGMENTATION_DEBUG_TOP_BOTTOM
                     {
@@ -1323,6 +1325,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                         merge(std::move(bottom), bottom_raw[extruder_idx]);
                     }
                 }
+                });
             }
     }
 
@@ -2101,8 +2104,10 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
         tbb::parallel_for(tbb::blocked_range<size_t>(1, num_facets_states), [&mv, &object_trafo, &facets_info, &layers, &edge_grids, &painted_lines, &painted_lines_mutex, &input_expolygons, &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
             for (size_t extruder_idx = range.begin(); extruder_idx < range.end(); ++extruder_idx) {
                 throw_on_cancel_callback();
+                if (!mv->is_model_part())
+                    continue;
                 const indexed_triangle_set custom_facets = facets_info.facets_annotation.get_facets(*mv, EnforcerBlockerType(extruder_idx));
-                if (!mv->is_model_part() || custom_facets.indices.empty())
+                if (custom_facets.indices.empty())
                     continue;
 
                 const Transform3f tr = (object_trafo * mv->get_matrix()).cast<float>();
