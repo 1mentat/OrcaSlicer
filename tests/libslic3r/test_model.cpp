@@ -3635,3 +3635,33 @@ TEST_CASE("Volume affine transformation updates mesh and convex hull geometry", 
 }
 
 } // namespace model_painted_geometry_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("Direct meter conversion scales the volume and clears its offset", "[Model][ModelPaintGeometry5][ModelGapContracts]")
+{
+    Model model;
+    CHECK_FALSE(model.looks_like_saved_in_meters());
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *volume = object->add_volume(make_cube(0.1, 0.2, 0.3), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(volume != nullptr);
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    volume->set_offset(Vec3d(1., 2., 3.));
+    CHECK(model.looks_like_saved_in_meters());
+    const BoundingBoxf3 source_bounds = volume->mesh().bounding_box();
+    Transform3d meter_scale = Transform3d::Identity();
+    meter_scale.scale(Vec3d::Constant(1000.));
+    const BoundingBoxf3 expected_bounds = source_bounds.transformed(meter_scale);
+
+    volume->convert_from_meters();
+
+    model_bounds_contracts::check_box(volume->mesh().bounding_box(), expected_bounds.min, expected_bounds.max, 1e-4);
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    model_bounds_contracts::check_box(volume->get_convex_hull().bounding_box(), expected_bounds.min, expected_bounds.max, 1e-4);
+    model_bounds_contracts::check_vec3d(volume->get_offset(), Vec3d::Zero(), 1e-12);
+    CHECK(volume->source.is_converted_from_meters);
+    CHECK_FALSE(volume->source.is_converted_from_inches);
+}
+
+} // namespace model_painted_geometry_contracts
