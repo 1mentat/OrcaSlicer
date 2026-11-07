@@ -662,6 +662,20 @@ TEST_CASE("Logging level names map supported severities and the unknown numeric 
     }
     CHECK(get_string_logging_level(99) == "error");
 }
+TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "[Utils][UtilsLoggingContracts]")
+{
+    const unsigned previous_level = get_logging_level();
+    ScopeGuard restore_level([previous_level] { set_logging_level(previous_level); });
+    set_logging_level(2); // warning suppresses informational memory diagnostics.
+
+    CHECK(log_memory_info(false).empty());
+    const std::string forced = log_memory_info(true);
+    CHECK_FALSE(forced.empty());
+#ifndef WIN32
+    CHECK(forced.find("Peak memory usage:") != std::string::npos);
+#endif
+}
+
 TEST_CASE("UTF8 stepping spans ASCII and complete modern multibyte characters", "[Utils][UtilsIOContracts]")
 {
     const std::string s = "A\xc3\xa9\xe6\xa8\xa1\xf0\x9f\x90\x8bZ";
