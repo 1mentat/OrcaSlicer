@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Public GeometryEngine contracts for projected face bounds, circle-edge metadata, and sheet mass properties.",
+  "mutants": [
+    {
+      "id": "geometry-face-bounds-inverts-presence-result",
+      "path": "src/libslic3r/CAD/GeometryEngine.cpp",
+      "old": "    return any;",
+      "new": "    return !any;",
+      "expected_matches": 1,
+      "test_filter": "^FacePlaneBounds$",
+      "ordinary_assertion_only": true,
+      "description": "Invert the public face_plane_bounds presence result. The valid projected rectangle must report its measured local coordinates and the null-face control must report no bounds."
+    }
+  ]
+}

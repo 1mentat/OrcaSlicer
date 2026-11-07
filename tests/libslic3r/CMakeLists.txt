@@ -122,6 +122,7 @@ set_property(SOURCE test_color_utils_contracts.cpp test_texture_to_color_contrac
 if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE
         test_caddocument.cpp
+        test_geometryengine.cpp
         test_sketchengine.cpp
         test_sketchconstraints.cpp
         test_sketchedit.cpp
