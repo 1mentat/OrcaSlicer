@@ -1362,10 +1362,13 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
     }
 #endif // MM_SEGMENTATION_DEBUG_TOP_BOTTOM
 
-    // When the upper surface of an object is occluded, it should no longer be considered the upper surface
-    {
-        for (size_t extruder_idx = 0; extruder_idx < num_facets_states; ++extruder_idx) {
-            for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+    // When the upper surface of an object is occluded, it should no longer be considered the upper surface.
+    // Each layer only reads input_expolygons and replaces its own projections, so the layers run in parallel.
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()), [&num_facets_states, &layers, &top_raw, &bottom_raw, &input_expolygons,
+                                                                     &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
+        for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+            throw_on_cancel_callback();
+            for (size_t extruder_idx = 0; extruder_idx < num_facets_states; ++extruder_idx) {
                 if (!top_raw[extruder_idx].empty() && !top_raw[extruder_idx][layer_idx].empty() && layer_idx + 1 < layers.size()) {
                     top_raw[extruder_idx][layer_idx] = diff(top_raw[extruder_idx][layer_idx], input_expolygons[layer_idx + 1]);
                 }
@@ -1374,7 +1377,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 }
             }
         }
-    }
+    });
 
     std::vector<std::vector<ExPolygons>> triangles_by_color_bottom(num_facets_states);
     std::vector<std::vector<ExPolygons>> triangles_by_color_top(num_facets_states);
