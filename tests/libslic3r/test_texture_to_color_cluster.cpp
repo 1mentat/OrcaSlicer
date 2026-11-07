@@ -433,7 +433,11 @@ TEST_CASE("Fixed-palette smoothing changes labels but keeps every palette colour
         TriMesh out_mesh;
         std::vector<Color> out_colors;
         REQUIRE(ClusterAndSmooth(cube, colors, out_mesh, out_colors, settings));
-        REQUIRE(out_colors.size() == cube.indices.size());
+        REQUIRE(out_mesh.indices.size() == cube.indices.size());
+        REQUIRE(out_colors.size() == out_mesh.indices.size());
+        check_finite_and_valid(out_mesh);
+        CHECK(color_utils::is_closed(out_mesh));
+        CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))), WithinAbs(1000.0, 1e-2));
         return out_colors;
     };
 

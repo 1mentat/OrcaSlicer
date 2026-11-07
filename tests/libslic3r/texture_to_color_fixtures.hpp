@@ -84,7 +84,7 @@ inline void check_finite_and_valid(const TriMesh &mesh)
 {
     for (const stl_vertex &vertex : mesh.vertices) {
         for (std::size_t component = 0; component < 3; ++component)
-            CHECK(std::isfinite(vertex[component]));
+            REQUIRE(std::isfinite(vertex[component]));
     }
     for (const stl_triangle_vertex_indices &face : mesh.indices) {
         for (std::size_t component = 0; component < 3; ++component) {
