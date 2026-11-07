@@ -642,8 +642,15 @@ static inline Polygons _clipper(ClipType clipType, TSubj &&subject, TClip &&clip
 {
     // Safety offset only allowed on intersection and difference.
     assert(do_safety_offset == ApplySafetyOffset::No || clipType != ctUnion);
+    C2::Paths64 subject_paths = to_paths64(std::forward<TSubj>(subject));
+    // Nothing to intersect with or to take a difference of: skip the clip set and its safety offset.
+    if (subject_paths.empty() && (clipType == ctIntersection || clipType == ctDifference))
+        return {};
+    C2::Paths64 clip_paths = c2_clip_paths(std::forward<TClip>(clip), do_safety_offset);
+    if (clip_paths.empty() && clipType == ctIntersection)
+        return {};
     C2::Paths64 out;
-    c2_clip(to_c2(clipType), to_paths64(std::forward<TSubj>(subject)), c2_clip_paths(std::forward<TClip>(clip), do_safety_offset), C2::FillRule::NonZero, out);
+    c2_clip(to_c2(clipType), std::move(subject_paths), std::move(clip_paths), C2::FillRule::NonZero, out);
     return c2_to_polygons(out);
 }
 
@@ -724,8 +731,15 @@ template <typename TSubject, typename TClip>
 static ExPolygons _clipper_ex(ClipType clipType, TSubject &&subject,  TClip &&clip, ApplySafetyOffset do_safety_offset, PolyFillType fill_type = pftNonZero)
 {
     assert(do_safety_offset == ApplySafetyOffset::No || clipType != ctUnion);
+    C2::Paths64 subject_paths = to_paths64(std::forward<TSubject>(subject));
+    // Nothing to intersect with or to take a difference of: skip the clip set and its safety offset.
+    if (subject_paths.empty() && (clipType == ctIntersection || clipType == ctDifference))
+        return {};
+    C2::Paths64 clip_paths = c2_clip_paths(std::forward<TClip>(clip), do_safety_offset);
+    if (clip_paths.empty() && clipType == ctIntersection)
+        return {};
     C2::PolyTree64 out;
-    c2_clip(to_c2(clipType), to_paths64(std::forward<TSubject>(subject)), c2_clip_paths(std::forward<TClip>(clip), do_safety_offset), to_c2(fill_type), out);
+    c2_clip(to_c2(clipType), std::move(subject_paths), std::move(clip_paths), to_c2(fill_type), out);
     return c2_to_expolygons(out);
 }
 
