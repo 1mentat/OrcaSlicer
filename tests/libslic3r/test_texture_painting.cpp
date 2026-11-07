@@ -779,3 +779,41 @@ TEST_CASE("Texture atlas honors distinct per-face UV values", "[TexturePainting]
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas gives base colors an isolated color swatch", "[TexturePainting][TextureAtlas][!shouldfail]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_texture_map = { -1, 0 };
+    mesh.material_colors = {
+        { 0.8f, 0.2f, 0.1f, 1.f },
+        { 1.f, 0.f, 0.f, 1.f },
+    };
+    mesh.textures = {
+        encoded_solid_texture(2, 4, { 0, 0, 255 }, ".png"),
+        encoded_solid_texture(3, 2, { 0, 0, 0 }, ".png"),
+    };
+    const PaintedMesh output = paint(mesh);
+    bool base_color_seen = false;
+    bool blue = false;
+    for (size_t i = 0; i < output.face_colors.size(); ++i) {
+        const RGB &color = output.face_colors[i];
+        if (face_center_x(output, i) < 1.5) {
+            CHECK(color[0] > 150);
+            CHECK(color[1] > 20);
+            CHECK(color[1] < 80);
+            CHECK(color[2] < 60);
+            base_color_seen = true;
+        } else if (face_center_x(output, i) > 2.5) {
+            CHECK(color[0] < 60);
+            CHECK(color[1] < 60);
+            CHECK(color[2] > 150);
+            blue = true;
+        }
+    }
+    REQUIRE(base_color_seen);
+    REQUIRE(blue);
+}
+
+} // namespace texture_atlas_contracts
