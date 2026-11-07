@@ -853,3 +853,13 @@ TEST_CASE("Texture atlas keeps each mapped texture attached to its face", "[Text
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas preserves input surface area while subdividing", "[TexturePainting][TextureAtlas]")
+{
+    const PaintedMesh output = paint(two_material_faces());
+    CHECK_THAT(painted_area(output), Catch::Matchers::WithinAbs(1., 1e-5));
+}
+
+} // namespace texture_atlas_contracts
