@@ -3512,6 +3512,18 @@ TEST_CASE("Top expansion direction changes a configured top expansion", "[Settin
                      "top_surface_expansion_direction", "inward", "outward", true, 50);
 }
 
+TEST_CASE("Top expansion wall margin limits the expanded surface",
+          "[SettingsVariance][SettingsReslice][SettingsResliceActivation][TopExpansionMarginVariance]")
+{
+    check_variant_on(step_expansion_fixture(),
+                     {{"wall_generator", "arachne"}, {"wall_loops", 3}, {"top_shell_layers", 3},
+                      {"bottom_shell_layers", 3}, {"top_surface_density", "100%"},
+                      {"min_width_top_surface", 0.0}, {"only_one_wall_top", true},
+                      {"top_surface_expansion", 2.0},
+                      {"top_surface_expansion_direction", "inward_and_outward"}},
+                     "top_surface_expansion_margin", "0", "10", true, 50);
+}
+
 TEST_CASE("Honeycomb complete-top setting changes the internal solid fill", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
 {
     check_variant_on(make_cube(20., 20., 10.),

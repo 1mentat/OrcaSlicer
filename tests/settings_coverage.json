@@ -3633,6 +3633,15 @@
       ],
       "reason": "An activated ledge fixture distinguishes inward from outward expansion and checks fresh/incremental/restored equality; the combined direction is exercised only as a negative control, so complete enum behavior is not claimed."
     },
+    "top_surface_expansion_margin": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[TopExpansionMarginVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a 0..10 mm range with default 0. On the 60 mm base with a centered 54 mm raised island, 2 mm top expansion, solid top fill, three top layers, one top wall and Arachne, margins 0 and 10 must produce different top extrusion paths. The public Print snapshot requires fresh and incremental reslicing to agree and config restoration to reproduce the original; no intermediate-margin monotonicity is claimed."
+    },
     "slicing_mode": {
       "test": "tests/fff_print/test_settings_variance.cpp",
       "tag": "[SlicingModeHoleTopology]",
