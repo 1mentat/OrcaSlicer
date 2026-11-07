@@ -1025,8 +1025,15 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 // check cantilever
                 // lower_layer_offset may be very small, so we need to do max and then add 0.1
                 lower_layer_offseted = offset_ex(lower_layer_offseted, scale_(std::max(extrusion_width - lower_layer_offset, 0.) + 0.1));
+                const std::vector<BoundingBox> lower_layer_offseted_bboxes = get_extents_vector(lower_layer_offseted);
                 for (ExPolygon& poly : overhangs_all_layers[layer_nr]) {
-                    auto cluster_boundary_ex = intersection_ex(poly, lower_layer_offseted);
+                    // Only the lower islands whose bounding boxes touch the overhang can intersect it.
+                    const BoundingBox poly_bbox = get_extents(poly.contour);
+                    ExPolygons        lower_near;
+                    for (size_t i = 0; i < lower_layer_offseted.size(); ++i)
+                        if (lower_layer_offseted_bboxes[i].overlap(poly_bbox))
+                            lower_near.emplace_back(lower_layer_offseted[i]);
+                    auto cluster_boundary_ex = intersection_ex(poly, lower_near);
                     Polygons cluster_boundary = to_polygons(cluster_boundary_ex);
                     if (cluster_boundary.empty()) continue;
                     double dist_max = 0;
