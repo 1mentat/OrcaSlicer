@@ -1,3 +1,4 @@
+#include <cmath>
 #include <Font_FontAspect.hxx>
 #include <Font_FontMgr.hxx>
 #include <Font_SystemFont.hxx>
@@ -47,6 +48,7 @@ Handle(Font_SystemFont) register_bundled_font()
     REQUIRE(manager->RegisterFont(font, true));
     const Handle(Font_SystemFont) registered = manager->GetFont(font->FontName());
     REQUIRE(!registered.IsNull());
+    REQUIRE(registered->FontPath(Font_FontAspect_Regular).IsEqual(font_path));
     return registered;
 }
 
@@ -60,8 +62,18 @@ struct TextMeshSize {
 TextMeshSize closed_mesh_size(const TriangleMesh &mesh)
 {
     REQUIRE_FALSE(mesh.its.indices.empty());
+    REQUIRE_FALSE(mesh.its.vertices.empty());
+    for (const Vec3f &vertex : mesh.its.vertices) {
+        REQUIRE(std::isfinite(static_cast<double>(vertex.x())));
+        REQUIRE(std::isfinite(static_cast<double>(vertex.y())));
+        REQUIRE(std::isfinite(static_cast<double>(vertex.z())));
+    }
     size_t degenerate = 0;
     for (const stl_triangle_vertex_indices &triangle : mesh.its.indices) {
+        for (int corner = 0; corner < 3; ++corner) {
+            REQUIRE(triangle[corner] >= 0);
+            REQUIRE(static_cast<size_t>(triangle[corner]) < mesh.its.vertices.size());
+        }
         const Vec3f &a = mesh.its.vertices[triangle[0]];
         const Vec3f &b = mesh.its.vertices[triangle[1]];
         const Vec3f &c = mesh.its.vertices[triangle[2]];
@@ -72,7 +84,14 @@ TextMeshSize closed_mesh_size(const TriangleMesh &mesh)
 
     const BoundingBoxf3 bounds = mesh.bounding_box();
     REQUIRE(bounds.defined);
-    return {bounds.max.x() - bounds.min.x(), bounds.max.y() - bounds.min.y(), bounds.max.z() - bounds.min.z()};
+    const TextMeshSize size{bounds.max.x() - bounds.min.x(), bounds.max.y() - bounds.min.y(), bounds.max.z() - bounds.min.z()};
+    REQUIRE(std::isfinite(size.width));
+    REQUIRE(std::isfinite(size.height));
+    REQUIRE(std::isfinite(size.depth));
+    REQUIRE(size.width > 0.);
+    REQUIRE(size.height > 0.);
+    REQUIRE(size.depth > 0.);
+    return size;
 }
 
 } // namespace
@@ -85,6 +104,7 @@ TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thi
     TextResult base{};
     load_text_shape("Ag", font_name, 10.f, 0.6f, false, false, base);
     const TextMeshSize base_size = closed_mesh_size(base.text_mesh);
+    REQUIRE(std::isfinite(base.text_width));
     REQUIRE(base.text_width > 0.);
     CHECK_THAT(base_size.depth, WithinAbs(0.6, 2e-3));
 
@@ -92,6 +112,8 @@ TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thi
         TextResult doubled{};
         load_text_shape("Ag", font_name, 20.f, 0.6f, false, false, doubled);
         const TextMeshSize doubled_size = closed_mesh_size(doubled.text_mesh);
+        REQUIRE(std::isfinite(doubled.text_width));
+        REQUIRE(doubled.text_width > 0.);
         CHECK_THAT(doubled.text_width / base.text_width, WithinRel(2., 1e-2));
         CHECK_THAT(doubled_size.width / base_size.width, WithinRel(2., 2e-2));
         CHECK_THAT(doubled_size.height / base_size.height, WithinRel(2., 2e-2));
@@ -101,6 +123,8 @@ TEST_CASE("OCCT text shape exposes a closed mesh that scales with height and thi
         TextResult thicker{};
         load_text_shape("Ag", font_name, 10.f, 1.8f, false, false, thicker);
         const TextMeshSize thicker_size = closed_mesh_size(thicker.text_mesh);
+        REQUIRE(std::isfinite(thicker.text_width));
+        REQUIRE(thicker.text_width > 0.);
         CHECK_THAT(thicker.text_width, WithinRel(base.text_width, 1e-2));
         CHECK_THAT(thicker_size.width, WithinRel(base_size.width, 2e-2));
         CHECK_THAT(thicker_size.height, WithinRel(base_size.height, 2e-2));
