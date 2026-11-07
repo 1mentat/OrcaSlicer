@@ -492,7 +492,7 @@ std::vector<MatrixCase> first_motion_flow_cases()
         { "outer_wall_line_width",  coFloatOrPercent,  Signal::outer_geometry, { 0.42, 0.60 } },
         { "inner_wall_line_width",  coFloatOrPercent,  Signal::inner_geometry, { 0.42, 0.60 } },
         { "sparse_infill_line_width", coFloatOrPercent, Signal::sparse_geometry, { 0.55, 0.70 } },
-        { "print_flow_ratio",       coFloat,           Signal::all_filament, { 0.95, 1.05 } },
+        { "print_flow_ratio",       coFloat,           Signal::all_filament, { 0.01, 0.95, 1.05, 2.0 } },
         { "infill_wall_overlap",    coPercent,         Signal::sparse_geometry, { 5.0, 35.0 } },
     };
 }
@@ -710,7 +710,7 @@ TEST_CASE("Filament flow ratio changes capped feedrate without changing deposite
     REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
 
     const MatrixCase flow_case{
-        "filament_flow_ratio", coFloats, Signal::outer_feedrate, { 0.75, 1.25 }
+        "filament_flow_ratio", coFloats, Signal::outer_feedrate, { 0.75, 1.25, 2.0 }
     };
     for (const double value : flow_case.values) {
         CAPTURE(value);
@@ -744,7 +744,7 @@ TEST_CASE("Filament volumetric cap changes feedrate without changing deposited g
     REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
 
     const MatrixCase cap_case{
-        "filament_max_volumetric_speed", coFloats, Signal::outer_feedrate, { 1.5, 20.0 }
+        "filament_max_volumetric_speed", coFloats, Signal::outer_feedrate, { 0.0, 1.5, 20.0 }
     };
     for (const double value : cap_case.values) {
         CAPTURE(value);
@@ -758,13 +758,20 @@ TEST_CASE("Filament volumetric cap changes feedrate without changing deposited g
         require_same_geometry(baseline_evidence, fresh);
         require_same_material(baseline_evidence, fresh);
         require_incremental_equivalence(baseline, changed, fresh);
-        const double cap_bound = outer_feedrate_cap_bound(value, 1.0, minimum_outer_flow);
-        CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
-
-        if (value < 8.0)
-            CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
-        else
+        if (value == 0.0) {
+            // Zero disables the volumetric cap, so the configured 120 mm/s
+            // outer-wall speed reaches the G-code without a max-flow clamp.
+            CHECK_THAT(fresh.roles[outer].feedrate, Catch::Matchers::WithinAbs(120.0 * 60.0, 1e-3));
             CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        } else {
+            const double cap_bound = outer_feedrate_cap_bound(value, 1.0, minimum_outer_flow);
+            CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
+
+            if (value < 8.0)
+                CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
+            else
+                CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        }
     }
 }
 

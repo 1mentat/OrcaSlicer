@@ -1888,10 +1888,11 @@
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
       "tag": "[MotionFlowVariance]",
       "dimensions": [
+        "boundary_values",
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The matrix varies 0.95 and 1.05 print flow ratios with explicit cooling and volumetric gates, requires a setting-specific output change, and compares fresh/incremental geometry, role feedrates, filament totals, and acceleration states. Numeric extremes and percent/null alternatives are not claimed."
+      "reason": "The single-tool matrix exercises the registered 0.01 minimum and 2 maximum plus representative 0.95 and 1.05 values with explicit cooling and volumetric gates. Each value changes emitted material while the role geometry remains stable, and fresh/incremental output agrees for geometry, feedrates, filament totals, and acceleration states."
     },
     "infill_wall_overlap": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3850,7 +3851,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "XY and role geometry remain stable, positive emitted E length scales by the configured ratio within the derived parser/export bound, outer feedrate follows the cap bound and direction, and fresh/incremental results agree. Representative values only; full numeric ranges and interactions remain unclaimed."
+      "reason": "The registered maximum 2 scales positive emitted E length while XY and role geometry remain stable, the outer feedrate follows the cap bound, and fresh/incremental output agrees. Representative values 0.75 and 1.25 remain covered. The registry accepts the minimum 0, but Print::validate() returned empty for the zero-valued public fixture, so minimum-value behavior is unclaimed. Nullable nil behavior is also unclaimed because the public print/G-code path reads the nil value without a stable resolved-value fallback."
     },
     "filament_max_volumetric_speed": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
@@ -3859,7 +3860,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "Geometry and material remain stable, outer feedrate obeys the derived volumetric cap and direction, and fresh/incremental results agree. Numeric boundaries remain unclaimed."
+      "reason": "With one active filament column, the registered minimum 0 disables the volumetric cap and lets the configured 120 mm/s outer-wall speed reach G-code. Positive representative values 1.5 and 20 obey the derived cap, while geometry and material remain stable and fresh/incremental output agrees. No upper boundary is registered."
     },
     "set_other_flow_ratios": {
       "test": "tests/fff_print/test_motion_flow_variance.cpp",
