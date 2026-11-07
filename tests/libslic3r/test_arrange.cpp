@@ -1,3 +1,4 @@
+#include <memory>
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
@@ -875,10 +876,16 @@ Model arrange_model(std::initializer_list<Vec2d> offsets = {Vec2d::Zero()})
 {
     Model model;
     ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
     object->name = "model-arrange-contract.stl";
-    object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
-    for (const Vec2d &offset : offsets)
-        object->add_instance()->set_offset(to_3d(offset, 0.));
+    ModelVolume *volume = object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
+    REQUIRE(volume != nullptr);
+    REQUIRE(volume->get_convex_hull_shared_ptr() != nullptr);
+    for (const Vec2d &offset : offsets) {
+        ModelInstance *instance = object->add_instance();
+        REQUIRE(instance != nullptr);
+        instance->set_offset(to_3d(offset, 0.));
+    }
     return model;
 }
 
@@ -910,6 +917,9 @@ TEST_CASE("Model arrange polygon is the convex hull of every instance at its pos
     model.objects.front()->instances.front()->set_rotation(Z, PI / 2.);
 
     const ArrangePolygon polygon = get_arrange_poly(model);
+    CHECK(polygon.bed_idx == arrangement::UNARRANGED);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
     const Polygon       &hull    = polygon.poly.contour;
     CHECK(hull.is_counter_clockwise());
     CHECK_THAT(hull.area() * SCALING_FACTOR * SCALING_FACTOR, WithinRel(50. * 20., 1e-6));
@@ -944,6 +954,11 @@ TEST_CASE("Model instance arrange polygon setter writes an arranged result back 
     ModelInstance *instance = model.objects.front()->instances.front();
 
     ArrangePolygon polygon = get_arrange_poly(instance, arrange_config("normal(auto)", false));
+    REQUIRE_FALSE(polygon.poly.contour.points.empty());
+    REQUIRE(polygon.poly.contour.points.size() <= 10000);
+    CHECK(polygon.poly.contour.area() > 0.);
+    CHECK(std::isfinite(polygon.height));
+    CHECK(std::isfinite(polygon.brim_width));
     CHECK(polygon.bed_idx == 0);
     REQUIRE(polygon.setter);
 
@@ -974,20 +989,38 @@ TEST_CASE("Model instance arrangement reads plate and filament metadata for the 
 {
     Model model = arrange_model();
     ModelObject *object = model.objects.front();
-    object->volumes.front()->config.set("extruder", 2);
     ModelInstance *instance = object->instances.front();
 
-    const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
+    SECTION("unset object and volume assignments use the first filament") {
+        REQUIRE_FALSE(object->config.has("extruder"));
+        REQUIRE_FALSE(object->volumes.front()->config.has("extruder"));
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
+        REQUIRE(polygon.extrude_ids == std::vector<int>{1});
+        CHECK(polygon.bed_temp == 65);
+        CHECK(polygon.first_bed_temp == 70);
+        CHECK(polygon.print_temp == 205);
+        CHECK(polygon.first_print_temp == 215);
+        CHECK(polygon.vitrify_temp == 90);
+        CHECK(polygon.filament_temp_type != -1);
+        CHECK(polygon.name == object->name);
+        CHECK(polygon.height > 0.0);
+        CHECK_THAT(polygon.brim_width, WithinAbs(1., 1e-9));
+        CHECK_FALSE(polygon.has_tree_support);
+    }
+    SECTION("an explicit second filament keeps its own metadata") {
+        object->volumes.front()->config.set("extruder", 2);
+        const ArrangePolygon polygon = get_instance_arrange_poly(instance, arrange_config("normal(auto)", false));
 
-    REQUIRE(polygon.extrude_ids == std::vector<int>{2});
-    CHECK(polygon.bed_temp == 66);
-    CHECK(polygon.first_bed_temp == 71);
-    CHECK(polygon.print_temp == 206);
-    CHECK(polygon.first_print_temp == 216);
-    CHECK(polygon.vitrify_temp == 91);
-    CHECK(polygon.filament_temp_type == FilamentTempType::HighTemp); // PC
-    CHECK(polygon.name == object->name);
-    CHECK_THAT(polygon.height, WithinAbs(20., 1e-6));
+        REQUIRE(polygon.extrude_ids == std::vector<int>{2});
+        CHECK(polygon.bed_temp == 66);
+        CHECK(polygon.first_bed_temp == 71);
+        CHECK(polygon.print_temp == 206);
+        CHECK(polygon.first_print_temp == 216);
+        CHECK(polygon.vitrify_temp == 91);
+        CHECK(polygon.filament_temp_type == FilamentTempType::HighTemp); // PC
+        CHECK(polygon.name == object->name);
+        CHECK_THAT(polygon.height, WithinAbs(20., 1e-6));
+    }
 }
 
 TEST_CASE("Model instance arrangement sizes the brim margin by the support type", "[Arrange][ModelArrange]")
@@ -1064,6 +1097,7 @@ TEST_CASE("Model arrange reports success when every result is on the physical be
     ModelInstancePtrs instances;
     ArrangePolygons polygons = get_arrange_polys(model, instances);
     REQUIRE(polygons.size() == 2);
+    REQUIRE(instances.size() == 2);
     polygons[0].translation = Vec2crd{scaled(1.), scaled(2.)};
     polygons[1].translation = Vec2crd{scaled(3.), scaled(4.)};
 
