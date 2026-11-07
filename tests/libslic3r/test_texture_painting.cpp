@@ -457,3 +457,48 @@ TEST_CASE("Texture atlas decodes an encoded PNG in the single-texture route", "[
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas keeps encoded PNG cancellation before conversion", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures = {
+        encoded_solid_texture(4, 4, { 255, 0, 0 }, ".png"),
+        encoded_solid_texture(4, 4, { 0, 0, 255 }, ".png"),
+    };
+    REQUIRE_FALSE(mesh.vertices.empty());
+    REQUIRE_FALSE(mesh.indices.empty());
+    REQUIRE(mesh.uvs.size() == mesh.vertices.size());
+    REQUIRE(mesh.material_ids.size() == mesh.indices.size());
+    REQUIRE(mesh.material_texture_map.size() == mesh.textures.size());
+    REQUIRE(mesh.textures.size() == 2);
+    for (const auto &vertex : mesh.vertices)
+        for (float coordinate : vertex)
+            REQUIRE(std::isfinite(coordinate));
+    for (const auto &face : mesh.indices)
+        for (int index : face) {
+            REQUIRE(index >= 0);
+            REQUIRE(static_cast<std::size_t>(index) < mesh.vertices.size());
+        }
+    for (const auto &uv : mesh.uvs)
+        for (float coordinate : uv)
+            REQUIRE(std::isfinite(coordinate));
+    for (int material : mesh.material_ids) {
+        REQUIRE(material >= 0);
+        REQUIRE(static_cast<std::size_t>(material) < mesh.material_texture_map.size());
+    }
+    for (int texture : mesh.material_texture_map) {
+        REQUIRE(texture >= 0);
+        REQUIRE(static_cast<std::size_t>(texture) < mesh.textures.size());
+    }
+    std::atomic<bool> cancelled{false};
+    PaintedMesh output;
+    CHECK_FALSE(texture_to_painting(mesh, output, atlas_settings(), nullptr, [&]() {
+        cancelled.store(true, std::memory_order_relaxed);
+        return true;
+    }));
+    CHECK(cancelled.load(std::memory_order_relaxed));
+}
+
+} // namespace texture_atlas_contracts
