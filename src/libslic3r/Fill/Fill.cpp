@@ -1466,6 +1466,8 @@ void Layer::make_fills(const FillAdaptive::RegionOctrees* fill_octrees, FillLigh
         }
 		if (surface_fill.params.pattern == ipGrid)
 			params.can_reverse = false;
+		// Only the no-overlap areas whose bounding boxes come near a surface can intersect it.
+		const std::vector<BoundingBox> no_overlap_bboxes = get_extents_vector(surface_fill.no_overlap_expolygons);
 		for (ExPolygon& expoly : surface_fill.expolygons) {
 
             // Orca: Reuse the body box and octree used for bridge anchoring, resetting them for each surface.
@@ -1473,7 +1475,13 @@ void Layer::make_fills(const FillAdaptive::RegionOctrees* fill_octrees, FillLigh
             f->set_bounding_box(body >= 0 ? this->object()->separated_body_bboxes()[body] : bbox);
             f->adapt_fill_octree = octrees ? octrees->get(body) : nullptr;
 
-            f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
+            BoundingBox expoly_bbox = get_extents(expoly.contour);
+            expoly_bbox.offset(scale_(1.));
+            ExPolygons no_overlap_near;
+            for (size_t i = 0; i < no_overlap_bboxes.size(); ++ i)
+                if (no_overlap_bboxes[i].overlap(expoly_bbox))
+                    no_overlap_near.emplace_back(surface_fill.no_overlap_expolygons[i]);
+            f->no_overlap_expolygons = intersection_ex(no_overlap_near, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
             if (params.symmetric_infill_y_axis) {
                 params.symmetric_y_axis = f->extended_object_bounding_box().center().x();
                 expoly.symmetric_y(params.symmetric_y_axis);
