@@ -658,3 +658,62 @@ TEST_CASE("Texture atlas preserves encoded PNG mapping after texture permutation
 }
 
 } // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+namespace {
+
+TextureImage horizontal_texture(int width, RGB left, RGB right)
+{
+    TextureImage image = solid_texture(width, 1, left);
+    for (int x = width / 2; x < width; ++x) {
+        const std::size_t offset = static_cast<std::size_t>(x) * 3;
+        image.data[offset + 0] = static_cast<unsigned char>(right[0]);
+        image.data[offset + 1] = static_cast<unsigned char>(right[1]);
+        image.data[offset + 2] = static_cast<unsigned char>(right[2]);
+    }
+    return image;
+}
+
+} // namespace
+
+TEST_CASE("Texture atlas wraps negative U against a nonuniform texture", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = horizontal_texture(2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(2, 1, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.f });
+    mesh.uvs[0] = { -0.5f, 0.f };
+    mesh.uvs[1] = { -0.5f, 0.f };
+    mesh.uvs[2] = { -0.5f, 0.f };
+
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
+    CHECK((*left)[2] < 80);
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas wraps negative U before scaling a narrower texture", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = horizontal_texture(2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(4, 1, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.f, 0.f });
+    mesh.uvs[0] = { -0.5f, 0.f };
+    mesh.uvs[1] = { -0.5f, 0.f };
+    mesh.uvs[2] = { -0.5f, 0.f };
+
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
+    CHECK((*left)[2] < 80);
+}
+
+} // namespace texture_atlas_contracts
