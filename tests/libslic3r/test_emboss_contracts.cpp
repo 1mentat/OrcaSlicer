@@ -477,6 +477,11 @@ TEST_CASE("Emboss places text onto a surface point facing along its normal", "[E
                                      {Vec3d(0.6, 0., 0.8), Vec3d::UnitY(), Vec3d(-0.8, 0., 0.6)},
                                      {Vec3d(-0.6, 0., 0.8), -Vec3d::UnitY(), Vec3d(0.8, 0., 0.6)}}};
     const Vec3d position(12., -4., 9.);
+    // Preserve the original +Z row independently of the stronger signed-axis table.
+    const Transform3d upward = Emboss::create_transformation_onto_surface(position, Vec3d::UnitZ());
+    CHECK(upward.translation().isApprox(position, 1e-9));
+    const Vec3d upward_normal = (upward.linear() * Vec3d::UnitZ()).normalized();
+    CHECK_THAT(upward_normal.dot(Vec3d::UnitZ()), Catch::Matchers::WithinAbs(1., 1e-9));
     for (const Case &c : cases) {
         const Transform3d transform = Emboss::create_transformation_onto_surface(position, c.normal);
         same_vector(transform.translation(), position);
@@ -538,6 +543,19 @@ TEST_CASE("Projection wrappers preserve round-trip coordinates and scale the dep
         REQUIRE(back.has_value());
         CHECK_THAT((*back - p.cast<double>()).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
         CHECK_THAT(depth, Catch::Matchers::WithinAbs(8., 1e-9));
+    }
+    SECTION("ProjectTransform with ProjectZ round-trips and leaves a zero depth sentinel") {
+        Transform3d transform = Transform3d::Identity();
+        transform.translate(Vec3d(10., -4., 3.));
+        auto core = std::make_unique<Emboss::ProjectZ>(2.);
+        Emboss::ProjectTransform transformed(std::move(core), transform);
+        const auto front_back = transformed.create_front_back(p);
+        // ProjectZ does not calculate depth. Initialize it before the wrapper scales it.
+        double depth = 0.;
+        const auto back = transformed.unproject(front_back.second, &depth);
+        REQUIRE(back.has_value());
+        CHECK_THAT((*back - p.cast<double>()).norm(), Catch::Matchers::WithinAbs(0., 1e-9));
+        CHECK_THAT(depth, Catch::Matchers::WithinAbs(0., 1e-9));
     }
     SECTION("ProjectTransform moves the projected points and scales the depth by its Z scale") {
         // Tilted 30 degrees about X, so the Z scale is the length of the transformed Z axis (3), not its
