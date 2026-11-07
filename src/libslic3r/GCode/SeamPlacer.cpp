@@ -1104,7 +1104,7 @@ void pick_random_seam_point(const std::vector<SeamCandidate> &perimeter_points, 
 void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerImpl::GlobalModelInfo &global_model_info,
                                         PreciseSeam::PreciseSeamWarnings* warnings) {
   using namespace SeamPlacerImpl;
-  PrintObjectSeamData &seam_data = m_seam_per_object.emplace(po, PrintObjectSeamData { }).first->second;
+  PrintObjectSeamData &seam_data = m_seam_per_object.at(po);
   seam_data.layers.resize(po->layer_count());
 
   tbb::parallel_for(tbb::blocked_range<size_t>(0, po->layers().size()),
@@ -1136,7 +1136,7 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
 void SeamPlacer::calculate_candidates_visibility(const PrintObject *po,
                                                  const SeamPlacerImpl::GlobalModelInfo &global_model_info) {
 
-  std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object[po].layers;
+  std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object.at(po).layers;
   tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()),
                     [&layers, &global_model_info](tbb::blocked_range<size_t> r) {
                       for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
@@ -1152,7 +1152,7 @@ void SeamPlacer::calculate_overhangs_and_layer_embedding(const PrintObject *po) 
   using namespace SeamPlacerImpl;
   using PerimeterDistancer = AABBTreeLines::LinesDistancer<Linef>;
 
-  std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object[po].layers;
+  std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object.at(po).layers;
   tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()),
                     [po, &layers](tbb::blocked_range<size_t> r) {
                       std::unique_ptr<PerimeterDistancer> prev_layer_distancer;
@@ -1350,7 +1350,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
 #endif
 
   //gather vector of all seams on the print_object - pair of layer_index and seam__index within that layer
-  const std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object[po].layers;
+  const std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object.at(po).layers;
   std::vector<std::pair<size_t, size_t>> seams;
   for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
     const std::vector<SeamCandidate> &layer_perimeter_points = layers[layer_idx].points;
@@ -1525,7 +1525,14 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
   // Warning flags for Precise Seam processing — shared across all objects
   PreciseSeam::PreciseSeamWarnings precise_seam_warnings;
 
-  for (const PrintObject *po : print.objects()) {
+  // Each object reads only its own model and layers and writes only its own entry of
+  // m_seam_per_object. The entries are created up front, so that the objects can be processed in
+  // parallel below.
+  for (const PrintObject *po : print.objects())
+    m_seam_per_object[po];
+
+  auto process_object = [this, &throw_if_canceled_func, &precise_seam_warnings](const PrintObject *po) {
+    using namespace SeamPlacerImpl;
     throw_if_canceled_func();
     SeamPosition configured_seam_preference = po->config().seam_position.value;
     SeamComparator comparator { configured_seam_preference };
@@ -1536,7 +1543,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       PreciseSeam::init_precise_seam_data(
           global_model_info.precise_seam_strong_volumes,
           global_model_info.precise_seam_weak_volumes,
-          m_seam_per_object[po].has_precise_seam_strong_volumes,
+          m_seam_per_object.at(po).has_precise_seam_strong_volumes,
           po->model_object());
 
       // Slice each Precise Seam modifier once per object; both consumers read the cache.
@@ -1582,7 +1589,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: pick_seam_point : start";
       //pick seam point
-      std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object[po].layers;
+      std::vector<PrintObjectSeamData::LayerSeams> &layers = m_seam_per_object.at(po).layers;
       tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()),
                         [&layers, configured_seam_preference, comparator](tbb::blocked_range<size_t> r) {
                           for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
@@ -1608,13 +1615,30 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     }
 
     // Restore precise seam positions that were potentially modified
-    if (m_seam_per_object[po].has_precise_seam_strong_volumes) {
-      PreciseSeam::restore_precise_seam_positions(m_seam_per_object[po].layers);
+    if (m_seam_per_object.at(po).has_precise_seam_strong_volumes) {
+      PreciseSeam::restore_precise_seam_positions(m_seam_per_object.at(po).layers);
     }
 
 #ifdef DEBUG_FILES
-    debug_export_points(m_seam_per_object[po].layers, po->bounding_box(), comparator);
+    debug_export_points(m_seam_per_object.at(po).layers, po->bounding_box(), comparator);
 #endif
+  };
+
+  // Precise Seam modifiers register their usage tracking in the shared warnings while their object
+  // is processed, so a print with any of them processes its objects one at a time.
+  const bool has_precise_seam_modifiers = std::any_of(print.objects().begin(), print.objects().end(), [](const PrintObject *po) {
+    const ModelObject *model_object = po->model_object();
+    return model_object != nullptr && std::any_of(model_object->volumes.begin(), model_object->volumes.end(),
+                                                  [](const ModelVolume *volume) { return volume->is_precise_seam(); });
+  });
+  if (has_precise_seam_modifiers) {
+    for (const PrintObject *po : print.objects())
+      process_object(po);
+  } else {
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, print.objects().size()), [&print, &process_object](const tbb::blocked_range<size_t> &range) {
+      for (size_t object_idx = range.begin(); object_idx < range.end(); ++object_idx)
+        process_object(print.objects()[object_idx]);
+    });
   }
 
   // Prepare one combined Precise Seam warning; G-code export issues it. Keep it single: separate
