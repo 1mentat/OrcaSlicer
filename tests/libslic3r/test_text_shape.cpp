@@ -80,6 +80,7 @@ TextMeshSize closed_mesh_size(const TriangleMesh &mesh)
         degenerate += (b - a).cross(c - a).squaredNorm() <= 1e-12f;
     }
     CHECK(degenerate == 0);
+    REQUIRE_FALSE(mesh.empty());
     REQUIRE(its_num_open_edges(mesh.its) == 0);
 
     const BoundingBoxf3 bounds = mesh.bounding_box();
