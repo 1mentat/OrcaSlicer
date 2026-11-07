@@ -1,6 +1,7 @@
 #include "ConflictChecker.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Line.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -218,9 +219,32 @@ ObjectExtrusions getAllLayersExtrusionPathsFromObject(PrintObject *obj)
 ConflictComputeOpt ConflictChecker::find_inter_of_lines(const LineWithIDs &lines)
 {
     using namespace RasterizationImpl;
+    // Only lines of different objects can conflict, and only lines sharing a grid cell are tested. Lines sharing a cell
+    // are at most a few cells apart, so a line far from all lines of the other objects is never tested and is left out.
+    std::vector<std::pair<const void *, BoundingBox>> id_bboxes;
+    for (const LineWithID &l : lines) {
+        auto it = std::find_if(id_bboxes.begin(), id_bboxes.end(), [&l](const auto &id_bbox) { return id_bbox.first == l._id; });
+        if (it == id_bboxes.end())
+            it = id_bboxes.insert(id_bboxes.end(), {l._id, BoundingBox()});
+        it->second.merge(l._line.a);
+        it->second.merge(l._line.b);
+    }
+    if (id_bboxes.size() < 2)
+        return {};
+    for (auto &id_bbox : id_bboxes)
+        id_bbox.second.offset(10 * scale_(1));
+    std::vector<int> candidates;
+    for (int i = 0; i < int(lines.size()); ++i) {
+        const LineWithID &l     = lines[i];
+        const BoundingBox bbox(l._line.a.cwiseMin(l._line.b), l._line.a.cwiseMax(l._line.b));
+        if (std::any_of(id_bboxes.begin(), id_bboxes.end(),
+                        [&l, &bbox](const auto &id_bbox) { return id_bbox.first != l._id && id_bbox.second.overlap(bbox); }))
+            candidates.push_back(i);
+    }
+
     std::map<IndexPair, std::vector<int>> indexToLine;
 
-    for (int i = 0; i < lines.size(); ++i) {
+    for (int i : candidates) {
         const LineWithID &l1      = lines[i];
         auto              indexes = line_rasterization(l1._line);
         for (auto index : indexes) {
