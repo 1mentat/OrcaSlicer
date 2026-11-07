@@ -1,3 +1,5 @@
+#include <gp_Cylinder.hxx>
+#include <gp_Ax3.hxx>
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/Point.hpp"
 
@@ -88,6 +90,26 @@ TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine
     // and the in-plane Y axis runs along the axis.
     CHECK_THAT(plane.normal.z(), Catch::Matchers::WithinAbs(0., 1e-9));
     CHECK_THAT(std::abs(plane.y_axis.z()), Catch::Matchers::WithinAbs(1., 1e-9));
+
+    // The frame is evaluated at the surface's first U parameter, independently of
+    // the triangulation node used for origin. Compare with the analytic cylinder
+    // directions there; increasing V need not be assumed to mean world +Z.
+    const BRepAdaptor_Surface surface(side);
+    REQUIRE(surface.GetType() == GeomAbs_Cylinder);
+    const gp_Cylinder analytic_cylinder = surface.Cylinder();
+    const gp_Ax3 &placement = analytic_cylinder.Position();
+    REQUIRE(placement.Direct());
+    const double u = surface.FirstUParameter();
+    REQUIRE(std::isfinite(u));
+    const gp_Dir &x_direction = placement.XDirection();
+    const gp_Dir &y_direction = placement.YDirection();
+    const gp_Dir &z_direction = placement.Direction();
+    const Vec3d analytic_x(x_direction.X(), x_direction.Y(), x_direction.Z());
+    const Vec3d analytic_y(y_direction.X(), y_direction.Y(), y_direction.Z());
+    const Vec3d analytic_axis(z_direction.X(), z_direction.Y(), z_direction.Z());
+    const Vec3d analytic_radial = std::cos(u) * analytic_x + std::sin(u) * analytic_y;
+    CHECK_THAT(plane.normal.dot(analytic_radial), Catch::Matchers::WithinAbs(1., 1e-6));
+    CHECK_THAT(plane.y_axis.dot(analytic_axis), Catch::Matchers::WithinAbs(1., 1e-9));
 }
 
 TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[SketchEngine]")
