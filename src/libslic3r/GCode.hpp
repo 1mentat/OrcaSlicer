@@ -650,6 +650,9 @@ protected:
     std::set<ObjectInstanceID>      m_objsWithBrim; // indicates the object instances with brim
     // Cache for custom seam enforcers/blockers for each layer.
     SeamPlacer                          m_seam_placer;
+    // SeamPlacer::find_closest_perimeter_point() of the perimeter loops of the layer being generated, found ahead in
+    // parallel, keyed by the loop with the layer it belongs to.
+    std::unordered_map<const ExtrusionLoop*, std::pair<const Layer*, size_t>> m_precomputed_seam_points;
 
     // One stop of the island-level tour: consecutive islands of a single instance. An instance
     // can have several visits per layer when its islands are toured non-consecutively.

@@ -156,7 +156,12 @@ public:
   // change the Print: the caller issues the warning where a print step is active (G-code export).
   const std::string &precise_seam_warning() const { return m_precise_seam_warning; }
 
-  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang) const;
+  // Index of the seam candidate of the perimeter closest to the loop, from which place_seam() places the seam. It depends
+  // only on the layer and the loop, so it can be found ahead of G-code generation.
+  size_t find_closest_perimeter_point(const Layer *layer, const ExtrusionLoop &loop) const;
+  // closest_perimeter_point, when given, is find_closest_perimeter_point() of the layer and the loop.
+  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang,
+                  const size_t *closest_perimeter_point = nullptr) const;
 private:
   std::string m_precise_seam_warning;
 
