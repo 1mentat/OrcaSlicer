@@ -10,6 +10,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cmath>
 #include <vector>
@@ -29,6 +30,21 @@ using Color = std::array<std::size_t, 3>;
 
 constexpr Color RED  { { 255, 0, 0 } };
 constexpr Color BLUE { { 0, 0, 255 } };
+
+void require_valid_painted_geometry(const PaintedMesh &mesh)
+{
+    REQUIRE_FALSE(mesh.vertices.empty());
+    REQUIRE_FALSE(mesh.indices.empty());
+    REQUIRE(mesh.face_colors.size() == mesh.indices.size());
+    for (const auto &vertex : mesh.vertices)
+        for (float coordinate : vertex)
+            REQUIRE(std::isfinite(coordinate));
+    for (const auto &face : mesh.indices)
+        for (int index : face) {
+            REQUIRE(index >= 0);
+            REQUIRE(static_cast<std::size_t>(index) < mesh.vertices.size());
+        }
+}
 
 void check_color(const Color &actual, const Color &expected)
 {
@@ -91,9 +107,11 @@ double triangle_area(const std::array<float, 3> &a,
 
 double painted_area(const PaintedMesh &mesh)
 {
+    require_valid_painted_geometry(mesh);
     double area = 0.;
     for (const auto &face : mesh.indices)
         area += triangle_area(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]);
+    REQUIRE(std::isfinite(area));
     return area;
 }
 
@@ -143,6 +161,17 @@ TEST_CASE("Texture painting converts a solid RGB texture on a closed mesh", "[Te
     input.uvs.assign(input.vertices.size(), { 0.f, 0.f });
     input.textures = { { 1, 1, 3, { 255, 0, 0 } } };
 
+    REQUIRE_FALSE(input.vertices.empty());
+    REQUIRE_FALSE(input.indices.empty());
+    for (const auto &vertex : input.vertices)
+        for (float coordinate : vertex)
+            REQUIRE(std::isfinite(coordinate));
+    for (const auto &face : input.indices)
+        for (int index : face) {
+            REQUIRE(index >= 0);
+            REQUIRE(static_cast<std::size_t>(index) < input.vertices.size());
+        }
+
     TexturePaintingSettings settings;
     settings.target_colors_num = 1;
     settings.smooth_weight = 0.;
@@ -151,6 +180,7 @@ TEST_CASE("Texture painting converts a solid RGB texture on a closed mesh", "[Te
     REQUIRE(texture_to_painting(input, output, settings));
     REQUIRE(output.face_colors.size() == output.indices.size());
     REQUIRE_FALSE(output.indices.empty());
+    require_valid_painted_geometry(output);
     for (const Color &color : output.face_colors)
         check_clustered_red(color);
 }
@@ -244,13 +274,13 @@ TEST_CASE("Texture painting honors cancellation before processing", "[TexturePai
     input.precomputed_vertex_colors = {
         { 1.f, 0.f, 0.f, 1.f }, { 1.f, 0.f, 0.f, 1.f }, { 1.f, 0.f, 0.f, 1.f },
     };
-    bool cancelled = false;
+    std::atomic<bool> cancelled{false};
     PaintedMesh output;
     CHECK_FALSE(face_colors_to_painting(input, output, {}, nullptr, [&]() {
-        cancelled = true;
+        cancelled.store(true, std::memory_order_relaxed);
         return true;
     }));
-    CHECK(cancelled);
+    CHECK(cancelled.load(std::memory_order_relaxed));
 }
 
 TEST_CASE("Texture painting rejects incomplete import payloads", "[TexturePainting]")
@@ -265,7 +295,9 @@ TEST_CASE("Texture painting rejects incomplete import payloads", "[TexturePainti
 
     Model model;
     ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
     ModelVolume *volume = object->add_volume(make_cube(2., 2., 2.));
+    REQUIRE(volume != nullptr);
     object->add_instance();
     CHECK_FALSE(apply_painted_mesh_to_volume(painted, {}, *volume));
 }
