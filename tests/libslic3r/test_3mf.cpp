@@ -9698,3 +9698,88 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
 }
 
 } // namespace bbs_skip_model_contracts
+
+namespace bbs_archive_contracts {
+
+TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world vertices", "[3MF][Transformation][Geometry]")
+{
+    const bool bbs_format = GENERATE(false, true);
+    const bool shear = GENERATE(false, true);
+    const bool on_volume = GENERATE(false, true);
+    CAPTURE(bbs_format, shear, on_volume);
+    ScopedTemporaryDir source_backup("orca_affine_roundtrip_store");
+    Model source;
+    source.set_backup_path(source_backup.string());
+    // A centered asymmetric box prevents importer centering from obscuring the
+    // raw affine-matrix contract; unequal dimensions distinguish swapped axes.
+    TriangleMesh box = make_cube(4., 6., 8.);
+    box.translate(-2.f, -3.f, -4.f);
+    ModelObject *object = source.add_object("affine-box", "affine-box.stl", box);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+    Matrix3d stretch = Vec3d(2., 3., 4.).asDiagonal();
+    if (shear)
+        stretch(0, 1) = stretch(1, 0) = .5; // SPD: leading minor 6-.25 > 0.
+    const Matrix3d rotation = Eigen::AngleAxisd(.37, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+    Transform3d expected = Transform3d::Identity();
+    expected.linear() = rotation * stretch * Vec3d(-1., 1., 1.).asDiagonal();
+    expected.translation() = Vec3d(11.125, -13.25, 17.5);
+    if (on_volume)
+        object->volumes.front()->set_transformation(expected);
+    else
+        instance->set_transformation(expected);
+    const Geometry::Transformation &transform = on_volume ? object->volumes.front()->get_transformation() : instance->get_transformation();
+    CHECK((transform.get_rotation_matrix().linear() * transform.get_scaling_factor_matrix().linear() *
+           transform.get_mirror_matrix().linear()).isApprox(expected.linear(), 1e-12));
+    CHECK(transform.get_matrix().matrix() == expected.matrix());
+    const TriangleMesh expected_mesh = source.mesh();
+    REQUIRE(expected_mesh.its.vertices.size() == 8);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    if (bbs_format)
+        store_model(archive.string(), source, config, plates);
+    else
+        REQUIRE(store_3mf(archive.string().c_str(), &source, &config, false));
+    CHECK(transform.get_matrix().matrix() == expected.matrix());
+
+    // Keep the imported Model alive only while its project-owned backup exists.
+    LoadedProject loaded;
+    Model destination;
+    if (bbs_format)
+        REQUIRE(load_model(archive.string(), destination, loaded));
+    else {
+        loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_affine_roundtrip_load");
+        destination.set_backup_path(loaded.backup->string());
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        REQUIRE(load_3mf(archive.string().c_str(), loaded.config, substitutions, &destination, false));
+    }
+    REQUIRE(destination.objects.size() == 1);
+    const ModelObject *restored = destination.objects.front();
+    REQUIRE(restored->instances.size() == 1);
+    REQUIRE(restored->volumes.size() == 1);
+    // Conventional 3MF bakes a volume's affine transform into its mesh and
+    // retains the original full matrix in source.transform for reload. BBS
+    // restores the component matrix directly. Assert each backend's real contract.
+    const Transform3d &actual = !on_volume ? restored->instances.front()->get_matrix() :
+        bbs_format ? restored->volumes.front()->get_matrix() : restored->volumes.front()->source.transform.get_matrix();
+    // Exporters use max_digits10(float) for model XML. Compare every coefficient,
+    // including translation, rather than just determinant or canonical labels.
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            CHECK_THAT(actual(row, column), Catch::Matchers::WithinAbs(expected(row, column), 1e-6));
+    const TriangleMesh actual_mesh = destination.mesh();
+    REQUIRE(actual_mesh.its.vertices.size() == expected_mesh.its.vertices.size());
+    // Each expected box corner is distinct, so equal cardinality plus membership
+    // proves the world-vertex set without depending on importer vertex ordering.
+    for (const Vec3f &vertex : expected_mesh.its.vertices)
+        CHECK(std::any_of(actual_mesh.its.vertices.begin(), actual_mesh.its.vertices.end(),
+                          [&vertex](const Vec3f &candidate) { return (candidate - vertex).norm() < 1e-4f; }));
+}
+
+} // namespace bbs_archive_contracts
