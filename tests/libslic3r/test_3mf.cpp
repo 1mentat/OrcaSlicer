@@ -7271,8 +7271,9 @@ struct MakerMetadata
 // Stores a minimal archive carrying the MakerLab fields and two custom metadata entries and
 // returns the model-level metadata the importer reads back; also checks that the serialized
 // model is well-formed XML with exactly one metadata element per key.
-std::map<std::string, std::string> round_trip(const MakerMetadata& values)
+std::map<std::string, std::string> round_trip(const MakerMetadata& values, int cycles = 1)
 {
+    REQUIRE(cycles > 0);
     ScopedTemporaryDir backup("orca_bbs_maker_metadata_store");
     Model source;
     source.set_backup_path(backup.string());
@@ -7294,27 +7295,42 @@ std::map<std::string, std::string> round_trip(const MakerMetadata& values)
     params.config          = &config;
     params.plate_data_list = {&plate};
     params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    REQUIRE(store_bbs_3mf(params));
+    std::unique_ptr<bbs_archive_contracts::LoadedProject> loaded;
+    std::unique_ptr<Model> loaded_model;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        CAPTURE(cycle);
+        REQUIRE(store_bbs_3mf(params));
 
-    std::string model_xml;
-    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
-    std::stringstream input(model_xml);
-    boost::property_tree::ptree tree;
-    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
-    std::map<std::string, int> element_count;
-    for (const auto& node : tree.get_child("model"))
-        if (node.first == "metadata")
-            ++element_count[node.second.get<std::string>("<xmlattr>.name")];
-    for (const char* key : {"MakerLab", "MakerLabVersion", "MakerWorkflow", "MakerRevision"}) {
-        INFO(key);
-        CHECK(element_count[key] == 1);
+        std::string model_xml;
+        REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+        std::stringstream input(model_xml);
+        boost::property_tree::ptree tree;
+        REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+        std::map<std::string, int> element_count;
+        for (const auto& node : tree.get_child("model"))
+            if (node.first == "metadata")
+                ++element_count[node.second.get<std::string>("<xmlattr>.name")];
+        for (const char* key : {"MakerLab", "MakerLabVersion", "MakerWorkflow", "MakerRevision"}) {
+            INFO(key);
+            CHECK(element_count[key] == 1);
+        }
+
+        auto next_model = std::make_unique<Model>();
+        auto next_loaded = std::make_unique<bbs_archive_contracts::LoadedProject>();
+        REQUIRE(bbs_archive_contracts::load_model(archive.string(), *next_model, *next_loaded));
+        REQUIRE(next_model->model_info != nullptr);
+        // Later cycles use imported metadata_items, not the fresh-value overrides.
+        next_model->mk_name.clear();
+        next_model->mk_version.clear();
+        next_model->md_name.clear();
+        next_model->md_value.clear();
+        loaded_model = std::move(next_model);
+        loaded = std::move(next_loaded);
+        params.model = loaded_model.get();
+        params.config = &loaded->config;
+        params.plate_data_list = loaded->plates;
     }
-
-    Model loaded_model;
-    bbs_archive_contracts::LoadedProject loaded;
-    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded));
-    REQUIRE(loaded_model.model_info != nullptr);
-    return loaded_model.model_info->metadata_items;
+    return loaded_model->model_info->metadata_items;
 }
 
 } // namespace
@@ -7339,17 +7355,34 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
     }
 }
 
-TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata][!shouldfail]")
+TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
 {
     const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
                                "rev 7"};
     const auto metadata = round_trip(values);
-    // Known bug: the importer's xml_unescape() decodes &amp; &lt; &gt; but not &quot; or &apos;, so
-    // quotes come back as entities; fixed by the follow-up fix PR. The unquoted entry is not
-    // affected and is checked above.
     CHECK(metadata.at("MakerLab") == values.maker_name);
     CHECK(metadata.at("MakerLabVersion") == values.maker_version);
     CHECK(metadata.at("MakerWorkflow") == values.workflow);
+}
+
+TEST_CASE("BBS metadata preserves mixed quote characters and literal quote entities across saves", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    const MakerMetadata values{"Maker \"double\" &quot; 'single' &apos; & <Lab>",
+                               "version \"seven\" &quot; 'one' &apos;",
+                               "workflow \"quoted\" &quot; 'single' &apos; &unknown;",
+                               "revision \"two\" &quot; 'three' &apos;"};
+    for (int cycles : {1, 2, 3}) {
+        CAPTURE(cycles);
+        const auto metadata = round_trip(values, cycles);
+        for (const auto &entry : std::map<std::string, std::string>{
+                 {"MakerLab", values.maker_name}, {"MakerLabVersion", values.maker_version},
+                 {"MakerWorkflow", values.workflow}, {"MakerRevision", values.revision}}) {
+            INFO(entry.first);
+            const auto found = metadata.find(entry.first);
+            REQUIRE(found != metadata.end());
+            CHECK(found->second == entry.second);
+        }
+    }
 }
 
 } // namespace bbs_maker_metadata_contracts

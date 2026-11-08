@@ -7154,19 +7154,28 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (!m_minimal_published)
                 metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 
+            // The final XML write escapes this text again. Keep the legacy amp/lt/gt
+            // layer for existing readers, but let the XML parser decode quotes once.
+            // Literal entity spellings are protected by xml_escape before replacement.
+            const auto escape_metadata_text = [](const std::string &value) {
+                std::string escaped = xml_escape(value);
+                boost::replace_all(escaped, "&quot;", "\"");
+                boost::replace_all(escaped, "&apos;", "'");
+                return escaped;
+            };
             if (!model.mk_name.empty()) {
-                metadata_item_map[BBL_MAKERLAB_TAG] = xml_escape(model.mk_name);
+                metadata_item_map[BBL_MAKERLAB_TAG] = escape_metadata_text(model.mk_name);
                 BOOST_LOG_TRIVIAL(info) << "saved mk_name " << model.mk_name;
             }
             if (!model.mk_version.empty()) {
-                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = xml_escape(model.mk_version);
+                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = escape_metadata_text(model.mk_version);
                 BOOST_LOG_TRIVIAL(info) << "saved mk_version " << model.mk_version;
             }
             if (!model.md_name.empty()) {
                 for (unsigned int i = 0; i < model.md_name.size(); i++)
                 {
                     BOOST_LOG_TRIVIAL(info) << boost::format("saved metadata_name %1%, metadata_value %2%") %model.md_name[i] %model.md_value[i];
-                    metadata_item_map[model.md_name[i]] = xml_escape(model.md_value[i]);
+                    metadata_item_map[model.md_name[i]] = escape_metadata_text(model.md_value[i]);
                 }
             }
 
