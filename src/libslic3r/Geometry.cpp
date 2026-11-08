@@ -448,6 +448,30 @@ static int canonical_handedness(const Transform3d& trafo)
     return svd.matrixU().determinant() * svd.matrixV().determinant() < 0. ? -1 : 1;
 }
 
+// Only a getter branch certificate, not a replacement for canonical_handedness:
+// positive but rank-ambiguous/unrepresentable inputs must retain its zero result.
+static bool requires_canonical_mirror(const Transform3d& trafo)
+{
+    const Matrix3d linear = trafo.linear();
+    if (linear.allFinite()) {
+        const double magnitude = linear.cwiseAbs().maxCoeff();
+        if (magnitude > 0.) {
+            const Matrix3d m = linear / magnitude;
+            // Entries have magnitude <= 1. Including division rounding, the
+            // 3x3 cofactor formula has absolute error < 64*epsilon. A doubled
+            // margin also rejects cancellation-dominated signs; ambiguous inputs
+            // use the existing SVD rank/overflow policy without modification.
+            const double determinant =
+                m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) -
+                m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) +
+                m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
+            if (m.allFinite() && determinant > 128. * std::numeric_limits<double>::epsilon())
+                return false;
+        }
+    }
+    return canonical_handedness(trafo) < 0;
+}
+
 // TransformationSVD already represents reflection by M = diag(-1,1,1).
 // On left-handed input A = R*S*M, R is proper and S is positive definite.
 // This canonical display convention is independent of repeated singular values.
@@ -466,7 +490,7 @@ bool Transformation::is_left_handed() const
 
 static Transform3d extract_rotation_matrix(const Transform3d& trafo)
 {
-    if (canonical_handedness(trafo) < 0)
+    if (requires_canonical_mirror(trafo))
         return canonical_rotation_scale(trafo).first;
     Matrix3d rotation;
     Matrix3d scale;
@@ -476,7 +500,7 @@ static Transform3d extract_rotation_matrix(const Transform3d& trafo)
 
 static Transform3d extract_scale(const Transform3d& trafo)
 {
-    if (canonical_handedness(trafo) < 0)
+    if (requires_canonical_mirror(trafo))
         return canonical_rotation_scale(trafo).second;
     Matrix3d rotation;
     Matrix3d scale;
@@ -486,7 +510,7 @@ static Transform3d extract_scale(const Transform3d& trafo)
 
 static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transform3d& trafo)
 {
-    if (canonical_handedness(trafo) < 0)
+    if (requires_canonical_mirror(trafo))
         return canonical_rotation_scale(trafo);
     Matrix3d rotation;
     Matrix3d scale;
@@ -507,7 +531,7 @@ static Transform3d extract_orthogonal(const Transform3d& trafo)
 
 static bool contains_skew(const Transform3d& trafo)
 {
-    if (canonical_handedness(trafo) < 0)
+    if (requires_canonical_mirror(trafo))
         return !canonical_rotation_scale(trafo).second.linear().isDiagonal();
     Matrix3d rotation;
     Matrix3d scale;
@@ -546,7 +570,7 @@ Transform3d Transformation::get_rotation_matrix() const
 
 Vec3d Transformation::get_rotation_by_quaternion() const
 {
-    Matrix3d           rotation_matrix = canonical_handedness(m_matrix) < 0 ?
+    Matrix3d           rotation_matrix = requires_canonical_mirror(m_matrix) ?
         Matrix3d(extract_rotation_matrix(m_matrix).linear()) : Matrix3d(m_matrix.matrix().block(0, 0, 3, 3));
     Eigen::Quaterniond quaternion(rotation_matrix);
     quaternion.normalize();
@@ -651,7 +675,7 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 
 Vec3d Transformation::get_mirror() const
 {
-    if (canonical_handedness(m_matrix) < 0)
+    if (requires_canonical_mirror(m_matrix))
         return Vec3d(-1., 1., 1.);
     const Transform3d scale = extract_scale(m_matrix);
     return { scale(0, 0) / std::abs(scale(0, 0)), scale(1, 1) / std::abs(scale(1, 1)), scale(2, 2) / std::abs(scale(2, 2)) };
@@ -659,7 +683,7 @@ Vec3d Transformation::get_mirror() const
 
 Transform3d Transformation::get_mirror_matrix() const
 {
-    if (canonical_handedness(m_matrix) < 0)
+    if (requires_canonical_mirror(m_matrix))
         return scale_transform(Vec3d(-1., 1., 1.));
     Transform3d scale = extract_scale(m_matrix);
     scale(0, 0) = scale(0, 0) / std::abs(scale(0, 0));

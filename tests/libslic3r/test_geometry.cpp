@@ -2108,3 +2108,22 @@ TEST_CASE("An axis target outside the supported relative rank leaves a mirror un
     transform.set_scaling_factor(Y, 1e-300);
     CHECK(transform.get_matrix().matrix() == matrix.matrix());
 }
+
+TEST_CASE("Proper getter branches preserve legacy results around determinant cancellation", "[Geometry][Transformation][Scale]")
+{
+    const double factor = GENERATE(1e-150, 1., 1e150);
+    const double separation = GENERATE(1., 32., 1024.) * std::numeric_limits<double>::epsilon();
+    Transform3d matrix = Transform3d::Identity();
+    // Nearly dependent columns put the normalized determinant below or above
+    // the conservative sign certificate, without relying on raw det(A) units.
+    matrix.linear() << 1., 1., 0., 1., 1. + separation, 0., 0., 0., 1.;
+    matrix.linear() *= factor;
+    matrix.translation() = Vec3d(3., -4., 5.);
+    Matrix3d legacy_rotation, legacy_scale;
+    matrix.computeRotationScaling(&legacy_rotation, &legacy_scale);
+    Geometry::Transformation transform(matrix);
+    CHECK(transform.get_rotation_matrix().linear().isApprox(legacy_rotation, 1e-12));
+    CHECK((transform.get_scaling_factor_matrix().linear() / factor).isApprox(legacy_scale / factor, 1e-12));
+    CHECK((transform.get_scaling_factor() / factor).isApprox(legacy_scale.diagonal() / factor, 1e-12));
+    CHECK(transform.get_matrix().matrix() == matrix.matrix());
+}
