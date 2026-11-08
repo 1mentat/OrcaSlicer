@@ -6010,16 +6010,16 @@ TEST_CASE("Grouped point parsing retains delimiter cardinality and empty-input c
         CHECK(decoded.values.back().empty());
     for (const Vec2ds &group : decoded.values)
         for (const Vec2d &point : group)
-            check_point_components(point, 1., 2.);
+            config_option_value_contracts::check_point_components(point, 1., 2.);
 
     ConfigOptionPointsGroups appended({Vec2ds{Vec2d(7., 8.)}});
     REQUIRE(appended.deserialize("", true));
     REQUIRE(appended.values.size() == 1);
-    check_point_components(appended.values.front().front(), 7., 8.);
+    config_option_value_contracts::check_point_components(appended.values.front().front(), 7., 8.);
     REQUIRE(appended.deserialize("1x2#", true));
     REQUIRE(appended.values.size() == 3);
     CHECK(appended.values.back().empty());
-    check_point_components(appended.values[1].front(), 1., 2.);
+    config_option_value_contracts::check_point_components(appended.values[1].front(), 1., 2.);
 
     // The existing text encoding has no distinct representation for one empty group.
     const ConfigOptionPointsGroups singleton({Vec2ds{}});

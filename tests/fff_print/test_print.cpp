@@ -1558,7 +1558,10 @@ TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty 
         empty_region ? std::vector<Vec2ds>{bed, Vec2ds{}} : std::vector<Vec2ds>{bed}));
     Print print{};
     print.apply_config_for_render(config);
-    Layer layer(0, nullptr, 0.2, 0.2, 0.1);
+    // Layer is constructible only by its owners; this empty test layer has no PrintObject.
+    struct TimelapseLayer final : Layer {
+        TimelapseLayer() : Layer(0, nullptr, 0.2, 0.2, 0.1) {}
+    } layer;
     TimelapsePosPicker picker;
     picker.init(&print, Point(0, 0));
     const PosPickCtx context{Point(0, 0), &layer, 0, 0, std::nullopt, std::nullopt};
@@ -1566,7 +1569,7 @@ TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty 
     if (empty_region)
         CHECK(position == DefaultTimelapsePos);
     else
-        CHECK(Polygon::new_scale(bed).contains(Point(scaled(position.x()), scaled(position.y()))));
+        CHECK(Polygon::new_scale(bed).contains(Point::new_scale(static_cast<double>(position.x()), static_cast<double>(position.y()))));
 }
 
 TEST_CASE("Prime Tower generation rejects an explicit empty shared printable region", "[Print][WipeTower][BedShape]")

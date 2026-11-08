@@ -1,4 +1,5 @@
 #include "Arrange.hpp"
+#include "Config.hpp"
 #include "Exception.hpp"
 #include "ExPolygon.hpp"
 #include "Point.hpp"
