@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <limits>
 #include <opencv2/core/mat.hpp>
+#include <opencv2/core/types.hpp>
 #include <algorithm>
 #include <memory>
 #include <ratio>
@@ -197,25 +198,42 @@ static bool ensure_all_cluster_centers_used(const std::vector<RGB>& source_face_
 }
 
 // Bilinear interpolation texture sampling; sub-pixel precision avoids nearest-neighbor aliasing
-static RGB get_pixel_color(float u, float v, const cv::Mat& texture) {
+static RGB get_pixel_color(float u, float v, const cv::Mat& texture, const cv::Rect* region = nullptr) {
     u = u - std::floor(u);
     v = v - std::floor(v);
 
-    // glTF UV convention: (0,0) = top-left, v increases downward
-    float fx = u * (texture.cols - 1);
-    float fy = v * (texture.rows - 1);
-
-    int x0 = std::clamp(static_cast<int>(fx), 0, texture.cols - 1);
-    int y0 = std::clamp(static_cast<int>(fy), 0, texture.rows - 1);
-    int x1 = std::min(x0 + 1, texture.cols - 1);
-    int y1 = std::min(y0 + 1, texture.rows - 1);
-
-    float wx = fx - x0;
-    float wy = fy - y0;
+    int x0, y0, x1, y1;
+    float wx, wy;
+    if (region) {
+        // Avoid converting atlas offsets to float: even a very tall atlas
+        // cannot move a sample outside its material's integer rectangle.
+        const double fx = std::clamp(static_cast<double>(u) * (region->width - 1), 0., static_cast<double>(region->width - 1));
+        const double fy = std::clamp(static_cast<double>(v) * (region->height - 1), 0., static_cast<double>(region->height - 1));
+        x0 = static_cast<int>(fx);
+        y0 = static_cast<int>(fy);
+        x1 = std::min(x0 + 1, region->width - 1);
+        y1 = std::min(y0 + 1, region->height - 1);
+        wx = static_cast<float>(fx - x0);
+        wy = static_cast<float>(fy - y0);
+        x0 += region->x;
+        x1 += region->x;
+        y0 += region->y;
+        y1 += region->y;
+    } else {
+        // Preserve the existing full-image sampling calculations.
+        float fx = u * (texture.cols - 1);
+        float fy = v * (texture.rows - 1);
+        x0 = std::clamp(static_cast<int>(fx), 0, texture.cols - 1);
+        y0 = std::clamp(static_cast<int>(fy), 0, texture.rows - 1);
+        x1 = std::min(x0 + 1, texture.cols - 1);
+        y1 = std::min(y0 + 1, texture.rows - 1);
+        wx = fx - x0;
+        wy = fy - y0;
+    }
 
     const int ch = texture.channels();
     auto sample = [&](int row, int col) -> std::array<float, 3> {
-        const uchar* ptr = texture.data + row * texture.step[0] + col * ch;
+        const uchar* ptr = texture.data + row * texture.step[0] + static_cast<size_t>(col) * ch;
         return {static_cast<float>(ptr[2]), static_cast<float>(ptr[1]), static_cast<float>(ptr[0])};
     };
 
@@ -257,12 +275,12 @@ static_assert(
 
 // Multi-point Gaussian quadrature sampling on a single face; returns weighted average color.
 // GAUSS_TRI_WEIGHT sums to 1.0 (Hammer quadrature formula), no normalization needed.
-static RGB sample_face_color(const std::array<Vec2f, 3>& uvs, const cv::Mat& texture) {
+static RGB sample_face_color(const std::array<Vec2f, 3>& uvs, const cv::Mat& texture, const cv::Rect* region = nullptr) {
     float r = 0.0f, g = 0.0f, b = 0.0f;
     for (int k = 0; k < 7; ++k) {
         float u = GAUSS_TRI_BARY[k][0] * uvs[0].x() + GAUSS_TRI_BARY[k][1] * uvs[1].x() + GAUSS_TRI_BARY[k][2] * uvs[2].x();
         float v = GAUSS_TRI_BARY[k][0] * uvs[0].y() + GAUSS_TRI_BARY[k][1] * uvs[1].y() + GAUSS_TRI_BARY[k][2] * uvs[2].y();
-        RGB c = get_pixel_color(u, v, texture);
+        RGB c = get_pixel_color(u, v, texture, region);
         float w = GAUSS_TRI_WEIGHT[k];
         r += w * c[0];
         g += w * c[1];
@@ -275,13 +293,15 @@ static RGB sample_face_color(const std::array<Vec2f, 3>& uvs, const cv::Mat& tex
 // Use array<Vec2f,3> instead of vector<Vec2f> for UV storage to avoid per-face heap allocations at million-face scale
 using FaceUVArray = std::array<Vec2f, 3>;
 
-static bool linear_subdivision(TriMesh& mesh, std::vector<FaceUVArray>& uv_coords, const std::function<void(int)>& sub_progress = nullptr) {
+static bool linear_subdivision(TriMesh& mesh, std::vector<FaceUVArray>& uv_coords, const std::function<void(int)>& sub_progress = nullptr,
+                               std::vector<cv::Rect>* texture_regions = nullptr) {
     const auto& original_vertices = mesh.vertices;
     const auto& original_faces = mesh.indices;
     TriVertices sub_vertices = mesh.vertices;
     sub_vertices.reserve(original_vertices.size() + original_faces.size() * 3);
     TriFaces sub_faces;
     std::vector<FaceUVArray> sub_uv_coords;
+    std::vector<cv::Rect> sub_texture_regions;
 
     // Single-level flat map with edge key encoding replaces nested unordered_map;
     // merges two vertex indices into a single uint64_t to reduce hash lookups and indirection.
@@ -316,11 +336,15 @@ static bool linear_subdivision(TriMesh& mesh, std::vector<FaceUVArray>& uv_coord
     const std::size_t N = original_faces.size();
     sub_faces.resize(N * 4);
     sub_uv_coords.resize(N * 4);
+    if (texture_regions)
+        sub_texture_regions.resize(N * 4);
     std::atomic<bool> has_missing_edge{false};
 
     tbb::parallel_for(tbb::blocked_range<std::size_t>(0, N), [&](const tbb::blocked_range<size_t>& range) {
         for (std::size_t fid = range.begin(); fid < range.end(); ++fid) {
             const std::size_t base = fid * 4;
+            if (texture_regions)
+                std::fill_n(sub_texture_regions.begin() + base, 4, (*texture_regions)[fid]);
             const auto& face = original_faces[fid];
             std::size_t vtx_0 = face[0];
             std::size_t vtx_1 = face[1];
@@ -373,12 +397,16 @@ static bool linear_subdivision(TriMesh& mesh, std::vector<FaceUVArray>& uv_coord
             if (write_idx != i) {
                 sub_faces[write_idx] = sub_faces[i];
                 sub_uv_coords[write_idx] = sub_uv_coords[i];
+                if (texture_regions)
+                    sub_texture_regions[write_idx] = sub_texture_regions[i];
             }
             ++write_idx;
         }
         BOOST_LOG_TRIVIAL(warning) << "[warning] linear_subdivision has missing edge vertex, removed " << (sub_faces.size() - write_idx) << " degenerate triangles";
         sub_faces.resize(write_idx);
         sub_uv_coords.resize(write_idx);
+        if (texture_regions)
+            sub_texture_regions.resize(write_idx);
     }
 
     if (sub_progress) {
@@ -387,6 +415,8 @@ static bool linear_subdivision(TriMesh& mesh, std::vector<FaceUVArray>& uv_coord
     BOOST_LOG_TRIVIAL(debug) << "TextureToColor: input faces count = " << mesh.indices.size() << ".";
     mesh = TriMesh(sub_faces, sub_vertices);
     uv_coords = std::move(sub_uv_coords);
+    if (texture_regions)
+        *texture_regions = std::move(sub_texture_regions);
     BOOST_LOG_TRIVIAL(debug) << "TextureToColor: output faces count = " << mesh.indices.size() << ".";
     return true;
 }
@@ -800,6 +830,13 @@ static bool repair_cluster_smooth(
 bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& texture_mesh_uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
                     std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings, AlgoProgressCallback progress_callback,
                     AlgoCancelCallback cancel_callback) {
+    return TextureToColor(texture_mesh, texture_mesh_uv_coords, texture, color_mesh, face_colors,
+                          settings, std::move(progress_callback), std::move(cancel_callback), {});
+}
+
+bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& texture_mesh_uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
+                    std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings, AlgoProgressCallback progress_callback,
+                    AlgoCancelCallback cancel_callback, const std::vector<cv::Rect>& texture_regions) {
     auto report = [&](int pct, const char* msg) {
         if (progress_callback) {
             progress_callback({pct, msg});
@@ -847,6 +884,21 @@ bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<V
             return false;
         }
     }
+    if (!texture_regions.empty()) {
+        if (texture_regions.size() != texture_mesh.indices.size() || texture.depth() != CV_8U)
+            return false;
+        for (size_t fi = 0; fi < texture_regions.size(); ++fi) {
+            const cv::Rect& region = texture_regions[fi];
+            if (region.x < 0 || region.y < 0 || region.width <= 0 || region.height <= 0 ||
+                region.x > texture.cols || region.y > texture.rows ||
+                region.width > texture.cols - region.x || region.height > texture.rows - region.y)
+                return false;
+            for (const Vec2f& uv : texture_mesh_uv_coords[fi])
+                if (!std::isfinite(uv.x()) || !std::isfinite(uv.y()) ||
+                    uv.x() < 0.f || uv.x() > 1.f || uv.y() < 0.f || uv.y() > 1.f)
+                    return false;
+        }
+    }
     color_mesh = texture_mesh;
 
     using Clock = std::chrono::high_resolution_clock;
@@ -871,6 +923,8 @@ bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<V
     for (std::size_t i = 0; i < texture_mesh_uv_coords.size(); ++i) {
         color_mesh_uv_coords[i] = {texture_mesh_uv_coords[i][0], texture_mesh_uv_coords[i][1], texture_mesh_uv_coords[i][2]};
     }
+    std::vector<cv::Rect> color_mesh_texture_regions = texture_regions;
+    auto* regions = color_mesh_texture_regions.empty() ? nullptr : &color_mesh_texture_regions;
     {
         // Estimate total iterations and map each iteration's sub-progress to the [5, 25] range
         size_t estimated_iters = 0;
@@ -899,13 +953,13 @@ bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<V
         if (settings.oversampling_iters > 0) {
             for (size_t i = 0; i < settings.oversampling_iters && color_mesh.facets_count() * 4.0 < settings.oversampling_max_face_count; ++i) {
                 if (cancelled()) return false;
-                linear_subdivision(color_mesh, color_mesh_uv_coords, make_iter_progress(i));
+                linear_subdivision(color_mesh, color_mesh_uv_coords, make_iter_progress(i), regions);
             }
         } else {
             size_t iter = 0;
             while (color_mesh.facets_count() < settings.oversampling_min_face_count) {
                 if (cancelled()) return false;
-                linear_subdivision(color_mesh, color_mesh_uv_coords, make_iter_progress(iter++));
+                linear_subdivision(color_mesh, color_mesh_uv_coords, make_iter_progress(iter++), regions);
             }
         }
     }
@@ -928,7 +982,8 @@ bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<V
         tbb::parallel_for(tbb::blocked_range<std::size_t>(0, total_faces), [&](const tbb::blocked_range<size_t>& range) {
             for (std::size_t fid = range.begin(); fid < range.end(); ++fid) {
                 if (cancel_requested.load(std::memory_order_relaxed)) return;
-                face_colors[fid] = sample_face_color(color_mesh_uv_coords[fid], texture);
+                face_colors[fid] = sample_face_color(color_mesh_uv_coords[fid], texture,
+                                                     regions ? &(*regions)[fid] : nullptr);
                 size_t cnt = done_faces.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (cnt % report_interval == 0) {
                     if (cancelled()) { cancel_requested.store(true, std::memory_order_relaxed); return; }

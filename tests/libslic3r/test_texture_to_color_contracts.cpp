@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -314,3 +315,88 @@ TEST_CASE("TextureToColor auto-oversampling stops at the configured face thresho
     }
 }
 
+TEST_CASE("TextureToColor rejects invalid face texture regions and clears outputs",
+          "[TextureToColor]")
+{
+    // All images own their small buffers; invalid metadata must be rejected
+    // before any texel is sampled.
+    const int invalid = GENERATE(0, 1, 2, 3, 4, 5, 6, 7, 8);
+    CAPTURE(invalid);
+    const TriMesh input = one_triangle();
+    auto uv_coords = one_face_uv();
+    cv::Mat texture(3, 3, CV_8UC3, cv::Scalar(7, 19, 233));
+    std::vector<cv::Rect> regions{{1, 1, 1, 1}};
+    switch (invalid) {
+    case 0: regions.push_back(regions.front()); break; // Wrong face count.
+    case 1: regions[0].x = -1; break;
+    case 2: regions[0].width = 0; break;
+    case 3: regions[0] = cv::Rect(2, 1, 2, 1); break; // Crosses the right edge.
+    case 4: regions[0] = cv::Rect(1, 2, 1, 2); break; // Crosses the bottom edge.
+    case 5: texture = cv::Mat(3, 3, CV_16UC3, cv::Scalar(0)); break;
+    case 6: uv_coords[0][0].x() = std::numeric_limits<float>::quiet_NaN(); break;
+    case 7: uv_coords[0][0].y() = std::numeric_limits<float>::infinity(); break;
+    case 8: uv_coords[0][0].x() = 1.5f; break; // Regional UVs must be local.
+    }
+
+    TriMesh output = input;
+    std::vector<Color> colors{red};
+    CHECK_FALSE(TextureToColor(input, uv_coords, texture, output, colors,
+                               bounded_settings(), nullptr, nullptr, regions));
+    CHECK(output.vertices.empty());
+    CHECK(output.indices.empty());
+    CHECK(colors.empty());
+}
+
+TEST_CASE("TextureToColor keeps local texture regions attached through subdivision",
+          "[TextureToColor]")
+{
+    const bool fixed_iterations = GENERATE(true, false);
+    CAPTURE(fixed_iterations);
+    const TriMesh input(
+        {stl_triangle_vertex_indices(0, 1, 2), stl_triangle_vertex_indices(3, 4, 5)},
+        {stl_vertex(0.f, 0.f, 0.f), stl_vertex(1.f, 0.f, 0.f), stl_vertex(0.f, 1.f, 0.f),
+         stl_vertex(3.f, 0.f, 0.f), stl_vertex(4.f, 0.f, 0.f), stl_vertex(3.f, 1.f, 0.f)});
+    const std::vector<Vec2f> local_uv(3, Vec2f(0.25f, 0.5f));
+    const std::vector<std::vector<Vec2f>> uv_coords{local_uv, local_uv};
+    const std::vector<cv::Rect> regions{{1, 1, 2, 2}, {2, 4, 3, 1}};
+    cv::Mat texture(5, 6, CV_8UC3, cv::Scalar(0, 255, 0));
+    for (int row = 1; row <= 2; ++row) {
+        texture.at<cv::Vec3b>(row, 1) = cv::Vec3b(0, 0, 255);
+        texture.at<cv::Vec3b>(row, 2) = cv::Vec3b(255, 0, 0);
+    }
+    for (int col = 2; col <= 4; ++col)
+        texture.at<cv::Vec3b>(4, col) = cv::Vec3b(255, 0, 0);
+    // Local U=1/4 blends the first region's red/blue texels to (191,0,63),
+    // regardless of its atlas offset or the second region's unequal extent.
+    const Color left_rgb{{191, 0, 63}};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 2;
+    settings.oversampling_iters = fixed_iterations ? 2 : 0;
+    settings.oversampling_min_face_count = 32;
+    settings.oversampling_max_face_count = 64;
+
+    TriMesh output;
+    std::vector<Color> colors;
+    REQUIRE(TextureToColor(input, uv_coords, texture, output, colors,
+                           settings, nullptr, nullptr, regions));
+    REQUIRE(output.indices.size() == 32);
+    REQUIRE(colors.size() == output.indices.size());
+    check_finite_and_valid(output);
+    bool left_seen = false;
+    bool right_seen = false;
+    for (std::size_t i = 0; i < output.indices.size(); ++i) {
+        const auto &face = output.indices[i];
+        const double center_x = (output.vertices[face[0]].x() + output.vertices[face[1]].x()
+                               + output.vertices[face[2]].x()) / 3.;
+        if (center_x < 1.5) {
+            CHECK(matches_color(colors[i], left_rgb));
+            left_seen = true;
+        } else {
+            REQUIRE(center_x > 2.5);
+            CHECK(matches_color(colors[i], blue));
+            right_seen = true;
+        }
+    }
+    CHECK(left_seen);
+    CHECK(right_seen);
+}
