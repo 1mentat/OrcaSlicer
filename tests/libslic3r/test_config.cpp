@@ -5146,7 +5146,7 @@ TEST_CASE("DynamicConfig erase removes one key and reports whether it existed", 
     CHECK(config.size() == 1);
 }
 
-TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts][!shouldfail]")
+TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts]")
 {
     DynamicConfig target;
     target.set_key_value("count", new ConfigOptionInt(4));
@@ -5154,9 +5154,64 @@ TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing
     source.set_key_value("count", new ConfigOptionInt(12));
 
     target += source;
-    // Known bug: the lvalue operator+= only adds missing keys and keeps the old value of existing
-    // ones; it should overwrite them with the source value, as the rvalue overload does.
     CHECK(target.opt<ConfigOptionInt>("count")->value == 12);
+}
+
+TEST_CASE("DynamicConfig lvalue addition copies values with apply and rvalue precedence", "[Config][ConfigContracts]")
+{
+    DynamicConfig base;
+    base.set_key_value("count", new ConfigOptionInt(4));
+    base.set_key_value("labels", new ConfigOptionStrings({"old"}));
+    base.set_key_value("ratio", new ConfigOptionFloatOrPercent(0.3, false));
+    base.set_key_value("kept", new ConfigOptionBool(true));
+    DynamicConfig source;
+    source.set_key_value("count", new ConfigOptionInt(12));
+    source.set_key_value("labels", new ConfigOptionStrings({"first", "second"}));
+    source.set_key_value("ratio", new ConfigOptionFloatOrPercent(75., true));
+
+    const DynamicConfig source_before(source);
+    DynamicConfig target(base), applied(base), moved(base), move_source(source);
+    DynamicConfig &returned = (target += source);
+    // All source keys already exist, so apply needs no definition for this dynamic config.
+    applied.apply(source);
+    moved += std::move(move_source);
+    CHECK(&returned == &target);
+    CHECK(target == applied);
+    CHECK(target == moved);
+    REQUIRE(target.opt<ConfigOptionFloatOrPercent>("ratio") != nullptr);
+    CHECK_THAT(target.opt<ConfigOptionFloatOrPercent>("ratio")->value, Catch::Matchers::WithinAbs(75., 1e-9));
+    CHECK(target.opt<ConfigOptionFloatOrPercent>("ratio")->percent);
+    REQUIRE(target.opt<ConfigOptionStrings>("labels") != nullptr);
+    CHECK(target.opt<ConfigOptionStrings>("labels")->values == std::vector<std::string>{"first", "second"});
+    CHECK(move_source.empty());
+    CHECK(source == source_before);
+    CHECK(source.opt<ConfigOptionInt>("count")->value == 12);
+    CHECK(source.opt<ConfigOptionStrings>("labels")->values == std::vector<std::string>{"first", "second"});
+    CHECK(source.opt<ConfigOptionFloatOrPercent>("ratio")->percent);
+    source.opt<ConfigOptionStrings>("labels")->values.front() = "changed";
+    CHECK(target.opt<ConfigOptionStrings>("labels")->values.front() == "first");
+
+    target += target;
+    CHECK(target == applied);
+    DynamicConfig empty;
+    target += empty;
+    CHECK(target == applied);
+}
+
+TEST_CASE("DynamicConfig lvalue addition preserves the source option concrete type", "[Config][ConfigContracts]")
+{
+    DynamicConfig target;
+    target.set_key_value("modes", new ConfigOptionEnumsGeneric({1}));
+    DynamicConfig source;
+    source.set_key_value("modes", new ConfigOptionEnumsGenericNullable({2, 3}));
+    // Both options report coEnums, but only the source's concrete type is nullable.
+    target += source;
+    REQUIRE(target.opt<ConfigOptionEnumsGenericNullable>("modes") != nullptr);
+    CHECK(target.opt<ConfigOptionEnumsGenericNullable>("modes")->values == std::vector<int>{2, 3});
+    CHECK(source.opt<ConfigOptionEnumsGenericNullable>("modes")->values == std::vector<int>{2, 3});
+    CHECK(target.option("modes") != source.option("modes"));
+    source.opt<ConfigOptionEnumsGenericNullable>("modes")->values.front() = 9;
+    CHECK(target.opt<ConfigOptionEnumsGenericNullable>("modes")->values.front() == 2);
 }
 
 TEST_CASE("ConfigBase equality ignores missing options but reports present differences", "[Config][ConfigContracts]")

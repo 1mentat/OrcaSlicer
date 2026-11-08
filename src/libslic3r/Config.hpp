@@ -2910,10 +2910,8 @@ public:
                 this->options[kvp.first].reset(kvp.second->clone());
             else {
                 assert(it->second->type() == kvp.second->type());
-                if (it->second->type() == kvp.second->type())
-                    *it->second = *kvp.second;
-                else
-                    it->second.reset(kvp.second->clone());
+                // Replace by a copy: assigning through ConfigOption& would not copy the derived value.
+                it->second.reset(kvp.second->clone());
             }
         }
         return *this;
