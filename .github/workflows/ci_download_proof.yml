@@ -1,0 +1,104 @@
+name: Official release download route proof
+on:
+  push:
+    branches: [ci-download-proof-official-assets-v1]
+    paths: [.github/workflows/ci_download_proof.yml]
+permissions:
+  contents: read
+jobs:
+  download-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Verify four fixed assets over both official routes
+        shell: bash
+        run: |
+          python3 - <<'PYPROOF'
+          import hashlib, json, os, pathlib, tempfile, time, urllib.error, urllib.parse, urllib.request
+          ASSETS = json.loads(r'''[{"repo":"AppImage/appimagetool","tag":"continuous","name":"appimagetool-x86_64.AppImage","id":715388534,"size":15133176,"sha256":"e8c1169c4af66c3184d7ee110713d4be04befe671fa358e2c1591ee840553b03"},{"repo":"AppImage/type2-runtime","tag":"continuous","name":"runtime-x86_64","id":657374641,"size":944632,"sha256":"617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46"},{"repo":"ninja-build/ninja","tag":"v1.13.2","name":"ninja-linux.zip","id":318865358,"size":134040,"sha256":"5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6"},{"repo":"FreeSpacenav/libspnav","tag":"v1.2","name":"libspnav-1.2.tar.gz","id":241978987,"size":33000,"sha256":"093747e7e03b232e08ff77f1ad7f48552c06ac5236316a5012db4269951c39db"}]''')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "official-download-proof"
+          root.mkdir(exist_ok=False)
+          report = {"head": os.environ["GITHUB_SHA"], "runner_os": os.environ["RUNNER_OS"],
+                    "scope": "Download-only route proof; no installs, execution, cache writes or main CI success claim", "results": []}
+          def save():
+              temp = root / "result.tmp"
+              temp.write_text(json.dumps(report, indent=2) + "\n")
+              temp.replace(root / "result.json")
+          def response(url, accept, deadline):
+              for hop in range(4):
+                  parsed = urllib.parse.urlsplit(url)
+                  if (parsed.scheme != "https" or parsed.hostname not in
+                          {"github.com", "api.github.com", "release-assets.githubusercontent.com"}
+                          or parsed.port not in (None, 443) or parsed.username or parsed.password):
+                      raise ValueError("unapproved redirect")
+                  request = urllib.request.Request(url, headers={"User-Agent": "orca-download-only-proof", "Accept": accept})
+                  try:
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          raise TimeoutError("redirect deadline")
+                      return opener.open(request, timeout=min(15, remaining))
+                  except urllib.error.HTTPError as error:
+                      if error.code not in (301, 302, 303, 307, 308):
+                          raise
+                      location = error.headers.get("Location", "")
+                      error.close()
+                      url = urllib.parse.urljoin(url, location)
+              raise ValueError("redirect limit")
+          save()
+          for asset in ASSETS:
+              for route in ("browser", "api"):
+                  started = time.monotonic()
+                  result = dict(asset, route=route, verified=False, bytes=0)
+                  url = ("https://github.com/{repo}/releases/download/{tag}/{name}".format(**asset) if route == "browser"
+                         else "https://api.github.com/repos/{repo}/releases/assets/{id}".format(**asset))
+                  try:
+                      digest = hashlib.sha256()
+                      with response(url, "application/octet-stream", started + 60) as incoming, tempfile.TemporaryFile() as output:
+                          result["http_status"] = incoming.status
+                          if incoming.status != 200:
+                              raise ValueError("expected full response")
+                          while True:
+                              if time.monotonic() - started > 60:
+                                  raise TimeoutError("transfer deadline")
+                              block = incoming.read(262144)
+                              if not block:
+                                  break
+                              result["bytes"] += len(block)
+                              if result["bytes"] > asset["size"]:
+                                  raise ValueError("oversize")
+                              digest.update(block)
+                              output.write(block)
+                      result["actual_sha256"] = digest.hexdigest()
+                      result["verified"] = result["bytes"] == asset["size"] and digest.hexdigest() == asset["sha256"]
+                  except Exception as error:
+                      # Never print exception strings/headers: they can contain signed URLs.
+                      result["error_type"] = type(error).__name__
+                      if isinstance(error, urllib.error.HTTPError):
+                          result["http_status"] = error.code
+                          error.close()
+                  result["seconds"] = round(time.monotonic() - started, 3)
+                  report["results"].append(result)
+                  save()
+                  print(json.dumps(result), flush=True)
+          report["collection_complete"] = True
+          report["api_all_verified"] = all(r["verified"] for r in report["results"] if r["route"] == "api")
+          report["browser_all_verified"] = all(r["verified"] for r in report["results"] if r["route"] == "browser")
+          save()
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("Download-only proof: API all verified = " + str(report["api_all_verified"]) +
+                            "; browser all verified = " + str(report["browser_all_verified"]) +
+                            ". No binaries installed or executed; main CI remains separate.\n")
+          raise SystemExit(0 if report["api_all_verified"] else 1)
+          PYPROOF
+      - name: Preserve sanitized route evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: official-download-route-proof
+          path: ${{ runner.temp }}/official-download-proof/result.json
+          if-no-files-found: error
+          retention-days: 7
