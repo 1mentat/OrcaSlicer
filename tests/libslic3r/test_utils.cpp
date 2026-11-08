@@ -1028,8 +1028,34 @@ TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[u
     CHECK_FALSE(is_thingiverse_link("https://www.thingiverseXcom"));
 }
 
-// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
-// does not; fixed by the follow-up fix PR
-TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils]") {
     CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
+}
+
+TEST_CASE("MakerWorld links retain their exact HTTP origin across resource suffixes", "[utils]") {
+    const std::vector<std::string> urls{
+        "https://makerworld.com", "http://makerworld.com/", "HTTP://MAKERWORLD.COM/en/models/12345",
+        "https://makerworld.com/en/models/12345?from=app#profileId-67", "https://makerworld.com?from=app",
+        "https://makerworld.com/#profile", "https://makerworld.com/en/@user", "https://makerworld.com/api/file.3mf?name=My%20File"};
+    for (const auto& url : urls) {
+        CAPTURE(url);
+        CHECK(is_makerworld_link(url));
+    }
+}
+
+TEST_CASE("MakerWorld links reject alternate authorities and malformed HTTP origins", "[utils]") {
+    const std::vector<std::string> urls{
+        "", "makerworld.com/en/models/12345", "//makerworld.com/en/models/12345", "ftp://makerworld.com/x",
+        "https://makerworldXcom/x", "https://makerworld.com.evil/x", "https://evil.example/makerworld.com",
+        "https://makerworld.com@evil.example/x", "https://user@makerworld.com/x", "https://www.makerworld.com/x",
+        "https://makerworld.com.cn/x", "https://makerworld.bblmw.com/x", "https://makerworld.com:443/x",
+        "https://makerworld.com./x", "https://makerworld%2ecom/x", "https://makerworld.com%40evil.example/x",
+        "https://makerworld.com\\@evil.example/x", "https://makerworld.com/x\\y", " https://makerworld.com/x",
+        "https://makerworld.com/x ", "https://makerworld.com/line\nfeed", "https://makerworld.com/\tfile",
+        std::string("https://makerworld.com") + '\0' + "/file", std::string("https://makerworld.com/") + char(0x7f),
+        "orcaslicer://open?file=https://makerworld.com/en/models/12345"};
+    for (const auto& url : urls) {
+        CAPTURE(url);
+        CHECK_FALSE(is_makerworld_link(url));
+    }
 }

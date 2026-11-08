@@ -172,7 +172,9 @@ void Downloader::start_download(const std::string& full_url)
 	}
     size_t id = get_next_id();
     std::string escaped_url = FileGet::escape_url(full_url.substr(results.length()));
-    if (is_bambustudio_open(full_url) || (is_orca_open(full_url) && is_makerworld_link(full_url)))
+    // Match import_model_id's optional filename suffix without treating it as part of the URL.
+    const std::string download_url = escaped_url.substr(0, escaped_url.find("&name="));
+    if (is_bambustudio_open(full_url) || (is_orca_open(full_url) && is_makerworld_link(download_url)))
         plater->request_model_download(wxString::FromUTF8(escaped_url));
     else {
         std::string text(escaped_url);

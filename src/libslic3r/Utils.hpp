@@ -320,9 +320,19 @@ inline bool is_printables_link(const std::string& url) {
     const std::regex url_regex("(http|https)://printables\\.com", std::regex_constants::icase);
     return std::regex_match(url, url_regex);
 }
+// Classify the HTTP(S) origin, allowing resource paths, queries and fragments.
 inline bool is_makerworld_link(const std::string& url) {
-    const std::regex url_regex("(http|https)://makerworld\\.com", std::regex_constants::icase);
-    return std::regex_match(url, url_regex);
+    const std::string_view value(url);
+    const size_t scheme_end = value.find("://");
+    if (scheme_end == std::string_view::npos ||
+        (!ascii_iequals(value.substr(0, scheme_end), "http") && !ascii_iequals(value.substr(0, scheme_end), "https")))
+        return false;
+    const size_t host_begin = scheme_end + 3;
+    const size_t host_end = value.find_first_of("/?#", host_begin);
+    const auto host = value.substr(host_begin, host_end == std::string_view::npos ? std::string_view::npos : host_end - host_begin);
+    if (!ascii_iequals(host, "makerworld.com"))
+        return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f || c == '\\'; });
 }
 inline bool is_thingiverse_link(const std::string& url) {
     const std::regex url_regex("(http|https)://www\\.thingiverse\\.com", std::regex_constants::icase);
