@@ -542,6 +542,7 @@ void MeasuringImpl::extract_features(int plane_idx)
     cog /= double(counter);
     plane.surface_features.emplace_back(SurfaceFeature(SurfaceFeatureType::Plane,
         plane.normal, cog, std::optional<Vec3d>(), plane_idx + 0.0001));
+    plane.surface_features.back().set_plane_triangles(m_its, plane.facets, Transform3d::Identity());
 
     plane.borders.clear();
     plane.borders.shrink_to_fit();
@@ -864,6 +865,280 @@ static AngleAndEdges angle_plane_plane(const std::tuple<int, Vec3d, Vec3d>& p1, 
     return ret;
 }
 
+namespace {
+using FaceTriangle = SurfaceFeature::PlaneTriangle;
+
+// Degree <= 4, on a bounded parameter interval. Derivative roots split it into
+// monotone intervals; testing their endpoints also retains repeated roots.
+std::vector<double> bounded_polynomial_roots(std::vector<double> coefficients)
+{
+    while (coefficients.size() > 1 && coefficients.back() == 0.0)
+        coefficients.pop_back();
+    if (coefficients.size() <= 1)
+        return {};
+    double scale = 0.0;
+    for (double value : coefficients)
+        scale = std::max(scale, std::abs(value));
+    for (double &value : coefficients)
+        value /= scale;
+    const auto evaluate = [&](double x) {
+        double value = 0.0;
+        for (auto it = coefficients.rbegin(); it != coefficients.rend(); ++it)
+            value = value * x + *it;
+        return value;
+    };
+    std::vector<double> derivative;
+    for (std::size_t i = 1; i < coefficients.size(); ++i)
+        derivative.push_back(static_cast<double>(i) * coefficients[i]);
+    std::vector<double> knots = bounded_polynomial_roots(std::move(derivative));
+    knots.push_back(0.0);
+    knots.push_back(1.0);
+    std::sort(knots.begin(), knots.end());
+    std::vector<double> roots;
+    const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() * static_cast<double>(coefficients.size());
+    for (double x : knots)
+        if (std::abs(evaluate(x)) <= tolerance)
+            roots.push_back(x);
+    for (std::size_t i = 1; i < knots.size(); ++i) {
+        double low = knots[i - 1], high = knots[i];
+        double low_value = evaluate(low), high_value = evaluate(high);
+        if (low_value == 0.0 || high_value == 0.0 || std::signbit(low_value) == std::signbit(high_value))
+            continue;
+        for (int iteration = 0; iteration < 80; ++iteration) {
+            const double mid = low + (high - low) * 0.5;
+            if (mid == low || mid == high)
+                break;
+            const double value = evaluate(mid);
+            if (value == 0.0) {
+                low = high = mid;
+                break;
+            }
+            if (std::signbit(value) == std::signbit(low_value)) {
+                low = mid;
+                low_value = value;
+            } else
+                high = mid;
+        }
+        roots.push_back(low + (high - low) * 0.5);
+    }
+    return roots;
+}
+
+Vec3d closest_on_segment(const Vec3d &point, const Vec3d &a, const Vec3d &b)
+{
+    const Vec3d delta = b - a;
+    const double scale = std::max(delta.cwiseAbs().maxCoeff(), (point - a).cwiseAbs().maxCoeff());
+    if (scale == 0.0)
+        return a;
+    const Vec3d direction = delta / scale;
+    const double length_sq = direction.squaredNorm();
+    const double t = length_sq > 0.0 ? std::clamp(((point - a) / scale).dot(direction) / length_sq, 0.0, 1.0) : 0.0;
+    return a + t * delta;
+}
+
+Vec3d closest_on_triangle(const Vec3d &point, const FaceTriangle &triangle)
+{
+    // Cross-product half spaces retain thin triangle interiors that differences of
+    // almost equal dot products can incorrectly classify as an edge. Extended
+    // intermediates add headroom where available; no wider type is required.
+    using WideVec = Eigen::Matrix<long double, 3, 1>;
+    const WideVec origin = triangle[0].cast<long double>();
+    const WideVec ab = triangle[1].cast<long double>() - origin;
+    const WideVec ac = triangle[2].cast<long double>() - origin;
+    const long double scale = std::max(ab.cwiseAbs().maxCoeff(), ac.cwiseAbs().maxCoeff());
+    if (scale == 0.0L)
+        return triangle[0];
+    const WideVec b = ab / scale, c = ac / scale;
+    const WideVec cross = b.cross(c);
+    const long double length = cross.stableNorm();
+    if (length > 0.0L) {
+        const WideVec normal = cross / length;
+        const WideVec q = (point.cast<long double>() - origin) / scale;
+        const WideVec projected = q - q.dot(normal) * normal;
+        if (projected.allFinite() &&
+            b.cross(projected).dot(normal) >= 0.0L &&
+            (c - b).cross(projected - b).dot(normal) >= 0.0L &&
+            (-c).cross(projected - c).dot(normal) >= 0.0L)
+            return (origin + scale * projected).cast<double>();
+    }
+    Vec3d closest = triangle[0];
+    for (int i = 0; i < 3; ++i) {
+        const Vec3d candidate = closest_on_segment(point, triangle[i], triangle[(i + 1) % 3]);
+        if ((candidate - point).stableNorm() < (closest - point).stableNorm())
+            closest = candidate;
+    }
+    return closest;
+}
+
+std::optional<DistAndPoints> distance_to_face_region(const SurfaceFeature &feature,
+                                                   const SurfaceFeature::PlaneTriangles &triangles,
+                                                   bool center_mode)
+{
+    std::optional<DistAndPoints> best;
+    const auto add = [&](const Vec3d &from, const Vec3d &to) {
+        if (!from.allFinite() || !to.allFinite())
+            return;
+        const double distance = (to - from).stableNorm();
+        if (std::isfinite(distance) && (!best || distance < best->dist))
+            best = DistAndPoints{distance, from, to};
+    };
+    for (const FaceTriangle &triangle : triangles)
+        for (int i = 0; i < 3; ++i)
+            if (!triangle[i].allFinite() || !(triangle[(i + 1) % 3] - triangle[i]).allFinite())
+                return std::nullopt;
+    const bool is_circle = feature.get_type() == SurfaceFeatureType::Circle;
+    Vec3d center = Vec3d::Zero(), circle_normal = Vec3d::UnitZ();
+    double radius = 0.0;
+    if (is_circle) {
+        const auto circle = feature.get_circle();
+        center = std::get<0>(circle);
+        radius = std::get<1>(circle);
+        circle_normal = std::get<2>(circle);
+        const double length = circle_normal.stableNorm();
+        if (!center.allFinite() || !std::isfinite(radius) || radius < 0.0 || !std::isfinite(length) || length == 0.0)
+            return std::nullopt;
+        circle_normal /= length;
+    }
+    const Vec3d reference = is_circle ? center : feature.get_edge().first;
+    if (!reference.allFinite())
+        return std::nullopt;
+    for (const FaceTriangle &triangle : triangles)
+        for (const Vec3d &vertex : triangle)
+            if (!(vertex - reference).allFinite())
+                return std::nullopt;
+    if (!is_circle && !(feature.get_edge().second - reference).allFinite())
+        return std::nullopt;
+    const auto circle_point = [&](const Vec3d &point) -> Vec3d {
+        const Vec3d q = point - center;
+        const double scale = q.cwiseAbs().maxCoeff();
+        const Vec3d local = scale > 0.0 ? Vec3d(q / scale) : Vec3d::Zero();
+        const Vec3d radial = local - local.dot(circle_normal) * circle_normal;
+        const double length = radial.stableNorm();
+        return center + radius * (length > 0.0 ? Vec3d(radial / length) : Vec3d(get_orthogonal(circle_normal, true)));
+    };
+    const auto circle_segment = [&](const Vec3d &a, const Vec3d &b) {
+        const Vec3d delta = b - a, offset = a - center;
+        const double scale = std::max({delta.cwiseAbs().maxCoeff(), offset.cwiseAbs().maxCoeff(), radius});
+        if (scale == 0.0) {
+            add(center, a);
+            return;
+        }
+        const Vec3d d = delta / scale, q = offset / scale;
+        const double r = radius / scale;
+        const Vec3d v = q - q.dot(circle_normal) * circle_normal;
+        const Vec3d w = d - d.dot(circle_normal) * circle_normal;
+        const double A = d.squaredNorm(), B = q.dot(d), a2 = w.squaredNorm(), b2 = v.dot(w), c2 = v.squaredNorm();
+        std::vector<double> candidates{0.0, 1.0};
+        if (A > 0.0)
+            candidates.push_back(std::clamp(-B / A, 0.0, 1.0));
+        // The radial-axis point is nondifferentiable and may not be a polynomial root.
+        if (a2 > 0.0)
+            candidates.push_back(std::clamp(-b2 / a2, 0.0, 1.0));
+        // S(u)=a2*u^2+2*b2*u+c2 is squared radial distance. Stationarity is
+        // (A*u+B)*sqrt(S)=r*(a2*u+b2); squaring gives a quartic with extra roots.
+        const std::vector<double> coefficients{
+            B * B * c2 - r * r * b2 * b2,
+            2.0 * A * B * c2 + 2.0 * B * B * b2 - 2.0 * r * r * a2 * b2,
+            A * A * c2 + 4.0 * A * B * b2 + B * B * a2 - r * r * a2 * a2,
+            2.0 * A * A * b2 + 2.0 * A * B * a2, A * A * a2};
+        for (double u : bounded_polynomial_roots(coefficients)) {
+            const double radial_sq = std::max(0.0, (a2 * u + 2.0 * b2) * u + c2);
+            const double left = (A * u + B) * std::sqrt(radial_sq), right = r * (a2 * u + b2);
+            const double tolerance = 128.0 * std::sqrt(std::numeric_limits<double>::epsilon()) *
+                                     (std::abs(left) + std::abs(right) + std::numeric_limits<double>::epsilon());
+            if (std::abs(left - right) <= tolerance)
+                candidates.push_back(u); // Reject roots introduced by squaring the original derivative.
+        }
+        for (double u : candidates) {
+            const Vec3d point = a + u * delta;
+            add(circle_point(point), point);
+        }
+    };
+    for (const FaceTriangle &triangle : triangles) {
+        if (is_circle && (center_mode || radius == 0.0)) {
+            add(center, closest_on_triangle(center, triangle));
+            continue;
+        }
+        const Vec3d ab = triangle[1] - triangle[0], ac = triangle[2] - triangle[0];
+        const double scale = std::max(ab.cwiseAbs().maxCoeff(), ac.cwiseAbs().maxCoeff());
+        const Vec3d cross = scale > 0.0 ? Vec3d((ab / scale).cross(ac / scale)) : Vec3d::Zero();
+        const double normal_length = cross.stableNorm();
+        const Vec3d normal = normal_length > 0.0 ? Vec3d(cross / normal_length) : Vec3d::Zero();
+        const auto add_projection = [&](const Vec3d &point) {
+            const Vec3d offset = point - triangle[0];
+            const double offset_scale = offset.cwiseAbs().maxCoeff();
+            if (!point.allFinite() || !offset.allFinite())
+                return;
+            const double height = offset_scale > 0.0 ? (offset / offset_scale).dot(normal) * offset_scale : 0.0;
+            const Vec3d projected = point - height * normal;
+            if (!projected.allFinite())
+                return;
+            const Vec3d on_triangle = closest_on_triangle(projected, triangle);
+            const double local_scale = std::max(scale, (projected - triangle[0]).stableNorm());
+            if ((projected - on_triangle).stableNorm() <= 128.0 * std::numeric_limits<double>::epsilon() * local_scale)
+                add(point, on_triangle); // Return an actual triangle witness, even at roundoff near an edge.
+        };
+        if (is_circle) {
+            if (normal_length > 0.0) {
+                const Vec3d radial = normal - normal.dot(circle_normal) * circle_normal;
+                const double length = radial.stableNorm();
+                const Vec3d dir = length > 0.0 ? Vec3d(radial / length) : Vec3d(get_orthogonal(circle_normal, true));
+                add_projection(center + radius * dir);
+                add_projection(center - radius * dir);
+                const double amplitude = radius * normal.dot(dir);
+                if (amplitude != 0.0) {
+                    const double cosine = -(center - triangle[0]).dot(normal) / amplitude;
+                    if (std::abs(cosine) <= 1.0) {
+                        const Vec3d along = circle_normal.cross(dir);
+                        const double sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
+                        add_projection(center + radius * (cosine * dir + sine * along));
+                        add_projection(center + radius * (cosine * dir - sine * along));
+                    }
+                }
+            }
+            for (int i = 0; i < 3; ++i)
+                circle_segment(triangle[i], triangle[(i + 1) % 3]);
+        } else {
+            const auto segment = feature.get_edge();
+            const Vec3d from = segment.first, to = segment.second, delta = to - from;
+            if (!from.allFinite() || !to.allFinite())
+                return std::nullopt;
+            if (normal_length > 0.0) {
+                add_projection(from);
+                add_projection(to);
+                const double rate = delta.dot(normal);
+                if (rate != 0.0) {
+                    const double u = -(from - triangle[0]).dot(normal) / rate;
+                    if (u >= 0.0 && u <= 1.0)
+                        add_projection(from + u * delta);
+                }
+            }
+            for (int i = 0; i < 3; ++i) {
+                const Vec3d a = triangle[i], b = triangle[(i + 1) % 3];
+                add(from, closest_on_segment(from, a, b));
+                add(to, closest_on_segment(to, a, b));
+                add(closest_on_segment(a, from, to), a);
+                add(closest_on_segment(b, from, to), b);
+                const Vec3d other = b - a, offset = from - a;
+                const double local_scale = std::max({delta.cwiseAbs().maxCoeff(), other.cwiseAbs().maxCoeff(), offset.cwiseAbs().maxCoeff()});
+                if (local_scale == 0.0)
+                    continue;
+                const Vec3d d = delta / local_scale, e = other / local_scale, r = offset / local_scale;
+                const Vec3d cross = d.cross(e);
+                const double denominator = cross.squaredNorm();
+                if (denominator > 0.0) {
+                    const double u = -r.cross(e).dot(cross) / denominator;
+                    const double v = -r.cross(d).dot(cross) / denominator;
+                    if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0)
+                        add(from + u * delta, a + v * other);
+                }
+            }
+        }
+    }
+    return best;
+}
+} // namespace
+
 MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature &b, bool deal_circle_result)
 {
     assert(a.get_type() != SurfaceFeatureType::Undef && b.get_type() != SurfaceFeatureType::Undef);
@@ -873,6 +1148,32 @@ MeasurementResult get_measurement(const SurfaceFeature &a, const SurfaceFeature 
     const SurfaceFeature& f2 = swap ? a : b;
 
     MeasurementResult result;
+    if (f2.get_type() == SurfaceFeatureType::Plane && f2.plane_triangles &&
+        (f1.get_type() == SurfaceFeatureType::Edge || f1.get_type() == SurfaceFeatureType::Circle)) {
+        auto distance = distance_to_face_region(f1, *f2.plane_triangles, deal_circle_result);
+        if (f1.get_type() == SurfaceFeatureType::Circle) {
+            const auto circle = f1.get_circle();
+            const auto plane = f2.get_plane();
+            const bool coplanar = are_parallel(std::get<2>(circle), std::get<1>(plane)) &&
+                Eigen::Hyperplane<double, 3>(std::get<2>(circle), std::get<0>(circle)).absDistance(std::get<2>(plane)) < EPSILON;
+            if (coplanar)
+                result.distance_strict = distance;
+            else
+                result.distance_infinite = distance;
+        } else {
+            result.distance_infinite = distance;
+            const auto edge = f1.get_edge();
+            if ((edge.second - edge.first).squaredNorm() > 0.0)
+                result.angle = angle_edge_plane(edge, f2.get_plane());
+        }
+        if (swap) {
+            if (result.distance_infinite)
+                std::swap(result.distance_infinite->from, result.distance_infinite->to);
+            if (result.distance_strict)
+                std::swap(result.distance_strict->from, result.distance_strict->to);
+        }
+        return result;
+    }
 
     ///////////////////////////////////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////
@@ -1464,6 +1765,47 @@ AssemblyAction get_assembly_action(const SurfaceFeature& a, const SurfaceFeature
     return action;
 }
 
+void SurfaceFeature::set_plane_triangles(const indexed_triangle_set &mesh, const std::vector<int> &facets,
+                                         const Transform3d &transform)
+{
+    PlaneTriangles triangles;
+    triangles.reserve(facets.size());
+    for (int facet : facets) {
+        if (facet < 0 || std::size_t(facet) >= mesh.indices.size()) {
+            triangles.clear();
+            break;
+        }
+        PlaneTriangle triangle;
+        bool valid = true;
+        for (int i = 0; i < 3; ++i) {
+            const int vertex = mesh.indices[facet][i];
+            if (vertex < 0 || std::size_t(vertex) >= mesh.vertices.size()) {
+                valid = false;
+                break;
+            }
+            triangle[i] = transform * mesh.vertices[vertex].cast<double>();
+            valid = valid && triangle[i].allFinite();
+        }
+        if (!valid) {
+            triangles.clear();
+            break;
+        }
+        triangles.push_back(triangle);
+    }
+    plane_triangles = std::make_shared<const PlaneTriangles>(std::move(triangles));
+}
+
+void SurfaceFeature::transform_plane_triangles(const Transform3d &transform)
+{
+    if (get_type() != SurfaceFeatureType::Plane || !plane_triangles)
+        return;
+    PlaneTriangles triangles = *plane_triangles;
+    for (PlaneTriangle &triangle : triangles)
+        for (Vec3d &vertex : triangle)
+            vertex = transform * vertex;
+    plane_triangles = std::make_shared<const PlaneTriangles>(std::move(triangles));
+}
+
 void SurfaceFeature::translate(const Vec3d& displacement) {
     switch (get_type()) {
     case Measure::SurfaceFeatureType::Point: {
@@ -1489,6 +1831,11 @@ void SurfaceFeature::translate(const Vec3d& displacement) {
         break;
     }
     default: break;
+    }
+    if (get_type() == SurfaceFeatureType::Plane && plane_triangles) {
+        Transform3d transform = Transform3d::Identity();
+        transform.translate(displacement);
+        transform_plane_triangles(transform);
     }
 }
 
@@ -1540,6 +1887,7 @@ void SurfaceFeature::translate(const Transform3d &tran)
     }
     default: break;
     }
+    transform_plane_triangles(tran);
 }
    }//namespace Measure
 } // namespace Slic3r

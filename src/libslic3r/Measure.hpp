@@ -2,6 +2,7 @@
 #define Slic3r_Measure_hpp_
 
 #include <cassert>
+#include <array>
 #include <cstdlib>
 #include <cstddef>
 #include <optional>
@@ -34,6 +35,9 @@ Vec3d get_one_point_in_plane(const Vec3d &plane_origin, const Vec3d &plane_norma
 class SurfaceFeature
 {
 public:
+    using PlaneTriangle = std::array<Vec3d, 3>;
+    using PlaneTriangles = std::vector<PlaneTriangle>;
+
     SurfaceFeature(SurfaceFeatureType type, const Vec3d& pt1, const Vec3d& pt2, std::optional<Vec3d> pt3 = std::nullopt, double value = 0.0)
         : m_type(type), m_pt1(pt1), m_pt2(pt2), m_pt3(pt3), m_value(value) {}
 
@@ -47,9 +51,11 @@ public:
         m_pt2                = sf.get_pt2();
         m_pt3                = sf.get_pt3();
         m_value              = sf.get_value();
+        plane_triangles      = sf.plane_triangles;
     }
     void translate(const Vec3d& displacement);
     void translate(const Transform3d& tran);
+    void set_plane_triangles(const indexed_triangle_set &mesh, const std::vector<int> &facets, const Transform3d &transform);
     // Get type of this feature.
     SurfaceFeatureType get_type() const { return m_type; }
 
@@ -94,6 +100,9 @@ public:
     std::vector<int>*    plane_indices{nullptr};
     Transform3d                  world_tran = Transform3d::Identity();
     std::shared_ptr<std::vector<SurfaceFeature>> world_plane_features{nullptr};
+    // Actual face facets in this feature's coordinate frame. Null retains legacy behavior;
+    // an owned empty region is not an unbounded plane. Fitted selection circles are not a face boundary.
+    std::shared_ptr<const PlaneTriangles> plane_triangles{nullptr};
     std::shared_ptr<SurfaceFeature> origin_surface_feature{nullptr};
 
     Vec3d get_pt1() const{ return m_pt1; }
@@ -102,6 +111,7 @@ public:
     double                      get_value() const { return m_value; }
 
 private:
+    void transform_plane_triangles(const Transform3d &transform);
     SurfaceFeatureType m_type{ SurfaceFeatureType::Undef };
     Vec3d m_pt1{ Vec3d::Zero() };
     Vec3d m_pt2{ Vec3d::Zero() };
@@ -178,6 +188,8 @@ struct MeasurementResult {
 };
 
 // Returns distance/angle between two SurfaceFeatures.
+// Owned plane facets restrict edge/circle distances to the actual face region.
+// Without facet data the historical plane behavior is retained.
 MeasurementResult get_measurement(const SurfaceFeature& a, const SurfaceFeature& b,bool deal_circle_result =false);
 bool              can_set_xyz_distance(const SurfaceFeature &a, const SurfaceFeature &b);
 
