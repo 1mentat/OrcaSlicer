@@ -185,6 +185,9 @@ public:
         std::shared_ptr<T> new_data(std::make_shared<T>(std::move(new_value)));
         std::unique_ptr<node> p(new node);
         {
+            // Serialize publication with the consumer's predicate-to-wait transition.
+            // Lock head before tail, as in wait_for_data(), try_pop_head(), and empty().
+            std::lock_guard<std::mutex> head_lock(head_mutex);
             std::lock_guard<std::mutex> tail_lock(tail_mutex);
             tail->data = new_data;
             node* const new_tail = p.get();
