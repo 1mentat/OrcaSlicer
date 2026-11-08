@@ -346,7 +346,7 @@ using RGB = Color;
 TextureImage solid_texture(int width, int height, RGB rgb)
 {
     REQUIRE(width > 0);
-    REQUIRE(width <= 4);
+    REQUIRE(width <= 8);
     REQUIRE(height > 0);
     REQUIRE(height <= 8);
     TextureImage image;
@@ -536,7 +536,7 @@ const RGB *color_near_x(const PaintedMesh &mesh, double x, double tolerance = 0.
 
 } // namespace
 
-TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas keeps UVs near a stacked texture edge in that texture", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh mesh = two_material_faces();
     mesh.textures[0] = solid_texture(1, 2, { 255, 0, 0 });
@@ -587,7 +587,7 @@ void require_red_blue_by_side(const PaintedMesh &mesh)
 
 } // namespace
 
-TEST_CASE("Texture atlas decodes encoded PNGs for separate material rows", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas decodes encoded PNGs for separate material rows", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh mesh = two_material_faces();
     mesh.textures = {
@@ -623,7 +623,7 @@ TextureImage rgba_texture(RGB rgb, unsigned char alpha)
 
 } // namespace
 
-TEST_CASE("Texture atlas converts RGBA material textures without using alpha as color", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas converts RGBA material textures without using alpha as color", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh mesh = two_material_faces();
     mesh.textures = {
@@ -639,7 +639,7 @@ TEST_CASE("Texture atlas converts RGBA material textures without using alpha as 
 
 namespace texture_atlas_contracts {
 
-TEST_CASE("Texture atlas preserves encoded PNG mapping after texture permutation", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas preserves encoded PNG mapping after texture permutation", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh first = two_material_faces();
     first.textures = {
@@ -782,7 +782,7 @@ TEST_CASE("Texture atlas honors distinct per-face UV values", "[TexturePainting]
 
 namespace texture_atlas_contracts {
 
-TEST_CASE("Texture atlas gives base colors an isolated color swatch", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas gives base colors an isolated color swatch", "[TexturePainting][TextureAtlas]")
 {
     TexturedMesh mesh = two_material_faces();
     mesh.material_texture_map = { -1, 0 };
@@ -846,7 +846,7 @@ TEST_CASE("Texture atlas uses the first decoded row for a material-less encoded-
 
 namespace texture_atlas_contracts {
 
-TEST_CASE("Texture atlas keeps each mapped texture attached to its face", "[TexturePainting][TextureAtlas][!shouldfail]")
+TEST_CASE("Texture atlas keeps each mapped texture attached to its face", "[TexturePainting][TextureAtlas]")
 {
     const PaintedMesh output = paint(two_material_faces());
     require_red_blue_by_side(output);
@@ -877,6 +877,201 @@ TEST_CASE("Texture atlas remaps the vertical coordinate for unequal texture heig
     REQUIRE(left != nullptr);
     CHECK((*left)[0] > 100);
     CHECK((*left)[1] < 80);
+    CHECK((*left)[2] < 80);
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas remaps the horizontal coordinate inside a narrow texture", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = horizontal_texture(2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(8, 1, { 0, 0, 0 });
+    mesh.uvs.assign(mesh.vertices.size(), { 0.5f, 0.f });
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
+    CHECK((*left)[2] < 80);
+}
+
+TEST_CASE("Texture atlas wraps tiled UVs on both axes", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = solid_texture(2, 2, { 255, 0, 0 });
+    mesh.textures[1] = solid_texture(2, 2, { 0, 0, 255 });
+    mesh.uvs.assign(mesh.vertices.size(), { -0.25f, 1.25f });
+    const PaintedMesh negative = paint(mesh);
+    mesh.uvs.assign(mesh.vertices.size(), { 0.75f, 0.25f });
+    const PaintedMesh wrapped = paint(mesh);
+    REQUIRE(negative.face_colors.size() == wrapped.face_colors.size());
+    REQUIRE(negative.indices.size() == wrapped.indices.size());
+    for (size_t i = 0; i < negative.face_colors.size(); ++i)
+        CHECK(negative.face_colors[i] == wrapped.face_colors[i]);
+}
+
+// This zero-UV case protects material colors. The nonzero face-UV case below
+// separately checks UV selection when vertex UVs are absent.
+TEST_CASE("Texture atlas uses explicit per-face UVs when vertex UVs are absent", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.uvs.clear();
+    mesh.uv_coords = {
+        { 0.f, 0.f }, { 0.f, 0.f }, { 0.f, 0.f },
+        { 0.f, 0.f }, { 0.f, 0.f }, { 0.f, 0.f },
+    };
+    mesh.uv_indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    const PaintedMesh output = paint(mesh);
+    require_red_blue_by_side(output);
+}
+
+TEST_CASE("Texture atlas gives an untextured material a dedicated base-color swatch", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_texture_map = { -1, 0 };
+    mesh.material_colors = {
+        { 0.f, 1.f, 0.f, 1.f },
+        { 1.f, 0.f, 0.f, 1.f },
+    };
+    mesh.textures = { solid_texture(1, 1, { 0, 0, 255 }), solid_texture(1, 1, { 0, 0, 0 }) };
+    const PaintedMesh output = paint(mesh);
+    bool green = false;
+    bool blue = false;
+    for (size_t i = 0; i < output.face_colors.size(); ++i) {
+        const RGB &c = output.face_colors[i];
+        if (face_center_x(output, i) < 1.5) {
+            CHECK(c[0] < 60);
+            CHECK(c[1] > 150);
+            CHECK(c[2] < 60);
+            green = true;
+        } else if (face_center_x(output, i) > 2.5) {
+            CHECK(c[0] < 60);
+            CHECK(c[1] < 60);
+            CHECK(c[2] > 150);
+            blue = true;
+        }
+    }
+    REQUIRE(green);
+    REQUIRE(blue);
+}
+
+TEST_CASE("Texture atlas uses the first usable texture for a material-less face", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_ids = { -1, 1 };
+    mesh.material_texture_map = { 0, 1 };
+    const PaintedMesh output = paint(mesh);
+    bool first_face_red = false;
+    for (size_t i = 0; i < output.face_colors.size(); ++i) {
+        if (face_center_x(output, i) < 1.5) {
+            CHECK(output.face_colors[i][0] > 180);
+            CHECK(output.face_colors[i][1] < 40);
+            CHECK(output.face_colors[i][2] < 40);
+            first_face_red = true;
+        }
+    }
+    REQUIRE(first_face_red);
+}
+
+TEST_CASE("Texture atlas falls back to base color for an invalid texture mapping", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.material_texture_map = { 7, 1 };
+    mesh.material_colors[0] = { 1.f, 1.f, 0.f, 1.f };
+    const PaintedMesh output = paint(mesh);
+    bool yellow = false;
+    for (size_t i = 0; i < output.face_colors.size(); ++i) {
+        if (face_center_x(output, i) < 1.5) {
+            CHECK(output.face_colors[i][0] > 150);
+            CHECK(output.face_colors[i][1] > 150);
+            CHECK(output.face_colors[i][2] < 80);
+            yellow = true;
+        }
+    }
+    REQUIRE(yellow);
+}
+
+TEST_CASE("Texture atlas material order is a metamorphic permutation", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh first = two_material_faces();
+    TexturedMesh permuted = first;
+    std::swap(permuted.textures[0], permuted.textures[1]);
+    permuted.material_texture_map = { 1, 0 };
+    const PaintedMesh a = paint(first);
+    const PaintedMesh b = paint(permuted);
+    require_red_blue_by_side(a);
+    require_red_blue_by_side(b);
+    REQUIRE(a.face_colors.size() == b.face_colors.size());
+    for (size_t i = 0; i < a.face_colors.size(); ++i) {
+        const RGB expected = face_center_x(a, i) < 1.5 ? RGB{255, 0, 0} : RGB{0, 0, 255};
+        // Float sampling and integer truncation may retain 254 in a full-intensity channel.
+        for (std::size_t channel = 0; channel < expected.size(); ++channel)
+            CHECK_THAT(static_cast<double>(a.face_colors[i][channel]),
+                       Catch::Matchers::WithinAbs(static_cast<double>(expected[channel]),
+                                                  expected[channel] == 255 ? 1. : 0.));
+        CHECK(a.face_colors[i] == b.face_colors[i]);
+    }
+}
+
+TEST_CASE("Texture atlas is deterministic across repeated builds", "[TexturePainting][TextureAtlas]")
+{
+    const TexturedMesh input = two_material_faces();
+    const PaintedMesh first = paint(input);
+    const PaintedMesh second = paint(input);
+    REQUIRE(first.indices.size() == second.indices.size());
+    REQUIRE(first.vertices.size() == second.vertices.size());
+    CHECK(first.indices == second.indices);
+    CHECK(first.face_colors == second.face_colors);
+}
+
+TEST_CASE("Texture atlas rejects empty or undecodable texture inputs", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh empty = two_material_faces();
+    empty.textures.clear();
+    PaintedMesh output;
+    CHECK_FALSE(texture_to_painting(empty, output, atlas_settings()));
+
+    TexturedMesh undecodable = two_material_faces();
+    undecodable.textures[0].channels = 2;
+    undecodable.textures[1].channels = 2;
+    CHECK_FALSE(texture_to_painting(undecodable, output, atlas_settings()));
+
+    TexturedMesh no_faces = two_material_faces();
+    no_faces.indices.clear();
+    CHECK_FALSE(texture_to_painting(no_faces, output, atlas_settings()));
+}
+
+TEST_CASE("Texture atlas forwards cancellation before expensive color conversion", "[TexturePainting][TextureAtlas]")
+{
+    bool cancelled = false;
+    PaintedMesh output;
+    CHECK_FALSE(texture_to_painting(two_material_faces(), output, atlas_settings(), nullptr, [&]() {
+        cancelled = true;
+        return true;
+    }));
+    CHECK(cancelled);
+}
+
+} // namespace texture_atlas_contracts
+
+namespace texture_atlas_contracts {
+
+TEST_CASE("Texture atlas selects nonzero face UVs without vertex UVs", "[TexturePainting][TextureAtlas]")
+{
+    TexturedMesh mesh = two_material_faces();
+    mesh.textures[0] = horizontal_texture(2, { 255, 0, 0 }, { 0, 255, 0 });
+    mesh.textures[1] = solid_texture(2, 1, { 0, 0, 0 });
+    mesh.uvs.clear();
+    mesh.uv_coords.assign(6, { 0.5f, 0.f });
+    mesh.uv_indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    const PaintedMesh output = paint(mesh);
+    const RGB *left = color_near_x(output, 1. / 3.);
+    REQUIRE(left != nullptr);
+    CHECK((*left)[0] > 50);
+    CHECK((*left)[1] > 50);
     CHECK((*left)[2] < 80);
 }
 
