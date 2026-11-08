@@ -2305,8 +2305,10 @@ namespace model_import_contracts {
 TEST_CASE("Model read_from_archive cancellation is surfaced after archive load", "[Model][ModelImport][Archive][ModelArchiveInstanceCancel]")
 {
     ScopedSlic3rTemporaryDir backup("orca_model_import_read");
-    const std::string archive = (boost::filesystem::path(TEST_DATA_DIR) / "test_3mf" / "Geräte" / "Büchse.3mf").string();
-    REQUIRE(boost::filesystem::is_regular_file(archive));
+    ScopedTemporaryFile archive_file(".3mf");
+    store_archive(archive_file.string());
+    const std::string archive = archive_file.string();
+    REQUIRE(boost::filesystem::is_regular_file(archive_file.path()));
     En3mfType control_type = En3mfType::From_Other;
     Model control = read_archive(archive, control_type,
         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances);
