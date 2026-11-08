@@ -26,6 +26,8 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/I18N.hpp"
 #include "libslic3r/GCode/TimelapsePosPicker.hpp"
 #include <optional>
 #include "libslic3r/Layer.hpp"
@@ -1565,4 +1567,60 @@ TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty 
         CHECK(position == DefaultTimelapsePos);
     else
         CHECK(Polygon::new_scale(bed).contains(Point(scaled(position.x()), scaled(position.y()))));
+}
+
+TEST_CASE("Prime Tower generation rejects an explicit empty shared printable region", "[Print][WipeTower][BedShape]")
+{
+    // One physical nozzle bypasses multi-nozzle geometric mapping; two object-assigned
+    // filaments still require real tool ordering and Prime Tower generation.
+    const int region = GENERATE(0, 1, 2); // missing, valid, explicitly empty
+    INFO("printable region mode " << region);
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"nozzle_diameter", "0.4"},
+        {"single_extruder_multi_material", 1},
+        {"enable_prime_tower", 1},
+        {"prime_tower_width", 35},
+        {"wipe_tower_x", "50"},
+        {"wipe_tower_y", "50"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+    });
+    if (region == 0)
+        config.erase("extruder_printable_area");
+    else
+        config.set_deserialize_strict("extruder_printable_area",
+            region == 1 ? "0x0,200x0,200x200,0x200" : "0x0,200x0,200x200,0x200#");
+
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}}, {{"extruder", 2}}};
+    Print print;
+    Model model;
+    REQUIRE_NOTHROW(init_print(std::vector<TriangleMesh>{cube(2), cube(2)}, print, model, config, &overrides));
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.has_wipe_tower());
+    if (region == 2) {
+        REQUIRE(print.config().extruder_printable_area.values.size() == 2);
+        REQUIRE(print.config().extruder_printable_area.values.back().empty());
+        bool rejected = false;
+        try {
+            print.process();
+        } catch (const SlicingError &error) {
+            rejected = true;
+            CHECK(std::string(error.what()) == I18N::translate("Prime Tower") +
+                I18N::translate(" is partially outside the printable area, and it cannot be printed.\n"));
+        }
+        REQUIRE(rejected);
+        // An earlier validation failure cannot satisfy these: _make_wipe_tower has
+        // populated tool ordering, but rejects the region before generating paths.
+        CHECK(print.step_state_with_timestamp(psWipeTower).state == PrintStateBase::STARTED);
+        CHECK(print.wipe_tower_data().tool_ordering.has_wipe_tower());
+        CHECK(print.wipe_tower_data().tool_changes.empty());
+    } else {
+        REQUIRE_NOTHROW(print.process());
+        CHECK(print.is_step_done(psWipeTower));
+        CHECK(print.wipe_tower_data().tool_ordering.has_wipe_tower());
+        CHECK_FALSE(print.wipe_tower_data().tool_changes.empty());
+    }
 }
