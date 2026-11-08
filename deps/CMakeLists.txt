@@ -215,6 +215,31 @@ function(orcaslicer_add_cmake_project projectname)
         set(_source_dir_arg SOURCE_DIR ${P_ARGS_SOURCE_DIR})
     endif ()
 
+    # Keep the original cache name and native download/hash/extraction behavior.
+    # Only ordinary URL <zip> URL_HASH <sha256> recipes gain an official fallback.
+    set(_archive_args ${P_ARGS_UNPARSED_ARGUMENTS})
+    list(LENGTH _archive_args _archive_count)
+    list(REMOVE_ITEM _archive_args URL)
+    list(LENGTH _archive_args _archive_without_url)
+    math(EXPR _archive_url_count "${_archive_count} - ${_archive_without_url}")
+    list(FIND P_ARGS_UNPARSED_ARGUMENTS URL _archive_index)
+    math(EXPR _archive_hash_index "${_archive_index} + 3")
+    if (_archive_url_count EQUAL 1 AND _archive_hash_index LESS _archive_count
+        AND NOT ";${P_ARGS_UNPARSED_ARGUMENTS};" MATCHES ";(DOWNLOAD_COMMAND|HTTP_HEADER|HTTP_USERNAME|HTTP_PASSWORD|NETRC|NETRC_FILE);")
+        math(EXPR _archive_value_index "${_archive_index} + 1")
+        math(EXPR _archive_keyword_index "${_archive_index} + 2")
+        list(GET P_ARGS_UNPARSED_ARGUMENTS ${_archive_value_index} _archive_url)
+        list(GET P_ARGS_UNPARSED_ARGUMENTS ${_archive_keyword_index} _archive_keyword)
+        list(GET P_ARGS_UNPARSED_ARGUMENTS ${_archive_hash_index} _archive_hash)
+        string(LENGTH "${_archive_hash}" _archive_hash_length)
+        if (_archive_keyword STREQUAL "URL_HASH" AND _archive_hash_length EQUAL 71
+            AND _archive_hash MATCHES "^SHA256=[0-9A-Fa-f]+$"
+            AND _archive_url MATCHES "^https://github[.]com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/archive/([A-Za-z0-9_./+-]+)[.]zip$")
+            list(INSERT P_ARGS_UNPARSED_ARGUMENTS ${_archive_keyword_index}
+                "https://codeload.github.com/${CMAKE_MATCH_1}/${CMAKE_MATCH_2}/zip/${CMAKE_MATCH_3}")
+        endif ()
+    endif ()
+
 if (NOT IS_CROSS_COMPILE OR NOT APPLE)
     ExternalProject_Add(
         dep_${projectname}
