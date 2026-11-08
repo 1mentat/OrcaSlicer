@@ -1,4 +1,4 @@
-name: Official release download route proof
+name: Official browser downloads on ARM runner
 on:
   push:
     branches: [ci-download-proof-official-assets-v1]
@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   download-only:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - name: Verify four fixed assets over both official routes
@@ -92,7 +92,7 @@ jobs:
               summary.write("Download-only proof: API all verified = " + str(report["api_all_verified"]) +
                             "; browser all verified = " + str(report["browser_all_verified"]) +
                             ". No binaries installed or executed; main CI remains separate.\n")
-          raise SystemExit(0 if report["api_all_verified"] else 1)
+          raise SystemExit(0 if report["browser_all_verified"] else 1)
           PYPROOF
       - name: Preserve sanitized route evidence
         if: always()
