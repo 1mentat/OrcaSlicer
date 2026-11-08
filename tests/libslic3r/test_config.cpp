@@ -3799,15 +3799,87 @@ TEST_CASE("ConfigOption vector overrides copy regular sources and preserve nulla
     CHECK(target.values == expected_nullable);
 }
 
-TEST_CASE("Vector override into an empty target takes the nullable source values", "[Config][ConfigVectorOverride][!shouldfail]")
+TEST_CASE("Vector override into an empty target takes the nullable source values", "[Config][ConfigVectorOverride]")
 {
     ConfigOptionInts empty_target;
     const ConfigOptionIntsNullable incoming({7, 8});
     std::vector<int> indices{0, 1};
-    // Known bug: apply_override returns early when the target is empty, leaving it empty and
-    // disagreeing with overriden_by; fixed by the follow-up fix PR
     CHECK(empty_target.apply_override(&incoming, indices));
     CHECK(empty_target.values == std::vector<int>{7, 8});
+}
+
+TEST_CASE("Retraction and z-hop overrides initialize empty machine vectors from concrete filament values",
+          "[Config][ConfigVectorOverride]")
+{
+    const std::string key = GENERATE(std::string("retraction_length"), std::string("z_hop"));
+    CAPTURE(key);
+    const ConfigOptionFloats old_machine;
+    const ConfigOptionFloats new_machine;
+    const ConfigOptionFloatsNullable incoming({0., 0.9});
+    const DynamicPrintConfig full_config;
+    DynamicPrintConfig overrides;
+    t_config_option_keys differences;
+    std::vector<int> indices{1, 0};
+
+    compute_filament_override_value(key, &old_machine, &new_machine, &incoming,
+                                    full_config, differences, overrides, indices);
+
+    CHECK(differences == t_config_option_keys{key});
+    const auto *result = dynamic_cast<const ConfigOptionFloats *>(overrides.option(key));
+    REQUIRE(result != nullptr);
+    check_values(result->values, {0., 0.9});
+    CHECK(old_machine.empty());
+    CHECK(new_machine.empty());
+    check_values(incoming.values, {0., 0.9});
+    CHECK(indices == std::vector<int>{1, 0});
+}
+
+TEST_CASE("Empty vector overrides preserve unresolved nil slots and empty sources",
+          "[Config][ConfigVectorOverride]")
+{
+    const int nil_slots = GENERATE(0, 1, 2, 3);
+    CAPTURE(nil_slots);
+    ConfigOptionFloats target;
+    ConfigOptionFloatsNullable incoming;
+    if (nil_slots != 0) {
+        incoming.values = {0., 0.9};
+        if (nil_slots & 1)
+            incoming.values[0] = ConfigOptionFloatsNullable::nil_value();
+        if (nil_slots & 2)
+            incoming.values[1] = ConfigOptionFloatsNullable::nil_value();
+    }
+    std::vector<int> indices(incoming.size(), 0);
+    const auto original_indices = indices;
+
+    CHECK_FALSE(target.apply_override(&incoming, indices));
+    CHECK(target.empty());
+    CHECK(indices == original_indices);
+    if (nil_slots != 0) {
+        REQUIRE(incoming.size() == 2);
+        CHECK(incoming.is_nil(0) == bool(nil_slots & 1));
+        CHECK(incoming.is_nil(1) == bool(nil_slots & 2));
+    } else
+        CHECK(incoming.empty());
+}
+
+TEST_CASE("Empty vector override retains type and nullable-target checks",
+          "[Config][ConfigVectorOverride]")
+{
+    ConfigOptionInts target;
+    const ConfigOptionFloatsNullable different_type({1.});
+    std::vector<int> indices{0};
+    CHECK_THROWS_AS(target.apply_override(&different_type, indices), ConfigurationError);
+    CHECK(target.empty());
+
+    ConfigOptionIntsNullable nullable_target;
+    const ConfigOptionIntsNullable incoming({7});
+    CHECK_THROWS_AS(nullable_target.apply_override(&incoming, indices), ConfigurationError);
+    CHECK(nullable_target.empty());
+
+    ConfigOptionInts existing({10, 20});
+    const ConfigOptionIntsNullable empty_source;
+    CHECK_FALSE(existing.apply_override(&empty_source, indices));
+    CHECK(existing.values == std::vector<int>{10, 20});
 }
 
 TEST_CASE("Config option vectors collect scalar values and first vector values, and set_at grows with the first value", "[Config][ConfigContracts]")

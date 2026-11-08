@@ -777,6 +777,18 @@ public:
     		return false;
     	}
 
+        if (this->values.empty()) {
+            if (rhs_vec->values.empty())
+                return false;
+            // Nil slots need an existing machine default; only a fully concrete
+            // source can initialize an empty, non-nullable target.
+            for (size_t i = 0; i < rhs_vec->size(); ++i)
+                if (rhs_vec->is_nil(i))
+                    return false;
+            this->values = rhs_vec->values;
+            return true;
+        }
+
     	size_t cnt = std::min(this->size(), rhs_vec->size());
         if (cnt < 1)
             return false;
