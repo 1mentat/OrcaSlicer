@@ -229,10 +229,7 @@ TEST_CASE("SVG importer preserves the last curve of implicitly and explicitly cl
     check_prism(single_mesh(model), 10., 7.5, 60., 0.05, 0.03);
 }
 
-// Known bug: the importer passes the self-crossing wire straight to BRepBuilderAPI_MakeFace
-// (is_profile_self_interaction only logs a warning), so the extruded solid has almost no volume
-// (0.58 of 35 mm^3) instead of two filled lobes; fixed by the follow-up fix PR.
-TEST_CASE("SVG importer fills both lobes of a self-intersecting contour", "[SVGImport][!shouldfail]")
+TEST_CASE("SVG importer fills both lobes of a self-intersecting contour", "[SVGImport]")
 {
     ScopedTemporaryFile file(".svg");
     write_svg(file,
@@ -285,4 +282,83 @@ TEST_CASE("SVG importer applies group transforms to the paths inside", "[SVGImpo
     CHECK(volumes[1]->name == "part_2");
     check_prism(volumes[0]->mesh(), 2., 2., 2. * 2.);
     check_prism(volumes[1]->mesh(), 6., 2., 6. * 2.);
+}
+
+TEST_CASE("SVG importer applies fill rules to nested subpath winding", "[SVGImport]")
+{
+    const bool evenodd = GENERATE(false, true);
+    const bool reverse_inner = GENERATE(false, true);
+    ScopedTemporaryFile file(".svg");
+    const std::string inner = reverse_inner ? "M5 5 L5 15 L15 15 L15 5 Z" : "M5 5 L15 5 L15 15 L5 15 Z";
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"red\" fill-rule=\"" +
+        std::string(evenodd ? "evenodd" : "nonzero") + "\" d=\"M0 0 L20 0 L20 20 L0 20 Z " + inner + "\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_prism(single_mesh(model), 20., 20., evenodd || reverse_inner ? 300. : 400.);
+}
+
+TEST_CASE("SVG importer retains disconnected components within one filled shape", "[SVGImport]")
+{
+    const bool evenodd = GENERATE(false, true);
+    ScopedTemporaryFile file(".svg");
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"blue\" fill-rule=\"" +
+        std::string(evenodd ? "evenodd" : "nonzero") +
+        "\" d=\"M0 0 L4 0 L4 5 L0 5 Z M8 0 L14 0 L14 3 L8 3 Z\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_prism(single_mesh(model), 14., 5., 38.);
+    CHECK(model.objects.front()->volumes.front()->name == "part_1");
+}
+
+TEST_CASE("SVG importer retains islands inside holes under evenodd fill", "[SVGImport]")
+{
+    ScopedTemporaryFile file(".svg");
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"red\" fill-rule=\"evenodd\" "
+        "d=\"M0 0 L20 0 L20 20 L0 20 Z M5 5 L15 5 L15 15 L5 15 Z M8 8 L12 8 L12 12 L8 12 Z\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_prism(single_mesh(model), 20., 20., 316.);
+}
+
+TEST_CASE("SVG importer unions disconnected stroke subpaths independently of fill rule", "[SVGImport]")
+{
+    const bool evenodd = GENERATE(false, true);
+    ScopedTemporaryFile file(".svg");
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"30\" height=\"20\"><path fill=\"none\" "
+        "stroke=\"black\" stroke-width=\"2\" stroke-linecap=\"butt\" fill-rule=\"" +
+        std::string(evenodd ? "evenodd" : "nonzero") + "\" d=\"M2 5 L12 5 M16 5 L26 5\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_prism(single_mesh(model), 24., 2., 40.);
+}
+
+TEST_CASE("SVG importer keeps overlapping stroke offsets nonzero under either fill rule", "[SVGImport]")
+{
+    const bool evenodd = GENERATE(false, true);
+    ScopedTemporaryFile file(".svg");
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><path fill=\"none\" "
+        "stroke=\"black\" stroke-width=\"2\" fill-rule=\"" + std::string(evenodd ? "evenodd" : "nonzero") +
+        "\" d=\"M2 2 L12 2 L12 12 L2 12 Z M2 2 L12 2 L12 12 L2 12 Z\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    check_prism(single_mesh(model), 12., 12., 80.);
+}
+
+TEST_CASE("SVG importer rejects filled coordinates outside the clipping range", "[SVGImport]")
+{
+    // Finite NanoSVG float coordinates, but outside the integer clipping domain.
+    // Fixed-producer only: do not run this as an old integer-conversion probe.
+    ScopedTemporaryFile file(".svg");
+    write_svg(file, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">"
+        "<path fill=\"red\" d=\"M0 0 L1e20 0 L1e20 10 L0 10 Z\"/></svg>");
+    Model model;
+    std::string message;
+    CHECK_FALSE(load_svg(file.string().c_str(), &model, message));
+    CHECK(message == "import svg failed: path coordinates exceed the supported integer range.");
+    CHECK(model.objects.empty());
 }

@@ -37,6 +37,13 @@
 #include "TopoDS.hxx"
 #include "BRepExtrema_SelfIntersection.hxx"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
+#include <clipper2/clipper.core.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include "libslic3r/Polyline.hpp"
 
 namespace Slic3r {
@@ -154,6 +161,9 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
     int name_index = 1;
     for (NSVGshape *shape = svg_data->shapes; shape; shape = shape->next) {
         char *      id     = shape->id;
+        const bool has_fill = shape->fill.type == NSVG_PAINT_COLOR ||
+                              shape->fill.type == NSVG_PAINT_LINEAR_GRADIENT ||
+                              shape->fill.type == NSVG_PAINT_RADIAL_GRADIENT;
 
         int interpolation_precision = 10;  // Number of interpolation points
         float step = 1.0f / float(interpolation_precision - 1);
@@ -211,7 +221,7 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
                 continue;
 
             // Preserve the last sampled edge and add the implicit fill-closing edge.
-            if (shape->fill.gradient != nullptr) {
+            if (has_fill) {
                 const gp_Pnt start = profile_line_points.front().first;
                 const gp_Pnt end = profile_line_points.back().second;
                 if (is_same_points(end, start))
@@ -226,7 +236,7 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             path_line_points.push_back(profile_line_points);
         }
 
-        if (shape->fill.gradient == nullptr) {
+        if (!has_fill) {
             double scale_size = 1e6;
             std::vector<std::vector<std::pair<gp_Pnt, gp_Pnt>>> new_path_line_points;
             float stroke_width = shape->strokeWidth * scale_size;
@@ -270,38 +280,56 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             path_line_points = new_path_line_points;
         }
 
-        // generate all profile curves
-        std::vector<TopoDS_Wire> wires;
-        int index = 0;
-        double                   max_area = 0;
-        for (int i = 0; i < path_line_points.size(); ++i) {
-            BRepBuilderAPI_MakeWire wire_build;
-            for (auto point_item : path_line_points[i]) {
-                TopoDS_Edge edge_build = BRepBuilderAPI_MakeEdge(point_item.first, point_item.second);
-                wire_build.Add(edge_build);
+        // Resolve crossings and hole ownership across all subpaths of this shape.
+        // Stroke offsets already describe painted areas; fill-rule applies only to fills.
+        constexpr double profile_scale = 1e6;
+        // Stay strictly inside the representable and Clipper-safe coordinate bounds.
+        // Strict comparison also avoids the rounded-up double representation of MAX_COORD.
+        const double coordinate_limit = std::min(double(std::numeric_limits<coord_t>::max()), double(Clipper2Lib::MAX_COORD));
+        Polygons profiles;
+        for (const auto &lines : path_line_points) {
+            Polygon profile;
+            for (const auto &line : lines) {
+                const double x = line.first.X() * profile_scale;
+                const double y = line.first.Y() * profile_scale;
+                if (!std::isfinite(x) || !std::isfinite(y) ||
+                    x <= -coordinate_limit || x >= coordinate_limit ||
+                    y <= -coordinate_limit || y >= coordinate_limit) {
+                    message = "import svg failed: path coordinates exceed the supported integer range.";
+                    nsvgDelete(svg_data);
+                    return false;
+                }
+                profile.points.emplace_back(static_cast<coord_t>(x), static_cast<coord_t>(y));
             }
-            TopoDS_Wire wire = wire_build.Wire();
-            double profile_area = get_profile_area(path_line_points[i]);
-            if (profile_area > max_area) {
-                max_area = profile_area;
-                index = i;
-            }
-            wires.emplace_back(wire);
+            if (profile.points.size() >= 3)
+                profiles.push_back(std::move(profile));
         }
-
-        if (wires.empty())
+        const PolyFillType fill_rule = has_fill && shape->fillRule == NSVG_FILLRULE_EVENODD ? pftEvenOdd : pftNonZero;
+        const ExPolygons regions = union_ex(profiles, fill_rule);
+        if (regions.empty())
             continue;
 
-        gp_Vec      dir(0, 0, 10);
-        BRepBuilderAPI_MakeFace face_make(wires[index]);
-        for (int i = 0; i < wires.size(); ++i) {
-            if (index == i)
-                continue;
-            face_make.Add(wires[i]);
+        const auto make_wire = [](const Polygon &polygon) {
+            BRepBuilderAPI_MakeWire wire;
+            for (size_t i = 0; i < polygon.points.size(); ++i) {
+                const Point &a = polygon.points[i];
+                const Point &b = polygon.points[(i + 1) % polygon.points.size()];
+                wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(double(a.x()) / profile_scale, double(a.y()) / profile_scale, 0.),
+                                               gp_Pnt(double(b.x()) / profile_scale, double(b.y()) / profile_scale, 0.)));
+            }
+            return wire.Wire();
+        };
+        // Keep one imported volume/name per original shape, including disconnected islands.
+        BRep_Builder compound_builder;
+        TopoDS_Compound element_shape;
+        compound_builder.MakeCompound(element_shape);
+        const gp_Vec dir(0, 0, 10);
+        for (const ExPolygon &region : regions) {
+            BRepBuilderAPI_MakeFace face_make(make_wire(region.contour));
+            for (const Polygon &hole : region.holes)
+                face_make.Add(make_wire(hole));
+            compound_builder.Add(element_shape, BRepPrimAPI_MakePrism(face_make.Face(), dir, false, false).Shape());
         }
-
-        TopoDS_Face face = face_make.Face();
-        TopoDS_Shape element_shape = BRepPrimAPI_MakePrism(face, dir, false, false).Shape();
 
         Element_Info element_info;
         element_info.name  = "part_" + std::to_string(name_index);
