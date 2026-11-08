@@ -6,6 +6,7 @@
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/Point.hpp"
 #include <exception>
+#include <string>
 
 namespace Slic3r { namespace GUI {
 
@@ -26,6 +27,7 @@ class FillBedJob : public Job
     Points m_bedpts;
 
     arrangement::ArrangeParams params;
+    std::string m_bed_error;
 
     int m_status_range = 0;
     Plater *m_plater;

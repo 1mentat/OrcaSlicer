@@ -16578,6 +16578,18 @@ void Plater::calib_pa(const Calib_Params& params)
 
 void Plater::_calib_pa_pattern(const Calib_Params& params)
 {
+    // new_project has already applied the user's keep/discard preset choice.
+    // Reject its actual bed before changing calibration settings or adding a model.
+    arrangement::ArrangeParams arrange_params;
+    Points bedpts;
+    const DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
+    try {
+        bedpts = arrangement::get_shrink_bedpts(&config, arrange_params);
+    } catch (const Slic3r::RuntimeError &ex) {
+        show_error(this, ex.what());
+        return;
+    }
+
     std::vector<double> speeds{params.speeds};
     std::vector<double> accels{params.accelerations};
     std::vector<size_t> object_idxs{};
@@ -16714,9 +16726,6 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
 
     arrangement::ArrangePolygons arranged_items;
     {
-        arrangement::ArrangeParams ap;
-        Points bedpts = arrangement::get_shrink_bedpts(&full_config, ap);
-
         for(size_t i = 0; i < speeds.size() * accels.size(); i++) {
             arrangement::ArrangePolygon p;
             cube->instances[0]->get_arrange_polygon(&p);
@@ -16724,7 +16733,7 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
             arranged_items.emplace_back(p);
         }
 
-        arrangement::arrange(arranged_items, bedpts, ap);
+        arrangement::arrange(arranged_items, bedpts, arrange_params);
     }
 
     /* scale cube back to the size of test pattern 'handle' */
