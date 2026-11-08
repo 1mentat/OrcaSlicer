@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -28,8 +29,8 @@ namespace Slic3r { namespace tex2color {
 // that CloseBoundariesAndRepairManifoldness will attempt to triangulate. The
 // cost of triangulate_hole grows non-linearly with cycle length, so this caps
 // the worst-case per-hole work rather than the aggregate boundary size: a mesh
-// with many small holes is still fully repaired, while a mesh containing one
-// pathologically large hole skips triangulation entirely.
+// with many small holes can still be repaired while oversized cycles are left
+// open, provided the aggregate boundary limit below is met.
 inline constexpr std::size_t MAX_REPAIRABLE_MESH_HOLE_EDGES = 500;
 
 // Default upper bound on the aggregate number of boundary half-edges in the
@@ -81,10 +82,9 @@ inline BoundaryEdgeStats ComputeBoundaryEdgeStats(const cgalutils::CGALMesh& cga
     return stats;
 }
 
-// Unconditionally close every boundary cycle of the mesh and repair non-manifold
-// vertices. The caller (e.g. RepairMesh) is expected to gate this call based on
-// boundary statistics; entering this function always triggers triangulation.
-inline void CloseBoundariesAndRepairManifoldness(cgalutils::CGALMesh& cgal_mesh)
+// Close boundary cycles within the per-hole limit and repair non-manifold vertices.
+// The caller (e.g. RepairMesh) must separately enforce the aggregate boundary limit.
+inline void CloseBoundariesAndRepairManifoldness(cgalutils::CGALMesh& cgal_mesh, std::size_t max_hole_edges)
 {
     namespace PMP = CGAL::Polygon_mesh_processing;
     using CGALMesh = cgalutils::CGALMesh;
@@ -98,12 +98,26 @@ inline void CloseBoundariesAndRepairManifoldness(cgalutils::CGALMesh& cgal_mesh)
     CGAL::extract_boundary_cycles(cgal_mesh, std::back_inserter(border_cycles));
 
     for (const HalfedgeDescriptor h : border_cycles) {
+        std::size_t edges = 0;
+        HalfedgeDescriptor current = h;
+        do {
+            ++edges;
+            current = next(current, cgal_mesh);
+        } while (current != h);
+        if (edges > max_hole_edges)
+            continue;
         std::vector<FaceDescriptor> patch_faces;
         PMP::triangulate_hole(cgal_mesh, h, CGAL::parameters::face_output_iterator(std::back_inserter(patch_faces)));
     }
 
     PMP::remove_degenerate_faces(cgal_mesh);
     PMP::duplicate_non_manifold_vertices(cgal_mesh);
+}
+
+// Preserve the original one-argument helper's unconditional hole-filling policy.
+inline void CloseBoundariesAndRepairManifoldness(cgalutils::CGALMesh& cgal_mesh)
+{
+    CloseBoundariesAndRepairManifoldness(cgal_mesh, std::numeric_limits<std::size_t>::max());
 }
 
 inline bool RepairMesh(const TriMesh& mesh,
@@ -210,13 +224,11 @@ inline bool RepairMesh(const TriMesh& mesh,
                                 << " cycle_count=" << stats.cycle_count;
     }
 
-    const bool can_repair_holes =
-        stats.total_boundary_edges <= setting.max_boundary_edges &&
-        stats.max_cycle_edges      <= setting.max_hole_edges;
+    const bool can_repair_holes = stats.total_boundary_edges <= setting.max_boundary_edges;
 
     if (can_repair_holes) {
         const auto t0 = Clock::now();
-        CloseBoundariesAndRepairManifoldness(cgal_mesh);
+        CloseBoundariesAndRepairManifoldness(cgal_mesh, setting.max_hole_edges);
         BOOST_LOG_TRIVIAL(info) << "TextureToColor: RepairMesh stage=close_boundaries took="
                                 << elapsed_ms(t0) << " ms";
     } else {
