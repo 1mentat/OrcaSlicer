@@ -458,9 +458,14 @@ jobs:
         # resources/ the shipped profiles (PROFILES_DIR), the printers/ maps, the
         # icon SVGs (NativeCommands icon names are checked against them), and the
         # bundled fonts (the text-shape tests load them from beside profiles/).
+        # Keep the measured colour recipes and directional flush datasets too.
         find "$d" -mindepth 1 -maxdepth 1 -type d \
           ! -name tests ! -name build_flatpak ! -name scripts ! -name resources -exec rm -rf {} +
-        find "$d/resources" -mindepth 1 -maxdepth 1 ! -name profiles ! -name printers ! -name images ! -name fonts -exec rm -rf {} +
+        find "$d/resources" -mindepth 1 -maxdepth 1 ! -name profiles ! -name printers ! -name images ! -name fonts ! -name filament_mixing ! -name flush -exec rm -rf {} +
+        test -s "$d/resources/filament_mixing/standard_color_recipes.json"
+        for dataset in flush_data_standard.txt flush_data_dual_standard.txt flush_data_dual_highflow.txt; do
+          test -s "$d/resources/flush/$dataset"
+        done
         # Only the SVGs are read; the png/ico/icns/gif assets are ~35MB of dead weight.
         find "$d/resources/images" -mindepth 1 -maxdepth 1 ! -name '*.svg' -exec rm -rf {} + 2>/dev/null || true
         tar -cf flatpak-test-asset.tar flatpak_app "$d"

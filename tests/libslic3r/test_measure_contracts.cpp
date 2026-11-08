@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -87,8 +88,14 @@ void check_circle_pair_witness(const std::optional<DistAndPoints> &distance, con
 // b's points to a over b's angle. It uses neither the production polynomial nor its root finder.
 double sampled_circle_distance(const SurfaceFeature &a, const SurfaceFeature &b)
 {
-    const auto [a_center, a_radius, a_normal_raw] = a.get_circle();
-    const auto [b_center, b_radius, b_normal_raw] = b.get_circle();
+    const auto a_circle = a.get_circle();
+    const auto b_circle = b.get_circle();
+    const auto &a_center = std::get<0>(a_circle);
+    const auto &a_radius = std::get<1>(a_circle);
+    const auto &a_normal_raw = std::get<2>(a_circle);
+    const auto &b_center = std::get<0>(b_circle);
+    const auto &b_radius = std::get<1>(b_circle);
+    const auto &b_normal_raw = std::get<2>(b_circle);
     const Vec3d a_normal = a_normal_raw.normalized();
     const Vec3d u = b_normal_raw.unitOrthogonal();
     const Vec3d v = b_normal_raw.normalized().cross(u);

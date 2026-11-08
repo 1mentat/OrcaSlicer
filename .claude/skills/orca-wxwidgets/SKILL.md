@@ -15,7 +15,8 @@ wrong → right pairs with the commit that fixed each one.
 
 ## Ground truth: the wx tree in deps/
 
-Orca pins **wxWidgets 3.3.2** from the fork `github.com/SoftFever/Orca-deps-wxWidgets` (tag `v3.3.2`,
+Orca pins **wxWidgets 3.3.2** from the fork `github.com/SoftFever/Orca-deps-wxWidgets` (commit
+`b44c39c100975a0ac0e46f937aa3f3eae5e18631` from the `v3.3.2` branch,
 `deps/wxWidgets/wxWidgets.cmake`), built static (Flatpak: shared). Facts about this build that change
 how you read the wx docs:
 
@@ -33,7 +34,9 @@ Look things up in the source the app is built from — it beats memory, and 3.3 
 WX=$(find -L deps -maxdepth 5 -type d -path '*dep_wxWidgets-prefix/src/dep_wxWidgets' 2>/dev/null | head -1)
 # macOS: deps/build/<arch>/dep_wxWidgets-prefix/src/dep_wxWidgets   Linux, Windows: deps/<tree>/dep_wxWidgets-prefix/...
 # -L follows a worktree's deps/<tree> symlinked to the main checkout. Not a glob: zsh aborts on one that matches nothing.
-# If deps are not built: git clone --depth 1 -b v3.3.2 https://github.com/SoftFever/Orca-deps-wxWidgets
+# If deps are not built:
+# git clone --no-checkout https://github.com/SoftFever/Orca-deps-wxWidgets
+# git -C Orca-deps-wxWidgets checkout b44c39c100975a0ac0e46f937aa3f3eae5e18631
 grep -n "CaptureMouse" -A 30 $WX/interface/wx/window.h      # documented contract (doxygen source)
 grep -rn "@onlyfor\|not implemented" $WX/interface/wx/popupwin.h   # documented platform limits
 ls $WX/docs/doxygen/overviews/                               # eventhandling.h, sizer.h, high_dpi.md, windowdeletion.h, ...
