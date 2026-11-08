@@ -1998,9 +1998,10 @@ namespace client
     // If an invalid UTF-8 sequence is encountered, a qi::expectation_failure is thrown.
     struct utf8_char_parser : qi::primitive_parser<utf8_char_parser>
     {
-        explicit utf8_char_parser(bool check_final = false) : check_final_continuation(check_final) {}
+        utf8_char_parser() = default;
+        explicit utf8_char_parser(bool check_final) : check_final_continuation(check_final) {}
         // Preserve historical byte handling outside quoted expression strings.
-        bool check_final_continuation;
+        bool check_final_continuation = false;
 
         // Define the attribute type exposed by this parser component
         template <typename Context, typename Iterator>
