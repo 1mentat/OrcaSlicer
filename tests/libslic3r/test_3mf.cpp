@@ -4743,6 +4743,17 @@ bool load_generic(const std::string &path, Model &model, DynamicPrintConfig &con
     return load_3mf(path.c_str(), config, substitutions, &model, check_version);
 }
 
+// Match both rejection forms used by the archive parser, without masking errors
+// in successful-input calls or the dedicated version-error assertions.
+bool load_generic_for_rejection(const std::string &path, Model &model, DynamicPrintConfig &config)
+{
+    try {
+        return load_generic(path, model, config);
+    } catch (const FileIOError &) {
+        return false;
+    }
+}
+
 Model make_cube_model()
 {
     Model model;
@@ -5003,7 +5014,7 @@ TEST_CASE("Legacy importer rejects duplicate object identifiers", "[Legacy3MF][E
     REQUIRE(write_archive(archive.string(), xml));
     Model model;
     DynamicPrintConfig config;
-    CHECK_FALSE(load_generic(archive.string(), model, config));
+    CHECK_FALSE(load_generic_for_rejection(archive.string(), model, config));
 }
 
 TEST_CASE("Legacy importer rejects an invalid component reference", "[Legacy3MF][Errors]")
@@ -5022,7 +5033,10 @@ TEST_CASE("Legacy importer rejects an invalid component reference", "[Legacy3MF]
     REQUIRE(write_archive(archive.string(), xml));
     Model model;
     DynamicPrintConfig config;
-    CHECK(load_generic(archive.string(), model, config) == (referenced == 1));
+    if (referenced == 1)
+        CHECK(load_generic(archive.string(), model, config));
+    else
+        CHECK_FALSE(load_generic_for_rejection(archive.string(), model, config));
 }
 
 TEST_CASE("Legacy importer ignores a singular build transform", "[Legacy3MF][Geometry][Errors]")
