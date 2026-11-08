@@ -6978,9 +6978,8 @@ TEST_CASE("The complete preset configuration concatenates multiple filament vect
     CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1});
 }
 
-TEST_CASE("The complete preset configuration lists the filament id of every filament", "[Preset][Bundle][ConstructFullConfig][!shouldfail]")
+TEST_CASE("The complete preset configuration lists the filament id of every filament", "[Preset][Bundle][ConstructFullConfig]")
 {
-    // Known bug: construct_full_config fills filament_ids only for a single filament (full_fff_config fills it for every filament); fixed by the follow-up fix PR
     ConstructInputs in;
     in.add_filament("Test PETG", "test-petg-id");
 
@@ -7077,9 +7076,8 @@ TEST_CASE("The complete preset configuration removes preset-only bookkeeping fro
     CHECK(out.option<ConfigOptionStrings>("inherits_group")->values == std::vector<std::string>{"Base Process", "Base Filament"});
 }
 
-TEST_CASE("The complete preset configuration groups the metadata of every filament", "[Preset][Bundle][ConstructFullConfig][!shouldfail]")
+TEST_CASE("The complete preset configuration groups the metadata of every filament", "[Preset][Bundle][ConstructFullConfig]")
 {
-    // Known bug: with several filaments construct_full_config collects only the print's conditions and inherits into the group keys (full_fff_config collects every filament's); fixed by the follow-up fix PR
     ConstructInputs in;
     in.add_filament("Test PETG", "test-petg-id");
     in.print.inherits() = "Base Process";
@@ -7099,6 +7097,34 @@ TEST_CASE("The complete preset configuration groups the metadata of every filame
     const auto *process_group = out.option<ConfigOptionStrings>("compatible_process_expression_group");
     REQUIRE(process_group != nullptr);
     CHECK(process_group->values == std::vector<std::string>{"filament process 0", "filament process 1"});
+}
+
+TEST_CASE("The complete preset configuration preserves sparse filament metadata inputs", "[Preset][Bundle][ConstructFullConfig]")
+{
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    for (const std::string key : {"inherits", "compatible_printers_condition", "compatible_prints_condition"}) {
+        in.printer.config.erase(key);
+        in.print.config.erase(key);
+        in.bundle.project_config.erase(key);
+        for (Preset &filament : in.filaments)
+            filament.config.erase(key);
+    }
+    in.filaments[0].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {1.75};
+    in.filaments[1].config.option<ConfigOptionFloats>("filament_diameter", true)->values = {2.85};
+    const std::vector<DynamicPrintConfig> original_configs{in.filaments[0].config, in.filaments[1].config};
+
+    const DynamicPrintConfig out = in.construct(false, std::vector<int>{1, 1}, std::vector<int>{nvtStandard, nvtStandard});
+
+    check_double_vector(out.option<ConfigOptionFloats>("filament_diameter")->values, {1.75, 2.85});
+    CHECK(out.option<ConfigOptionStrings>("filament_ids")->values == std::vector<std::string>{"test-pla-id", "test-petg-id"});
+    CHECK(out.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1});
+    CHECK(out.option<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{nvtStandard, nvtStandard});
+    for (size_t i = 0; i < in.filaments.size(); ++i) {
+        CAPTURE(i);
+        CHECK(in.filaments[i].config.keys() == original_configs[i].keys());
+        CHECK(in.filaments[i].config == original_configs[i]);
+    }
 }
 
 namespace preset_lifecycle_contracts {

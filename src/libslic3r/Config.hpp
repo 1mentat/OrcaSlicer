@@ -554,12 +554,14 @@ public:
             }
 
             // Assign the new value from the rhs vector.
-            auto other = const_cast<ConfigOptionVector<T>*>(static_cast<const ConfigOptionVector<T>*>(rhs));
+            std::vector<T> source_values = static_cast<const ConfigOptionVector<T>*>(rhs)->values;
 
-            if (other->values.size() != (restore_index.size())) {
+            if (source_values.size() != (restore_index.size())) {
                 if (skip_error) {
-                    T default_v = other->values.front();
-                    other->values.resize(restore_index.size(), default_v);
+                    if (source_values.empty())
+                        throw ConfigurationError("ConfigOptionVector::set_with_restore_2(): Assigning from an empty vector");
+                    T default_v = source_values.front();
+                    source_values.resize(restore_index.size(), default_v);
                 }
                 else
                     throw ConfigurationError("ConfigOptionVector::set_with_restore_2(): Assigning from an vector with invalid restore_index size");
@@ -570,7 +572,7 @@ public:
                     this->values.insert(this->values.begin() + start + i, backup_values[restore_index[i]]);
                 }
                 else
-                    this->values.insert(this->values.begin() + start + i, other->values[i]);
+                    this->values.insert(this->values.begin() + start + i, source_values[i]);
             }
         }
         else
@@ -774,6 +776,18 @@ public:
     		}
     		return false;
     	}
+
+        if (this->values.empty()) {
+            if (rhs_vec->values.empty())
+                return false;
+            // Nil slots need an existing machine default; only a fully concrete
+            // source can initialize an empty, non-nullable target.
+            for (size_t i = 0; i < rhs_vec->size(); ++i)
+                if (rhs_vec->is_nil(i))
+                    return false;
+            this->values = rhs_vec->values;
+            return true;
+        }
 
     	size_t cnt = std::min(this->size(), rhs_vec->size());
         if (cnt < 1)
@@ -2908,10 +2922,8 @@ public:
                 this->options[kvp.first].reset(kvp.second->clone());
             else {
                 assert(it->second->type() == kvp.second->type());
-                if (it->second->type() == kvp.second->type())
-                    *it->second = *kvp.second;
-                else
-                    it->second.reset(kvp.second->clone());
+                // Replace by a copy: assigning through ConfigOption& would not copy the derived value.
+                it->second.reset(kvp.second->clone());
             }
         }
         return *this;
