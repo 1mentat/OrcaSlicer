@@ -63,7 +63,7 @@ TEST_CASE("Arc slice containment follows direction and wraps through zero", "[Ci
     CHECK_FALSE(ArcSegment::are_points_within_slice(wrap_cw, wrap_cw_outside));
 }
 
-TEST_CASE("Arc slice containment accepts several interior points and rejects one outside before the last", "[Circle][CircleArcPublic]")
+TEST_CASE("Arc slice containment accepts interior points and rejects an end-ray crossing", "[Circle][CircleArcPublic]")
 {
     const ArcSegment ccw(p(0., 0.), scaled(5.), p(5., 0.), p(0., 5.), ArcDirection::Arc_Dir_CCW);
     const Points3 inside{p3(5., 0., 0.), p3(4.8, 1.4, 1.), p3(4., 3., 2.), p3(3., 4., 3.), p3(0., 5., 4.)};
@@ -72,13 +72,27 @@ TEST_CASE("Arc slice containment accepts several interior points and rejects one
     CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, outside_before_last));
 }
 
-// Known bug: are_points_within_slice only checks the last two points, so an earlier point outside the slice is accepted; fixed by the follow-up fix PR
-TEST_CASE("Arc slice containment rejects an early point outside the slice", "[Circle][CircleArcPublic][!shouldfail]")
+TEST_CASE("Arc slice containment rejects an early point outside the slice", "[Circle][CircleArcPublic]")
 {
     const ArcSegment ccw(p(0., 0.), scaled(5.), p(5., 0.), p(0., 5.), ArcDirection::Arc_Dir_CCW);
     // (-5, 0) lies on the circle but outside the CCW quarter arc from (5, 0) to (0, 5).
     CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, Points3{p3(5., 0., 0.), p3(-5., 0., 1.), p3(4., 3., 2.), p3(3., 4., 3.), p3(0., 5., 4.)}));
     CHECK_FALSE(ArcSegment::are_points_within_slice(ccw, Points{p(5., 0.), p(-5., 0.), p(4., 3.), p(3., 4.), p(0., 5.)}));
+}
+
+TEST_CASE("Arc slice containment rejects an early reversal inside the slice", "[Circle][CircleArcPublic]")
+{
+    const bool clockwise = GENERATE(false, true);
+    Points points{p(5., 0.), p(3., 4.), p(4., 3.), p(2.4, 4.4), p(0., 5.)};
+    Points3 points3{p3(5., 0., 0.), p3(3., 4., 1.), p3(4., 3., 2.), p3(2.4, 4.4, 3.), p3(0., 5., 4.)};
+    if (clockwise) {
+        std::reverse(points.begin(), points.end());
+        std::reverse(points3.begin(), points3.end());
+    }
+    const ArcSegment arc(p(0., 0.), scaled(5.), points.front(), points.back(),
+                         clockwise ? ArcDirection::Arc_Dir_CW : ArcDirection::Arc_Dir_CCW);
+    CHECK_FALSE(ArcSegment::are_points_within_slice(arc, points));
+    CHECK_FALSE(ArcSegment::are_points_within_slice(arc, points3));
 }
 
 TEST_CASE("Points3 arc fitting recovers a known XY circle", "[Circle][CircleArcPublic]")

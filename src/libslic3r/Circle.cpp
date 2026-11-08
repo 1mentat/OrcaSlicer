@@ -428,9 +428,9 @@ bool ArcSegment::are_points_within_slice(const ArcSegment& test_arc, const Point
     else
         will_cross_zero = test_arc.polar_start_theta < test_arc.polar_end_theta;
 
-    //BBS: check if point 1 to point 2 cross zero
+    // Check every interior point and consecutive segment in traversal order.
     double polar_test;
-    for (int index = point_count - 2; index < point_count; index++)
+    for (int index = 1; index < point_count; index++)
     {
         if (index < point_count - 1)
           polar_test = test_arc.get_polar_radians(points[index]);
@@ -509,9 +509,9 @@ bool ArcSegment::are_points_within_slice(const ArcSegment& test_arc, const Point
     else
         will_cross_zero = test_arc.polar_start_theta < test_arc.polar_end_theta;
 
-    //BBS: check if point 1 to point 2 cross zero
+    // Check every interior point and consecutive segment in traversal order.
     double polar_test;
-    for (int index = point_count - 2; index < point_count; index++)
+    for (int index = 1; index < point_count; index++)
     {
         if (index < point_count - 1)
           polar_test = test_arc.get_polar_radians(points[index].to_point());
