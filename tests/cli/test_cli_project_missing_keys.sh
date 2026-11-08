@@ -112,4 +112,83 @@ check uptodate
 # The replaced second filament takes the system values the refresh would have given it.
 slice partial "$WORK/old.3mf" --load-filaments ";$PROFILES/filament/Bambu PLA Basic @BBL P1S 0.4 nozzle.json"
 check partial
+
+# Preserve the printer marker: otherwise project refresh can replace the deliberate area.
+# These variants reuse the same owned archive, model and shipped presets as the checks above.
+"$PY" - "$WORK/base/out.3mf" "$WORK" <<'EOF' || exit $?
+import copy, json, pathlib, sys, zipfile
+
+src, work = sys.argv[1], pathlib.Path(sys.argv[2])
+square = "0x0,200x0,200x200,0x200"
+variants = {"area-missing": None, "area-square": [square],
+            "area-terminal-empty": [square, ""],
+            "area-disjoint": [square, "210x0,220x0,220x10,210x10"]}
+with zipfile.ZipFile(src) as zin:
+    assert zin.namelist().count("Metadata/project_settings.config") == 1
+    for tag, groups in variants.items():
+        with zipfile.ZipFile(work / (tag + ".3mf"), "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "Metadata/project_settings.config":
+                    config = json.loads(data)
+                    if groups is None:
+                        config.pop("extruder_printable_area", None)
+                    else:
+                        config["extruder_printable_area"] = groups
+                    filament_count = len(config["filament_settings_id"])
+                    different = config["different_settings_to_system"]
+                    assert filament_count == 2 and len(different) == filament_count + 2
+                    index = filament_count + 1
+                    keys = [key for key in different[index].split(";") if key]
+                    if "extruder_printable_area" not in keys:
+                        keys.append("extruder_printable_area")
+                    different[index] = ";".join(keys)
+                    data = json.dumps(config, indent=4)
+                zout.writestr(copy.copy(item), data)
+EOF
+
+slice area-missing "$WORK/area-missing.3mf" --arrange 1
+slice area-square "$WORK/area-square.3mf" --arrange 1
+"$PY" - "$WORK" <<'EOF' || exit $?
+import json, pathlib, sys, zipfile
+
+work = pathlib.Path(sys.argv[1])
+for tag, expected in {"area-missing": [], "area-square": ["0x0,200x0,200x200,0x200"]}.items():
+    out = work / tag
+    with zipfile.ZipFile(out / "out.3mf") as z:
+        config = json.loads(z.read("Metadata/project_settings.config"))
+    assert config.get("extruder_printable_area", []) == expected, (tag, config.get("extruder_printable_area"))
+    result = json.loads((out / "result.json").read_text())
+    assert result["return_code"] == 0, (tag, result)
+    print(json.dumps({"variant": tag, "return_code": result["return_code"],
+                      "exported_extruder_printable_area": config.get("extruder_printable_area", [])}))
+EOF
+
+reject_empty_arrange() {
+    local tag="$1" out="$WORK/$1" status
+    mkdir -p "$out"
+    timeout 300 "$BIN" --datadir "$out/datadir" --arrange 1 --slice 0 --outputdir "$out" \
+        --export-3mf out.3mf "$WORK/$tag.3mf" > "$out/log" 2>&1
+    status=$?
+    "$PY" - "$out" "$status" <<'EOF' || { tail -n 40 "$out/log"; exit 1; }
+import json, pathlib, sys
+
+out, status = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+# CLI_OBJECT_ARRANGE_FAILED is -21; a signal, timeout or uncaught exception is not rejection success.
+assert status == (-21 & 255), (out.name, status)
+result = json.loads((out / "result.json").read_text())
+assert result["return_code"] == -21, result
+assert result["error_string"] == "An error occurred when auto-arranging object(s).", result
+assert result["plate_index"] == 0, result
+message = "error: Extruder printable areas have no common printable region."
+assert message in (out / "log").read_text().splitlines()
+assert not (out / "out.3mf").exists()
+print(json.dumps({"variant": out.name, "shell_status": status, "return_code": result["return_code"],
+                  "error_string": result["error_string"], "diagnostic": message}))
+EOF
+}
+
+reject_empty_arrange area-terminal-empty
+reject_empty_arrange area-disjoint
+
 echo "PASS"

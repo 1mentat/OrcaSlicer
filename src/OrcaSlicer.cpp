@@ -4784,6 +4784,18 @@ int CLI::run(int argc, char **argv)
     Points beds = get_bed_shape(m_print_config);
     ArrangeParams arrange_cfg;
 
+    // Keep expected bed rejection on the CLI's structured arrange-error path.
+    const auto update_arrange_bed = [&]() {
+        try {
+            beds = get_shrink_bedpts(&m_print_config, arrange_cfg);
+            return true;
+        } catch (const Slic3r::RuntimeError &ex) {
+            boost::nowide::cerr << "error: " << ex.what() << std::endl;
+            record_exit_reson(outfile_dir, CLI_OBJECT_ARRANGE_FAILED, 0, cli_errors[CLI_OBJECT_ARRANGE_FAILED], sliced_info);
+            return false;
+        }
+    };
+
     BOOST_LOG_TRIVIAL(info) << "will start transforms, commands count " << m_transforms.size() << "\n";
 #if defined(__linux__) || defined(__LINUX__)
     if (g_cli_callback_mgr.is_started()) {
@@ -5389,7 +5401,9 @@ int CLI::run(int argc, char **argv)
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
 
-                beds = get_shrink_bedpts(&m_print_config, arrange_cfg);
+                if (!update_arrange_bed()) {
+                    flush_and_exit(CLI_OBJECT_ARRANGE_FAILED);
+                }
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
 
@@ -5861,7 +5875,9 @@ int CLI::run(int argc, char **argv)
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
 
-                beds=get_shrink_bedpts(&m_print_config, arrange_cfg);
+                if (!update_arrange_bed()) {
+                    flush_and_exit(CLI_OBJECT_ARRANGE_FAILED);
+                }
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
 
