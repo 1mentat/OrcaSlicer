@@ -44,20 +44,34 @@ jobs:
             echo "No C++ changes under src/ or tests/."
           fi
 
-      # Parsing needs the dependency headers, not a build of this PR's deps/, so
-      # a PR that changes deps/ falls back to the newest cache main has.
+      # Reuse installed dependency headers when available; a cold or stale
+      # cache falls back to the normal dependency build below.
       - name: Restore cached deps
+        id: deps
         if: steps.changes.outputs.cpp == 'true'
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
           key: linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
           restore-keys: linux-clang-cache-orcaslicer_deps-build-
-          fail-on-cache-miss: true
+          fail-on-cache-miss: false
 
       - name: Apt-Install Dependencies
         if: steps.changes.outputs.cpp == 'true' && !vars.SELF_HOSTED
         uses: ./.github/actions/apt-install-deps
+
+      # Use the same dependency toolchain and command as build_deps.yml on a
+      # cold or stale cache. Clean the owned dependency build tree first so
+      # stale headers or CMake stamps cannot survive. Lint still runs afterward.
+      - name: Install CMake for a dependency build
+        if: steps.changes.outputs.cpp == 'true' && steps.deps.outputs.cache-hit != 'true'
+        uses: lukka/get-cmake@30aea713799f46b5b60e60f5fa83f849abd52c22 # latest as of 2026-11-05
+        with:
+          cmakeVersion: "~4.3.0"
+
+      - name: Build dependencies when the cache is missing or stale
+        if: steps.changes.outputs.cpp == 'true' && steps.deps.outputs.cache-hit != 'true'
+        run: ./build_linux.sh -cdrlL
 
       - name: Install clang-tidy
         if: steps.changes.outputs.cpp == 'true'

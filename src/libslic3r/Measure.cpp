@@ -837,7 +837,9 @@ static AngleAndEdges angle_plane_plane(const std::tuple<int, Vec3d, Vec3d>& p1, 
     };
 
     // Calculate intersection line between planes
-    const auto [intersection_line_direction, intersection_line_origin] = intersection_plane_plane(normal1, origin1, normal2, origin2);
+    const auto intersection = intersection_plane_plane(normal1, origin1, normal2, origin2);
+    const auto& intersection_line_direction = intersection.first;
+    const auto& intersection_line_origin = intersection.second;
 
     // Project planes' origin on intersection line
     const Eigen::ParametrizedLine<double, 3> intersection_line = Eigen::ParametrizedLine<double, 3>(intersection_line_origin, intersection_line_direction);
