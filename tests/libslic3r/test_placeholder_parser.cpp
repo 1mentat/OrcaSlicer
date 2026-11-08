@@ -894,10 +894,8 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
                       Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
 }
 
-// Known bug: utf8_char_parser only checks continuation bytes before the last one, so a truncated-by-substitution
-// sequence such as E2 82 28 is accepted; fixed by the follow-up fix PR.
 TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
-          "[PlaceholderParser][PlaceholderParserUnicode][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserUnicode]")
 {
     PlaceholderParser parser;
     // Euro sign E2 82 AC with the final continuation byte replaced by ASCII '('.
@@ -905,6 +903,37 @@ TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is no
     literal.append("\xE2\x82\x28", 3);
     literal += "\"}";
     CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser checks final continuation bytes only in quoted expressions",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    const std::array<std::string, 3> valid{{
+        std::string("\xC3\xA9", 2), std::string("\xE2\x82\xAC", 3), std::string("\xF0\x9F\x98\x80", 4)}};
+    const std::array<std::string, 3> malformed{{
+        std::string("\xC3\x28", 2), std::string("\xE2\x82\x28", 3), std::string("\xF0\x9F\x98\x28", 4)}};
+    for (const std::string &value : valid)
+        CHECK(parser.process("{\"" + value + "\"}") == value);
+    for (const std::string &value : malformed) {
+        CHECK_THROWS_WITH(parser.process("{\"" + value + "\"}"),
+                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+        CHECK_THROWS_WITH(parser.process("{if false}{\"" + value + "\"}{endif}"),
+                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+    }
+
+    // Previously accepted Latin1/CP1252 bytes in template comments remain byte-for-byte text.
+    std::string comment = "M117 ; H";
+    comment.push_back(static_cast<char>(0xD6)); // Latin1/CP1252 O-diaeresis, not a UTF8 sequence here.
+    comment += "HE {1 + 1}\n";
+    std::string expected = "M117 ; H";
+    expected.push_back(static_cast<char>(0xD6));
+    expected += "HE 2\n";
+    CHECK(parser.process(comment) == expected);
+    std::string final_comment = "; CAF";
+    final_comment.push_back(static_cast<char>(0xC9)); // Latin1/CP1252 E-acute followed by newline.
+    final_comment += "\n";
+    CHECK(parser.process(final_comment) == final_comment);
 }
 
 TEST_CASE("Placeholder parser uses the external filament map for vector access",
