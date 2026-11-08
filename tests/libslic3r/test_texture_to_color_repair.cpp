@@ -173,12 +173,16 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
     REQUIRE(stats.total_boundary_edges == 7);
     // {max_hole_edges, max_boundary_edges, closes}. The last row allows each hole on its own
     // (4 <= 7 per hole) but not their 7-edge total. The per-hole case {3, 7}, where only the
-    // 4-edge hole is over the limit, is covered by the tagged test below.
+    // 4-edge hole is over the limit, is covered by the partial-repair test below.
     const auto [max_hole_edges, max_boundary_edges, closes] = GENERATE(
         table<std::size_t, std::size_t, bool>({
             {4, 7, true},
             {4, 6, false},
             {7, 4, false},
+            {3, 6, false},
+            {2, 7, false},
+            {0, 7, false},
+            {4, 0, false},
         }));
     RepairSetting settings;
     settings.max_hole_edges = max_hole_edges;
@@ -189,6 +193,7 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
     REQUIRE(repaired);
     check_finite_and_valid(*repaired);
     if (closes) {
+        CHECK(repaired->indices.size() == 12);
         CHECK(color_utils::is_closed(*repaired));
         CHECK_THAT(std::abs(its_volume(*repaired)), WithinAbs(1000.f, 1e-2f));
     } else {
@@ -197,13 +202,8 @@ TEST_CASE("RepairMesh limits the largest hole and the total boundary separately"
     }
 }
 
-// Known bug: RepairSetting::max_hole_edges is documented as "skip triangulating a boundary cycle whose
-// half-edge count exceeds this", but RepairMesh gates hole closing globally on the largest cycle, so
-// one over-limit hole stops every other hole from being filled. (The comment on
-// MAX_REPAIRABLE_MESH_HOLE_EDGES says the opposite: "skips triangulation entirely".) Needs a fix or a
-// documentation decision.
 TEST_CASE("RepairMesh fills holes within the per-hole limit when another hole exceeds it",
-          "[TextureToColor][repair][!shouldfail]")
+          "[TextureToColor][repair]")
 {
     RepairSetting settings;
     settings.max_hole_edges = 3;      // the three-edge hole qualifies, the four-edge one does not
@@ -211,7 +211,40 @@ TEST_CASE("RepairMesh fills holes within the per-hole limit when another hole ex
     std::shared_ptr<TriMesh> repaired;
     REQUIRE(RepairMesh(cube_with_two_holes(), repaired, nullptr, nullptr, settings));
     REQUIRE(repaired);
+    check_finite_and_valid(*repaired);
     // One triangle closes the three-edge hole; the four-edge hole stays open.
     CHECK(repaired->indices.size() == 10);
     CHECK_FALSE(color_utils::is_closed(*repaired));
+    const BoundaryEdgeStats stats = ComputeBoundaryEdgeStats(cgalutils::trimesh_to_cgal(*repaired));
+    CHECK(stats.cycle_count == 1);
+    CHECK(stats.max_cycle_edges == 4);
+    CHECK(stats.total_boundary_edges == 4);
+}
+
+TEST_CASE("Unbounded boundary repair keeps the one-argument helper's policy", "[TextureToColor][repair]")
+{
+    auto mesh = cgalutils::trimesh_to_cgal(cube_with_two_holes());
+    CloseBoundariesAndRepairManifoldness(mesh);
+    const TriMesh repaired = cgalutils::cgal_to_trimesh(mesh);
+    check_finite_and_valid(repaired);
+    CHECK(repaired.indices.size() == 12);
+    CHECK(color_utils::is_closed(repaired));
+    CHECK_THAT(std::abs(its_volume(repaired)), WithinAbs(1000.f, 1e-2f));
+}
+
+TEST_CASE("Partial hole repair does not publish a mesh when cancelled", "[TextureToColor][repair]")
+{
+    const int stop_after = GENERATE(80, 85);
+    RepairSetting settings;
+    settings.max_hole_edges = 3;
+    settings.max_boundary_edges = 7;
+    auto sentinel = std::make_shared<TriMesh>(closed_tetrahedron());
+    std::shared_ptr<TriMesh> repaired = sentinel;
+    int progress = 0;
+    const auto record_progress = [&](AlgoProgress state) { progress = state.percent; };
+    const auto cancel = [&]() { return progress >= stop_after; };
+    CHECK_FALSE(RepairMesh(cube_with_two_holes(), repaired, record_progress, cancel, settings));
+    CHECK(progress == stop_after);
+    REQUIRE(repaired == sentinel);
+    CHECK(repaired->indices.size() == 4);
 }
