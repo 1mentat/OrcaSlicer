@@ -9729,7 +9729,7 @@ TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world ve
     if (on_volume)
         object->volumes.front()->set_transformation(expected);
     else
-        instance->set_transformation(expected);
+        instance->set_transformation(Geometry::Transformation(expected));
     const Geometry::Transformation &transform = on_volume ? object->volumes.front()->get_transformation() : instance->get_transformation();
     CHECK((transform.get_rotation_matrix().linear() * transform.get_scaling_factor_matrix().linear() *
            transform.get_mirror_matrix().linear()).isApprox(expected.linear(), 1e-12));

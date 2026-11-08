@@ -2080,7 +2080,7 @@ TEST_CASE("Model scale and instance accessors keep mirrored affine state and mes
     CHECK(&volume->mesh() == mesh);
     ModelInstance *instance = object->add_instance();
     REQUIRE(instance != nullptr);
-    instance->set_transformation(matrix);
+    instance->set_transformation(Geometry::Transformation(matrix));
     instance->set_scaling_factor(Y, 6.);
     Matrix3d expected = matrix.linear();
     expected.col(1) *= 3.;
