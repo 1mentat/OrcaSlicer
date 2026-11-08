@@ -70,7 +70,7 @@ void intersect(CGALMesh &A, CGALMesh &B);
 bool does_self_intersect(const TriangleMesh &mesh);
 bool does_self_intersect(const CGALMesh &mesh);
 
-//BBS
+// Connected surface regions with best-effort hole filling; closed, positive-volume output is not guaranteed.
 std::vector<TriangleMesh> segment(const TriangleMesh& src, double smoothing_alpha = 0.5, int segment_number = 5);
 TriangleMesh merge(std::vector<TriangleMesh> meshes);
 

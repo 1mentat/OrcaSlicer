@@ -8,8 +8,10 @@
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -111,6 +113,14 @@ void check_valid_indices(const indexed_triangle_set &mesh)
         REQUIRE(static_cast<size_t>(face[1]) < mesh.vertices.size());
         REQUIRE(static_cast<size_t>(face[2]) < mesh.vertices.size());
     }
+}
+
+void check_finite_mesh(const indexed_triangle_set &mesh)
+{
+    check_valid_indices(mesh);
+    for (const Vec3f &vertex : mesh.vertices)
+        for (int axis = 0; axis < 3; ++axis)
+            REQUIRE(std::isfinite(vertex[axis]));
 }
 
 } // namespace
@@ -266,34 +276,97 @@ TEST_CASE("CGAL LSCM parameterization maps a disk and rejects disconnected patch
     CHECK_FALSE(MeshBoolean::cgal::parameterize_lscm(with_closed_part).has_value());
 }
 
-TEST_CASE("CGAL segmentation returns closed volume-preserving pieces for a dumbbell", "[MeshBoolean][MeshBooleanContracts]")
+TEST_CASE("CGAL segmentation preserves the oriented surface of a dumbbell", "[MeshBoolean][MeshBooleanContracts]")
 {
-    // SDF clustering may place the boundaries differently across platforms. The wrapper must
-    // still split this nonuniform shape and return closed parts that preserve its volume.
     TriangleMesh dumbbell = make_sphere(5.);
     TriangleMesh far_ball = make_sphere(5.);
     far_ball.translate(Vec3f(0.f, 0.f, 20.f));
     MeshBoolean::cgal::plus(dumbbell, far_ball);
     MeshBoolean::cgal::plus(dumbbell, make_cylinder(1., 20.));
-    const float dumbbell_volume = mesh_volume(dumbbell);
+    check_finite_mesh(dumbbell.its);
 
+    // Canonical cyclic rotation preserves winding; finite float coordinates are compared exactly.
+    using FaceKey = std::array<float, 9>;
+    using FaceCounts = std::map<FaceKey, std::size_t>;
+    const auto face_key = [](const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+        const std::array<Vec3f, 3> vertices{a, b, c};
+        FaceKey key{};
+        for (int rotation = 0; rotation < 3; ++rotation) {
+            FaceKey candidate{};
+            for (int corner = 0; corner < 3; ++corner)
+                for (int axis = 0; axis < 3; ++axis)
+                    candidate[3 * corner + axis] = vertices[(corner + rotation) % 3][axis];
+            if (rotation == 0 || candidate < key)
+                key = candidate;
+        }
+        return key;
+    };
+    const auto count_faces = [&](const indexed_triangle_set &mesh) {
+        FaceCounts counts;
+        for (const Vec3i32 &face : mesh.indices)
+            ++counts[face_key(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])];
+        return counts;
+    };
+    const auto covers = [](const FaceCounts &source, const FaceCounts &output) {
+        for (const auto &entry : source) {
+            const auto found = output.find(entry.first);
+            if (found == output.end() || found->second < entry.second)
+                return false;
+        }
+        return true;
+    };
+    const Vec3f a(0.f, 0.f, 0.f), b(1.f, 0.f, 0.f), c(0.f, 1.f, 0.f);
+    const FaceKey key = face_key(a, b, c);
+    CHECK(key == face_key(b, c, a));
+    CHECK_FALSE(key == face_key(a, c, b));
+    const FaceCounts repeated{{key, 2}};
+    CHECK(covers(repeated, repeated));
+    CHECK(covers(repeated, FaceCounts{{key, 3}}));
+    CHECK_FALSE(covers(repeated, FaceCounts{{key, 1}}));
+    CHECK_FALSE(covers(repeated, FaceCounts{{face_key(a, c, b), 2}}));
+
+    const FaceCounts source_faces = count_faces(dumbbell.its);
     const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(dumbbell, 0.5, 3);
-    // The requested cluster count does not specify the final number of connected segments.
+    // Connected surface regions need not be closed positive-volume solids after best-effort caps.
     REQUIRE(pieces.size() >= 2);
-    std::vector<float> volumes;
+    FaceCounts output_faces;
     for (const TriangleMesh &piece : pieces) {
-        check_valid_indices(piece.its);
-        CHECK(its_num_open_edges(piece.its) == 0);
-        const float volume = mesh_volume(piece);
-        CHECK(std::isfinite(volume));
-        CHECK(volume > 0.f);
-        CHECK(volume < dumbbell_volume);
-        volumes.push_back(volume);
+        check_finite_mesh(piece.its);
+        CHECK_FALSE(piece.is_splittable());
+        const FaceCounts region_faces = count_faces(piece.its);
+        std::size_t covered = 0;
+        for (const auto &entry : region_faces) {
+            output_faces[entry.first] += entry.second;
+            const auto source = source_faces.find(entry.first);
+            if (source != source_faces.end())
+                covered += std::min(source->second, entry.second);
+        }
+        // Reject whole-input duplicates and require source-matching faces in every region.
+        CHECK(covered > 0);
+        CHECK(covered < dumbbell.its.indices.size());
     }
-    float total_volume = 0.f;
-    for (const float volume : volumes)
-        total_volume += volume;
-    CHECK_THAT(total_volume, WithinRel(dumbbell_volume, 1e-2f));
+    // Caps can add or duplicate faces: coverage is not bijective face-label provenance.
+    CHECK(covers(source_faces, output_faces));
+}
+
+TEST_CASE("CGAL segmentation preserves a closed cube in a single connected cluster", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const TriangleMesh cube = shifted_cube(0.f);
+    check_finite_mesh(cube.its);
+    REQUIRE(its_num_open_edges(cube.its) == 0);
+    const float source_volume = mesh_volume(cube);
+    REQUIRE(std::isfinite(source_volume));
+    REQUIRE(source_volume > 0.f);
+    const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(cube, 0.5, 1);
+    REQUIRE(pieces.size() == 1);
+    check_finite_mesh(pieces.front().its);
+    CHECK_FALSE(pieces.front().is_splittable());
+    CHECK(its_num_open_edges(pieces.front().its) == 0);
+    const float volume = mesh_volume(pieces.front());
+    REQUIRE(std::isfinite(volume));
+    CHECK(volume > 0.f);
+    CHECK_THAT(volume, WithinRel(source_volume, 1e-3f));
+    // This boundary-free control checks conversion/input preservation, not hole-filling efficacy.
 }
 
 TEST_CASE("CGAL repair closes a cube with one missing triangle", "[MeshBoolean][MeshBooleanContracts]")
