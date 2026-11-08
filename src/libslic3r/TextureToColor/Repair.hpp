@@ -3,6 +3,9 @@
 #include "CgalUtils.hpp"
 #include "Callbacks.hpp"
 #include <CGAL/boost/graph/border.h>
+#include <CGAL/boost/graph/helpers.h>
+#include <CGAL/Polygon_mesh_processing/orientation.h>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Named_function_parameters.h>
 #include <CGAL/Polygon_mesh_processing/manifoldness.h>
 #include <CGAL/Polygon_mesh_processing/repair_degeneracies.h>
@@ -247,6 +250,17 @@ inline bool RepairMesh(const TriMesh& mesh,
     if (cancel_callback && cancel_callback()) {
         return false;
     }
+
+    // Normalize only closed, non-self-intersecting solids. Open/mixed-open and
+    // intersecting results retain the existing best-effort soup orientation.
+    // The nesting-aware operation keeps cavity shells inward, not every shell positive.
+    if (num_faces(cgal_mesh) != 0 && CGAL::is_valid_polygon_mesh(cgal_mesh) &&
+        CGAL::is_triangle_mesh(cgal_mesh) && CGAL::is_closed(cgal_mesh) &&
+        !PMP::does_self_intersect(cgal_mesh))
+        PMP::orient_to_bound_a_volume(cgal_mesh);
+
+    if (cancel_callback && cancel_callback())
+        return false;
 
     std::shared_ptr<TriMesh> out;
     {

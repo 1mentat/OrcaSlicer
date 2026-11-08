@@ -4,6 +4,7 @@
 #include "libslic3r/TextureToColor/Repair.hpp"
 #include "libslic3r/TextureToColor/TriMesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Point.hpp"
 #include "texture_to_color_fixtures.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,11 +15,13 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <admesh/stl.h>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
 
 #include <cmath>
 #include <cstddef>
 #include <memory>
 #include <vector>
+#include <utility>
 
 using namespace Slic3r;
 using namespace Slic3r::tex2color;
@@ -118,15 +121,86 @@ TEST_CASE("RepairMesh corrects face orientation and removes a degenerate face",
     CHECK_THAT(std::abs(its_volume(*repaired)), WithinAbs(1.f / 6.f, 1e-5f));
 }
 
-// Known bug: orient_polygon_soup only makes the winding consistent; here it flips the three
-// outward faces to match the one inward face, so the repaired solid is inside out (volume -1/6).
-// Needs a fix (e.g. orient_to_bound_a_volume after building the mesh).
-TEST_CASE("RepairMesh leaves a reoriented closed mesh facing outward", "[TextureToColor][repair][!shouldfail]")
+TEST_CASE("RepairMesh leaves a reoriented closed mesh facing outward", "[TextureToColor][repair]")
 {
     std::shared_ptr<TriMesh> repaired;
     REQUIRE(RepairMesh(reversed_tetrahedron_with_degenerate_face(), repaired));
     REQUIRE(repaired);
     CHECK_THAT(its_volume(*repaired), WithinAbs(1.f / 6.f, 1e-5f));
+}
+
+TEST_CASE("RepairMesh orients closed solid boundaries with nesting-aware cavity winding", "[TextureToColor][repair]")
+{
+    const bool nested = GENERATE(false, true);
+    const bool reverse_outer = GENERATE(false, true);
+    const bool reverse_inner = GENERATE(false, true);
+    TriMesh input = closed_tetrahedron();
+    TriMesh second = closed_tetrahedron();
+    for (auto &point : input.vertices)
+        point *= nested ? 4.f : 1.f;
+    for (auto &point : second.vertices)
+        point += nested ? Vec3f(0.5f, 0.5f, 0.5f) : Vec3f(3.f, 0.f, 0.f);
+    if (reverse_outer)
+        for (auto &face : input.indices)
+            std::swap(face[1], face[2]);
+    if (reverse_inner)
+        for (auto &face : second.indices)
+            std::swap(face[1], face[2]);
+    its_merge(input, second);
+    std::shared_ptr<TriMesh> output;
+    REQUIRE(RepairMesh(input, output));
+    REQUIRE(output);
+    check_finite_and_valid(*output);
+    REQUIRE(output->indices.size() == 8);
+    CHECK(color_utils::is_closed(*output));
+    // Nested shells are a cavity; disconnected non-nested shells are two solids.
+    CHECK_THAT(its_volume(*output), WithinAbs(nested ? (64.f - 1.f) / 6.f : 2.f / 6.f, 1e-5f));
+}
+
+TEST_CASE("RepairMesh keeps open and intersecting results as best-effort surfaces", "[TextureToColor][repair]")
+{
+    const bool intersecting = GENERATE(false, true);
+    TriMesh input = closed_tetrahedron();
+    TriMesh second = intersecting ? closed_tetrahedron() : open_tetrahedron();
+    for (auto &point : second.vertices)
+        point += intersecting ? Vec3f(0.25f, 0.25f, 0.25f) : Vec3f(3.f, 0.f, 0.f);
+    its_merge(input, second);
+    if (intersecting) {
+        REQUIRE(color_utils::is_closed(input));
+        REQUIRE(CGAL::Polygon_mesh_processing::does_self_intersect(cgalutils::trimesh_to_cgal(input)));
+    }
+    RepairSetting no_hole_filling;
+    no_hole_filling.max_hole_edges = 0;
+    no_hole_filling.max_boundary_edges = 0;
+    std::shared_ptr<TriMesh> output;
+    REQUIRE(RepairMesh(input, output, nullptr, nullptr, no_hole_filling));
+    REQUIRE(output);
+    check_finite_and_valid(*output);
+    CHECK(output->indices.size() == input.indices.size());
+    CHECK(color_utils::is_closed(*output) == intersecting);
+    if (intersecting)
+        CHECK(CGAL::Polygon_mesh_processing::does_self_intersect(cgalutils::trimesh_to_cgal(*output)));
+    // No positive-volume assertion is valid for these best-effort outputs.
+}
+
+TEST_CASE("RepairMesh preserves output when cancellation arrives during solid orientation", "[TextureToColor][repair]")
+{
+    const auto sentinel = std::make_shared<TriMesh>(closed_tetrahedron());
+    std::shared_ptr<TriMesh> output = sentinel;
+    std::vector<int> progress;
+    int polls_at_85 = 0;
+    const auto cancel_after_work = [&]() {
+        if (!progress.empty() && progress.back() == 85)
+            return ++polls_at_85 == 2;
+        return false;
+    };
+    CHECK_FALSE(RepairMesh(closed_tetrahedron(), output,
+                          [&](AlgoProgress state) { progress.push_back(state.percent); }, cancel_after_work));
+    CHECK(polls_at_85 == 2);
+    REQUIRE_FALSE(progress.empty());
+    CHECK(progress.back() == 85);
+    REQUIRE(output == sentinel);
+    CHECK(output->indices.size() == 4);
 }
 
 TEST_CASE("RepairMesh cancellation stops at each published stage",
