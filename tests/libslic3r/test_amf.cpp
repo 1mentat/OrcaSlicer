@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -65,6 +66,17 @@ bool load(const std::string &path, Model &model, bool *inches = nullptr)
     DynamicPrintConfig        config;
     ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
     return load_amf(path.c_str(), &config, &substitutions, &model, inches);
+}
+
+// Malformed input may be rejected by a false result or by the archive parser's
+// typed FileIOError. Keep successful-input calls on load() so errors still fail them.
+bool load_for_rejection(const std::string &path, Model &model)
+{
+    try {
+        return load(path, model);
+    } catch (const FileIOError &) {
+        return false;
+    }
 }
 
 void replace(std::string &s, const std::string &a, const std::string &b)
@@ -175,7 +187,7 @@ TEST_CASE("AMF archives reject malformed embedded XML", "[AMF][AMFArchive]")
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"bad.amf", xml}});
     Model m;
-    CHECK_FALSE(load(f.string(), m));
+    CHECK_FALSE(load_for_rejection(f.string(), m));
 }
 
 TEST_CASE("AMF archives reject empty model entries", "[AMF][AMFArchive]")
@@ -338,7 +350,7 @@ TEST_CASE("AMF archives reject triangle references outside the vertex list", "[A
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load(f.string(), m));
+    CHECK_FALSE(load_for_rejection(f.string(), m));
 }
 
 TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
@@ -352,7 +364,7 @@ TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load(f.string(), m));
+    CHECK_FALSE(load_for_rejection(f.string(), m));
 }
 
 TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMFArchive]")
@@ -362,7 +374,7 @@ TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMF
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load(f.string(), m));
+    CHECK_FALSE(load_for_rejection(f.string(), m));
 }
 
 TEST_CASE("AMF normalizes inward triangle winding to positive volume", "[AMF][AMFArchive]")
