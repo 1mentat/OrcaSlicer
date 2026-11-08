@@ -3690,7 +3690,7 @@ int CLI::run(int argc, char **argv)
                 auto *opt_vec_dst = dynamic_cast<ConfigOptionVectorBase *>(m_print_config.option(opt_key));
                 if (opt_vec_dst == nullptr || opt_vec_dst->size() < size_t(old_start + old_variant_count))
                     continue;
-                // set_with_restore_2() pads its source in place
+                // Keep a snapshot of the old destination while restoring its variant slots.
                 std::unique_ptr<ConfigOption> old_values(opt_vec_dst->clone());
                 opt_vec_dst->set_with_restore_2(static_cast<ConfigOptionVectorBase *>(old_values.get()), kept_variant_indice, old_start,
                                                 old_variant_count, true);

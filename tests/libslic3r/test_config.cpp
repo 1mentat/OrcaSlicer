@@ -4726,18 +4726,47 @@ TEST_CASE("Variant vector replacement reports an invalid start, type or restore 
                       Catch::Matchers::ContainsSubstring("invalid restore_index size"));
 }
 
-// Known bug: set_with_restore_2 takes its source as const but const_casts it and resizes it when padding a short
-// source, so the caller's vector grows; fixed by a follow-up fix PR.
-TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore][!shouldfail]")
+TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore]")
 {
     ConfigOptionInts destination({1, 2, 3, 4, 5});
-    ConfigOptionInts source({8}); // not const: the library const_casts it when padding
+    ConfigOptionInts source({8});
     std::vector<int> restore_index{1, -1, -1};
 
     destination.set_with_restore_2(&source, restore_index, 1, 2, true);
 
     CHECK(source.values == std::vector<int>{8});
+    CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    CHECK(restore_index == std::vector<int>{1, -1, -1});
 }
+
+TEST_CASE("Variant vector replacement reads const sources without changing their shape", "[Config][ConfigVariantRestore]")
+{
+    SECTION("a padded boolean source retains its single entry") {
+        ConfigOptionBools destination({false, false});
+        const ConfigOptionBools source({true});
+        std::vector<int> restore_index{-1, -1};
+        destination.set_with_restore_2(&source, restore_index, 0, 2, true);
+        CHECK(destination.values == std::vector<unsigned char>{true, true});
+        CHECK(source.values == std::vector<unsigned char>{true});
+    }
+    SECTION("a longer source is truncated only for the destination") {
+        ConfigOptionStrings destination({"old", "tail"});
+        const ConfigOptionStrings source({"first", "second", "third"});
+        std::vector<int> restore_index{-1, -1};
+        destination.set_with_restore_2(&source, restore_index, 0, 1, true);
+        CHECK(destination.values == std::vector<std::string>{"first", "second", "tail"});
+        CHECK(source.values == std::vector<std::string>{"first", "second", "third"});
+    }
+    SECTION("an empty source cannot supply a padding default") {
+        ConfigOptionInts destination({1, 2});
+        const ConfigOptionInts source;
+        std::vector<int> restore_index{-1};
+        CHECK_THROWS_WITH(destination.set_with_restore_2(&source, restore_index, 0, 0, true),
+                          Catch::Matchers::ContainsSubstring("empty vector"));
+        CHECK(source.values.empty());
+    }
+}
+
 
 namespace {
 
@@ -5117,7 +5146,7 @@ TEST_CASE("DynamicConfig erase removes one key and reports whether it existed", 
     CHECK(config.size() == 1);
 }
 
-TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts][!shouldfail]")
+TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing keys", "[Config][ConfigContracts]")
 {
     DynamicConfig target;
     target.set_key_value("count", new ConfigOptionInt(4));
@@ -5125,9 +5154,64 @@ TEST_CASE("Adding a DynamicConfig by reference overwrites the values of existing
     source.set_key_value("count", new ConfigOptionInt(12));
 
     target += source;
-    // Known bug: the lvalue operator+= only adds missing keys and keeps the old value of existing
-    // ones; it should overwrite them with the source value, as the rvalue overload does.
     CHECK(target.opt<ConfigOptionInt>("count")->value == 12);
+}
+
+TEST_CASE("DynamicConfig lvalue addition copies values with apply and rvalue precedence", "[Config][ConfigContracts]")
+{
+    DynamicConfig base;
+    base.set_key_value("count", new ConfigOptionInt(4));
+    base.set_key_value("labels", new ConfigOptionStrings({"old"}));
+    base.set_key_value("ratio", new ConfigOptionFloatOrPercent(0.3, false));
+    base.set_key_value("kept", new ConfigOptionBool(true));
+    DynamicConfig source;
+    source.set_key_value("count", new ConfigOptionInt(12));
+    source.set_key_value("labels", new ConfigOptionStrings({"first", "second"}));
+    source.set_key_value("ratio", new ConfigOptionFloatOrPercent(75., true));
+
+    const DynamicConfig source_before(source);
+    DynamicConfig target(base), applied(base), moved(base), move_source(source);
+    DynamicConfig &returned = (target += source);
+    // All source keys already exist, so apply needs no definition for this dynamic config.
+    applied.apply(source);
+    moved += std::move(move_source);
+    CHECK(&returned == &target);
+    CHECK(target == applied);
+    CHECK(target == moved);
+    REQUIRE(target.opt<ConfigOptionFloatOrPercent>("ratio") != nullptr);
+    CHECK_THAT(target.opt<ConfigOptionFloatOrPercent>("ratio")->value, Catch::Matchers::WithinAbs(75., 1e-9));
+    CHECK(target.opt<ConfigOptionFloatOrPercent>("ratio")->percent);
+    REQUIRE(target.opt<ConfigOptionStrings>("labels") != nullptr);
+    CHECK(target.opt<ConfigOptionStrings>("labels")->values == std::vector<std::string>{"first", "second"});
+    CHECK(move_source.empty());
+    CHECK(source == source_before);
+    CHECK(source.opt<ConfigOptionInt>("count")->value == 12);
+    CHECK(source.opt<ConfigOptionStrings>("labels")->values == std::vector<std::string>{"first", "second"});
+    CHECK(source.opt<ConfigOptionFloatOrPercent>("ratio")->percent);
+    source.opt<ConfigOptionStrings>("labels")->values.front() = "changed";
+    CHECK(target.opt<ConfigOptionStrings>("labels")->values.front() == "first");
+
+    target += target;
+    CHECK(target == applied);
+    DynamicConfig empty;
+    target += empty;
+    CHECK(target == applied);
+}
+
+TEST_CASE("DynamicConfig lvalue addition preserves the source option concrete type", "[Config][ConfigContracts]")
+{
+    DynamicConfig target;
+    target.set_key_value("modes", new ConfigOptionEnumsGeneric({1}));
+    DynamicConfig source;
+    source.set_key_value("modes", new ConfigOptionEnumsGenericNullable({2, 3}));
+    // Both options report coEnums, but only the source's concrete type is nullable.
+    target += source;
+    REQUIRE(target.opt<ConfigOptionEnumsGenericNullable>("modes") != nullptr);
+    CHECK(target.opt<ConfigOptionEnumsGenericNullable>("modes")->values == std::vector<int>{2, 3});
+    CHECK(source.opt<ConfigOptionEnumsGenericNullable>("modes")->values == std::vector<int>{2, 3});
+    CHECK(target.option("modes") != source.option("modes"));
+    source.opt<ConfigOptionEnumsGenericNullable>("modes")->values.front() = 9;
+    CHECK(target.opt<ConfigOptionEnumsGenericNullable>("modes")->values.front() == 2);
 }
 
 TEST_CASE("ConfigBase equality ignores missing options but reports present differences", "[Config][ConfigContracts]")
