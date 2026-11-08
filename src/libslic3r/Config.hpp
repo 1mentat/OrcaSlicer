@@ -1750,6 +1750,10 @@ public:
             }
             this->values.emplace_back(std::move(group));
         }
+        // getline omits the final empty field. Empty input still means no groups;
+        // the legacy encoding cannot distinguish that from one empty group.
+        if (!str.empty() && str.back() == '#')
+            this->values.emplace_back();
         return true;
     }
     std::vector<std::string> vserialize_single(int idx) const

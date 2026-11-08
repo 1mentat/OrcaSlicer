@@ -13488,12 +13488,17 @@ Polygon get_shared_poly(const std::vector<Pointfs>& extruder_polys)
     for (int index = 0; index < extruder_polys.size(); index++)
     {
         const Pointfs& extruder_area = extruder_polys[index];
+        // A present empty area contributes no printable region.
+        if (extruder_area.empty())
+            return {};
         if (index == 0)
             result.points = to_points(extruder_area);
         else {
             Polygon extruer_poly;
             extruer_poly.points = to_points(extruder_area);
             Polygons result_polygon = intersection(extruer_poly, result);
+            if (result_polygon.empty())
+                return {};
             result = result_polygon[0];
         }
     }
@@ -13501,6 +13506,11 @@ Polygon get_shared_poly(const std::vector<Pointfs>& extruder_polys)
 }
 Points get_bed_shape(const DynamicPrintConfig &config, bool use_share)
 {
+    if (use_share)
+        if (const auto *areas = config.opt<ConfigOptionPointsGroups>("extruder_printable_area"))
+            for (const Pointfs &area : areas->values)
+                if (area.empty())
+                    return {};
     const ConfigOptionPoints *bed_shape_opt = config.opt<ConfigOptionPoints>("printable_area");
     if (!bed_shape_opt) {
 

@@ -23,6 +23,7 @@
 #include <cereal/archives/binary.hpp>
 
 #include <boost/nowide/cstdlib.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <boost/nowide/fstream.hpp>
 #include "libslic3r/Config.hpp"
 #include <algorithm>
@@ -3589,14 +3590,13 @@ TEST_CASE("Grouped point options preserve empty group boundaries", "[Config][Con
     check_point_components(decoded.values[1][0], 1., 2.);
 }
 
-TEST_CASE("Grouped point options keep a trailing empty group when parsing", "[Config][ConfigContracts][ConfigGrouped][!shouldfail]")
+TEST_CASE("Grouped point options keep a trailing empty group when parsing", "[Config][ConfigContracts][ConfigGrouped]")
 {
     const ConfigOptionPointsGroups source({Vec2ds{Vec2d(1., 2.)}, Vec2ds{}});
     CHECK(source.serialize() == "1x2#");
 
     ConfigOptionPointsGroups decoded;
     REQUIRE(decoded.deserialize(source.serialize()));
-    // Known bug: a trailing empty group is dropped by deserialize (std::getline ends before it); fixed by the follow-up fix PR
     REQUIRE(decoded.values.size() == 2);
     CHECK(decoded.values[1].empty());
 }
@@ -5996,4 +5996,105 @@ TEST_CASE("Preset normalization keeps project slots and printer variants on thei
     REQUIRE(density != nullptr);
     REQUIRE(density->values.size() == 1); // The existing ordinary pass still uses diameter's width.
     CHECK_THAT(density->values.front(), Catch::Matchers::WithinAbs(1.25, 1e-12));
+}
+
+TEST_CASE("Grouped point parsing retains delimiter cardinality and empty-input compatibility", "[Config][ConfigGrouped]")
+{
+    const auto input = GENERATE(std::string(""), std::string("#"), std::string("##"),
+                                std::string("1x2#"), std::string("#1x2#"), std::string("1x2##"));
+    ConfigOptionPointsGroups decoded;
+    REQUIRE(decoded.deserialize(input));
+    const size_t count = input.empty() ? 0 : 1 + std::count(input.begin(), input.end(), '#');
+    REQUIRE(decoded.values.size() == count);
+    if (!input.empty())
+        CHECK(decoded.values.back().empty());
+    for (const Vec2ds &group : decoded.values)
+        for (const Vec2d &point : group)
+            check_point_components(point, 1., 2.);
+
+    ConfigOptionPointsGroups appended({Vec2ds{Vec2d(7., 8.)}});
+    REQUIRE(appended.deserialize("", true));
+    REQUIRE(appended.values.size() == 1);
+    check_point_components(appended.values.front().front(), 7., 8.);
+    REQUIRE(appended.deserialize("1x2#", true));
+    REQUIRE(appended.values.size() == 3);
+    CHECK(appended.values.back().empty());
+    check_point_components(appended.values[1].front(), 1., 2.);
+
+    // The existing text encoding has no distinct representation for one empty group.
+    const ConfigOptionPointsGroups singleton({Vec2ds{}});
+    CHECK(singleton.serialize().empty());
+    REQUIRE(decoded.deserialize(singleton.serialize()));
+    CHECK(decoded.values.empty());
+}
+
+TEST_CASE("Grouped printable areas persist a terminal empty region through JSON and config strings", "[Config][ConfigGrouped]")
+{
+    struct PrintSchemaConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &print_config_def; }
+    };
+    const Vec2ds bed{Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
+    PrintSchemaConfig source;
+    source.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({bed, Vec2ds{}}));
+    ScopedTemporaryFile file(".json");
+    source.save_to_json(file.string(), "empty-region", "User", "1.0.0.0");
+    nlohmann::json json;
+    {
+        boost::nowide::ifstream stream(file.string());
+        REQUIRE(stream.is_open());
+        stream >> json;
+    }
+    REQUIRE(json["extruder_printable_area"].size() == 2);
+    CHECK(json["extruder_printable_area"][1] == "");
+    PrintSchemaConfig reloaded;
+    reloaded.load(file.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    const auto *areas = reloaded.opt<ConfigOptionPointsGroups>("extruder_printable_area");
+    REQUIRE(areas != nullptr);
+    REQUIRE(areas->values.size() == 2);
+    CHECK(areas->values[1].empty());
+    CHECK(areas->serialize() == source.opt_serialize("extruder_printable_area"));
+
+    // Project export writes opt_serialize strings; exercise the config loader of that encoding.
+    boost::property_tree::ptree tree;
+    tree.put("extruder_printable_area", source.opt_serialize("extruder_printable_area"));
+    PrintSchemaConfig from_string;
+    from_string.load(tree, ForwardCompatibilitySubstitutionRule::Disable);
+    const auto *loaded = from_string.opt<ConfigOptionPointsGroups>("extruder_printable_area");
+    REQUIRE(loaded != nullptr);
+    REQUIRE(loaded->values.size() == 2);
+    CHECK(loaded->values[1].empty());
+    CHECK(loaded->serialize() == areas->serialize());
+}
+
+TEST_CASE("Shared bed shapes distinguish absent areas from empty and disjoint regions", "[Config][BedShape]")
+{
+    const Vec2ds bed{Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
+    const Vec2ds outside{Vec2d(30., 0.), Vec2d(40., 0.), Vec2d(40., 10.), Vec2d(30., 10.)};
+    const auto groups = GENERATE_COPY(std::vector<Vec2ds>{bed, Vec2ds{}},
+                                     std::vector<Vec2ds>{Vec2ds{}, bed},
+                                     std::vector<Vec2ds>{bed, outside});
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(groups));
+    CHECK(get_shared_poly(groups).empty());
+    CHECK(get_bed_shape(config, true).empty());
+    CHECK_FALSE(get_bed_shape(config, false).empty());
+    FullPrintConfig full;
+    full.printable_area.values = bed;
+    full.extruder_printable_area.values = groups;
+    CHECK(get_bed_shape(full, true).empty());
+    CHECK(get_bed_shape_with_excluded_area(full, true).empty());
+    config.erase("extruder_printable_area");
+    CHECK_THAT(bed_area_mm2(get_bed_shape(config)), Catch::Matchers::WithinAbs(400., 1e-6));
+}
+
+TEST_CASE("An explicit empty extruder region overrides the missing-bed center fallback", "[Config][BedShape]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("center", new ConfigOptionPoint(Vec2d(10., 20.)));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({Vec2ds{}}));
+    CHECK(get_bed_shape(config).empty());
+    config.erase("extruder_printable_area");
+    REQUIRE(get_bed_shape(config).size() == 1);
+    CHECK(get_bed_shape(config).front() == Point(scaled(10.), scaled(20.)));
 }

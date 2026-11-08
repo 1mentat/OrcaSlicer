@@ -278,6 +278,8 @@ private:
     // non-rectangular beds such as delta/circular printers.
     Polygon              m_bed_printable_area;
     std::vector<Polygon> m_extruder_printable_areas;
+    // Empty is a known unreachable region, unlike a missing/unknown boundary.
+    std::vector<bool> m_extruder_area_known_empty;
 
     std::string m_gcode_label_objects_start;
     std::string m_gcode_label_objects_end;

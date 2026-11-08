@@ -193,6 +193,7 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 
     m_bed_printable_area.points.clear();
     m_extruder_printable_areas.clear();
+    m_extruder_area_known_empty.clear();
 
     if (print_config.printable_area.values.size() >= 3)
         m_bed_printable_area = to_scaled_polygon(print_config.printable_area.values);
@@ -200,7 +201,12 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     const std::vector<Pointfs> &extruder_areas = print_config.extruder_printable_area.values;
     if (!extruder_areas.empty()) {
         m_extruder_printable_areas.resize(extruder_areas.size());
+        m_extruder_area_known_empty.resize(extruder_areas.size(), false);
         for (size_t i = 0; i < extruder_areas.size(); ++i) {
+            if (extruder_areas[i].empty()) {
+                m_extruder_area_known_empty[i] = true;
+                continue;
+            }
             if (extruder_areas[i].size() < 3) {
                 // No dedicated area for this extruder: it can reach the whole bed.
                 m_extruder_printable_areas[i] = m_bed_printable_area;
@@ -220,7 +226,10 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
                 double a = std::abs(p.area());
                 if (a > best_area) { best_area = a; largest = &p; }
             }
-            m_extruder_printable_areas[i] = largest ? *largest : std::move(extruder_poly);
+            if (largest)
+                m_extruder_printable_areas[i] = *largest;
+            else
+                m_extruder_area_known_empty[i] = true;
         }
     }
 }
@@ -229,7 +238,8 @@ const Polygon *GCodeWriter::active_printable_area() const
 {
     if (const Extruder *e = this->filament()) {
         size_t id = e->extruder_id();
-        if (id < m_extruder_printable_areas.size() && m_extruder_printable_areas[id].points.size() >= 3)
+        if (id < m_extruder_printable_areas.size() &&
+            (m_extruder_area_known_empty[id] || m_extruder_printable_areas[id].points.size() >= 3))
             return &m_extruder_printable_areas[id];
     }
     if (m_bed_printable_area.points.size() >= 3)
@@ -242,6 +252,8 @@ bool GCodeWriter::spiral_lift_fits_printable_area(const Vec2d &center, double ra
     const Polygon *area = this->active_printable_area();
     if (area == nullptr)
         return true; // Boundary unknown: don't restrict (preserve previous behavior).
+    if (area->empty())
+        return false;
 
     const Point  c        = Point::new_scale(center.x(), center.y());
     const double r_scaled = scale_(radius);

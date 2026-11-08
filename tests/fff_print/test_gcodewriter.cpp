@@ -1484,3 +1484,38 @@ TEST_CASE("Percent accelerations resolve against the option they are a percentag
         REQUIRE(accelerations_by_role[role_name] == std::set<int>{ value });
     }
 }
+
+TEST_CASE("Spiral lifts reject explicit empty regions while missing and short areas keep the bed fallback", "[GCodeWriter][BedShape]")
+{
+    const int area_kind = GENERATE(0, 1, 2, 3);
+    PrintConfig config;
+    config.printable_area.values = {{0., 0.}, {100., 0.}, {100., 100.}, {0., 100.}};
+    config.enable_arc_fitting.value = true;
+    config.travel_slope.values = {45.};
+    if (area_kind == 1)
+        config.extruder_printable_area.values = {{}};
+    else if (area_kind == 2)
+        config.extruder_printable_area.values = {{{1., 2.}}};
+    if (area_kind == 3)
+        config.extruder_printable_area.values = {{{110., 0.}, {120., 0.}, {120., 10.}, {110., 10.}}};
+    GCodeWriter writer;
+    writer.apply_print_config(config);
+    configure_lift_writer(writer);
+    writer.set_position(Vec3d(50., 50., 0.2));
+    writer.set_current_position_clear(true);
+    const std::string lift = writer.eager_lift(LiftType::SpiralLift);
+    REQUIRE_FALSE(lift.empty());
+    if (area_kind == 1 || area_kind == 3)
+        CHECK(lift.find("G17") == std::string::npos);
+    else
+        CHECK(lift.find("G17") != std::string::npos);
+
+    // Reloading an absent area must not retain the previous explicit-empty state.
+    writer.unlift();
+    config.extruder_printable_area.values.clear();
+    writer.apply_print_config(config);
+    configure_lift_writer(writer);
+    writer.set_position(Vec3d(50., 50., 0.2));
+    writer.set_current_position_clear(true);
+    CHECK(writer.eager_lift(LiftType::SpiralLift).find("G17") != std::string::npos);
+}

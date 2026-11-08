@@ -4898,6 +4898,9 @@ int CLI::run(int argc, char **argv)
                 if (!all_objects_have_instances) model.add_default_instances();
 
                 try {
+                    const auto *areas = m_print_config.opt<ConfigOptionPointsGroups>("extruder_printable_area");
+                    if (beds.empty() && areas && !areas->values.empty() && get_shared_poly(areas->values).empty())
+                        throw Slic3r::RuntimeError("Extruder printable areas have no common printable region.");
                     if (dups > 1) {
                         // if all input objects have defined position(s) apply duplication to the whole model
                         duplicate(model, size_t(dups), beds, arrange_cfg);

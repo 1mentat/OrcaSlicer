@@ -26,6 +26,8 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/TimelapsePosPicker.hpp"
+#include <optional>
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Support/TreeModelVolumes.hpp"
@@ -1519,4 +1521,48 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         CHECK(lowest->print_z - floor_under_lowest < 4. * 0.2 + EPSILON);
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
     }
+}
+
+TEST_CASE("Shared wipe regions retain explicit empty areas and legacy malformed fallbacks", "[Print][BedShape]")
+{
+    const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
+    const size_t nozzle_count = GENERATE(size_t(1), size_t(2));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_count, 0.4));
+    Print print{};
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({bed, Vec2ds{}}));
+    print.apply_config_for_render(config);
+    CHECK(print.get_extruder_shared_printable_polygon().empty());
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups());
+    print.apply_config_for_render(config);
+    CHECK_FALSE(print.get_extruder_shared_printable_polygon().empty());
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({Vec2ds{Vec2d(1., 2.)}}));
+    print.apply_config_for_render(config);
+    CHECK_FALSE(print.get_extruder_shared_printable_polygon().empty());
+}
+
+TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty region", "[Print][Timelapse][BedShape]")
+{
+    const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
+    const bool empty_region = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats(2, 0.4));
+    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(TimelapseType::tlSmooth));
+    config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(0.));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(
+        empty_region ? std::vector<Vec2ds>{bed, Vec2ds{}} : std::vector<Vec2ds>{bed}));
+    Print print{};
+    print.apply_config_for_render(config);
+    Layer layer(0, nullptr, 0.2, 0.2, 0.1);
+    TimelapsePosPicker picker;
+    picker.init(&print, Point(0, 0));
+    const PosPickCtx context{Point(0, 0), &layer, 0, 0, std::nullopt, std::nullopt};
+    const Point position = picker.pick_pos(context);
+    if (empty_region)
+        CHECK(position == DefaultTimelapsePos);
+    else
+        CHECK(Polygon::new_scale(bed).contains(Point(scaled(position.x()), scaled(position.y()))));
 }

@@ -4590,12 +4590,14 @@ size_t Print::get_extruder_id(unsigned int filament_id) const
 }
 
 // Region reachable by every extruder = intersection of all per-extruder printable areas.
-// For single-nozzle printers, or whenever extruder_printable_area is unpopulated / degenerate (all
-// current single/dual profiles), fall back to the full printable_area so the wipe-tower-center clamp
-// is identical to the previous full-bed clamp.
+// Missing areas retain the full-bed fallback. A present empty area has no
+// printable region; nonempty malformed areas retain their legacy fallback.
 Polygons Print::get_extruder_shared_printable_polygon() const
 {
     const std::vector<Vec2ds>& extruder_printable_areas = m_config.extruder_printable_area.values;
+    for (const Vec2ds& area : extruder_printable_areas)
+        if (area.empty())
+            return {};
     if (m_config.nozzle_diameter.size() < 2 || extruder_printable_areas.empty())
         return {Polygon::new_scale(m_config.printable_area.values)};
     for (const Vec2ds& area : extruder_printable_areas)
@@ -4823,6 +4825,10 @@ void Print::_make_wipe_tower()
         // Don't generate any wipe tower.
         return;
 
+    const Polygons shared_printable = this->get_extruder_shared_printable_polygon();
+    if (shared_printable.empty())
+        throw Slic3r::SlicingError(L("Prime Tower") + L(" is partially outside the printable area, and it cannot be printed.\n"));
+
     // Check whether there are any layers in m_tool_ordering, which are marked with has_wipe_tower,
     // they print neither object, nor support. Each such layer needs a virtual support layer
     // counterpart in m_objects.front() so that GCode::collect_layers_to_print picks it up and the
@@ -4896,7 +4902,7 @@ void Print::_make_wipe_tower()
             const ConfigOptionBool* hfs = m_full_print_config.option<ConfigOptionBool>("has_filament_switcher");
             wipe_tower.set_has_filament_switcher(hfs && hfs->value);
         }
-        wipe_tower.set_shared_print_bed(this->get_extruder_shared_printable_polygon());
+        wipe_tower.set_shared_print_bed(shared_printable);
         // Set the extruder & material properties at the wipe tower object.
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, m_config);
@@ -5198,8 +5204,8 @@ void Print::_make_wipe_tower()
         footprint.rotate(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
         footprint.translate(Point(scale_(m_config.wipe_tower_x.get_at(m_plate_index)),
                                   scale_(m_config.wipe_tower_y.get_at(m_plate_index))));
-        const Polygons printable_polys = this->get_extruder_shared_printable_polygon();
-        if (!printable_polys.empty() && !diff(Polygons{footprint}, printable_polys).empty()) {
+        const Polygons &printable_polys = shared_printable;
+        if (!diff(Polygons{footprint}, printable_polys).empty()) {
             const BoundingBox fp = get_extents(footprint);
             const BoundingBox pr = get_extents(printable_polys);
             BOOST_LOG_TRIVIAL(error) << boost::format("wipe tower footprint [%1%,%2%]-[%3%,%4%] leaves printable [%5%,%6%]-[%7%,%8%]") %

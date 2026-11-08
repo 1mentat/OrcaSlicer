@@ -471,3 +471,27 @@ TEST_CASE("Bed-plane intersections expose collisions absent from the above-bed v
 }
 
 } // namespace volume_geometry_contracts
+
+TEST_CASE("BuildVolume keeps empty extruder regions indexed and unprintable", "[BuildVolume]")
+{
+    const auto bed = rect_area(20., 20.);
+    const BuildVolume volume(bed, 20., {bed, {}}, {20., 20.});
+    REQUIRE(volume.get_extruder_area_count() == 2);
+    REQUIRE(volume.extruder_areas().size() == 2);
+    CHECK(volume.extruder_areas()[1].empty());
+    const BoundingBoxf3 box(Vec3d(5., 5., 0.), Vec3d(6., 6., 1.));
+    CHECK(volume.check_volume_bbox_state_with_extruder_area(box, 0) == BuildVolume::ObjectState::Inside);
+    CHECK(volume.check_volume_bbox_state_with_extruder_area(box, 1) == BuildVolume::ObjectState::Limited);
+    const TriangleMesh cube = make_cube(1., 1., 1.);
+    Transform3f transform = Transform3f::Identity();
+    transform.translation() = Vec3f(5.f, 5.f, 0.f);
+    std::vector<bool> inside;
+    CHECK(volume.check_object_state_with_extruder_areas(cube.its, transform, inside) == BuildVolume::ObjectState::Limited);
+    CHECK(inside == std::vector<bool>{true, false});
+    const auto &shared = volume.get_shared_volume();
+    CHECK(shared.type == static_cast<int>(BuildVolume_Type::Rectangle));
+    CHECK(shared.data[0] > shared.data[2]);
+    CHECK(shared.data[1] > shared.data[3]);
+    const BuildVolume absent(bed, 20., {}, {});
+    CHECK(absent.get_extruder_area_count() == 0);
+}

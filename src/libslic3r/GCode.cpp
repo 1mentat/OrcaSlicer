@@ -1263,20 +1263,20 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                 }
 
                 // Nozzle-heating center just outside the wipe tower. Clamp X to the
-                // region every extruder can reach (shared printable polygon), which equals the full
-                // printable_area for all current single/dual printers, so existing output is unchanged.
+                // region every extruder can reach. An empty shared region has no valid center.
                 Vec2f stop_pos = tool_change_start_pos;
-                {
+                const Polygons shared_printable = gcodegen.m_print->get_extruder_shared_printable_polygon();
+                if (!shared_printable.empty()) {
                     BoundingBoxf bbx = m_wipe_tower_bbx;
                     bbx.translate((m_wipe_tower_pos + m_rib_offset).cast<double>());
                     stop_pos.x() += (stop_pos.x() < bbx.center().x()) ? -2.f : 2.f;
-                    auto printer_bbx = unscaled(get_extents(gcodegen.m_print->get_extruder_shared_printable_polygon()));
+                    auto printer_bbx = unscaled(get_extents(shared_printable));
                     if (stop_pos.x() < printer_bbx.min[0]) stop_pos.x() = float(printer_bbx.min[0]);
                     if (stop_pos.x() > printer_bbx.max[0]) stop_pos.x() = float(printer_bbx.max[0]);
                 }
                 config.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(stop_pos.x()));
                 config.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(stop_pos.y()));
-                config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(true));
+                config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(!shared_printable.empty()));
 
                 config.set_key_value("max_layer_z", new ConfigOptionFloat(gcodegen.m_max_layer_z));
                 config.set_key_value("relative_e_axis", new ConfigOptionBool(full_config.use_relative_e_distances));
@@ -3631,11 +3631,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     this->placeholder_parser().set("has_wipe_tower", has_wipe_tower);
 
     // Nozzle-heating center just outside the wipe tower. The tower side is chosen
-    // from the full-bed midpoint, then X is clamped to the region every extruder can reach (shared printable
-    // polygon) = the full printable_area for all current single/dual printers, so existing output is unchanged.
+    // from the full-bed midpoint, then X is clamped to the region every extruder can reach.
+    // An empty shared region has no valid center.
     Vec2f wipe_tower_center       = Vec2f::Zero();
     bool  wipe_tower_center_valid = false;
-    if (has_wipe_tower) {
+    const Polygons shared_printable = has_wipe_tower ? print.get_extruder_shared_printable_polygon() : Polygons{};
+    if (has_wipe_tower && !shared_printable.empty()) {
         BoundingBoxf bbx = print.wipe_tower_data().bbx;
         bbx.translate(print.get_fake_wipe_tower().pos.cast<double>());
         BoundingBoxf printer_bed_bbx(m_config.printable_area.values);
@@ -3643,7 +3644,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             wipe_tower_center = Vec2f(float(bbx.max.x() + 2.f), float(bbx.center().y()));
         else
             wipe_tower_center = Vec2f(float(bbx.min.x() - 2.f), float(bbx.center().y()));
-        auto printer_bbx = unscaled(get_extents(print.get_extruder_shared_printable_polygon()));
+        auto printer_bbx = unscaled(get_extents(shared_printable));
         if (wipe_tower_center.x() < printer_bbx.min[0]) wipe_tower_center.x() = float(printer_bbx.min[0]);
         if (wipe_tower_center.x() > printer_bbx.max[0]) wipe_tower_center.x() = float(printer_bbx.max[0]);
         wipe_tower_center_valid = true;

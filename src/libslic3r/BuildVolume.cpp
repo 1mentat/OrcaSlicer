@@ -101,6 +101,7 @@ BuildVolume::BuildVolume(const std::vector<Vec2d> &printable_area, const double 
         if (extruder_printable_heights.size() < m_extruder_shapes.size())
             BOOST_LOG_TRIVIAL(warning) << boost::format("extruder_printable_height has only %1% entries but extruder_printable_area has %2%, falling back to the bed printable_height for the missing ones")
                     % extruder_printable_heights.size() % m_extruder_shapes.size();
+        bool has_empty_region = false;
         for (unsigned int index = 0; index < m_extruder_shapes.size(); index++)
         {
             std::vector<Vec2d>& extruder_shape = m_extruder_shapes[index];
@@ -108,11 +109,10 @@ BuildVolume::BuildVolume(const std::vector<Vec2d> &printable_area, const double 
 
             if (extruder_shape.empty())
             {
-                //should not happen
-                BOOST_LOG_TRIVIAL(warning) << boost::format("Found invalid extruder_printable_area of index %1%")%index;
-                assert(false);
-                m_extruder_shapes.clear();
-                return;
+                // Retain this extruder's index, but it cannot print anywhere.
+                has_empty_region = true;
+                m_extruder_volumes.emplace_back();
+                continue;
             }
 
             const double extruder_height = index < extruder_printable_heights.size() ? extruder_printable_heights[index] : printable_height;
@@ -187,6 +187,11 @@ BuildVolume::BuildVolume(const std::vector<Vec2d> &printable_area, const double 
 
         m_shared_volume.type = static_cast<int>(m_type);
         m_shared_volume.zs[0] = 0.f;
+        if (has_empty_region) {
+            // An inverted rectangle is empty in the bed shader's min/max checks.
+            m_shared_volume.type = static_cast<int>(BuildVolume_Type::Rectangle);
+            m_shared_volume.data = {1.f, 1.f, 0.f, 0.f};
+        }
         //m_shared_volume.zs[1] = printable_height;
     }
 
@@ -448,6 +453,8 @@ const BuildVolume::BuildExtruderVolume&  BuildVolume::get_extruder_area_volume(i
 BuildVolume::ObjectState  BuildVolume::check_object_state_with_extruder_area(const indexed_triangle_set &its, const Transform3f &trafo, int index) const
 {
     const BuildExtruderVolume& extruder_volume = get_extruder_area_volume(index);
+    if (m_extruder_shapes[index].empty())
+        return ObjectState::Limited;
     ObjectState return_state = ObjectState::Inside;
 
     if (!extruder_volume.same_with_bed) {
@@ -503,6 +510,8 @@ BuildVolume::ObjectState  BuildVolume::check_object_state_with_extruder_areas(co
 BuildVolume::ObjectState  BuildVolume::check_volume_bbox_state_with_extruder_area(const BoundingBoxf3& volume_bbox, int index) const
 {
     const BuildExtruderVolume& extruder_volume = get_extruder_area_volume(index);
+    if (m_extruder_shapes[index].empty())
+        return ObjectState::Limited;
     BoundingBox3Base<Vec3d> extruder_bbox = extruder_volume.bboxf.inflated(SceneEpsilon);
     if (extruder_volume.same_with_bed || extruder_bbox.contains(volume_bbox))
         return ObjectState::Inside;

@@ -1141,3 +1141,20 @@ TEST_CASE("Model arrange duplicates each source instance for every requested pla
 }
 
 } // namespace model_arrange_contracts
+
+TEST_CASE("Configured empty shared regions are rejected before arrangement", "[Arrange][BedShape]")
+{
+    const Vec2ds bed{Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({bed, Vec2ds{}}));
+    ArrangeParams params;
+    CHECK_THROWS_AS(get_shrink_bedpts(&config, params), Slic3r::RuntimeError);
+    config.erase("extruder_printable_area");
+    CHECK_FALSE(get_shrink_bedpts(&config, params).empty());
+    // Missing configuration keeps the generic infinite-bed convention.
+    config.erase("printable_area");
+    CHECK(get_shrink_bedpts(&config, params).empty());
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({bed}));
+    CHECK(get_shrink_bedpts(&config, params).empty());
+}
