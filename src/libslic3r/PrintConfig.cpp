@@ -9862,6 +9862,75 @@ std::set<std::string> print_options_with_variant = {
     "top_solid_infill_flow_ratio"
 };
 
+const std::vector<std::string>& filament_preset_option_keys()
+{
+    static const std::vector<std::string> keys {/*"filament_colour", */ "default_filament_colour", "required_nozzle_HRC", "filament_diameter", "pellet_flow_coefficient", "volumetric_speed_coefficients", "filament_type",
+                                                          "filament_soluble", "filament_is_support", "filament_printable", "filament_extruder_compatibility",
+    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed",
+    "filament_flow_ratio", "filament_density", "filament_adhesiveness_category", "filament_cost", "filament_minimal_purge_on_wipe_tower",
+    "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length", "filament_tower_ironing_area", "filament_tower_interface_purge_volume",
+    "filament_tower_interface_print_temp",
+    "nozzle_temperature", "nozzle_temperature_initial_layer",
+    // BBS
+    "cool_plate_temp", "textured_cool_plate_temp", "eng_plate_temp", "hot_plate_temp", "textured_plate_temp", "cool_plate_temp_initial_layer", "textured_cool_plate_temp_initial_layer", "eng_plate_temp_initial_layer", "hot_plate_temp_initial_layer", "textured_plate_temp_initial_layer", "supertack_plate_temp_initial_layer", "supertack_plate_temp",
+    // "bed_type",
+    //BBS:temperature_vitrification
+    "temperature_vitrification", "reduce_fan_stop_start_freq","dont_slow_down_outer_wall", "slow_down_for_layer_cooling", "fan_min_speed",
+    "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "close_additional_fan_first_x_layers", "first_x_layer_fan_speed", "full_fan_speed_layer", "initial_layer_fan_speed", "additional_fan_full_speed_layer", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
+    "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
+    //exhaust fan control
+    "activate_air_filtration","activate_air_filtration_during_print","activate_air_filtration_on_completion","during_print_exhaust_fan_speed","complete_print_exhaust_fan_speed",
+    // Retract overrides
+    "filament_deretraction_speed",
+    "filament_retract_after_wipe", // Orca
+    "filament_retract_before_wipe",
+    "filament_retract_lift_above",
+    "filament_retract_lift_below",
+    "filament_retract_lift_enforce",
+    "filament_retract_restart_extra",
+    "filament_retract_when_changing_layer",
+    "filament_retraction_length",
+    "filament_retraction_minimum_travel",
+    "filament_retraction_speed",
+    "filament_retract_length_toolchange",
+    "filament_retract_restart_extra_toolchange",
+    "filament_wipe",
+    "filament_z_hop",
+    "filament_z_hop_types",
+    // Profile compatibility
+    "filament_vendor", "compatible_prints", "compatible_prints_condition", "compatible_printers", "compatible_printers_condition", "inherits",
+    //BBS
+    "filament_wipe_distance", "additional_cooling_fan_speed",
+    "nozzle_temperature_range_low", "nozzle_temperature_range_high",
+    "filament_extruder_variant",
+    //SoftFever
+    "enable_pressure_advance", "pressure_advance","adaptive_pressure_advance","adaptive_pressure_advance_model","adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges","chamber_temperature", "filament_shrink","filament_shrinkage_compensation_z", "support_material_interface_fan_speed","internal_bridge_fan_speed", "filament_notes" /*,"filament_seam_gap"*/,
+    "ironing_fan_speed",
+    // Filament ironing overrides
+    "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
+    "filament_loading_speed", "filament_loading_speed_start",
+    "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
+    "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
+    "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control", "chamber_minimal_temperature",
+    "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
+    //BBS filament change length while the extruder color
+    "filament_change_length","filament_flush_volumetric_speed","filament_flush_temp","filament_flush_temp_fast", "filament_cooling_before_tower",
+    // Multi-nozzle pre-cooling / ramming / nozzle-change (nc) filament overrides
+    "filament_ramming_volumetric_speed", "filament_ramming_volumetric_speed_nc",
+    "filament_ramming_travel_time", "filament_ramming_travel_time_nc",
+    "filament_pre_cooling_temperature", "filament_pre_cooling_temperature_nc",
+    "filament_preheat_temperature_delta", "filament_retract_length_nc",
+    "filament_change_length_nc", "filament_prime_volume", "filament_prime_volume_nc",
+    "long_retractions_when_ec", "retraction_distances_when_ec",
+    "filament_plugin_config_overrides",
+    //ams chamber
+    "filament_dev_ams_drying_ams_limitations", "filament_dev_ams_drying_temperature", "filament_dev_ams_drying_time", "filament_dev_ams_drying_heat_distortion_temperature",
+    "filament_dev_chamber_drying_bed_temperature", "filament_dev_chamber_drying_time",
+    "filament_dev_drying_softening_temperature", "filament_dev_drying_cooling_temperature"
+    };
+    return keys;
+}
+
 std::set<std::string> filament_options_with_variant = {
     "filament_flow_ratio",
     "filament_max_volumetric_speed",
@@ -10402,18 +10471,28 @@ void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
 // BBS
 void DynamicPrintConfig::set_num_filaments(unsigned int num_filaments)
 {
-    const auto& defaults = FullPrintConfig::defaults();
-    for (const std::string& key : print_config_def.filament_option_keys()) {
-        if (key == "default_filament_profile")
-            // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
-            // empty fields there, if not defined by the system profile.
+    const auto &defaults = FullPrintConfig::defaults();
+    const auto resize = [&](const std::string &key) {
+        auto *opt = this->option(key, false);
+        if (opt != nullptr && opt->is_vector()) {
+            const ConfigOption *default_value = defaults.option(key);
+            // Some dynamic material fields are not members of FullPrintConfig.
+            if (default_value == nullptr)
+                if (const auto *definition = print_config_def.get(key))
+                    default_value = definition->default_value.get();
+            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_filaments, default_value);
+        }
+    };
+    for (const std::string &key : filament_preset_option_keys()) {
+        // Material values have one slot per filament. Compatibility/dev data and
+        // nozzle-variant columns keep their own layout, as in Preset::normalize.
+        if (key == "compatible_prints" || key == "compatible_printers" ||
+            filament_options_with_variant.count(key) != 0 || filament_dev_options.count(key) != 0)
             continue;
-        auto* opt = this->option(key, false);
-        assert(opt != nullptr);
-        assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_filaments, defaults.option(key));
+        resize(key);
     }
+    // Project swatches are not part of a filament preset's option classification.
+    resize("filament_colour");
 }
 
 //BBS: pass map to recording all invalid valies

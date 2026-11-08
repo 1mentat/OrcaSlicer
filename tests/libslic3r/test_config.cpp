@@ -7,6 +7,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Point.hpp"
@@ -4289,10 +4290,7 @@ TEST_CASE("get_parameter_size scales per-extruder options by their variant count
     CHECK(bare.get_parameter_size("unknown_option", 9) == 9);
 }
 
-// Known bug: PrintConfigDef never calls init_filament_option_keys(), so filament_option_keys() is empty and
-// set_num_filaments() resizes nothing; fixed by the follow-up fix PR. Only assertions that fail on main are
-// tagged: the prefix of the vectors is trivially unchanged today and is covered by the fix PR.
-TEST_CASE("set_num_filaments grows filament vectors with their first value and shrinks them", "[Config][ConfigVariants][!shouldfail]")
+TEST_CASE("set_num_filaments grows filament vectors with their first value and shrinks them", "[Config][ConfigVariants]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_key_value("filament_colour", new ConfigOptionStrings({"#112233", "#445566"}));
@@ -5847,3 +5845,155 @@ TEST_CASE("ConfigBase get_abs_value resolves a registered coPercent ratio agains
 }
 
 } // namespace config_getter_contracts
+
+TEST_CASE("set_num_filaments resizes ordinary material values and preserves other axes", "[Config][ConfigVariants]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"red", "blue"}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 2.5}));
+    config.set_key_value("filament_density", new ConfigOptionFloats({1.25, 1.5}));
+    config.set_key_value("filament_cost", new ConfigOptionFloats({12., 24.}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PETG"}));
+    config.set_key_value("filament_soluble", new ConfigOptionBools({true, false}));
+    config.set_key_value("filament_notes", new ConfigOptionStrings({"first", "second"}));
+    config.set_key_value("retraction_length", new ConfigOptionFloats({.6, .9}));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({.4, .6}));
+    config.set_key_value("filament_retraction_length", new ConfigOptionFloatsNullable({.7, 1.1}));
+    config.set_key_value("filament_retract_length_nc", new ConfigOptionFloatsNullable({10., 11.}));
+    config.set_key_value("volumetric_speed_coefficients", new ConfigOptionStrings({"a", "b"}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Bowden Standard"}));
+    config.set_key_value("filament_settings_id", new ConfigOptionStrings({"preset-a", "preset-b"}));
+    config.set_key_value("filament_ids", new ConfigOptionStrings({"id-a", "id-b"}));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({1, 1}));
+    config.set_key_value("filament_map", new ConfigOptionInts({1, 2}));
+    config.set_key_value("filament_nozzle_map", new ConfigOptionInts({0, 1}));
+    config.set_key_value("default_filament_profile", new ConfigOptionStrings({"default-a", "default-b"}));
+    config.set_key_value("filament_dev_ams_drying_temperature", new ConfigOptionFloats({40., 50.}));
+    config.set_key_value("compatible_printers", new ConfigOptionStrings({"printer-a", "printer-b"}));
+    config.set_key_value("compatible_prints", new ConfigOptionStrings({"print-a", "print-b"}));
+    config.set_key_value("inherits", new ConfigOptionString("parent"));
+    std::map<std::string, std::string> preserved;
+    for (const char *key : {"retraction_length", "nozzle_diameter", "filament_retraction_length", "filament_retract_length_nc",
+                            "volumetric_speed_coefficients", "filament_extruder_variant", "filament_settings_id", "filament_ids",
+                            "filament_self_index", "filament_map", "filament_nozzle_map", "default_filament_profile",
+                            "compatible_printers", "compatible_prints", "filament_dev_ams_drying_temperature", "inherits"})
+        preserved.emplace(key, config.opt_serialize(key));
+    const auto keys = config.keys();
+    const unsigned int count = GENERATE(0u, 1u, 3u);
+    CAPTURE(count);
+    config.set_num_filaments(count);
+    CHECK(config.keys() == keys); // A sparse configuration must not acquire default keys.
+    for (const char *key : {"filament_colour", "filament_diameter", "filament_density", "filament_cost",
+                            "filament_type", "filament_soluble", "filament_notes"}) {
+        INFO(key);
+        const auto *option = dynamic_cast<const ConfigOptionVectorBase*>(config.option(key));
+        REQUIRE(option != nullptr);
+        REQUIRE(option->size() == count);
+        const std::string name(key);
+        if (name == "filament_diameter" || name == "filament_density" || name == "filament_cost")
+            REQUIRE(dynamic_cast<const ConfigOptionFloats*>(option) != nullptr);
+        else if (name == "filament_soluble")
+            REQUIRE(dynamic_cast<const ConfigOptionBools*>(option) != nullptr);
+        else
+            REQUIRE(dynamic_cast<const ConfigOptionStrings*>(option) != nullptr);
+    }
+    for (const auto &entry : preserved) {
+        INFO(entry.first);
+        CHECK(config.opt_serialize(entry.first) == entry.second);
+    }
+    if (count != 0) {
+        CHECK(config.opt_string("filament_colour", 0u) == "red");
+        CHECK_THAT(config.opt_float("filament_diameter", 0), Catch::Matchers::WithinAbs(1.75, 1e-12));
+        CHECK_THAT(config.opt_float("filament_density", 0), Catch::Matchers::WithinAbs(1.25, 1e-12));
+        CHECK_THAT(config.opt_float("filament_cost", 0), Catch::Matchers::WithinAbs(12., 1e-12));
+        CHECK(config.opt_string("filament_type", 0u) == "PLA");
+        CHECK(config.opt_bool("filament_soluble", 0));
+        CHECK(config.opt_string("filament_notes", 0u) == "first");
+    }
+    if (count == 3) {
+        CHECK(config.opt_string("filament_colour", 1u) == "blue");
+        CHECK_THAT(config.opt_float("filament_density", 1), Catch::Matchers::WithinAbs(1.5, 1e-12));
+        CHECK_THAT(config.opt_float("filament_cost", 1), Catch::Matchers::WithinAbs(24., 1e-12));
+        CHECK(config.opt_string("filament_type", 1u) == "PETG");
+        CHECK_FALSE(config.opt_bool("filament_soluble", 1));
+        CHECK(config.opt_string("filament_notes", 1u) == "second");
+        CHECK(config.opt_string("filament_colour", 2u) == "red");
+        CHECK_THAT(config.opt_float("filament_diameter", 2), Catch::Matchers::WithinAbs(1.75, 1e-12));
+        CHECK_THAT(config.opt_float("filament_density", 2), Catch::Matchers::WithinAbs(1.25, 1e-12));
+        CHECK_THAT(config.opt_float("filament_cost", 2), Catch::Matchers::WithinAbs(12., 1e-12));
+        CHECK(config.opt_string("filament_type", 2u) == "PLA");
+        CHECK(config.opt_bool("filament_soluble", 2));
+        CHECK(config.opt_string("filament_notes", 2u) == "first");
+    }
+}
+
+TEST_CASE("set_num_filaments uses option defaults only for present empty material vectors", "[Config][ConfigVariants]")
+{
+    DynamicPrintConfig absent;
+    absent.set_num_filaments(3);
+    CHECK(absent.keys().empty());
+    DynamicPrintConfig config;
+    config.set_key_value("filament_density", new ConfigOptionFloats());
+    config.set_key_value("filament_type", new ConfigOptionStrings());
+    config.set_key_value("filament_colour", new ConfigOptionStrings());
+    config.set_key_value("pellet_flow_coefficient", new ConfigOptionFloats());
+    const auto keys = config.keys();
+    const auto &defaults = FullPrintConfig::defaults();
+    for (unsigned int count : {2u, 0u, 1u}) {
+        CAPTURE(count);
+        config.set_num_filaments(count);
+        CHECK(config.keys() == keys);
+        for (const char *key : {"filament_density", "filament_type", "filament_colour", "pellet_flow_coefficient"}) {
+            INFO(key);
+            const auto *option = dynamic_cast<const ConfigOptionVectorBase*>(config.option(key));
+            const auto *default_option = dynamic_cast<const ConfigOptionVectorBase*>(defaults.option(key));
+            if (std::string(key) == "pellet_flow_coefficient") {
+                REQUIRE(default_option == nullptr); // Exercise a dynamic-only field's definition fallback.
+                const auto *definition = print_config_def.get(key);
+                REQUIRE(definition != nullptr);
+                default_option = dynamic_cast<const ConfigOptionVectorBase*>(definition->default_value.get());
+            }
+            REQUIRE(option != nullptr);
+            REQUIRE(default_option != nullptr);
+            REQUIRE(default_option->size() > 0);
+            REQUIRE(option->size() == count);
+            for (unsigned int index = 0; index < count; ++index) {
+                if (std::string(key) == "filament_density" || std::string(key) == "pellet_flow_coefficient") {
+                    const auto *value = dynamic_cast<const ConfigOptionFloats*>(default_option);
+                    REQUIRE(value != nullptr);
+                    CHECK_THAT(config.opt_float(key, index), Catch::Matchers::WithinAbs(value->values.front(), 1e-12));
+                } else {
+                    const auto *value = dynamic_cast<const ConfigOptionStrings*>(default_option);
+                    REQUIRE(value != nullptr);
+                    CHECK(config.opt_string(key, index) == value->values.front());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Preset normalization keeps project slots and printer variants on their own axes", "[Config][ConfigVariants]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"red", "blue"}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75}));
+    config.set_key_value("filament_density", new ConfigOptionFloats({1.25, 1.5}));
+    config.set_key_value("retraction_length", new ConfigOptionFloats({.6, .9}));
+    config.set_key_value("filament_retract_length_nc", new ConfigOptionFloatsNullable({10., 11.}));
+    config.set_key_value("volumetric_speed_coefficients", new ConfigOptionStrings({"a", "b"}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Bowden Standard"}));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({1, 1}));
+    std::map<std::string, std::string> preserved;
+    for (const char *key : {"filament_colour", "retraction_length", "filament_retract_length_nc",
+                            "volumetric_speed_coefficients", "filament_extruder_variant", "filament_self_index"})
+        preserved.emplace(key, config.opt_serialize(key));
+    Preset::normalize(config);
+    for (const auto &entry : preserved) {
+        INFO(entry.first);
+        CHECK(config.opt_serialize(entry.first) == entry.second);
+    }
+    const auto *density = config.opt<ConfigOptionFloats>("filament_density");
+    REQUIRE(density != nullptr);
+    REQUIRE(density->values.size() == 1); // The existing ordinary pass still uses diameter's width.
+    CHECK_THAT(density->values.front(), Catch::Matchers::WithinAbs(1.25, 1e-12));
+}

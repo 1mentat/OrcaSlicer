@@ -901,7 +901,8 @@ public:
     size_t              get_parameter_size(const std::string& param_name, size_t extruder_nums);
     void                set_num_extruders(unsigned int num_extruders);
 
-    // BBS
+    // Resize present ordinary material-value vectors and project colours. Printer,
+    // nozzle-variant, compatibility, identity and mapping arrays keep their layout.
     void                set_num_filaments(unsigned int num_filaments);
 
     //BBS
@@ -971,6 +972,8 @@ public:
 };
 extern std::set<std::string> printer_extruder_options;
 extern std::set<std::string> print_options_with_variant;
+// Shared filament-preset classification; Preset::filament_options delegates here.
+const std::vector<std::string>& filament_preset_option_keys();
 extern std::set<std::string> filament_options_with_variant;
 extern std::set<std::string> printer_options_with_variant_1;
 extern std::set<std::string> printer_options_with_variant_2;
