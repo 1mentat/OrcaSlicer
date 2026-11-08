@@ -633,6 +633,9 @@ jobs:
           chmod +x "$appimage"
           "$appimage" --appimage-extract
           ./scripts/build_preset_cache.sh -b build build/package/resources/profiles squashfs-root/resources/profiles
+          # Extracted AppDirs must be readable and traversable by the app's users.
+          chmod -R a+rX squashfs-root
+          chmod a+rx squashfs-root/AppRun
           appimagetool=$(find build -name "appimagetool.AppImage" | head -1)
           ARCH=$(uname -m) "$appimagetool" --appimage-extract-and-run squashfs-root "$appimage"
           rm -rf squashfs-root
