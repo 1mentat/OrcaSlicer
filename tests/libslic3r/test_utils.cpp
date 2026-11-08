@@ -1027,19 +1027,17 @@ TEST_CASE("Published model links accept the canonical site roots over http and h
     CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
 }
 
-// Known bug: unescaped '.' in the is_printables_link host pattern (Utils.hpp) matches any character; fixed by the follow-up fix PR
-TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_printables_link("https://printablesXcom"));
 }
 
-// Known bug: unescaped '.' in the is_makerworld_link host pattern (Utils.hpp); fixed by the follow-up fix PR
-TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
 }
 
-// Known bug: unescaped '.' in the is_thingiverse_link host pattern (Utils.hpp); fixed by the follow-up fix PR
-TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils]") {
     CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://www.thingiverseXcom"));
 }
 
 // Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL

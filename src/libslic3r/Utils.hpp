@@ -317,15 +317,15 @@ inline bool is_bambustudio_open(const std::string& url) { return boost::starts_w
 inline bool is_cura_open(const std::string& url) { return boost::starts_with(url, "cura://open"); }
 inline bool is_supported_open_protocol(const std::string& url) { return is_orca_open(url) || is_prusaslicer_open(url) || is_bambustudio_open(url) || is_cura_open(url); }
 inline bool is_printables_link(const std::string& url) {
-    const std::regex url_regex("(http|https)://printables.com", std::regex_constants::icase);
+    const std::regex url_regex("(http|https)://printables\\.com", std::regex_constants::icase);
     return std::regex_match(url, url_regex);
 }
 inline bool is_makerworld_link(const std::string& url) {
-    const std::regex url_regex("(http|https)://makerworld.com", std::regex_constants::icase);
+    const std::regex url_regex("(http|https)://makerworld\\.com", std::regex_constants::icase);
     return std::regex_match(url, url_regex);
 }
 inline bool is_thingiverse_link(const std::string& url) {
-    const std::regex url_regex("(http|https)://www.thingiverse.com", std::regex_constants::icase);
+    const std::regex url_regex("(http|https)://www\\.thingiverse\\.com", std::regex_constants::icase);
     return std::regex_match(url, url_regex);
 }
 
