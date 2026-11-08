@@ -232,6 +232,11 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             float stroke_width = shape->strokeWidth * scale_size;
             Polygons polygons;
             bool close_polygon = false;
+            EndType open_end_type = etOpenButt;
+            if (shape->strokeLineCap == NSVG_CAP_ROUND)
+                open_end_type = etOpenRound;
+            else if (shape->strokeLineCap == NSVG_CAP_SQUARE)
+                open_end_type = etOpenSquare;
             for (int i = 0; i < path_line_points.size(); ++i) {
                 Polyline pt_path;
                 for (auto line_point : path_line_points[i]) {
@@ -241,7 +246,7 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
 
                 close_polygon = pt_path.points.front() == pt_path.points.back();
                 if (stroke_width > 0)
-                    append(polygons, offset(pt_path, stroke_width / 2, jtMiter, 2., close_polygon ? etClosedLine : etOpenSquare));
+                    append(polygons, offset(pt_path, stroke_width / 2, jtMiter, 2., close_polygon ? etClosedLine : open_end_type));
             }
 
             if (!close_polygon)

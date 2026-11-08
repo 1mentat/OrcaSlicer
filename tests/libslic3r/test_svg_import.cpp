@@ -105,7 +105,7 @@ TEST_CASE("SVG importer preserves separate filled components", "[SVGImport]")
 
 namespace {
 // Imports a 10 px long, 2 px wide open stroke with the given extra path attributes.
-void check_open_stroke(const std::string &cap_attribute, double expected_length_px)
+void check_open_stroke(const std::string &cap_attribute, double expected_length_px, double expected_area_px)
 {
     // Explicit width and height keep nanosvg's view scale at 1. Without them a zero-height
     // drawing gets a zero vertical scale, which halves the stroke width.
@@ -116,21 +116,45 @@ void check_open_stroke(const std::string &cap_attribute, double expected_length_
     Model model;
     std::string message;
     REQUIRE(load_svg(file.string().c_str(), &model, message));
-    check_prism(single_mesh(model), expected_length_px, 2., expected_length_px * 2.);
+    check_prism(single_mesh(model), expected_length_px, 2., expected_area_px);
 }
 } // namespace
 
 TEST_CASE("SVG importer turns an open square-capped stroke into a solid", "[SVGImport]")
 {
     // Square caps extend half the stroke width, 1 px, past each end.
-    check_open_stroke("stroke-linecap=\"square\"", 12.);
+    check_open_stroke("stroke-linecap=\"square\"", 12., 24.);
 }
 
-// Known bug: the importer always offsets open strokes with square ends and ignores
-// stroke-linecap, whose default is butt; fixed by the follow-up fix PR.
-TEST_CASE("SVG importer ends an open stroke flush with its endpoints by default", "[SVGImport][!shouldfail]")
+TEST_CASE("SVG importer ends an open stroke flush with its endpoints by default", "[SVGImport]")
 {
-    check_open_stroke("", 10.);
+    check_open_stroke("", 10., 20.);
+}
+
+TEST_CASE("SVG importer honors an explicit butt cap on an open stroke", "[SVGImport]")
+{
+    check_open_stroke("stroke-linecap=\"butt\"", 10., 20.);
+}
+
+TEST_CASE("SVG importer gives an open round-capped stroke semicircular ends", "[SVGImport]")
+{
+    // Two radius1 semicircles add pi px^2 to the 10x2 rectangular center.
+    check_open_stroke("stroke-linecap=\"round\"", 12., 20. + std::acos(-1.));
+}
+
+TEST_CASE("SVG importer keeps closed stroke joins independent of the line cap", "[SVGImport]")
+{
+    const std::string cap = GENERATE("butt", "round", "square");
+    ScopedTemporaryFile file(".svg");
+    write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">"
+        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" stroke-linecap=\"" + cap +
+        "\" d=\"M2 2 L12 2 L12 12 L2 12 Z\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    // Existing miter joins form a 12x12 outer square and an 8x8 inner hole.
+    check_prism(single_mesh(model), 12., 12., 12. * 12. - 8. * 8.);
 }
 
 TEST_CASE("SVG importer evaluates cubic path geometry", "[SVGImport]")
