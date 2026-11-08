@@ -4726,18 +4726,47 @@ TEST_CASE("Variant vector replacement reports an invalid start, type or restore 
                       Catch::Matchers::ContainsSubstring("invalid restore_index size"));
 }
 
-// Known bug: set_with_restore_2 takes its source as const but const_casts it and resizes it when padding a short
-// source, so the caller's vector grows; fixed by a follow-up fix PR.
-TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore][!shouldfail]")
+TEST_CASE("Variant vector replacement leaves a short source unchanged when padding", "[Config][ConfigVariantRestore]")
 {
     ConfigOptionInts destination({1, 2, 3, 4, 5});
-    ConfigOptionInts source({8}); // not const: the library const_casts it when padding
+    ConfigOptionInts source({8});
     std::vector<int> restore_index{1, -1, -1};
 
     destination.set_with_restore_2(&source, restore_index, 1, 2, true);
 
     CHECK(source.values == std::vector<int>{8});
+    CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    CHECK(restore_index == std::vector<int>{1, -1, -1});
 }
+
+TEST_CASE("Variant vector replacement reads const sources without changing their shape", "[Config][ConfigVariantRestore]")
+{
+    SECTION("a padded boolean source retains its single entry") {
+        ConfigOptionBools destination({false, false});
+        const ConfigOptionBools source({true});
+        std::vector<int> restore_index{-1, -1};
+        destination.set_with_restore_2(&source, restore_index, 0, 2, true);
+        CHECK(destination.values == std::vector<unsigned char>{true, true});
+        CHECK(source.values == std::vector<unsigned char>{true});
+    }
+    SECTION("a longer source is truncated only for the destination") {
+        ConfigOptionStrings destination({"old", "tail"});
+        const ConfigOptionStrings source({"first", "second", "third"});
+        std::vector<int> restore_index{-1, -1};
+        destination.set_with_restore_2(&source, restore_index, 0, 1, true);
+        CHECK(destination.values == std::vector<std::string>{"first", "second", "tail"});
+        CHECK(source.values == std::vector<std::string>{"first", "second", "third"});
+    }
+    SECTION("an empty source cannot supply a padding default") {
+        ConfigOptionInts destination({1, 2});
+        const ConfigOptionInts source;
+        std::vector<int> restore_index{-1};
+        CHECK_THROWS_WITH(destination.set_with_restore_2(&source, restore_index, 0, 0, true),
+                          Catch::Matchers::ContainsSubstring("empty vector"));
+        CHECK(source.values.empty());
+    }
+}
+
 
 namespace {
 
