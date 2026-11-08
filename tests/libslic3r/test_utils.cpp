@@ -767,16 +767,7 @@ TEST_CASE("Recursive directory copying throws when a directory occupies a file's
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
 
-// Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
-// ScopeGuard relies on a moved-from std::function being empty. libstdc++ and MSVC empty it; libc++ keeps a
-// small closure in the source, so the moved-from guard fires too. The move tests can only fail where that happens.
-#ifdef _LIBCPP_VERSION
-#define SCOPE_GUARD_MOVE_TAGS "[utils][!shouldfail]"
-#else
-#define SCOPE_GUARD_MOVE_TAGS "[utils]"
-#endif
-
-TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils]") {
     size_t calls = 0;
     {
         std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
@@ -788,7 +779,7 @@ TEST_CASE("ScopeGuard move construction transfers the callback to the new guard"
     CHECK(calls == 1);
 }
 
-TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils]") {
     size_t calls = 0;
     {
         ScopeGuard guard;
@@ -800,7 +791,7 @@ TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCO
     CHECK(calls == 1);
 }
 
-TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils]") {
     size_t calls = 0;
     {
         ScopeGuard destination([&calls] { calls += 10; });
@@ -812,8 +803,6 @@ TEST_CASE("ScopeGuard move assignment replaces the destination callback without 
     }
     CHECK(calls == 1);
 }
-
-#undef SCOPE_GUARD_MOVE_TAGS
 
 TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
     size_t calls = 0;
