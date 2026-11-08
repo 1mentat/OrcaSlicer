@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -894,10 +895,8 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
                       Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
 }
 
-// Known bug: utf8_char_parser only checks continuation bytes before the last one, so a truncated-by-substitution
-// sequence such as E2 82 28 is accepted; fixed by the follow-up fix PR.
 TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
-          "[PlaceholderParser][PlaceholderParserUnicode][!shouldfail]")
+          "[PlaceholderParser][PlaceholderParserUnicode]")
 {
     PlaceholderParser parser;
     // Euro sign E2 82 AC with the final continuation byte replaced by ASCII '('.
@@ -905,6 +904,37 @@ TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is no
     literal.append("\xE2\x82\x28", 3);
     literal += "\"}";
     CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+}
+
+TEST_CASE("Placeholder parser checks final continuation bytes only in quoted expressions",
+          "[PlaceholderParser][PlaceholderParserUnicode]")
+{
+    PlaceholderParser parser;
+    const std::array<std::string, 3> valid{{
+        std::string("\xC3\xA9", 2), std::string("\xE2\x82\xAC", 3), std::string("\xF0\x9F\x98\x80", 4)}};
+    const std::array<std::string, 3> malformed{{
+        std::string("\xC3\x28", 2), std::string("\xE2\x82\x28", 3), std::string("\xF0\x9F\x98\x28", 4)}};
+    for (const std::string &value : valid)
+        CHECK(parser.process("{\"" + value + "\"}") == value);
+    for (const std::string &value : malformed) {
+        CHECK_THROWS_WITH(parser.process("{\"" + value + "\"}"),
+                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+        CHECK_THROWS_WITH(parser.process("{if false}{\"" + value + "\"}{endif}"),
+                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+    }
+
+    // Previously accepted Latin1/CP1252 bytes in template comments remain byte-for-byte text.
+    std::string comment = "M117 ; H";
+    comment.push_back(static_cast<char>(0xD6)); // Latin1/CP1252 O-diaeresis, not a UTF8 sequence here.
+    comment += "HE {1 + 1}\n";
+    std::string expected = "M117 ; H";
+    expected.push_back(static_cast<char>(0xD6));
+    expected += "HE 2\n";
+    CHECK(parser.process(comment) == expected);
+    std::string final_comment = "; CAF";
+    final_comment.push_back(static_cast<char>(0xC9)); // Latin1/CP1252 E-acute followed by newline.
+    final_comment += "\n";
+    CHECK(parser.process(final_comment) == final_comment);
 }
 
 TEST_CASE("Placeholder parser uses the external filament map for vector access",
@@ -1406,12 +1436,8 @@ TEST_CASE("Placeholder parser converts initializer lists and rejects incompatibl
     CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
 }
 
-// Known bug: a one-element initializer list assigned to a scalar output variable ("scalar_var = ( scalar )") is
-// assigned, then the scalar branch of vector_variable_assign_initializer_list lacks a return and falls into the vector
-// switch, which ends in `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this
-// test aborts there; in a Release build it passes, because the assertion is compiled out after the value was stored.
 TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar output",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1420,13 +1446,8 @@ TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar
     CHECK(outputs.option<ConfigOptionInt>("number")->value == 1);
 }
 
-// Known bug: an initializer list assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626), because the switch has no coPercents
-// case. Whether the fix supports percent vectors or rejects them, the call must not assert and must not be ignored:
-// it either reports an error or stores the values. Built without NDEBUG this test aborts at that assertion; in a
-// Release build the assignment is silently ignored (no error, vector unchanged), so the check fails.
 TEST_CASE("Placeholder parser assigns an initializer list to a percent output vector or reports an error",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1440,13 +1461,8 @@ TEST_CASE("Placeholder parser assigns an initializer list to a percent output ve
     CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 1., 2. }));
 }
 
-// Known bug: repeat() assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420), because the switch has no coPercents
-// case. As above, a fix may support or reject percent vectors, but the call must not assert and must not be ignored.
-// Built without NDEBUG this test aborts at that assertion; in a Release build the assignment is silently ignored
-// (no error, vector unchanged), so the check fails.
 TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or reports an error",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1618,4 +1634,42 @@ TEST_CASE("Placeholder string concatenation groups with the additive operators",
     CHECK(parser.process(R"({"a" + 1 + 2})") == "a12");          // ("a" + 1) + 2
     CHECK(parser.process(R"({1 + 2 + "a"})") == "3a");           // (1 + 2) + "a"
     CHECK(parser.process(R"({"n=" + 1 + 2 * 3})") == "n=16");    // * before +
+}
+
+TEST_CASE("Placeholder parser fills numeric percent vectors and preserves them on rejected assignments",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    const bool nullable = GENERATE(false, true);
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    if (nullable)
+        outputs.set_key_value("percents", new ConfigOptionPercentsNullable({ 10., 20. }));
+    else
+        outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    const auto check_values = [&](const std::vector<double> &expected) {
+        const auto *values = dynamic_cast<const ConfigOptionVector<double>*>(outputs.option("percents"));
+        REQUIRE(values != nullptr);
+        REQUIRE(values->values.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(values->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-12));
+    };
+    CHECK(parser.process("{percents = (1,2.5)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({ 1., 2.5 });
+    CHECK_THROWS_WITH(parser.process("{percents = (3,\"bad\")}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_values({ 1., 2.5 });
+    CHECK(parser.process("{percents = repeat(3,5.25)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK_THROWS_WITH(parser.process("{percents = repeat(-1,7)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
+    CHECK_THROWS_WITH(parser.process("{percents = repeat(2,true)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK(parser.process("{if false}{percents = (3,\"bad\")}{percents = repeat(2,true)}{endif}",
+                         0, nullptr, &outputs, nullptr).empty());
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK(parser.process("{percents = ()}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({});
+    CHECK(parser.process("{percents = repeat(0,4)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({});
 }
