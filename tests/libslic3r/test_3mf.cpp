@@ -9710,8 +9710,8 @@ TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world ve
     ScopedTemporaryDir source_backup("orca_affine_roundtrip_store");
     Model source;
     source.set_backup_path(source_backup.string());
-    // A centered asymmetric box prevents importer centering from obscuring the
-    // raw affine-matrix contract; unequal dimensions distinguish swapped axes.
+    // A centered asymmetric box separates mesh centering from placement
+    // normalization; unequal dimensions distinguish swapped axes.
     TriangleMesh box = make_cube(4., 6., 8.);
     box.translate(-2.f, -3.f, -4.f);
     ModelObject *object = source.add_object("affine-box", "affine-box.stl", box);
@@ -9765,9 +9765,21 @@ TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world ve
     REQUIRE(restored->volumes.size() == 1);
     // Conventional 3MF bakes a volume's affine transform into its mesh and
     // retains the original full matrix in source.transform for reload. BBS
-    // restores the component matrix directly. Assert each backend's real contract.
-    const Transform3d &actual = !on_volume ? restored->instances.front()->get_matrix() :
+    // normalizes a single volume's offset into its instance while preserving
+    // the full instance * volume placement and the volume's linear transform.
+    Transform3d actual = !on_volume ? restored->instances.front()->get_matrix() :
         bbs_format ? restored->volumes.front()->get_matrix() : restored->volumes.front()->source.transform.get_matrix();
+    if (bbs_format && on_volume) {
+        const Transform3d &volume_matrix = restored->volumes.front()->get_matrix();
+        const Transform3d &instance_matrix = restored->instances.front()->get_matrix();
+        actual = instance_matrix * volume_matrix;
+        for (int row = 0; row < 3; ++row) {
+            CHECK_THAT(volume_matrix(row, 3), Catch::Matchers::WithinAbs(0., 1e-6));
+            CHECK_THAT(instance_matrix(row, 3), Catch::Matchers::WithinAbs(expected(row, 3), 1e-6));
+            for (int column = 0; column < 3; ++column)
+                CHECK_THAT(volume_matrix(row, column), Catch::Matchers::WithinAbs(expected(row, column), 1e-6));
+        }
+    }
     // Exporters use max_digits10(float) for model XML. Compare every coefficient,
     // including translation, rather than just determinant or canonical labels.
     for (int row = 0; row < 4; ++row)
