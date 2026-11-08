@@ -1008,6 +1008,51 @@ std::optional<DistAndPoints> distance_to_face_region(const SurfaceFeature &featu
                 return std::nullopt;
     if (!is_circle && !(feature.get_edge().second - reference).allFinite())
         return std::nullopt;
+    // A query superset gives a cheap lower bound; the exact solver below still
+    // handles every triangle that can improve an existing valid witness.
+    Eigen::AlignedBox3d query_box(reference, reference);
+    if (is_circle && !center_mode)
+        query_box = Eigen::AlignedBox3d(center - Vec3d::Constant(radius), center + Vec3d::Constant(radius));
+    else if (!is_circle)
+        query_box.extend(feature.get_edge().second);
+    const double infinity = std::numeric_limits<double>::infinity();
+    for (int axis = 0; axis < 3; ++axis) {
+        query_box.min()[axis] = std::nextafter(query_box.min()[axis], -infinity);
+        query_box.max()[axis] = std::nextafter(query_box.max()[axis], infinity);
+    }
+    const bool finite_query_box = query_box.min().allFinite() && query_box.max().allFinite();
+    const auto cannot_improve = [&](const FaceTriangle &triangle) {
+        if (!best || !finite_query_box)
+            return false;
+        Eigen::AlignedBox3d box(triangle[0], triangle[0]);
+        box.extend(triangle[1]);
+        box.extend(triangle[2]);
+        Vec3d gap = Vec3d::Zero();
+        double coordinate_scale = std::max(query_box.min().cwiseAbs().maxCoeff(), query_box.max().cwiseAbs().maxCoeff());
+        for (int axis = 0; axis < 3; ++axis) {
+            const double low = std::nextafter(box.min()[axis], -infinity);
+            const double high = std::nextafter(box.max()[axis], infinity);
+            if (!std::isfinite(low) || !std::isfinite(high))
+                return false;
+            coordinate_scale = std::max({coordinate_scale, std::abs(low), std::abs(high)});
+            const double separation = std::max({0.0, query_box.min()[axis] - high, low - query_box.max()[axis]});
+            if (!std::isfinite(separation))
+                return false; // Overflow is ambiguous: keep the exact path.
+            gap[axis] = std::max(0.0, std::nextafter(separation, -infinity));
+        }
+        const double scale = std::max(best->dist, gap.maxCoeff());
+        if (scale == 0.0)
+            return false;
+        const double epsilon = std::numeric_limits<double>::epsilon();
+        const double upper = std::nextafter(best->dist + 64.0 * epsilon * coordinate_scale, infinity);
+        if (!std::isfinite(upper) || upper / scale > 2.0)
+            return false;
+        const double lower_sq = (gap / scale).squaredNorm();
+        const double upper_sq = sqr(upper / scale);
+        // Outward boxes/downward gaps and slack keep rounding/ties in the exact
+        // path. Normalize before squaring to avoid overflow or absolute units.
+        return lower_sq > upper_sq + 128.0 * epsilon * std::max({1.0, lower_sq, upper_sq});
+    };
     const auto circle_point = [&](const Vec3d &point) -> Vec3d {
         const Vec3d q = point - center;
         const double scale = q.cwiseAbs().maxCoeff();
@@ -1055,6 +1100,8 @@ std::optional<DistAndPoints> distance_to_face_region(const SurfaceFeature &featu
         }
     };
     for (const FaceTriangle &triangle : triangles) {
+        if (cannot_improve(triangle))
+            continue;
         if (is_circle && (center_mode || radius == 0.0)) {
             add(center, closest_on_triangle(center, triangle));
             continue;

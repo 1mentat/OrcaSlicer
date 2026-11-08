@@ -1223,3 +1223,80 @@ TEST_CASE("Thin bounded faces retain their analytic interior projection", "[Meas
         }
     }
 }
+
+TEST_CASE("Face box pruning retains later interior and boundary minima", "[Measure][MeasureContracts]")
+{
+    const auto preceded = [](FaceTriangles near) {
+        FaceTriangles regions = rectangle_face(1000., 1000., 1001., 1001.);
+        regions.insert(regions.end(), near.begin(), near.end());
+        return face_with_triangles(std::move(regions));
+    };
+    const SurfaceFeature square = preceded(rectangle_face(-2., -2., 2., 2.));
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), square, 3.);
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.), square, 3.);
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.), square, 5., true);
+    check_bounded_distance(circle(Vec3d(3., 3., 2.), Vec3d::UnitZ(), 1.),
+                           preceded(rectangle_face(-1., -1., 1., 1.)),
+                           std::hypot(std::sqrt(8.) - 1., 2.));
+    FaceTriangles hole;
+    for (const FaceTriangles &strip : {rectangle_face(-5., -5., -2., 5.), rectangle_face(2., -5., 5., 5.),
+                                      rectangle_face(-2., -5., 2., -2.), rectangle_face(-2., 2., 2., 5.)})
+        hole.insert(hole.end(), strip.begin(), strip.end());
+    const SurfaceFeature annulus = preceded(std::move(hole));
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.), annulus, 1.);
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), annulus, std::sqrt(13.));
+
+    // A center-only query box could wrongly prune these later zero-distance
+    // regions after finding a small positive distance on the first patch.
+    for (bool tangent : {false, true}) {
+        CAPTURE(tangent);
+        FaceTriangles regions = tangent ? rectangle_face(.25, -.1, .5, .1) : rectangle_face(2.1, -.1, 2.2, .1);
+        const auto contact = tangent ? rectangle_face(-.1, -.1, .1, .1) : rectangle_face(1.5, -.25, 2., .25);
+        regions.insert(regions.end(), contact.begin(), contact.end());
+        check_bounded_distance(circle(Vec3d(0., 0., tangent ? 2. : 1.), Vec3d::UnitY(), 2.),
+                               face_with_triangles(std::move(regions)), 0.);
+    }
+    const auto axis_face = preceded({{Vec3d(0., 0., -2.), Vec3d(0., 0., 2.), Vec3d(0., 0., -2.)}});
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.);
+    const auto axis_result = get_measurement(ring, axis_face);
+    const auto &axis_distance = axis_result.distance_infinite ? axis_result.distance_infinite : axis_result.distance_strict;
+    check_witnessed_distance(axis_distance, 1.);
+    check_on_circle(axis_distance->from, ring);
+    check_vec(axis_distance->to, Vec3d::Zero());
+}
+
+TEST_CASE("Face box pruning keeps scale margins and overflowing bounds conservative", "[Measure][MeasureContracts]")
+{
+    FaceTriangles triangles = rectangle_face(1000., 1000., 1001., 1001.);
+    const auto square = rectangle_face(-2., -2., 2., 2.);
+    triangles.insert(triangles.end(), square.begin(), square.end());
+    for (double scale : {1e-9, 1., 1e9}) {
+        CAPTURE(scale);
+        Transform3d transform = Transform3d::Identity();
+        transform.scale(scale);
+        SurfaceFeature face = face_with_triangles(triangles);
+        SurfaceFeature ring = circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.);
+        face.translate(transform);
+        ring.translate(transform);
+        const auto result = get_measurement(ring, face);
+        const auto &distance = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+        REQUIRE(distance);
+        REQUIRE(distance->from.allFinite());
+        REQUIRE(distance->to.allFinite());
+        CHECK_THAT(distance->dist / scale, WithinAbs(3., 1e-7));
+        CHECK_THAT((distance->to - distance->from).stableNorm() / scale, WithinAbs(3., 1e-7));
+        CHECK_THAT(distance->to.z() / scale, WithinAbs(0., 1e-7));
+        CHECK(std::abs(distance->to.x() / scale) <= 2. + 1e-7);
+        CHECK(std::abs(distance->to.y() / scale) <= 2. + 1e-7);
+    }
+    // The circle passes through the origin but center+radius overflows its box.
+    // Finite exact endpoint witnesses remain usable when pruning is disabled.
+    FaceTriangles overflow_regions = rectangle_face(10., 10., 11., 11.);
+    overflow_regions.push_back({Vec3d::Zero(), Vec3d::UnitX(), Vec3d::UnitY()});
+    const auto result = get_measurement(circle(Vec3d(1e308, 0., 0.), Vec3d::UnitZ(), 1e308),
+                                        face_with_triangles(std::move(overflow_regions)));
+    const auto &distance = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+    check_witnessed_distance(distance, 0.);
+    check_vec(distance->from, Vec3d::Zero());
+    check_vec(distance->to, Vec3d::Zero());
+}
