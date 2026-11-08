@@ -1411,6 +1411,10 @@ namespace client
                 check_numeric(rhs_value);
                 static_cast<ConfigOptionFloats*>(opt)->values.assign(count, rhs_value.as_d());
                 break;
+            case coPercents:
+                check_numeric(rhs_value);
+                static_cast<ConfigOptionVector<double>*>(opt)->values.assign(count, rhs_value.as_d());
+                break;
             case coInts:
                 check_numeric(rhs_value);
                 static_cast<ConfigOptionInts*>(opt)->values.assign(count, rhs_value.as_i());
@@ -1602,6 +1606,7 @@ namespace client
                     // or
                     // scalar_var = ( scalar, scalar, ... )
                     ctx->throw_exception("Cannot assign a vector value to a scalar variable.", lhs.it_range);
+                return;
             }
 
             auto check_numeric_vector = [](const std::vector<expr> &il) {
@@ -1615,6 +1620,10 @@ namespace client
             case coFloats:
                 check_numeric_vector(il);
                 fill_vector_from_initializer_list<ConfigOptionFloats>(opt, il, [](auto &v){ return v.as_d(); });
+                break;
+            case coPercents:
+                check_numeric_vector(il);
+                fill_vector_from_initializer_list<ConfigOptionVector<double>>(opt, il, [](auto &v){ return v.as_d(); });
                 break;
             case coInts:
                 check_numeric_vector(il);

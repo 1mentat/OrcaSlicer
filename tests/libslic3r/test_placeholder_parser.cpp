@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1435,12 +1436,8 @@ TEST_CASE("Placeholder parser converts initializer lists and rejects incompatibl
     CHECK(outputs.option<ConfigOptionBools>("flags")->values == std::vector<unsigned char>{ 0, 0 });
 }
 
-// Known bug: a one-element initializer list assigned to a scalar output variable ("scalar_var = ( scalar )") is
-// assigned, then the scalar branch of vector_variable_assign_initializer_list lacks a return and falls into the vector
-// switch, which ends in `default: assert(false)` (PlaceholderParser.cpp, line 1626). Built without NDEBUG this
-// test aborts there; in a Release build it passes, because the assertion is compiled out after the value was stored.
 TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar output",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1449,13 +1446,8 @@ TEST_CASE("Placeholder parser assigns a one-element initializer list to a scalar
     CHECK(outputs.option<ConfigOptionInt>("number")->value == 1);
 }
 
-// Known bug: an initializer list assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_initializer_list (PlaceholderParser.cpp, line 1626), because the switch has no coPercents
-// case. Whether the fix supports percent vectors or rejects them, the call must not assert and must not be ignored:
-// it either reports an error or stores the values. Built without NDEBUG this test aborts at that assertion; in a
-// Release build the assignment is silently ignored (no error, vector unchanged), so the check fails.
 TEST_CASE("Placeholder parser assigns an initializer list to a percent output vector or reports an error",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1469,13 +1461,8 @@ TEST_CASE("Placeholder parser assigns an initializer list to a percent output ve
     CHECK((reported_error || outputs.option<ConfigOptionPercents>("percents")->values == std::vector<double>{ 1., 2. }));
 }
 
-// Known bug: repeat() assigned to a percent output vector reaches `default: assert(false)` in
-// vector_variable_assign_expr_with_count (PlaceholderParser.cpp, line 1420), because the switch has no coPercents
-// case. As above, a fix may support or reject percent vectors, but the call must not assert and must not be ignored.
-// Built without NDEBUG this test aborts at that assertion; in a Release build the assignment is silently ignored
-// (no error, vector unchanged), so the check fails.
 TEST_CASE("Placeholder parser assigns repeat() to a percent output vector or reports an error",
-          "[PlaceholderParser][PlaceholderParserVectors][.]")
+          "[PlaceholderParser][PlaceholderParserVectors]")
 {
     PlaceholderParser parser;
     DynamicConfig outputs;
@@ -1647,4 +1634,42 @@ TEST_CASE("Placeholder string concatenation groups with the additive operators",
     CHECK(parser.process(R"({"a" + 1 + 2})") == "a12");          // ("a" + 1) + 2
     CHECK(parser.process(R"({1 + 2 + "a"})") == "3a");           // (1 + 2) + "a"
     CHECK(parser.process(R"({"n=" + 1 + 2 * 3})") == "n=16");    // * before +
+}
+
+TEST_CASE("Placeholder parser fills numeric percent vectors and preserves them on rejected assignments",
+          "[PlaceholderParser][PlaceholderParserVectors]")
+{
+    const bool nullable = GENERATE(false, true);
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    if (nullable)
+        outputs.set_key_value("percents", new ConfigOptionPercentsNullable({ 10., 20. }));
+    else
+        outputs.set_key_value("percents", new ConfigOptionPercents({ 10., 20. }));
+    const auto check_values = [&](const std::vector<double> &expected) {
+        const auto *values = dynamic_cast<const ConfigOptionVector<double>*>(outputs.option("percents"));
+        REQUIRE(values != nullptr);
+        REQUIRE(values->values.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i)
+            CHECK_THAT(values->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-12));
+    };
+    CHECK(parser.process("{percents = (1,2.5)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({ 1., 2.5 });
+    CHECK_THROWS_WITH(parser.process("{percents = (3,\"bad\")}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_values({ 1., 2.5 });
+    CHECK(parser.process("{percents = repeat(3,5.25)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK_THROWS_WITH(parser.process("{percents = repeat(-1,7)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Negative number of elements"));
+    CHECK_THROWS_WITH(parser.process("{percents = repeat(2,true)}", 0, nullptr, &outputs, nullptr),
+                      Catch::Matchers::ContainsSubstring("Right side is not a numeric expression"));
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK(parser.process("{if false}{percents = (3,\"bad\")}{percents = repeat(2,true)}{endif}",
+                         0, nullptr, &outputs, nullptr).empty());
+    check_values({ 5.25, 5.25, 5.25 });
+    CHECK(parser.process("{percents = ()}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({});
+    CHECK(parser.process("{percents = repeat(0,4)}", 0, nullptr, &outputs, nullptr).empty());
+    check_values({});
 }
