@@ -210,9 +210,15 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             if (profile_line_points.empty())
                 continue;
 
-            // keep the start and end points of profile connected
-            if (shape->fill.gradient != nullptr)
-                profile_line_points.back().second = profile_line_points[0].first;
+            // Preserve the last sampled edge and add the implicit fill-closing edge.
+            if (shape->fill.gradient != nullptr) {
+                const gp_Pnt start = profile_line_points.front().first;
+                const gp_Pnt end = profile_line_points.back().second;
+                if (is_same_points(end, start))
+                    profile_line_points.back().second = start;
+                else
+                    profile_line_points.emplace_back(end, start);
+            }
             
             if (is_profile_self_interaction(profile_line_points))
                 BOOST_LOG_TRIVIAL(warning) << "the profile is self interaction.";
@@ -226,6 +232,11 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             float stroke_width = shape->strokeWidth * scale_size;
             Polygons polygons;
             bool close_polygon = false;
+            EndType open_end_type = etOpenButt;
+            if (shape->strokeLineCap == NSVG_CAP_ROUND)
+                open_end_type = etOpenRound;
+            else if (shape->strokeLineCap == NSVG_CAP_SQUARE)
+                open_end_type = etOpenSquare;
             for (int i = 0; i < path_line_points.size(); ++i) {
                 Polyline pt_path;
                 for (auto line_point : path_line_points[i]) {
@@ -235,7 +246,7 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
 
                 close_polygon = pt_path.points.front() == pt_path.points.back();
                 if (stroke_width > 0)
-                    append(polygons, offset(pt_path, stroke_width / 2, jtMiter, 2., close_polygon ? etClosedLine : etOpenSquare));
+                    append(polygons, offset(pt_path, stroke_width / 2, jtMiter, 2., close_polygon ? etClosedLine : open_end_type));
             }
 
             if (!close_polygon)
