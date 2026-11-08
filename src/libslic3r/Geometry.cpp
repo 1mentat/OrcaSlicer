@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <list>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -428,8 +429,45 @@ Transform3d Transformation::get_offset_matrix() const
     return translation_transform(get_offset());
 }
 
+// A relative numerical-rank test, not a scene-unit cutoff. Scaling before SVD
+// distinguishes a full-rank tiny mirror from determinant underflow. Ambiguous
+// rank/nonfinite inputs retain the legacy path; no inverse of a tiny scale is used.
+static int canonical_handedness(const Transform3d& trafo)
+{
+    const Matrix3d linear = trafo.linear();
+    if (!linear.allFinite())
+        return 0;
+    const double magnitude = linear.cwiseAbs().maxCoeff();
+    if (magnitude == 0.)
+        return 0;
+    const Eigen::JacobiSVD<Matrix3d> svd(Matrix3d(linear / magnitude), Eigen::ComputeFullU | Eigen::ComputeFullV);
+    const Vec3d values = svd.singularValues();
+    if (values.minCoeff() <= 3. * std::numeric_limits<double>::epsilon() * values.maxCoeff() ||
+        (values.maxCoeff() > 1. && magnitude > std::numeric_limits<double>::max() / values.maxCoeff()))
+        return 0;
+    return svd.matrixU().determinant() * svd.matrixV().determinant() < 0. ? -1 : 1;
+}
+
+// TransformationSVD already represents reflection by M = diag(-1,1,1).
+// On left-handed input A = R*S*M, R is proper and S is positive definite.
+// This canonical display convention is independent of repeated singular values.
+static std::pair<Transform3d, Transform3d> canonical_rotation_scale(const Transform3d& trafo)
+{
+    const TransformationSVD svd(trafo);
+    return {Transform3d(Matrix3d(svd.u * svd.v.transpose())),
+            Transform3d(Matrix3d(svd.v * svd.s * svd.v.transpose()))};
+}
+
+bool Transformation::is_left_handed() const
+{
+    const int handedness = canonical_handedness(m_matrix);
+    return handedness == 0 ? m_matrix.linear().determinant() < 0. : handedness < 0;
+}
+
 static Transform3d extract_rotation_matrix(const Transform3d& trafo)
 {
+    if (canonical_handedness(trafo) < 0)
+        return canonical_rotation_scale(trafo).first;
     Matrix3d rotation;
     Matrix3d scale;
     trafo.computeRotationScaling(&rotation, &scale);
@@ -438,6 +476,8 @@ static Transform3d extract_rotation_matrix(const Transform3d& trafo)
 
 static Transform3d extract_scale(const Transform3d& trafo)
 {
+    if (canonical_handedness(trafo) < 0)
+        return canonical_rotation_scale(trafo).second;
     Matrix3d rotation;
     Matrix3d scale;
     trafo.computeRotationScaling(&rotation, &scale);
@@ -446,6 +486,8 @@ static Transform3d extract_scale(const Transform3d& trafo)
 
 static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transform3d& trafo)
 {
+    if (canonical_handedness(trafo) < 0)
+        return canonical_rotation_scale(trafo);
     Matrix3d rotation;
     Matrix3d scale;
     trafo.computeRotationScaling(&rotation, &scale);
@@ -456,7 +498,7 @@ static std::pair<Transform3d, Transform3d> extract_rotation_scale(const Transfor
 // singular values are; right-handed (and singular) transforms use the rotation/scale split.
 static Transform3d extract_orthogonal(const Transform3d& trafo)
 {
-    if (trafo.linear().determinant() >= 0.0)
+    if (trafo.linear().determinant() >= 0.0 && canonical_handedness(trafo) >= 0)
         return extract_rotation_matrix(trafo);
 
     const Eigen::JacobiSVD<Matrix3d> svd(trafo.linear(), Eigen::ComputeFullU | Eigen::ComputeFullV);
@@ -465,6 +507,8 @@ static Transform3d extract_orthogonal(const Transform3d& trafo)
 
 static bool contains_skew(const Transform3d& trafo)
 {
+    if (canonical_handedness(trafo) < 0)
+        return !canonical_rotation_scale(trafo).second.linear().isDiagonal();
     Matrix3d rotation;
     Matrix3d scale;
     trafo.computeRotationScaling(&rotation, &scale);
@@ -502,7 +546,8 @@ Transform3d Transformation::get_rotation_matrix() const
 
 Vec3d Transformation::get_rotation_by_quaternion() const
 {
-    Matrix3d           rotation_matrix = m_matrix.matrix().block(0, 0, 3, 3);
+    Matrix3d           rotation_matrix = canonical_handedness(m_matrix) < 0 ?
+        Matrix3d(extract_rotation_matrix(m_matrix).linear()) : Matrix3d(m_matrix.matrix().block(0, 0, 3, 3));
     Eigen::Quaterniond quaternion(rotation_matrix);
     quaternion.normalize();
     Vec3d temp_rotation = quaternion.matrix().eulerAngles(2, 1, 0);
@@ -513,7 +558,10 @@ Vec3d Transformation::get_rotation_by_quaternion() const
 void Transformation::set_rotation(const Vec3d& rotation)
 {
     const Vec3d offset = get_offset();
+    const bool mirrored = canonical_handedness(m_matrix) < 0;
     m_matrix = rotation_transform(rotation) * extract_scale(m_matrix);
+    if (mirrored)
+        m_matrix = m_matrix * scale_transform(Vec3d(-1., 1., 1.));
     m_matrix.translation() = offset;
 }
 
@@ -528,7 +576,10 @@ void Transformation::set_rotation(Axis axis, double rotation)
     angles[axis] = rotation;
 
     const Vec3d offset = get_offset();
+    const bool mirrored = canonical_handedness(m_matrix) < 0;
     m_matrix = rotation_transform(angles) * scale;
+    if (mirrored)
+        m_matrix = m_matrix * scale_transform(Vec3d(-1., 1., 1.));
     m_matrix.translation() = offset;
 }
 
@@ -561,10 +612,36 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 {
     assert(scaling_factor > 0.0);
 
-    auto [rotation, scale] = extract_rotation_scale(m_matrix);
-    // scaling_factor is a magnitude; a mirrored transform keeps the sign of the entry. That keeps
-    // the mirror when the split carries it on a coordinate axis (unskewed, distinct scales), but
-    // not in general (see the known-bug test for a rotated uniformly scaled mirror).
+    if (canonical_handedness(m_matrix) < 0 && std::isfinite(scaling_factor) && scaling_factor > 0.) {
+        auto [rotation, stretch] = canonical_rotation_scale(m_matrix);
+        const double previous = stretch(axis, axis);
+        if (!(previous > 0.) || !std::isfinite(previous))
+            return;
+        const double ratio = std::sqrt(scaling_factor) / std::sqrt(previous);
+        // Congruence D*S*D preserves positive definiteness; replacing just Saa does not.
+        // Assign the diagonal separately to avoid squaring an extreme ratio.
+        for (int i = 0; i < 3; ++i) {
+            if (i != axis) {
+                stretch(axis, i) *= ratio;
+                stretch(i, axis) *= ratio;
+            }
+        }
+        stretch(axis, axis) = scaling_factor;
+        Transform3d changed = rotation * stretch * scale_transform(Vec3d(-1., 1., 1.));
+        // This void API has no error channel. Unrepresentable or numerically
+        // rank-ambiguous edits leave the original matrix intact, so subsequent
+        // getters cannot silently fall back to a different mirror convention.
+        if (std::isfinite(ratio) && changed.matrix().allFinite() && canonical_handedness(changed) < 0) {
+            changed.translation() = get_offset();
+            m_matrix = changed;
+        }
+        return;
+    }
+
+    // Preserve the legacy proper/rank-ambiguous path and Release invalid-input behavior.
+    Matrix3d legacy_rotation, legacy_scale;
+    m_matrix.computeRotationScaling(&legacy_rotation, &legacy_scale);
+    Transform3d rotation(legacy_rotation), scale(legacy_scale);
     scale(axis, axis) = is_left_handed() ? std::copysign(scaling_factor, scale(axis, axis)) : scaling_factor;
 
     const Vec3d offset = get_offset();
@@ -574,12 +651,16 @@ void Transformation::set_scaling_factor(Axis axis, double scaling_factor)
 
 Vec3d Transformation::get_mirror() const
 {
+    if (canonical_handedness(m_matrix) < 0)
+        return Vec3d(-1., 1., 1.);
     const Transform3d scale = extract_scale(m_matrix);
     return { scale(0, 0) / std::abs(scale(0, 0)), scale(1, 1) / std::abs(scale(1, 1)), scale(2, 2) / std::abs(scale(2, 2)) };
 }
 
 Transform3d Transformation::get_mirror_matrix() const
 {
+    if (canonical_handedness(m_matrix) < 0)
+        return scale_transform(Vec3d(-1., 1., 1.));
     Transform3d scale = extract_scale(m_matrix);
     scale(0, 0) = scale(0, 0) / std::abs(scale(0, 0));
     scale(1, 1) = scale(1, 1) / std::abs(scale(1, 1));
@@ -598,6 +679,19 @@ void Transformation::set_mirror(const Vec3d& mirror)
             copy(i) /= abs_mirror(i);
     }
 
+    const int handedness = canonical_handedness(m_matrix);
+    if (handedness != 0 && copy.allFinite()) {
+        // A no-op mirror request must preserve the raw matrix, including proper shear.
+        const Vec3d current = handedness < 0 ? Vec3d(-1., 1., 1.) : Vec3d::Ones();
+        if (copy == current)
+            return;
+        auto [rotation, stretch] = handedness < 0 ? canonical_rotation_scale(m_matrix) : extract_rotation_scale(m_matrix);
+        const Vec3d offset = get_offset();
+        m_matrix = rotation * stretch * scale_transform(copy);
+        m_matrix.translation() = offset;
+        return;
+    }
+
     auto [rotation, scale] = extract_rotation_scale(m_matrix);
     const Vec3d curr_scales = { scale(0, 0), scale(1, 1), scale(2, 2) };
     const Vec3d signs = curr_scales.cwiseProduct(copy);
@@ -613,6 +707,14 @@ void Transformation::set_mirror(const Vec3d& mirror)
 
 void Transformation::set_mirror(Axis axis, double mirror)
 {
+    const int handedness = canonical_handedness(m_matrix);
+    if (handedness != 0 && std::isfinite(mirror)) {
+        Vec3d requested = handedness < 0 ? Vec3d(-1., 1., 1.) : Vec3d::Ones();
+        requested[axis] = mirror;
+        set_mirror(requested);
+        return;
+    }
+
     double abs_mirror = std::abs(mirror);
     if (abs_mirror == 0.0)
         mirror = 1.0;
@@ -804,7 +906,8 @@ double rotation_diff_z(const Vec3d &rot_xyz_from, const Vec3d &rot_xyz_to)
 TransformationSVD::TransformationSVD(const Transform3d& trafo)
 {
     const Matrix3d m0 = trafo.matrix().block<3, 3>(0, 0);
-    mirror = m0.determinant() < 0.0;
+    const int handedness = canonical_handedness(trafo);
+    mirror = handedness == 0 ? m0.determinant() < 0.0 : handedness < 0;
 
     Matrix3d m;
     if (mirror)
