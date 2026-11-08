@@ -24,8 +24,8 @@ endif ()
 orcaslicer_add_cmake_project(
     wxWidgets
     GIT_REPOSITORY "https://github.com/SoftFever/Orca-deps-wxWidgets"
-    GIT_TAG v3.3.2
-    GIT_SHALLOW ON
+    GIT_TAG b44c39c100975a0ac0e46f937aa3f3eae5e18631 # v3.3.2 with the macOS sRGB fix
+    GIT_SHALLOW OFF
     GIT_SUBMODULES 3rdparty/catch 3rdparty/pcre 3rdparty/libwebp
     DEPENDS ${PNG_PKG} ${ZLIB_PKG} ${EXPAT_PKG} ${JPEG_PKG}
     CMAKE_ARGS
