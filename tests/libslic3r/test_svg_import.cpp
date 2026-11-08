@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -173,9 +174,7 @@ TEST_CASE("SVG importer accepts gradient-backed shapes", "[SVGImport]")
     check_prism(single_mesh(model), 6., 7., 6. * 7.);
 }
 
-// Known bug: gradient shapes close an open path by moving the end of the last sampled edge onto
-// the start point instead of adding a closing edge, cutting off a sliver; fixed by the follow-up fix PR.
-TEST_CASE("SVG importer closes an open gradient-filled path along its implicit closing edge", "[SVGImport][!shouldfail]")
+TEST_CASE("SVG importer closes an open gradient-filled path along its implicit closing edge", "[SVGImport]")
 {
     ScopedTemporaryFile file(".svg");
     write_svg(file,
@@ -187,6 +186,23 @@ TEST_CASE("SVG importer closes an open gradient-filled path along its implicit c
     std::string message;
     REQUIRE(load_svg(file.string().c_str(), &model, message));
     check_prism(single_mesh(model), 6., 7., 6. * 7.);
+}
+
+TEST_CASE("SVG importer preserves the last curve of implicitly and explicitly closed gradient fills", "[SVGImport]")
+{
+    const std::string gradient = GENERATE("linearGradient", "radialGradient");
+    const bool explicit_close = GENERATE(false, true);
+    ScopedTemporaryFile file(".svg");
+    write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><" + gradient + " id=\"g\">"
+        "<stop offset=\"0\" stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/>"
+        "</" + gradient + "></defs><path fill=\"url(#g)\" d=\"M0 0 C0 10 10 10 10 0" +
+        (explicit_close ? " Z" : "") + "\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    // Same 60 px^2 curve/chord and existing sampling tolerance as the solid-fill control.
+    check_prism(single_mesh(model), 10., 7.5, 60., 0.05, 0.03);
 }
 
 // Known bug: the importer passes the self-crossing wire straight to BRepBuilderAPI_MakeFace

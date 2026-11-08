@@ -210,9 +210,15 @@ bool get_svg_profile(const char *path, std::vector<Element_Info> &element_infos,
             if (profile_line_points.empty())
                 continue;
 
-            // keep the start and end points of profile connected
-            if (shape->fill.gradient != nullptr)
-                profile_line_points.back().second = profile_line_points[0].first;
+            // Preserve the last sampled edge and add the implicit fill-closing edge.
+            if (shape->fill.gradient != nullptr) {
+                const gp_Pnt start = profile_line_points.front().first;
+                const gp_Pnt end = profile_line_points.back().second;
+                if (is_same_points(end, start))
+                    profile_line_points.back().second = start;
+                else
+                    profile_line_points.emplace_back(end, start);
+            }
             
             if (is_profile_self_interaction(profile_line_points))
                 BOOST_LOG_TRIVIAL(warning) << "the profile is self interaction.";
