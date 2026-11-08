@@ -1529,7 +1529,7 @@ TEST_CASE("Shared wipe regions retain explicit empty areas and legacy malformed 
 {
     const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
     const size_t nozzle_count = GENERATE(size_t(1), size_t(2));
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config;
     config.set_key_value("printable_area", new ConfigOptionPoints(bed));
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_count, 0.4));
     Print print{};
@@ -1548,7 +1548,7 @@ TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty 
 {
     const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
     const bool empty_region = GENERATE(false, true);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config;
     config.set_key_value("printable_area", new ConfigOptionPoints(bed));
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats(2, 0.4));
     config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
