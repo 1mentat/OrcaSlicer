@@ -724,8 +724,7 @@ TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
 }
 #endif
 
-// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
-TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
     boost::filesystem::create_directories(src / "nested");
