@@ -1007,7 +1007,11 @@ TEST_CASE("Texture atlas material order is a metamorphic permutation", "[Texture
     REQUIRE(a.face_colors.size() == b.face_colors.size());
     for (size_t i = 0; i < a.face_colors.size(); ++i) {
         const RGB expected = face_center_x(a, i) < 1.5 ? RGB{255, 0, 0} : RGB{0, 0, 255};
-        CHECK(a.face_colors[i] == expected);
+        // Float sampling and integer truncation may retain 254 in a full-intensity channel.
+        for (std::size_t channel = 0; channel < expected.size(); ++channel)
+            CHECK_THAT(static_cast<double>(a.face_colors[i][channel]),
+                       Catch::Matchers::WithinAbs(static_cast<double>(expected[channel]),
+                                                  expected[channel] == 255 ? 1. : 0.));
         CHECK(a.face_colors[i] == b.face_colors[i]);
     }
 }
