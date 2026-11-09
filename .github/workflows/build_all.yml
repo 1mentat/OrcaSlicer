@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          ref: 4276229534f6fbd56a5bbe07e6db53409f8793c5
+          ref: b26d3e3453d0eecd3e1806dd660d70b894dd7acc
       - name: Identify source and restore durable history
         id: source
         env:
@@ -68,7 +68,8 @@ jobs:
         if: steps.source.outputs.measure == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time
+          sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time locales
+          sudo localedef -i de_DE -f UTF-8 de_DE.UTF-8
       - name: Check build storage headroom
         if: steps.source.outputs.measure == 'true'
         run: |
@@ -118,7 +119,7 @@ jobs:
           SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
-          SOURCE_BRANCH: ci/main-coverage
+          SOURCE_BRANCH: ci/coverage-validation
         run: |
           set -euo pipefail
           raw=coverage-output/measurement/coverage-report.json
