@@ -398,6 +398,44 @@ class WindowsJobOwnershipTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 7)
             self.assertFalse(marker.exists())
 
+    def test_relative_and_bare_executable_lookup_matches_direct_popen(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            caller, requested = root / "caller", root / "requested"
+            for folder in [caller / "bin", requested / "bin"]:
+                folder.mkdir(parents=True)
+            system = Path(os.environ["SystemRoot"]) / "System32"
+            shutil.copy2(system / "cmd.exe", caller / "bin" / "probe.exe")
+            # A different existing executable makes lookup in requested cwd/PATH
+            # observably wrong; only the original caller context selects cmd.exe.
+            shutil.copy2(system / "where.exe", requested / "bin" / "probe.exe")
+            environment = dict(os.environ, ORCA_JOB_LOOKUP="requested environment",
+                               PATH=str(requested / "bin") + os.pathsep + str(system))
+            previous = Path.cwd()
+            try:
+                os.chdir(caller)
+                with patch.dict(os.environ, {"PATH": str(caller / "bin") + os.pathsep + str(system)}):
+                    for executable in [str(Path("bin") / "probe.exe"), "probe.exe"]:
+                        with self.subTest(executable=executable):
+                            command = [executable, "/d", "/v:on", "/c",
+                                       "echo %CD% & echo %ORCA_JOB_LOOKUP% & set /p line= & echo !line! & exit /b 7"]
+                            reference = subprocess.run(command, cwd=requested, env=environment,
+                                                       input="owned input\n", capture_output=True,
+                                                       text=True, encoding="utf-8", errors="replace", timeout=5)
+                            self.assertEqual(reference.returncode, 7)
+                            self.assertIn(str(requested), reference.stdout)
+                            self.assertIn("requested environment", reference.stdout)
+                            self.assertIn("owned input", reference.stdout)
+                            actual = run_captured(command, cwd=requested, env=environment,
+                                                  input_data="owned input\n", timeout=5)
+                            self.assertEqual(actual.returncode, reference.returncode)
+                            self.assertEqual(actual.stdout, reference.stdout)
+                            self.assertEqual(actual.stderr, reference.stderr)
+            finally:
+                os.chdir(previous)
+
     def test_gate_signal_failure_never_starts_requested_target(self):
         import _slicer_windows_job as jobs
         original_checked = jobs._Api.checked

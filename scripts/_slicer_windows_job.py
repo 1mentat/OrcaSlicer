@@ -2,7 +2,7 @@
 
 The requesting parent owns the sole KillOnClose job handle. The broker cannot
 start the requested command until that parent has assigned it to the job.
-Control handles carry argv/status only; requested stdin and output are untouched.
+Control handles carry private memory and status; requested stdin/output are untouched.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import time
 
 _SETUP_MS = 10000
 _DRAIN_SECONDS = 5
-_MAX_CONTROL = 1024 * 1024
+_MAX_CONTROL = 16 * 1024 * 1024
 
 
 class _BasicLimits(ctypes.Structure):
@@ -60,6 +60,11 @@ class _Api:
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         signatures = {
             "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+            "CreateFileMappingW": ([wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR], wintypes.HANDLE),
+            "MapViewOfFile": ([wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.DWORD, ctypes.c_size_t], ctypes.c_void_p),
+            "UnmapViewOfFile": ([ctypes.c_void_p], wintypes.BOOL),
             "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int,
                                           ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
             "CreateEventW": ([ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL,
@@ -137,6 +142,32 @@ class _Job:
             self.close()
 
 
+class _Control:
+    """Unnamed pagefile mapping; requested environment never enters a disk file."""
+    def __init__(self, api, data):
+        self.api, self.handle = api, None
+        self.size = len(data)
+        if not 0 < self.size <= _MAX_CONTROL:
+            raise ValueError("Windows command control exceeds its bounded memory size")
+        handle = api.checked("CreateFileMappingW", wintypes.HANDLE(-1), None, 4,
+                             0, self.size, None)  # PAGE_READWRITE, pagefile-backed.
+        try:
+            view = api.checked("MapViewOfFile", handle, 2, 0, 0, self.size)  # FILE_MAP_WRITE.
+            try:
+                ctypes.memmove(view, data, self.size)
+            finally:
+                api.checked("UnmapViewOfFile", view)
+        except BaseException:
+            api.checked("CloseHandle", handle)
+            raise
+        self.handle = handle
+
+    def close(self):
+        if self.handle is not None:
+            self.api.checked("CloseHandle", self.handle)
+            self.handle = None
+
+
 def _read_status(stream):
     stream.seek(0)
     data = stream.read(_MAX_CONTROL + 1)
@@ -178,23 +209,23 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
     import msvcrt
 
     command = list(argv)
-    # An owned temporary handle avoids consuming stdin or inflating the Windows
-    # command line with encoded argv. No environment values enter either record.
-    control = json.dumps([os.fspath(arg) for arg in command], ensure_ascii=True).encode("utf-8")
-    if len(control) > _MAX_CONTROL:
-        raise ValueError("Windows command argv control record exceeds its bounded size")
+    # Keep the broker in the calling process's cwd/environment: Windows executable
+    # lookup uses that context, independently of the target's requested cwd/env.
+    # Private memory transports the latter without consuming stdin or disk files.
+    data = json.dumps({"argv": [os.fspath(arg) for arg in command],
+                       "cwd": os.fspath(cwd) if cwd is not None else None,
+                       "env": dict(env) if env is not None else None},
+                      ensure_ascii=True).encode("utf-8")
     api, process = _Api(), None
     job = _Job(api)
+    control = None
     gate = None
     cleaned = False
     try:
+        control = _Control(api, data)
         gate = api.checked("CreateEventW", None, True, False, None)
-        with tempfile.TemporaryFile("w+b") as arguments, tempfile.TemporaryFile("w+b") as status:
-            arguments.write(control)
-            arguments.flush()
-            arguments.seek(0)
-            handles = [gate, msvcrt.get_osfhandle(arguments.fileno()),
-                       msvcrt.get_osfhandle(status.fileno())]
+        with tempfile.TemporaryFile("w+b") as status:
+            handles = [gate, control.handle, msvcrt.get_osfhandle(status.fileno())]
             startup = subprocess.STARTUPINFO()
             startup.lpAttributeList = {"handle_list": handles}
             try:
@@ -203,8 +234,8 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
                 text = not isinstance(input_data, bytes)
                 process = subprocess.Popen(
                     [str(Path(sys.executable).resolve()), "-I", "-S", str(Path(__file__).resolve()),
-                     "--broker", *(str(handle) for handle in handles)],
-                    cwd=cwd, env=env, shell=False, close_fds=True,
+                     "--broker", *(str(handle) for handle in handles), str(control.size)],
+                    shell=False, close_fds=True,
                     startupinfo=startup, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                     stdin=subprocess.PIPE if input_data is not None else None,
                     stdout=output_file if output_file is not None else subprocess.PIPE,
@@ -257,7 +288,8 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
         raise
     finally:
         original = sys.exception()
-        for release in [job.close, lambda: api.checked("CloseHandle", gate) if gate is not None else None]:
+        for release in [job.close, lambda: api.checked("CloseHandle", gate) if gate is not None else None,
+                        lambda: control.close() if control is not None else None]:
             try:
                 release()
             except OSError as error:
@@ -267,29 +299,47 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
                 original.cleanup_incomplete = True
 
 
-def _broker(gate, arguments_handle, status_handle):
+def _broker(gate, control_handle, status_handle, control_size):
     import msvcrt
 
     api = _Api()
     if api.kernel.WaitForSingleObject(gate, _SETUP_MS) != 0:  # WAIT_OBJECT_0 only.
         api.checked("CloseHandle", gate)
-        api.checked("CloseHandle", arguments_handle)
+        api.checked("CloseHandle", control_handle)
         api.checked("CloseHandle", status_handle)
         return 125
     api.checked("CloseHandle", gate)
-    with os.fdopen(msvcrt.open_osfhandle(arguments_handle, os.O_RDONLY | os.O_BINARY), "rb") as stream:
-        data = stream.read(_MAX_CONTROL + 1)
-    if len(data) > _MAX_CONTROL:
+    try:
+        if not 0 < control_size <= _MAX_CONTROL:
+            return 125
+        view = api.checked("MapViewOfFile", control_handle, 4, 0, 0, control_size)  # FILE_MAP_READ.
+        try:
+            data = ctypes.string_at(view, control_size)
+        finally:
+            api.checked("UnmapViewOfFile", view)
+    finally:
+        api.checked("CloseHandle", control_handle)
+    record = json.loads(data.decode("utf-8"))
+    command, cwd, env = record["argv"], record["cwd"], record["env"]
+    if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
         api.checked("CloseHandle", status_handle)
         return 125
-    command = json.loads(data.decode("utf-8"))
-    if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
+    if cwd is not None and not isinstance(cwd, str):
+        api.checked("CloseHandle", status_handle)
+        return 125
+    if env is not None and (not isinstance(env, dict) or
+                            not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())):
         api.checked("CloseHandle", status_handle)
         return 125
     os.set_handle_inheritable(status_handle, False)
     with os.fdopen(msvcrt.open_osfhandle(status_handle, os.O_WRONLY | os.O_BINARY), "wb") as status:
         try:
-            target = subprocess.Popen(command, shell=False, close_fds=True)
+            # Explicit native binary streams are essential with close_fds=True on
+            # Windows; otherwise CPython omits STARTF_USESTDHANDLES for the target.
+            streams = {name: getattr(stream, "buffer", stream) if stream is not None else subprocess.DEVNULL
+                       for name, stream in [("stdin", sys.stdin), ("stdout", sys.stdout), ("stderr", sys.stderr)]}
+            target = subprocess.Popen(command, cwd=cwd, env=env, shell=False,
+                                      close_fds=True, **streams)
         except OSError as error:
             record = {"outcome": "launch_error", "errno": error.errno,
                       "strerror": error.strerror, "filename": error.filename,
@@ -304,6 +354,6 @@ def _broker(gate, arguments_handle, status_handle):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 5 or sys.argv[1] != "--broker":
+    if len(sys.argv) != 6 or sys.argv[1] != "--broker":
         raise SystemExit(125)
     raise SystemExit(_broker(*(int(value) for value in sys.argv[2:])))
