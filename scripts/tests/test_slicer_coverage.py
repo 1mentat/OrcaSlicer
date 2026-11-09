@@ -73,7 +73,8 @@ class Fixture:
                 Path(kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "runtime")).write_bytes(b"raw")
             return _completed(argv, self.tests_returncode, self.tests_output)
         if argv[1:] == ["--version"]:
-            version = dict(zip(("/usr/bin/clang++", "llvm-cov", "llvm-profdata"), self.versions))[argv[0]]
+            tools = (str(Path("/usr/bin/clang++").resolve()), "llvm-cov", "llvm-profdata")
+            version = dict(zip(tools, self.versions))[argv[0]]
             prefix = "clang" if "clang" in argv[0] else "LLVM"
             return _completed(argv, 0, f"Ubuntu {prefix} version {version}\n")
         if argv[0] == "llvm-profdata" and argv[1] == "merge":

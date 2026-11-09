@@ -93,7 +93,8 @@
       input:focus-visible,
       select:focus-visible,
       a:focus-visible,
-      summary:focus-visible {
+      summary:focus-visible,
+      .table-scroll:focus-visible {
         outline: 3px solid var(--focus);
         outline-offset: 3px;
       }
@@ -317,6 +318,9 @@
         overflow-x: auto;
         margin-top: 20px;
       }
+      .scroll-hint {
+        display: none;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -342,6 +346,9 @@
       th:last-child,
       td:last-child {
         padding-right: 0;
+      }
+      td:not(:first-child) {
+        white-space: nowrap;
       }
       tbody tr:hover {
         background: var(--soft);
@@ -465,9 +472,18 @@
         td {
           padding: 12px 10px;
         }
-        .file-path {
-          font-size: 11px;
-          min-width: 170px;
+        table {
+          min-width: 700px;
+        }
+        th:first-child,
+        td:first-child {
+          min-width: 240px;
+        }
+        .scroll-hint {
+          display: block;
+          margin: 16px 0 -8px;
+          color: var(--muted);
+          font-size: 12px;
         }
         .file-links {
           display: block;
@@ -577,7 +593,8 @@
             </div>
           </div>
         </div>
-        <div class="table-scroll">
+        <p class="scroll-hint" id="scroll-hint">Scroll horizontally to see all columns.</p>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Source file coverage" aria-describedby="scroll-hint">
           <table>
             <thead>
               <tr>
@@ -722,23 +739,30 @@
         if (text !== undefined) result.textContent = text;
         return result;
       }
+      let historyLimit = 30;
       function drawHistory(limit) {
+        historyLimit = limit;
         const chart = node("chart");
+        const width = Math.max(240, chart.getBoundingClientRect().width);
+        const left = 45;
+        const right = width - 12;
+        const middle = (left + right) / 2;
+        chart.setAttribute("viewBox", "0 0 " + width + " 265");
         chart.replaceChildren();
         const data = report.history.slice(-limit);
         for (const tick of [0, 25, 50, 75, 100]) {
           const y = 225 - tick * 2;
           chart.append(
             svgElement("line", {
-              x1: 50,
-              x2: 980,
+              x1: left,
+              x2: right,
               y1: y,
               y2: y,
               class: "grid",
             }),
             svgElement(
               "text",
-              { x: 39, y: y + 4, "text-anchor": "end" },
+              { x: left - 10, y: y + 4, "text-anchor": "end" },
               tick + "%",
             ),
           );
@@ -747,8 +771,8 @@
           chart.append(
             svgElement(
               "text",
-              { x: 520, y: 125, "text-anchor": "middle" },
-              "No valid measurements in this configuration yet",
+              { x: middle, y: 125, "text-anchor": "middle" },
+              "Awaiting a valid baseline",
             ),
           );
           node("history-note").textContent =
@@ -760,9 +784,10 @@
           Date.parse(data[data.length - 1].measured_at) - firstTime;
         const x = (index) =>
           elapsed === 0
-            ? 515
-            : 60 +
-              ((Date.parse(data[index].measured_at) - firstTime) * 910) /
+            ? middle
+            : left +
+              ((Date.parse(data[index].measured_at) - firstTime) *
+                (right - left)) /
                 elapsed;
         const y = (item) => 225 - item.summary.lines.percent * 2;
         if (data.length > 1) {
@@ -797,12 +822,22 @@
             month: "short",
             day: "numeric",
           });
-        chart.append(svgElement("text", { x: 60, y: 253 }, date(data[0])));
+        chart.append(
+          svgElement(
+            "text",
+            {
+              x: data.length === 1 ? middle : left,
+              y: 253,
+              "text-anchor": data.length === 1 ? "middle" : "start",
+            },
+            date(data[0]),
+          ),
+        );
         if (data.length > 1)
           chart.append(
             svgElement(
               "text",
-              { x: 970, y: 253, "text-anchor": "end" },
+              { x: right, y: 253, "text-anchor": "end" },
               date(data[data.length - 1]),
             ),
           );
@@ -836,6 +871,7 @@
           drawHistory(Number(button.dataset.range));
         }),
       );
+      window.addEventListener("resize", () => drawHistory(historyLimit));
       function renderFiles() {
         const query = node("search").value.toLowerCase();
         let files = report.files.filter((item) =>
@@ -891,6 +927,9 @@
           node("files").append(row);
         }
         node("empty").hidden = files.length > 0;
+        node("empty").textContent = report.files.length
+          ? "No source paths match this search."
+          : "No source files were measured in this run.";
         node("file-count").textContent =
           count(files.length) + " of " + count(report.files.length) + " files";
       }

@@ -23,7 +23,7 @@ jobs:
   measure:
     if: github.event_name == 'workflow_dispatch' || vars.COVERAGE_TRACKING == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 360
     outputs:
       commit: ${{ steps.source.outputs.commit }}
       valid: ${{ steps.render.outputs.valid }}
@@ -50,6 +50,12 @@ jobs:
           if [[ "$measure" == false ]]; then
             echo 'This exact source commit is already measured. Use a forced manual run to refresh the toolchain or measurement.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Reclaim unused hosted-runner SDK space
+        if: steps.source.outputs.measure == 'true'
+        run: |
+          # This disposable Linux job does not build Android or .NET software.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
+          df -h "$GITHUB_WORKSPACE"
       - name: Install project system dependencies
         if: steps.source.outputs.measure == 'true'
         uses: ./.github/actions/apt-install-deps
@@ -58,6 +64,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time
+      - name: Check build storage headroom
+        if: steps.source.outputs.measure == 'true'
+        run: |
+          available=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')
+          if (( available < 18 * 1024 * 1024 )); then
+            echo 'Coverage needs at least 18 GiB free for cold dependencies, instrumented objects and profiles.' >&2
+            df -h "$GITHUB_WORKSPACE"
+            exit 1
+          fi
       - name: Identify dependency toolchain
         if: steps.source.outputs.measure == 'true'
         id: toolchain

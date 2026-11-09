@@ -7,6 +7,9 @@ deps=${COVERAGE_DEPS_DIR:-$root/deps/build-coverage}
 out=${COVERAGE_OUTPUT_DIR:-$root/coverage-output}
 export CC=clang-18 CXX=clang++-18
 export CMAKE_BUILD_PARALLEL_LEVEL=2 CTEST_PARALLEL_LEVEL=2
+# CPython's PGO configure looks for an unversioned tool unless this is explicit.
+LLVM_PROFDATA=$(command -v llvm-profdata-18)
+export LLVM_PROFDATA
 
 # A local prefix needs the same input binding as a CI cache. Never silently use
 # an old prefix after dependency sources, build tools or the profile change.
@@ -21,7 +24,7 @@ subprocess.run(["git", "-C", root, "diff", "--exit-code", "HEAD", "--", "deps", 
 commands = (["git", "-C", root, "ls-tree", "-r", "HEAD", "deps", "cmake/modules"],
             ["clang-18", "--version"], ["ld.lld-18", "--version"],
             ["cmake", "--version"], ["ninja", "--version"], ["uname", "-m"])
-digest = hashlib.sha256(b"linux-clang18-release-core-cad-v1\0")
+digest = hashlib.sha256(b"linux-clang18-release-core-cad-deps-v2-gtk3\0")
 for command in commands:
     digest.update(subprocess.check_output(command))
     digest.update(b"\0")
@@ -66,13 +69,16 @@ if command -v ccache >/dev/null; then
   common+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 fi
 # Instrument only project code. Dependencies keep the repository's ordinary build
-# settings; GUI/media-only dependency targets are unnecessary for this scope.
+# settings. GLFW and GTK3 wxWidgets are required by root configuration and the
+# canonical color-support tests even with the application GUI disabled.
 marker=$deps/OrcaSlicer_dep/.coverage-ready
 if [[ ! -f "$marker" || $(cat "$marker") != "$deps_key" ]]; then
-  stage deps-configure cmake -S "$root/deps" -B "$deps" -G Ninja "${common[@]}" -DSLIC3R_CAD=ON
+  stage deps-configure cmake -S "$root/deps" -B "$deps" -G Ninja "${common[@]}" \
+    -DSLIC3R_CAD=ON -DDEP_WX_GTK3=ON
   stage deps-build cmake --build "$deps" --parallel 1 --target \
     dep_Boost dep_Eigen dep_TBB dep_Cereal dep_CGAL dep_Draco dep_NLopt \
-    dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise dep_Qhull
+    dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise dep_Qhull \
+    dep_GLFW dep_wxWidgets
   printf '%s\n' "$deps_key" > "$marker"
 fi
 stage configure cmake -S "$root" -B "$build" -G Ninja "${common[@]}" \
