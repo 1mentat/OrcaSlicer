@@ -1,4 +1,15 @@
 #include <algorithm>
+#include <array>
+#include <fstream>
+#include <ios>
+#include <initializer_list>
+#include <iterator>
+#include <limits>
+#include <regex>
+#include <string>
+#include <boost/polygon/point_data.hpp>
+#include <boost/polygon/segment_data.hpp>
+#include <boost/polygon/voronoi_geometry_type.hpp>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -2392,4 +2403,226 @@ TEST_CASE("Parabola discretization returns its endpoints when the focus lies on 
     REQUIRE(samples.size() == 2);
     CHECK(samples.front() == start);
     CHECK(samples.back() == end);
+}
+
+namespace {
+
+std::vector<std::array<double, 4>> svg_line_coordinates(const std::string &svg)
+{
+    static const std::regex line_pattern(R"(<line\b[^>]*>)");
+    static const std::array<std::regex, 4> attributes{
+        std::regex(R"re(\bx1\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\by1\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\bx2\s*=\s*["']([^"']+)["'])re"),
+        std::regex(R"re(\by2\s*=\s*["']([^"']+)["'])re"),
+    };
+    std::vector<std::array<double, 4>> result;
+    for (std::sregex_iterator it(svg.begin(), svg.end(), line_pattern), end; it != end; ++it) {
+        const std::string line = it->str();
+        std::array<double, 4> coordinates{};
+        for (size_t i = 0; i < attributes.size(); ++i) {
+            std::smatch match;
+            REQUIRE(std::regex_search(line, match, attributes[i]));
+            coordinates[i] = std::stod(match[1].str());
+        }
+        result.push_back(coordinates);
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Voronoi curved-edge discretization respects its analytic deviation bound", "[VoronoiVisualUtils][Voronoi]")
+{
+    using VisualPoint = boost::polygon::point_data<double>;
+    using VisualSegment = boost::polygon::segment_data<double>;
+
+    const VisualPoint focus(5.0, 6.0);
+    const VisualSegment directrix(VisualPoint(0.0, 0.0), VisualPoint(10.0, 0.0));
+    const double max_distance = 0.05;
+    std::vector<VisualPoint> samples{VisualPoint(-1.0, 6.0), VisualPoint(11.0, 6.0)};
+    boost::polygon::voronoi_visual_utils<double>::discretize(focus, directrix, max_distance, &samples);
+
+    REQUIRE(samples.size() > 2);
+    CHECK_THAT(samples.front().x(), WithinAbs(-1.0, 1e-10));
+    CHECK_THAT(samples.front().y(), WithinAbs(6.0, 1e-10));
+    CHECK_THAT(samples.back().x(), WithinAbs(11.0, 1e-10));
+    CHECK_THAT(samples.back().y(), WithinAbs(6.0, 1e-10));
+
+    for (const VisualPoint &sample : samples) {
+        const double x = sample.x();
+        const double y = sample.y();
+        const double expected_y = 3.0 + (x - 5.0) * (x - 5.0) / 12.0;
+        CHECK_THAT(y, WithinAbs(expected_y, 1e-9));
+        CHECK_THAT(std::hypot(x - 5.0, y - 6.0), WithinAbs(y, 1e-9));
+    }
+
+    for (size_t i = 1; i < samples.size(); ++i) {
+        const double x0 = samples[i - 1].x();
+        const double x1 = samples[i].x();
+        const double dx = x1 - x0;
+        REQUIRE(dx > 0.0);
+        const double chord_slope = (x0 + x1 - 10.0) / 12.0;
+        const double maximum_chord_error = (dx * dx / 48.0) / std::hypot(1.0, chord_slope);
+        CHECK(maximum_chord_error <= max_distance + 1e-9);
+    }
+}
+
+TEST_CASE("Voronoi SVG limits rays and subdivides curved edges", "[VoronoiVisualUtils][Voronoi]")
+{
+    const coord_t mm = coord_t(scale_(1.0));
+    // The reflex corner competes with the nonadjacent bottom segment, creating
+    // a finite parabolic edge. A convex rectangle has only straight bisectors.
+    Polygon outline{{Point(0, 0), Point(10, 0), Point(10, 4), Point(4, 4), Point(4, 8), Point(0, 8)}};
+    for (Point &point : outline.points)
+        point *= mm;
+    Lines lines = to_lines(Polygons{outline});
+
+    VD diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end());
+    REQUIRE_FALSE(lines.empty());
+    // The exporter indexes segment sites and casts diagram/sample coordinates.
+    // Fail before those operations if this generated fixture violates its contract.
+    const auto require_coordinate = [](double value) {
+        REQUIRE(std::isfinite(value));
+        REQUIRE(value > double(std::numeric_limits<coord_t>::lowest()));
+        REQUIRE(value < double(std::numeric_limits<coord_t>::max()));
+    };
+    Vec2d bounds_min = lines.front().a.cast<double>();
+    Vec2d bounds_max = bounds_min;
+    for (const Line &line : lines) {
+        REQUIRE(line.a != line.b);
+        for (const Point &point : {line.a, line.b}) {
+            bounds_min = bounds_min.cwiseMin(point.cast<double>());
+            bounds_max = bounds_max.cwiseMax(point.cast<double>());
+        }
+    }
+    for (const VD::vertex_type &vertex : diagram.vertices()) {
+        require_coordinate(vertex.x());
+        require_coordinate(vertex.y());
+        bounds_min = bounds_min.cwiseMin(Vec2d(vertex.x(), vertex.y()));
+        bounds_max = bounds_max.cwiseMax(Vec2d(vertex.x(), vertex.y()));
+    }
+    const double span = (bounds_max - bounds_min).maxCoeff();
+    REQUIRE((bounds_max - bounds_min).minCoeff() > 0.0);
+    REQUIRE(std::isfinite(span));
+    REQUIRE(2.0 * span < double(std::numeric_limits<coord_t>::max()));
+    for (int axis = 0; axis < 2; ++axis) {
+        // Includes the exporter's 1% inflation and one-span clipped rays.
+        require_coordinate(bounds_min[axis] - 2.0 * span);
+        require_coordinate(bounds_max[axis] + 2.0 * span);
+    }
+    for (const VD::cell_type &cell : diagram.cells()) {
+        REQUIRE(cell.source_index() < lines.size());
+        if (cell.contains_point()) {
+            const auto category = cell.source_category();
+            const std::array endpoint_categories{
+                boost::polygon::SOURCE_CATEGORY_SEGMENT_START_POINT, boost::polygon::SOURCE_CATEGORY_SEGMENT_END_POINT};
+            REQUIRE(std::find(endpoint_categories.begin(), endpoint_categories.end(), category) != endpoint_categories.end());
+        } else {
+            REQUIRE(cell.contains_segment());
+            const std::array segment_categories{
+                boost::polygon::SOURCE_CATEGORY_INITIAL_SEGMENT, boost::polygon::SOURCE_CATEGORY_REVERSE_SEGMENT};
+            REQUIRE(std::find(segment_categories.begin(), segment_categories.end(), cell.source_category()) != segment_categories.end());
+        }
+    }
+    const auto source_point = [&lines](const VD::cell_type &cell) -> const Point & {
+        const Line &line = lines[cell.source_index()];
+        return cell.source_category() == boost::polygon::SOURCE_CATEGORY_SEGMENT_START_POINT ? line.a : line.b;
+    };
+    // VoronoiDiagram owns the cells, edges, and vertices linked by these pointers.
+    for (const VD::edge_type &edge : diagram.edges()) {
+        REQUIRE(edge.twin() != nullptr);
+        REQUIRE(edge.cell() != nullptr);
+        REQUIRE(edge.twin()->cell() != nullptr);
+        if (edge.is_finite()) {
+            REQUIRE(edge.vertex0() != nullptr);
+            REQUIRE(edge.vertex1() != nullptr);
+        } else {
+            REQUIRE((edge.vertex0() == nullptr) != (edge.vertex1() == nullptr));
+            REQUIRE(int(edge.cell()->contains_point()) + int(edge.twin()->cell()->contains_point()) > 0);
+            if (edge.cell()->contains_point() && edge.twin()->cell()->contains_point()) {
+                REQUIRE_FALSE(edge.is_secondary());
+                REQUIRE(source_point(*edge.cell()) != source_point(*edge.twin()->cell()));
+            } else {
+                REQUIRE(edge.is_secondary());
+            }
+        }
+        if (edge.is_curved()) {
+            REQUIRE(edge.is_finite());
+            REQUIRE(edge.cell()->contains_point() != edge.twin()->cell()->contains_point());
+            const VD::cell_type &point_cell = edge.cell()->contains_point() ? *edge.cell() : *edge.twin()->cell();
+            const VD::cell_type &segment_cell = edge.cell()->contains_segment() ? *edge.cell() : *edge.twin()->cell();
+            const Line &directrix = lines[segment_cell.source_index()];
+            const Vec2d origin = directrix.a.cast<double>();
+            const Vec2d direction = directrix.b.cast<double>() - origin;
+            const Vec2d focus = source_point(point_cell).cast<double>() - origin;
+            REQUIRE(direction.squaredNorm() > 0.0);
+            REQUIRE(int(direction.x() == 0.0) + int(direction.y() == 0.0) == 1);
+            REQUIRE(direction.x() * focus.y() - direction.y() * focus.x() != 0.0);
+            const double projection0 = direction.dot(Vec2d(edge.vertex0()->x(), edge.vertex0()->y()) - origin);
+            const double projection1 = direction.dot(Vec2d(edge.vertex1()->x(), edge.vertex1()->y()) - origin);
+            REQUIRE(projection0 != projection1);
+            // For this axis-aligned fixture, the parabolic normal coordinate
+            // stays between its directrix and the maximum of its two seeds.
+            // Thus the checked input/vertex bounds also enclose subdivisions.
+        }
+    }
+
+    size_t finite_edge_pairs = 0;
+    size_t infinite_edge_pairs = 0;
+    size_t curved_edge_pairs = 0;
+    for (const VD::edge_type &edge : diagram.edges()) {
+        if (&edge > edge.twin())
+            continue;
+        if (edge.is_finite())
+            ++finite_edge_pairs;
+        if (edge.is_infinite())
+            ++infinite_edge_pairs;
+        if (edge.is_curved())
+            ++curved_edge_pairs;
+    }
+    REQUIRE(finite_edge_pairs > 0);
+    REQUIRE(infinite_edge_pairs > 0);
+    REQUIRE(curved_edge_pairs > 0);
+
+    ScopedTemporaryFile output(".svg");
+    dump_voronoi_to_svg(output.string().c_str(), diagram, Points(), lines);
+    std::ifstream input(output.string(), std::ios::binary);
+    const std::string svg((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(input.bad());
+    REQUIRE_FALSE(svg.empty());
+    REQUIRE(svg.find("</svg>") != std::string::npos);
+
+    std::smatch dimensions;
+    const std::regex root_pattern(R"re(<svg height="([^"]+)" width="([^"]+)")re");
+    REQUIRE(std::regex_search(svg, dimensions, root_pattern));
+    const double height = std::stod(dimensions[1].str());
+    const double width = std::stod(dimensions[2].str());
+    REQUIRE(std::isfinite(width));
+    REQUIRE(std::isfinite(height));
+    REQUIRE(width > 0.0);
+    REQUIRE(height > 0.0);
+
+    const std::vector<std::array<double, 4>> serialized_lines = svg_line_coordinates(svg);
+    REQUIRE(serialized_lines.size() > lines.size() + diagram.num_edges());
+
+    BoundingBox diagram_bounds;
+    diagram_bounds.merge(get_extents(lines));
+    for (const VD::vertex_type &vertex : diagram.vertices())
+        diagram_bounds.merge(Point(coord_t(vertex.x()), coord_t(vertex.y())));
+    const double max_clipped_extension = 1.05 * std::max(
+        unscale<double>(diagram_bounds.size().x()), unscale<double>(diagram_bounds.size().y())) * 10.0;
+    for (const std::array<double, 4> &line : serialized_lines) {
+        for (double coordinate : line)
+            CHECK(std::isfinite(coordinate));
+        CHECK(line[0] >= -max_clipped_extension - 1.0);
+        CHECK(line[0] <= width + max_clipped_extension + 1.0);
+        CHECK(line[2] >= -max_clipped_extension - 1.0);
+        CHECK(line[2] <= width + max_clipped_extension + 1.0);
+        CHECK(line[1] >= -max_clipped_extension - 1.0);
+        CHECK(line[1] <= height + max_clipped_extension + 1.0);
+        CHECK(line[3] >= -max_clipped_extension - 1.0);
+        CHECK(line[3] <= height + max_clipped_extension + 1.0);
+    }
 }

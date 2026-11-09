@@ -135,6 +135,8 @@ public:
         const std::unordered_map<int, std::vector<int>> &uv_unlink_limits = {});
 
     std::vector<int> solve();
+    // Returns the selected right-node positions. The legacy solve() continues to return values.
+    std::vector<int> solve_indices();
     ~GroupMinCostFlowSolver();
 
 private:

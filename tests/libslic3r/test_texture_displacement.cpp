@@ -3,6 +3,7 @@
 #endif
 
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <admesh/stl.h>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -42,10 +43,48 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
+// Encode literal texels through the PNG format accepted by the displacement layer.
+static std::shared_ptr<std::vector<unsigned char>> make_gray_png(size_t w, size_t h,
+                                                               const std::vector<uint8_t> &pixels)
+{
+    REQUIRE(pixels.size() == w * h);
+    ScopedTemporaryFile file(".png");
+    REQUIRE(Slic3r::png::write_gray_to_file(file.string(), w, h, pixels));
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream ifs(file.string(), std::ios::binary);
+        REQUIRE(ifs.good());
+        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+    REQUIRE_FALSE(bytes.empty());
+    return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+}
+
+// Encode RGB texels through the same PNG path used by imported color textures.
+static std::shared_ptr<std::vector<unsigned char>> make_rgb_png(size_t w, size_t h,
+                                                               const std::vector<uint8_t> &pixels)
+{
+    REQUIRE(pixels.size() == w * h * 3);
+    ScopedTemporaryFile file(".png");
+    REQUIRE(Slic3r::png::write_rgb_to_file(file.string(), w, h, pixels));
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream ifs(file.string(), std::ios::binary);
+        REQUIRE(ifs.good());
+        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+    REQUIRE_FALSE(bytes.empty());
+    return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+}
+
+// A flat map gives every painted vertex the same height sample.
 // Encodes a flat (uniform-value) grayscale image through Slic3r's own PNG writer/reader round
 // trip, so decode_height_texture() (which only accepts true 8-bit grayscale PNG) is guaranteed a
 // compatible file, exactly like the GUI's "Add texture" import path does.
@@ -181,6 +220,14 @@ static TriangleSelector::TriangleSplittingData paint_whole_mesh(const indexed_tr
     return selector.serialize();
 }
 
+static indexed_triangle_set make_texture_sheet(float x0, float x1, float y0, float y1)
+{
+    indexed_triangle_set sheet;
+    sheet.vertices = { { x0, y0, 0.f }, { x1, y0, 0.f }, { x1, y1, 0.f }, { x0, y1, 0.f } };
+    sheet.indices  = { { 0, 1, 2 }, { 0, 2, 3 } };
+    return sheet;
+}
+
 // Paints a disc of the top face of `mesh` (the plane z = `top`) the way the gizmo's brush does: the
 // selector splits the triangles under it, so the stroke need not follow the mesh.
 static TriangleSelector::TriangleSplittingData paint_top_disc(const indexed_triangle_set &mesh, float top,
@@ -198,6 +245,111 @@ static TriangleSelector::TriangleSplittingData paint_top_disc(const indexed_tria
                               Transform3d::Identity(), TriangleSelector::ClippingPlane()),
                           EnforcerBlockerType::ENFORCER, Transform3d::Identity(), /* triangle_splitting */ true);
     return selector.serialize();
+}
+
+TEST_CASE("A projective view texture leaves vertices behind its projector flat", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(-1.f, 1.f, -1.f, 1.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot                    = 0;
+    layer.image_data              = make_flat_gray_png(255);
+    layer.depth_mm                = 0.5f;
+    layer.tile_enabled            = false;
+    layer.projection_method       = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    // u/v cover [0.25, 0.75] on the sheet; w is the signed distance from the projector plane.
+    layer.view_project_matrix = { 0.25f, 0.f, 0.f, 0.5f,
+                                  0.f, 0.25f, 0.f, 0.5f,
+                                  1.f, 0.f, 0.f, 0.f };
+
+    const indexed_triangle_set out = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(out.vertices.size() == sheet.vertices.size());
+    REQUIRE(out.indices == sheet.indices);
+
+    for (size_t i = 0; i < sheet.vertices.size(); ++i) {
+        const float expected_z = sheet.vertices[i].x() > 0.f ? 0.5f : 0.f;
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected_z, 1e-4f));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(sheet.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(sheet.vertices[i].y(), 1e-6f));
+    }
+
+    // The rejected branch must leave a caller's UV untouched, rather than returning a mirrored
+    // coordinate for a point behind the projector.
+    Vec2f rejected_uv(7.f, -3.f);
+    CHECK_FALSE(project_uv_projective(layer.view_project_matrix, Vec3f(-1.f, 0.f, 0.f), rejected_uv));
+    CHECK_THAT(rejected_uv.x(), WithinAbs(7.f, 1e-6f));
+    CHECK_THAT(rejected_uv.y(), WithinAbs(-3.f, 1e-6f));
+}
+
+TEST_CASE("A non-tiled projective view uses its UV window for displacement", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(-1.f, 1.f, -1.f, 1.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot                    = 0;
+    layer.image_data              = make_gray_png(2, 2, { 0, 255, 255, 0 });
+    layer.depth_mm                = 0.4f;
+    layer.tile_enabled            = false;
+    layer.projection_method       = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    // The four sheet corners land at (u,v) = (.125/.375, .125/.375). Projective placement already is
+    // normalized UV, so these non-default transform values must not affect the sample.
+    layer.tiling_scale = 0.125f;
+    layer.rotation_deg = 37.f;
+    layer.offset       = Vec2f(0.31f, -0.27f);
+    layer.view_project_matrix = { 0.125f, 0.f, 0.f, 0.25f,
+                                  0.f, 0.125f, 0.f, 0.25f,
+                                  0.f, 0.f, 0.f, 1.f };
+
+    const indexed_triangle_set inside = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(inside.vertices.size() == sheet.vertices.size());
+    const std::array<float, 4> expected_z = { 0.15f, 0.25f, 0.15f, 0.25f };
+    for (size_t i = 0; i < expected_z.size(); ++i)
+        CHECK_THAT(inside.vertices[i].z(), WithinAbs(expected_z[i], 2e-3f));
+
+    // Shifting the projector window completely outside [0,1) is the negative control: with tiling
+    // disabled, no border texel may be smeared across the rest of the mesh.
+    layer.view_project_matrix[3] = 1.25f;
+    const indexed_triangle_set outside = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(outside.vertices.size() == sheet.vertices.size());
+    for (const Vec3f &v : outside.vertices)
+        CHECK_THAT(v.z(), WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Mirrored texture tiling reflects the second tile before displacement", "[TextureDisplacement][TextureDisplacementView]")
+{
+    const indexed_triangle_set sheet = make_texture_sheet(7.5f, 12.5f, 0.f, 2.f);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(sheet);
+
+    TextureDisplacementLayer layer;
+    layer.slot         = 0;
+    layer.image_data   = make_gray_png(3, 1, { 0, 255, 64 });
+    layer.depth_mm     = 1.f;
+    layer.tiling_scale = 10.f;
+    layer.tile_enabled = true;
+    layer.projection_method = TextureProjectionMethod::Triplanar;
+
+    layer.tile_method = TextureTileMethod::MirroredRepeat;
+    const indexed_triangle_set mirrored = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(mirrored.vertices.size() == sheet.vertices.size());
+    const float mirrored_height = 48.f / 255.f; // u=.75 and mirrored u=1.25 -> .75, from texels {0,255,64}
+    CHECK_THAT(mirrored.vertices[0].z(), WithinAbs(mirrored_height, 1e-4f));
+    CHECK_THAT(mirrored.vertices[1].z(), WithinAbs(mirrored_height, 1e-4f));
+
+    // Repeat is the control: the second point wraps to u=.25 and therefore samples the rising edge
+    // of the asymmetric map instead of the reflected falling edge.
+    layer.tile_method = TextureTileMethod::Repeat;
+    const indexed_triangle_set repeated = build_texture_displacement(sheet, { layer }, facets, classic_options());
+    REQUIRE(repeated.vertices.size() == sheet.vertices.size());
+    CHECK_THAT(repeated.vertices[0].z(), WithinAbs(48.f / 255.f, 1e-4f));
+    CHECK_THAT(repeated.vertices[1].z(), WithinAbs(191.25f / 255.f, 1e-4f));
+    CHECK(std::abs(repeated.vertices[1].z() - repeated.vertices[0].z()) > 0.5f);
 }
 
 // Regression test for the bug this feature shipped with: with two layers painted over the same
@@ -809,6 +961,35 @@ TEST_CASE("TextureDisplacement: feature-adaptive subdivision follows curvature, 
     }
 }
 
+TEST_CASE("Step-aware subdivision leaves sharp multi-crossing edges for the cutter",
+          "[TextureDisplacement][TextureStepMultiCrossings]")
+{
+    // The only triangle has one low edge and one edge that crosses two raised bands. Its third vertex
+    // samples the high side, so the field range and mid-level are present at the input vertices too.
+    indexed_triangle_set mesh;
+    mesh.vertices = { { 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 0.5f, 0.7f, 0.f } };
+    mesh.indices  = { { 0, 1, 2 } };
+    const HeightFieldSampler bands = [](const Vec3f &p, const Vec3f &) {
+        const bool raised = (p.y() > 0.15f && p.y() < 0.25f) || (p.y() > 0.65f && p.y() < 0.75f);
+        return raised ? 0.4f : 0.f;
+    };
+    const std::vector<uint8_t> region(mesh.indices.size(), 1);
+
+    const indexed_triangle_set ordinary = subdivide_mesh_adaptive(
+        mesh, region, /*max edge*/ 0.f, /*budget*/ 500, nullptr, bands, /*chord tolerance*/ 0.02f,
+        /*resolution floor*/ 0.03f);
+    const indexed_triangle_set step_aware = subdivide_mesh_adaptive(
+        mesh, region, /*max edge*/ 0.f, /*budget*/ 500, nullptr, bands, /*chord tolerance*/ 0.02f,
+        /*resolution floor*/ 0.03f, /*border*/ 0.f, nullptr, nullptr, /*colour edge*/ 0.f,
+        /*split multi-crossings*/ true);
+
+    // Ordinary chord refinement sees the raised bands and subdivides the face. Step mode leaves its
+    // sharp multi-crossing edge for cut_mesh_at_steps(), avoiding a carpet of small triangles there.
+    CHECK(ordinary.indices.size() > mesh.indices.size());
+    CHECK(step_aware.indices.size() == mesh.indices.size());
+    CHECK(step_aware.vertices.size() == mesh.vertices.size());
+}
+
 // A 2x2 truecolour PNG: red, green / blue, white. Written out as bytes rather than encoded here
 // because libslic3r only *writes* grayscale PNGs (png::write_gray_to_file) - which is also exactly
 // why the colour path exists: the GUI importer stores colour images through wxImage instead.
@@ -926,6 +1107,153 @@ static indexed_triangle_set color_test_quad()
     quad.vertices = { Vec3f(0, 0, 0), Vec3f(10, 0, 0), Vec3f(10, 10, 0), Vec3f(0, 10, 0) };
     quad.indices  = { { 0, 1, 2 }, { 0, 2, 3 } };
     return quad;
+}
+
+
+// This palette fixture keeps one triangle in a blue island within an 8x8 image and its three
+// edge-neighbours in red. The mesh is intentionally small but connected: no private
+// despeckle helper is called, so the assertions observe only the public bake output.
+static std::shared_ptr<std::vector<unsigned char>> make_despeckle_noise_png()
+{
+    static const unsigned char bytes[] = {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x4b, 0x6d, 0x29, 0xdc, 0x00, 0x00, 0x00,
+        0x18, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x80,
+        0x15, 0x61, 0x17, 0x25, 0x4e, 0x02, 0x42, 0x93, 0x22, 0x41, 0xb1, 0xe5,
+        0x00, 0x21, 0x07, 0x3f, 0xc1, 0xb4, 0x44, 0xac, 0x47, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    };
+    return std::make_shared<std::vector<unsigned char>>(std::begin(bytes), std::end(bytes));
+}
+
+static std::shared_ptr<std::vector<unsigned char>> make_despeckle_tie_png()
+{
+    static const unsigned char bytes[] = {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x4b, 0x6d, 0x29, 0xdc, 0x00, 0x00, 0x00,
+        0x17, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+        0x41, 0xe8, 0x80, 0x74, 0x09, 0x0c, 0x35, 0xa4, 0x48, 0x50, 0x08, 0x00,
+        0x88, 0xa2, 0x0c, 0xf4, 0xbb, 0x9e, 0xa1, 0x18, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    };
+    return std::make_shared<std::vector<unsigned char>>(std::begin(bytes), std::end(bytes));
+}
+
+static indexed_triangle_set make_despeckle_star()
+{
+    indexed_triangle_set mesh;
+    mesh.vertices = {
+        { 3.2f, 3.2f, 0.f }, // 0: central triangle
+        { 4.0f, 3.2f, 0.f },
+        { 3.2f, 4.0f, 0.f },
+        { 0.f, 0.f, 0.f },    // red neighbour
+        { 7.f, 7.f, 0.f },    // uncoloured neighbour in the tie image
+        { 0.f, 7.f, 0.f },    // uncoloured neighbour in the tie image
+    };
+    mesh.indices = {
+        { 0, 1, 2 }, // blue centre; its three edge neighbours are below
+        { 1, 0, 3 },
+        { 2, 1, 4 },
+        { 0, 2, 5 },
+    };
+    return mesh;
+}
+
+static std::vector<uint8_t> bake_despeckle_fixture(const indexed_triangle_set &mesh,
+                                                    const std::shared_ptr<std::vector<unsigned char>> &image,
+                                                    int passes)
+{
+    TextureDisplacementLayer layer;
+    layer.slot          = 0;
+    layer.image_data    = image;
+    layer.color_enabled = true;
+    layer.depth_mm      = 0.f; // isolate the per-face colour result from height displacement
+    layer.tiling_scale  = 8.f;
+    layer.tile_enabled  = false;
+    layer.projection_method = TextureProjectionMethod::Triplanar;
+
+    TriangleMesh     triangle_mesh(mesh);
+    TriangleSelector selector(triangle_mesh);
+    for (int face = 0; face < int(mesh.indices.size()); ++face)
+        selector.set_facet(face, EnforcerBlockerType::ENFORCER);
+    TextureDisplacementFacetsData facets;
+    facets[0] = selector.serialize();
+
+    TextureColorRequest request;
+    std::vector<uint8_t> colors;
+    request.out_triangle         = &colors;
+    request.despeckle_passes     = passes;
+    request.min_color_region_mm2 = 0.f; // keep this test about the majority filter, not area merging
+    request.quantize             = [](const Vec3f &rgb) {
+        if (rgb.z() > 0.15f && rgb.z() > rgb.x() + 0.02f)
+            return 1; // blue
+        if (rgb.x() > 0.15f && rgb.x() > rgb.z() + 0.02f)
+            return 0; // red
+        return -1; // the tie fixture's black texels are an uncoloured boundary
+    };
+
+    const indexed_triangle_set out =
+        build_texture_displacement(mesh, { layer }, facets, classic_options(), {}, &request);
+    REQUIRE(out.indices == mesh.indices);
+    REQUIRE(colors.size() == mesh.indices.size());
+    return colors;
+}
+
+TEST_CASE("Texture displacement removes an isolated colour speck from a connected bake",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const indexed_triangle_set mesh = make_despeckle_star();
+    const auto                 image = make_despeckle_noise_png();
+
+    const std::vector<uint8_t> without_filter = bake_despeckle_fixture(mesh, image, 0);
+    const std::vector<uint8_t> with_filter    = bake_despeckle_fixture(mesh, image, 1);
+
+    // Color indices are +1 in the public request output: red=1, blue=2, uncoloured=0.
+    const std::vector<uint8_t> expected_without{ 2, 1, 1, 1 };
+    const std::vector<uint8_t> expected_with{ 1, 1, 1, 1 };
+    REQUIRE(without_filter == expected_without);
+    CHECK(with_filter == expected_with);
+}
+
+TEST_CASE("Texture displacement keeps tied colours and uncoloured boundaries stable",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const std::vector<uint8_t> colors =
+        bake_despeckle_fixture(make_despeckle_star(), make_despeckle_tie_png(), 1);
+
+    // The centre sees one blue vote and one red vote; black/uncoloured neighbours do not vote.
+    const std::vector<uint8_t> expected{ 2, 1, 0, 0 };
+    REQUIRE(colors == expected);
+}
+
+TEST_CASE("Texture displacement colour despeckling is independent of triangle order",
+          "[TextureDisplacement][TextureColorDespeckle]")
+{
+    const indexed_triangle_set mesh = make_despeckle_star();
+    indexed_triangle_set       reordered = mesh;
+    reordered.indices = { mesh.indices[2], mesh.indices[1], mesh.indices[0], mesh.indices[3] };
+
+    const std::vector<uint8_t> original =
+        bake_despeckle_fixture(mesh, make_despeckle_tie_png(), 1);
+    const std::vector<uint8_t> shuffled =
+        bake_despeckle_fixture(reordered, make_despeckle_tie_png(), 1);
+
+    REQUIRE(original.size() == shuffled.size());
+    for (size_t i = 0; i < shuffled.size(); ++i) {
+        const auto &face = reordered.indices[i];
+        size_t      original_index = mesh.indices.size();
+        for (size_t j = 0; j < mesh.indices.size(); ++j) {
+            const auto &candidate = mesh.indices[j];
+            if (candidate[0] == face[0] && candidate[1] == face[1] && candidate[2] == face[2]) {
+                original_index = j;
+                break;
+            }
+        }
+        REQUIRE(original_index < mesh.indices.size());
+        CHECK(shuffled[i] == original[original_index]);
+    }
 }
 
 TEST_CASE("TextureDisplacement: colour is reported per triangle and only where painted", "[TextureDisplacement]")
@@ -1181,6 +1509,79 @@ TEST_CASE("TextureDisplacement: the step cutter turns a stepped field into walls
     }
     CHECK(walls > 0);
     CHECK(ramps == 0);
+}
+
+TEST_CASE("The step cutter moves blended source vertices clear of a sharp relief boundary",
+          "[TextureDisplacement][TextureStepVertexNudge]")
+{
+    constexpr float SIZE = 4.f, EDGE = 0.2f, STEP_WIDTH = 0.05f, SEAM_GAP = 0.075f;
+    constexpr float LOW = 0.f, HIGH = 0.4f;
+    const HeightFieldSampler stripe = [](const Vec3f &p, const Vec3f &) {
+        return 0.4f * std::clamp((p.x() - 1.969f) / 0.05f, 0.f, 1.f);
+    };
+    const indexed_triangle_set sheet = make_flat_sheet(SIZE, EDGE);
+    const std::vector<uint8_t> region(sheet.indices.size(), 1);
+
+    // The source grid has a row of vertices just to the high side of the midpoint of a half-texel-wide
+    // transition. The field still has broad low and high plateaus, so it is a sharp, printable step.
+    REQUIRE(texture_has_steps_to_cut(sheet, region, stripe, STEP_WIDTH, SEAM_GAP));
+    size_t cuts = 0;
+    const indexed_triangle_set cut = cut_mesh_at_steps(sheet, region, stripe, STEP_WIDTH, SEAM_GAP, 0.f, nullptr, &cuts);
+    REQUIRE(cuts > 0);
+    CHECK(sheet_is_manifold(cut, SIZE));
+
+    // Mark output vertices referenced by triangles so only actual output geometry can witness a move.
+    std::vector<uint8_t> referenced(cut.vertices.size(), 0);
+    for (const auto &tri : cut.indices)
+        for (int k = 0; k < 3; ++k) {
+            const int vi = tri[k];
+            REQUIRE(vi >= 0);
+            REQUIRE(size_t(vi) < cut.vertices.size());
+            referenced[size_t(vi)] = 1;
+        }
+    size_t active_vertices = 0;
+    for (size_t vi = 0; vi < referenced.size(); ++vi)
+        active_vertices += referenced[vi] != 0;
+    REQUIRE(active_vertices > 0);
+
+    // The cutter may leave generated contour fallback vertices blended when it cannot form a seam.
+    // The source-vertex contract is narrower: each blended input grid vertex must move out of that
+    // position and have nearby referenced output geometry on its original side's pure plateau.
+    constexpr float PLATEAU_TOLERANCE = 1e-6f;
+    constexpr float POSITION_TOLERANCE = 1e-6f;
+    constexpr float SOURCE_SEARCH_RADIUS = 0.5f * EDGE;
+    size_t blended_source_vertices = 0, blended_source_witnesses = 0;
+    for (const Vec3f &source_vertex : sheet.vertices) {
+        const float source_height = stripe(source_vertex, Vec3f::UnitZ());
+        const float low_error = std::abs(source_height - LOW);
+        const float high_error = std::abs(source_height - HIGH);
+        if (std::min(low_error, high_error) <= PLATEAU_TOLERANCE)
+            continue;
+        ++blended_source_vertices;
+        const float expected_plateau = low_error <= high_error ? LOW : HIGH;
+        CAPTURE(source_vertex.x(), source_vertex.y(), source_vertex.z(), source_height, expected_plateau);
+
+        bool referenced_at_source_position = false;
+        bool has_source_side_witness = false;
+        for (size_t vi = 0; vi < referenced.size(); ++vi) {
+            if (!referenced[vi])
+                continue;
+            const Vec3f &output_vertex = cut.vertices[vi];
+            referenced_at_source_position |= (output_vertex - source_vertex).norm() <= POSITION_TOLERANCE;
+            const bool same_yz = std::abs(output_vertex.y() - source_vertex.y()) <= POSITION_TOLERANCE &&
+                                 std::abs(output_vertex.z() - source_vertex.z()) <= POSITION_TOLERANCE;
+            const bool within_source_spacing = std::abs(output_vertex.x() - source_vertex.x()) <=
+                                               SOURCE_SEARCH_RADIUS + POSITION_TOLERANCE;
+            const bool on_source_side_plateau = std::abs(stripe(output_vertex, Vec3f::UnitZ()) - expected_plateau) <=
+                                                PLATEAU_TOLERANCE;
+            has_source_side_witness |= same_yz && within_source_spacing && on_source_side_plateau;
+        }
+        CHECK_FALSE(referenced_at_source_position);
+        CHECK(has_source_side_witness);
+        blended_source_witnesses += has_source_side_witness;
+    }
+    REQUIRE(blended_source_vertices > 0);
+    REQUIRE(blended_source_witnesses > 0);
 }
 
 TEST_CASE("TextureDisplacement: the step cutter passes a smooth field through untouched", "[TextureDisplacement]")
@@ -2135,3 +2536,855 @@ TEST_CASE("A second bake beside a first comes out as fine as a single bake", "[T
     CHECK(second <= single * 5 / 4);
 }
 
+// A small planar mesh keeps the edge-distance contract visible at individual vertices: the painted
+// cells are the 4x4 square [1, 5] x [1, 5], while the one-cell outer ring remains untouched.
+static indexed_triangle_set make_texture_edge_grid()
+{
+    constexpr int side = 7;
+    indexed_triangle_set mesh;
+    mesh.vertices.reserve(side * side);
+    for (int y = 0; y < side; ++y)
+        for (int x = 0; x < side; ++x)
+            mesh.vertices.emplace_back(float(x), float(y), 0.f);
+
+    mesh.indices.reserve(2 * (side - 1) * (side - 1));
+    for (int y = 0; y < side - 1; ++y)
+        for (int x = 0; x < side - 1; ++x) {
+            const int a = y * side + x;
+            const int b = a + 1;
+            const int d = a + side;
+            const int c = d + 1;
+            mesh.indices.push_back({a, b, c});
+            mesh.indices.push_back({a, c, d});
+        }
+    return mesh;
+}
+
+static TriangleSelector::TriangleSplittingData paint_texture_edge_cells(const indexed_triangle_set &mesh)
+{
+    constexpr int side = 7;
+    REQUIRE(mesh.vertices.size() == size_t(side * side));
+    REQUIRE(mesh.indices.size() == size_t(2 * (side - 1) * (side - 1)));
+
+    const TriangleMesh tm(mesh);
+    TriangleSelector       selector(tm);
+    for (int y = 1; y < 5; ++y)
+        for (int x = 1; x < 5; ++x) {
+            const int face = 2 * (y * (side - 1) + x);
+            selector.set_facet(face, EnforcerBlockerType::ENFORCER);
+            selector.set_facet(face + 1, EnforcerBlockerType::ENFORCER);
+        }
+    return selector.serialize();
+}
+
+TEST_CASE("Texture displacement fades a painted patch by edge distance", "[TextureDisplacement][TextureDisplacementEdgeSmoothing]")
+{
+    const indexed_triangle_set mesh = make_texture_edge_grid();
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_texture_edge_cells(mesh);
+    REQUIRE_FALSE(facets[0].triangles_to_split.empty());
+
+    const auto settings = GENERATE(table<int, bool, float>({
+        {0, false, 0.f}, // disabled control
+        {1, true, 0.f},  // amount-zero control
+        {2, true, 0.5f},
+        {3, true, 1.f},
+    }));
+    const int   row            = std::get<0>(settings);
+    const bool  edge_smoothing = std::get<1>(settings);
+    const float amount         = std::get<2>(settings);
+    CAPTURE(row, edge_smoothing, amount);
+
+    // Fixed contract table, independent of patch_boundary_distance(): the disabled and
+    // amount-zero controls raise every painted grid vertex to 2; amount .5 leaves the
+    // boundary at 0, the non-center 3x3 interior at 1, and (3,3) at 2; amount 1
+    // leaves the complete flat grid unchanged.
+    std::array<float, 49> expected{};
+    if (row <= 1) {
+        for (int y = 1; y <= 5; ++y)
+            for (int x = 1; x <= 5; ++x)
+                expected[size_t(y * 7 + x)] = 2.f;
+    } else if (row == 2) {
+        for (int y = 2; y <= 4; ++y)
+            for (int x = 2; x <= 4; ++x)
+                expected[size_t(y * 7 + x)] = 1.f;
+        expected[3 * 7 + 3] = 2.f;
+    }
+
+    TextureDisplacementLayer layer;
+    layer.slot                  = 0;
+    layer.depth_mm              = 2.f;
+    layer.tiling_scale          = 1.f;
+    layer.rotation_deg          = 0.f;
+    layer.offset                = Vec2f::Zero();
+    layer.invert                = false;
+    layer.midlevel              = 0.f;
+    layer.smoothing             = 0.f;
+    layer.tile_enabled          = true;
+    layer.tile_method           = TextureTileMethod::Repeat;
+    layer.projection_method     = TextureProjectionMethod::Triplanar;
+    layer.image_data            = make_flat_gray_png(255);
+    layer.edge_smoothing        = edge_smoothing;
+    layer.edge_smoothing_amount = amount;
+    layer.blend_mode            = TextureBlendMode::Add;
+
+    TextureDisplacementOptions options = classic_options();
+    options.displace_border     = true;
+    options.smooth_enabled      = false;
+    options.smooth_strength     = 0.f;
+    options.smooth_iterations   = 0;
+    options.smooth_skip_border  = true;
+
+    const indexed_triangle_set out = build_texture_displacement(mesh, {layer}, facets, options);
+    REQUIRE(out.vertices.size() == mesh.vertices.size());
+    REQUIRE(out.indices == mesh.indices);
+    for (size_t i = 0; i < out.vertices.size(); ++i) {
+        REQUIRE(std::isfinite(out.vertices[i].x()));
+        REQUIRE(std::isfinite(out.vertices[i].y()));
+        REQUIRE(std::isfinite(out.vertices[i].z()));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(mesh.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(mesh.vertices[i].y(), 1e-6f));
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected[i], 1e-4f));
+    }
+}
+
+TEST_CASE("Texture displacement edge smoothing preserves a lower layer's neutral value", "[TextureDisplacement][TextureDisplacementEdgeSmoothing]")
+{
+    const indexed_triangle_set mesh = make_texture_edge_grid();
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(mesh);
+    facets[1] = paint_texture_edge_cells(mesh);
+    REQUIRE_FALSE(facets[1].triangles_to_split.empty());
+
+    const auto blend_case = GENERATE(table<TextureBlendMode, float>({
+        {TextureBlendMode::Multiply, 2.f},
+        {TextureBlendMode::Divide, 0.5f},
+    }));
+    const TextureBlendMode blend_mode = std::get<0>(blend_case);
+    const float partial_depth          = std::get<1>(blend_case);
+    CAPTURE(blend_mode, partial_depth);
+
+    TextureDisplacementLayer base;
+    base.slot                  = 0;
+    base.depth_mm              = 1.f;
+    base.tiling_scale          = 1.f;
+    base.rotation_deg          = 0.f;
+    base.offset                = Vec2f::Zero();
+    base.invert                = false;
+    base.midlevel              = 0.f;
+    base.smoothing             = 0.f;
+    base.tile_enabled          = true;
+    base.tile_method           = TextureTileMethod::Repeat;
+    base.projection_method     = TextureProjectionMethod::Triplanar;
+    base.image_data            = make_flat_gray_png(255);
+    base.blend_mode            = TextureBlendMode::Add;
+    base.edge_smoothing        = false;
+
+    TextureDisplacementLayer partial = base;
+    partial.slot                  = 1;
+    partial.depth_mm              = partial_depth;
+    partial.blend_mode            = blend_mode;
+    partial.edge_smoothing        = true;
+    partial.edge_smoothing_amount = 0.5f;
+
+    TextureDisplacementOptions options = classic_options();
+    options.displace_border    = true;
+    options.smooth_enabled     = false;
+    options.smooth_strength    = 0.f;
+    options.smooth_iterations  = 0;
+    options.smooth_skip_border = true;
+
+    const indexed_triangle_set out = build_texture_displacement(mesh, {base, partial}, facets, options);
+    REQUIRE(out.vertices.size() == mesh.vertices.size());
+    REQUIRE(out.indices == mesh.indices);
+    for (size_t i = 0; i < out.vertices.size(); ++i) {
+        const int x = int(i % 7), y = int(i / 7);
+        REQUIRE(std::isfinite(out.vertices[i].x()));
+        REQUIRE(std::isfinite(out.vertices[i].y()));
+        REQUIRE(std::isfinite(out.vertices[i].z()));
+        CHECK_THAT(out.vertices[i].x(), WithinAbs(mesh.vertices[i].x(), 1e-6f));
+        CHECK_THAT(out.vertices[i].y(), WithinAbs(mesh.vertices[i].y(), 1e-6f));
+        // Fixed neutral-element profile: outside and painted boundary stay at the
+        // accumulated base 1, the non-center 3x3 interior is 1.5, and the center is 2.
+        float expected = 1.f;
+        if (x >= 2 && x <= 4 && y >= 2 && y <= 4)
+            expected = (x == 3 && y == 3) ? 2.f : 1.5f;
+        CHECK_THAT(out.vertices[i].z(), WithinAbs(expected, 1e-4f));
+    }
+}
+
+TEST_CASE("Small colored regions follow their strongest shared boundary", "[TextureDisplacement][TextureColorRegions]")
+{
+    // The central right triangle has area 6 and edge lengths 5, 3 and 4.  Its
+    // color-1 neighbor shares only the length-5 edge; its two color-2 neighbors
+    // share lengths 3 and 4, so their combined boundary length 7 must win.
+    indexed_triangle_set mesh;
+    mesh.vertices = {{0.f, 0.f, 0.f}, {4.f, 0.f, 0.f}, {0.f, 3.f, 0.f},
+                     {4.f, 4.f, 0.f}, {-5.f, 1.f, 0.f}, {2.f, -4.f, 0.f}};
+    mesh.indices  = {{0, 1, 2}, {1, 3, 2}, {2, 4, 0}, {0, 5, 1}};
+    const auto triangle_area = [&mesh](size_t i) {
+        const stl_triangle_vertex_indices &t = mesh.indices[i];
+        return 0.5f * (mesh.vertices[size_t(t[1])] - mesh.vertices[size_t(t[0])])
+                            .cross(mesh.vertices[size_t(t[2])] - mesh.vertices[size_t(t[0])])
+                            .norm();
+    };
+    CHECK_THAT(triangle_area(0), WithinAbs(6.f, 1e-6f));
+    CHECK(triangle_area(1) > 7.f);
+    CHECK(triangle_area(2) > 7.f);
+    CHECK(triangle_area(3) > 7.f);
+    CHECK_THAT((mesh.vertices[1] - mesh.vertices[2]).norm(), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT((mesh.vertices[2] - mesh.vertices[0]).norm(), WithinAbs(3.f, 1e-6f));
+    CHECK_THAT((mesh.vertices[0] - mesh.vertices[1]).norm(), WithinAbs(4.f, 1e-6f));
+
+    const std::vector<int> seed = {0, 1, 2, 2};
+    SECTION("zero threshold is disabled")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 0.f);
+        CHECK(colors == seed);
+    }
+    SECTION("the strict area boundary preserves an equal-area component")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 6.f);
+        CHECK(colors == seed);
+    }
+    SECTION("the summed shared boundary chooses color two")
+    {
+        std::vector<int> colors = seed;
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {2, 1, 2, 2};
+        CHECK(colors == expected);
+    }
+    SECTION("unpainted neighbors block a merge")
+    {
+        std::vector<int> colors = {0, -1, -1, -1};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {0, -1, -1, -1};
+        CHECK(colors == expected);
+    }
+    SECTION("an unpainted center stays outside colored components")
+    {
+        std::vector<int> colors = {-1, 1, 2, 2};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {-1, 1, 2, 2};
+        CHECK(colors == expected);
+    }
+    SECTION("connected faces contribute their combined area")
+    {
+        // The center and its left neighbor form one area-13.5 component.
+        std::vector<int> colors = {0, 1, 0, 2};
+        merge_small_color_regions(mesh, colors, 7.f);
+        const std::vector<int> expected = {0, 1, 0, 2};
+        CHECK(colors == expected);
+    }
+}
+
+static DecodedHeightTexture make_texture_projection_contract_texture()
+{
+    DecodedHeightTexture texture;
+    texture.width = 2;
+    texture.height = 2;
+    texture.pixels = {0, 85, 170, 255};
+    texture.rgb = {
+        255, 0,   0, // red
+        0,   255, 0, // green
+        0,   0,   255, // blue
+        255, 255, 255, // white
+    };
+    return texture;
+}
+
+TEST_CASE("Cylindrical and spherical projection sample literal colour texels", "[TextureDisplacement][TextureProjectionColor]")
+{
+    const DecodedHeightTexture texture = make_texture_projection_contract_texture();
+    const Vec3f patch_center(10.f, 20.f, 30.f);
+    constexpr float pi = 3.14159265358979323846f;
+    constexpr float half_pi = 1.57079632679489661923f;
+
+    auto expect_sample = [&](const TextureDisplacementLayer &layer,
+                             const Vec3f &position,
+                             const Vec3f &patch_axis,
+                             const std::array<float, 3> &expected_rgb,
+                             float expected_height) {
+        Vec3f colour(-1.f, -1.f, -1.f);
+        REQUIRE(sample_layer_color(texture, layer, position, Vec3f::UnitZ(), colour,
+                                            patch_center, patch_axis));
+        CHECK_THAT(colour.x(), WithinAbs(expected_rgb[0], 1e-6f));
+        CHECK_THAT(colour.y(), WithinAbs(expected_rgb[1], 1e-6f));
+        CHECK_THAT(colour.z(), WithinAbs(expected_rgb[2], 1e-6f));
+        CHECK_THAT(sample_layer_height(texture, layer, position, Vec3f::UnitZ(),
+                                               patch_center, patch_axis),
+                   WithinAbs(expected_height, 1e-6f));
+    };
+
+    TextureDisplacementLayer cylindrical;
+    cylindrical.projection_method = TextureProjectionMethod::Cylindrical;
+    cylindrical.tile_enabled = false;
+    cylindrical.tiling_scale = pi;
+    cylindrical.rotation_deg = 0.f;
+    cylindrical.offset = Vec2f::Zero();
+
+    // With an axis through patch_center, the selected positions land at UV (0,0), (.5,0),
+    // and (.5,.5), which are literal texel corners in this 2x2 fixture.
+    expect_sample(cylindrical, patch_center + Vec3f(0.f, 1.f, 0.f),
+                  Vec3f::UnitZ(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(cylindrical, patch_center + Vec3f(1.f, 0.f, 0.f),
+                  Vec3f(0.f, 0.f, 5.f), {0.f, 1.f, 0.f}, 85.f / 255.f);
+    expect_sample(cylindrical, patch_center + Vec3f(1.f, 0.f, half_pi),
+                  Vec3f::Zero(), {1.f, 1.f, 1.f}, 1.f);
+
+    TextureDisplacementLayer spherical = cylindrical;
+    spherical.projection_method = TextureProjectionMethod::Spherical;
+    expect_sample(spherical, patch_center, Vec3f::UnitX(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(spherical, patch_center + Vec3f(1.f, 0.f, 0.f),
+                  Vec3f::UnitX(), {1.f, 0.f, 0.f}, 0.f);
+    expect_sample(spherical, patch_center + Vec3f(0.f, 1.f, 0.f),
+                  Vec3f::UnitX(), {0.f, 1.f, 0.f}, 85.f / 255.f);
+    expect_sample(spherical, patch_center + Vec3f(0.f, 0.f, 1.f),
+                  Vec3f::UnitX(), {0.f, 0.f, 1.f}, 170.f / 255.f);
+
+    // The south pole is outside the single non-tiled placement. The color API must report no
+    // colour and preserve its caller-owned output, while the height API returns its neutral zero.
+    Vec3f colour_sentinel(0.25f, 0.5f, 0.75f);
+    CHECK_FALSE(sample_layer_color(texture, spherical,
+                                           patch_center + Vec3f(0.f, 0.f, -1.f),
+                                           Vec3f::UnitZ(), colour_sentinel, patch_center,
+                                           Vec3f::UnitX()));
+    CHECK_THAT(colour_sentinel.x(), WithinAbs(0.25f, 1e-6f));
+    CHECK_THAT(colour_sentinel.y(), WithinAbs(0.5f, 1e-6f));
+    CHECK_THAT(colour_sentinel.z(), WithinAbs(0.75f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, spherical,
+                                           patch_center + Vec3f(0.f, 0.f, -1.f),
+                                           Vec3f::UnitZ(), patch_center,
+                                           Vec3f::UnitX()),
+               WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Projective colour projection enforces depth and untiled bounds", "[TextureDisplacement][TextureProjectionColor]")
+{
+    const DecodedHeightTexture texture = make_texture_projection_contract_texture();
+    TextureDisplacementLayer layer;
+    layer.projection_method = TextureProjectionMethod::ViewProjected;
+    layer.view_project_projective = true;
+    layer.tile_enabled = false;
+    // These ordinary placement fields must not affect a projective matrix's already-normalized UV.
+    layer.tiling_scale = 0.125f;
+    layer.rotation_deg = 37.f;
+    layer.offset = Vec2f(0.31f, -0.27f);
+    // w=z+1; the origin maps to the white texel at UV (.5,.5), z=1 has w=2 and maps to
+    // the green texel at UV (.5,0), y=2 maps outside at v=1.5, and z=-2 is behind.
+    layer.view_project_matrix = {0.f, 0.f, 0.5f, 0.5f,
+                                 0.f, 0.5f, -0.5f, 0.5f,
+                                 0.f, 0.f, 1.f, 1.f};
+
+    Vec3f inside(-1.f, -1.f, -1.f);
+    REQUIRE(sample_layer_color(texture, layer, Vec3f::Zero(), Vec3f::UnitZ(), inside));
+    CHECK_THAT(inside.x(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(inside.y(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(inside.z(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f::Zero(), Vec3f::UnitZ()),
+               WithinAbs(1.f, 1e-6f));
+
+    Vec3f perspective_inside(-1.f, -1.f, -1.f);
+    REQUIRE(sample_layer_color(texture, layer, Vec3f(0.f, 0.f, 1.f),
+                                       Vec3f::UnitZ(), perspective_inside));
+    CHECK_THAT(perspective_inside.x(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(perspective_inside.y(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(perspective_inside.z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 0.f, 1.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(85.f / 255.f, 1e-6f));
+
+    Vec3f behind_sentinel(0.2f, 0.4f, 0.6f);
+    CHECK_FALSE(sample_layer_color(texture, layer, Vec3f(0.f, 0.f, -2.f),
+                                           Vec3f::UnitZ(), behind_sentinel));
+    CHECK_THAT(behind_sentinel.x(), WithinAbs(0.2f, 1e-6f));
+    CHECK_THAT(behind_sentinel.y(), WithinAbs(0.4f, 1e-6f));
+    CHECK_THAT(behind_sentinel.z(), WithinAbs(0.6f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 0.f, -2.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(0.f, 1e-6f));
+
+    Vec3f outside_sentinel(0.7f, 0.8f, 0.9f);
+    CHECK_FALSE(sample_layer_color(texture, layer, Vec3f(0.f, 2.f, 0.f),
+                                           Vec3f::UnitZ(), outside_sentinel));
+    CHECK_THAT(outside_sentinel.x(), WithinAbs(0.7f, 1e-6f));
+    CHECK_THAT(outside_sentinel.y(), WithinAbs(0.8f, 1e-6f));
+    CHECK_THAT(outside_sentinel.z(), WithinAbs(0.9f, 1e-6f));
+    CHECK_THAT(sample_layer_height(texture, layer, Vec3f(0.f, 2.f, 0.f),
+                                           Vec3f::UnitZ()),
+               WithinAbs(0.f, 1e-6f));
+}
+
+namespace texture_anchor_contracts {
+
+TriangleSelector::TriangleSplittingData select_facets(const indexed_triangle_set &mesh,
+                                                       const std::vector<int> &facet_ids)
+{
+    const TriangleMesh triangle_mesh(mesh);
+    TriangleSelector selector(triangle_mesh);
+    for (const int facet_id : facet_ids)
+        selector.set_facet(facet_id, EnforcerBlockerType::ENFORCER);
+    return selector.serialize();
+}
+
+void check_vec3(const Vec3f &actual, const Vec3f &expected, float tolerance)
+{
+    CHECK_THAT(actual.x(), WithinAbs(expected.x(), tolerance));
+    CHECK_THAT(actual.y(), WithinAbs(expected.y(), tolerance));
+    CHECK_THAT(actual.z(), WithinAbs(expected.z(), tolerance));
+}
+
+TEST_CASE("Painted anchors use the analytic area-weighted patch centroid and normal",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool equal_area = GENERATE(false, true);
+    CAPTURE(equal_area);
+
+    indexed_triangle_set mesh;
+    if (equal_area) {
+        // Both triangles have area 1.5 and +Z orientation.  This is a positive
+        // control for the current unweighted implementation as well as a check
+        // that the selector preserves both selected leaves.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 13.f, 0.f, 0.f }, { 10.f, 1.f, 0.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    } else {
+        // The first triangle has area 1.5, centroid (1, 1/3, 0), and +Z
+        // normal.  The second has area 6, centroid (10, 4/3, 1), and +X
+        // normal.  Disjoint facets keep the expected result independent of
+        // topology or ordering conventions in the selector.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 10.f, 4.f, 0.f }, { 10.f, 0.f, 3.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    }
+
+    Vec3f anchor_position(99.f, 98.f, 97.f);
+    Vec3f anchor_normal(-1.f, -2.f, -3.f);
+    REQUIRE(compute_layer_paint_anchor(mesh, select_facets(mesh, {0, 1}),
+                                       anchor_position, anchor_normal));
+
+    if (equal_area) {
+        // The two equal-area centroids average to (6, 1/3, 0), and both
+        // oriented cross products point along +Z.
+        check_vec3(anchor_position, Vec3f(6.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    } else {
+        // (1.5*(1,1/3,0) + 6*(10,4/3,1)) / 7.5.
+        check_vec3(anchor_position, Vec3f(8.2f, 17.f / 15.f, 0.8f), 1e-5f);
+        // Cross products are (0,0,3) and (12,0,0), so the normalized sum is (12,0,3)/sqrt(153).
+        check_vec3(anchor_normal, Vec3f(12.f / std::sqrt(153.f), 0.f, 3.f / std::sqrt(153.f)), 1e-5f);
+    }
+}
+
+TEST_CASE("Unpainted anchors preserve caller outputs",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool has_mesh = GENERATE(false, true);
+    CAPTURE(has_mesh);
+
+    indexed_triangle_set mesh;
+    if (has_mesh)
+        mesh = its_make_cube(10., 10., 10.);
+    // Both rows have no selected facets.  The nonempty row verifies that the
+    // valid base mesh itself does not turn an unpainted layer into a patch.
+    TriangleSelector::TriangleSplittingData empty_facets;
+    const Vec3f original_position(7.f, -8.f, 9.f);
+    const Vec3f original_normal(-4.f, 5.f, -6.f);
+    Vec3f anchor_position = original_position;
+    Vec3f anchor_normal = original_normal;
+
+    CHECK_FALSE(compute_layer_paint_anchor(mesh, empty_facets, anchor_position, anchor_normal));
+    check_vec3(anchor_position, original_position, 0.f);
+    check_vec3(anchor_normal, original_normal, 0.f);
+}
+
+TEST_CASE("Degenerate painted patches use the stable fallback normal",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    // TriangleSelector::reset/push_triangle retains every indexed leaf,
+    // including this collinear one; set_facet/serialize therefore provide a
+    // valid selected patch for the source fallback branch to consume.
+    indexed_triangle_set mesh;
+    mesh.vertices = { { 0.f, 0.f, 0.f }, { 2.f, 0.f, 0.f }, { 1.f, 0.f, 0.f } };
+    mesh.indices = { { 0, 1, 2 } };
+
+    Vec3f anchor_position = Vec3f::Zero();
+    Vec3f anchor_normal = Vec3f::Zero();
+    REQUIRE(compute_layer_paint_anchor(mesh, select_facets(mesh, {0}),
+                                       anchor_position, anchor_normal));
+    check_vec3(anchor_position, Vec3f(1.f, 0.f, 0.f), 1e-5f);
+    // The +Z result is source-specified by TextureDisplacement.cpp's
+    // near-zero normal guard; it is not separately promised by the header.
+    check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+}
+
+
+TEST_CASE("Painted anchor geometry ignores zero-area faces and winding cancellation",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    const bool opposite_winding = GENERATE(false, true);
+    CAPTURE(opposite_winding);
+
+    indexed_triangle_set mesh;
+    if (opposite_winding) {
+        // Equal-area triangles with opposite winding retain their geometric centroid,
+        // while the signed normal sum intentionally reaches the existing +Z fallback.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 10.f, 0.f, 0.f }, { 10.f, 1.f, 0.f }, { 13.f, 0.f, 0.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    } else {
+        // The second face is far away but has exactly zero area. It must not move
+        // the positive-area face's centroid or normal.
+        mesh.vertices = {
+            { 0.f, 0.f, 0.f }, { 3.f, 0.f, 0.f }, { 0.f, 1.f, 0.f },
+            { 100.f, 100.f, 100.f }, { 102.f, 100.f, 100.f }, { 101.f, 100.f, 100.f }
+        };
+        mesh.indices = { { 0, 1, 2 }, { 3, 4, 5 } };
+    }
+
+    REQUIRE(mesh.vertices.size() == 6);
+    REQUIRE(mesh.indices.size() == 2);
+    const auto selected = select_facets(mesh, {0, 1});
+    REQUIRE_FALSE(selected.triangles_to_split.empty());
+
+    Vec3f anchor_position(99.f, 98.f, 97.f);
+    Vec3f anchor_normal(-1.f, -2.f, -3.f);
+    REQUIRE(compute_layer_paint_anchor(mesh, selected, anchor_position, anchor_normal));
+
+    if (opposite_winding) {
+        check_vec3(anchor_position, Vec3f(6.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    } else {
+        check_vec3(anchor_position, Vec3f(1.f, 1.f / 3.f, 0.f), 1e-5f);
+        check_vec3(anchor_normal, Vec3f::UnitZ(), 1e-5f);
+    }
+}
+
+TEST_CASE("Painted anchors keep finite large-position weighted centroids",
+          "[TextureDisplacement][TextureDisplacementAnchor]")
+{
+    // A 32 mm triangle translated along its normal: twice-area is 2^10,
+    // and its finite 2^120 centroid overflows a float weighted product (2^130).
+    const float x = std::ldexp(1.f, 120);
+    REQUIRE(std::isfinite(x));
+    indexed_triangle_set mesh;
+    mesh.vertices = {{x, 0.f, 0.f}, {x, 32.f, 0.f}, {x, 0.f, 32.f}};
+    mesh.indices = {{0, 1, 2}};
+    Vec3f anchor_position = Vec3f::Zero();
+    Vec3f anchor_normal = Vec3f::Zero();
+    REQUIRE(compute_layer_paint_anchor(mesh, select_facets(mesh, {0}), anchor_position, anchor_normal));
+    CHECK(std::isfinite(anchor_position.x()));
+    CHECK(std::isfinite(anchor_position.y()));
+    CHECK(std::isfinite(anchor_position.z()));
+    check_vec3(anchor_position, Vec3f(x, 32.f / 3.f, 32.f / 3.f), 1e-5f);
+    check_vec3(anchor_normal, Vec3f::UnitX(), 1e-5f);
+}
+
+} // namespace texture_anchor_contracts
+TEST_CASE("Planar projection follows the dominant normal axis", "[TextureDisplacement][TexturePlacement]")
+{
+    const Vec3f position(1.25f, -2.5f, 3.75f);
+    struct Row {
+        Vec3f normal;
+        Vec2f expected;
+    };
+    const std::array<Row, 4> rows{{
+        { Vec3f(3.f, -1.f, 0.5f), Vec2f(-2.5f, 3.75f) },
+        { Vec3f(-0.5f, 4.f, -1.f), Vec2f(1.25f, 3.75f) },
+        { Vec3f(0.5f, -1.f, -5.f), Vec2f(1.25f, -2.5f) },
+        { Vec3f(-5.f, 1.f, 0.5f), Vec2f(-2.5f, 3.75f) },
+    }};
+
+    for (size_t row = 0; row < rows.size(); ++row) {
+        INFO("row=" << row);
+        const Vec2f actual = project_planar(position, rows[row].normal);
+        CHECK_THAT(actual.x(), WithinAbs(rows[row].expected.x(), 1e-6f));
+        CHECK_THAT(actual.y(), WithinAbs(rows[row].expected.y(), 1e-6f));
+    }
+}
+
+TEST_CASE("Texture UV transforms apply scale rotation aspect and offset", "[TextureDisplacement][TexturePlacement]")
+{
+    TextureDisplacementLayer layer;
+    layer.tiling_scale = 2.f;
+    layer.rotation_deg = 90.f;
+    layer.offset       = Vec2f(0.1f, -0.2f);
+    const Vec2f planar(2.f, 1.f);
+
+    struct Row {
+        float aspect;
+        Vec2f expected;
+    };
+    const std::array<Row, 3> rows{{
+        { 1.f, Vec2f(-0.4f, 0.8f) },
+        { 2.f, Vec2f(-0.4f, 1.8f) },
+        { 0.f, Vec2f(-0.4f, 0.8f) },
+    }};
+    for (size_t row = 0; row < rows.size(); ++row) {
+        INFO("row=" << row);
+        const Vec2f actual = apply_uv_transform(planar, layer, rows[row].aspect);
+        CHECK_THAT(actual.x(), WithinAbs(rows[row].expected.x(), 1e-5f));
+        CHECK_THAT(actual.y(), WithinAbs(rows[row].expected.y(), 1e-5f));
+    }
+
+    TextureDisplacementLayer fallback = layer;
+    fallback.tiling_scale = 0.f;
+    const Vec2f fallback_uv = apply_uv_transform(planar, fallback, 1.f);
+    CHECK_THAT(fallback_uv.x(), WithinAbs(-0.9f, 1e-5f));
+    CHECK_THAT(fallback_uv.y(), WithinAbs(1.8f, 1e-5f));
+}
+
+static TextureBake::TriSoup make_texture_bake_boundary_falloff_strip()
+{
+    TextureBake::TriSoup soup;
+    const Vec3f normal(0.f, 0.f, 1.f);
+    const auto append_triangle = [&](const Vec3f &a, const Vec3f &b, const Vec3f &c, float excluded) {
+        soup.pos.push_back(a);
+        soup.pos.push_back(b);
+        soup.pos.push_back(c);
+        soup.nrm.insert(soup.nrm.end(), 3, normal);
+        soup.exclude_weight.insert(soup.exclude_weight.end(), 3, excluded);
+    };
+    const auto append_quad = [&](int x, float excluded) {
+        const Vec3f p00(float(x), 0.f, 0.f);
+        const Vec3f p10(float(x + 1), 0.f, 0.f);
+        const Vec3f p11(float(x + 1), 1.f, 0.f);
+        const Vec3f p01(float(x), 1.f, 0.f);
+        append_triangle(p00, p10, p11, excluded);
+        append_triangle(p00, p11, p01, excluded);
+    };
+
+    append_quad(0, 1.f);
+    append_quad(1, 0.f);
+    append_quad(2, 0.f);
+    return soup;
+}
+
+TEST_CASE("Texture bake boundary falloff ramps an excluded planar seam", "[TextureDisplacement][TextureBakeBoundaryFalloff]")
+{
+    const TextureBake::TriSoup strip = make_texture_bake_boundary_falloff_strip();
+    const TextureBake::HeightSampleFn sample =
+        [](const Vec3f &, const Vec3f &, const Vec3f &) { return 1.f; };
+
+    TextureBake::DisplaceSettings settings;
+    settings.amplitude              = 1.f;
+    settings.symmetric              = false;
+    settings.bottom_angle_limit     = 0.f;
+    settings.top_angle_limit        = 0.f;
+    settings.no_downward_z           = false;
+    settings.blend_normal_smoothing = 0;
+    settings.boundary_falloff        = 2.f;
+
+    TextureBake::DisplaceBounds bounds;
+    bounds.min = Vec3f(0.f, 0.f, 0.f);
+    bounds.max = Vec3f(3.f, 1.f, 0.f);
+
+    const auto check_output = [&](const TextureBake::TriSoup &input_soup,
+                                  const TextureBake::TriSoup &output,
+                                  const std::array<float, 4> &expected_z) {
+        REQUIRE(output.pos.size() == input_soup.pos.size());
+        REQUIRE(output.nrm.size() == input_soup.nrm.size());
+        REQUIRE(output.exclude_weight == input_soup.exclude_weight);
+
+        float min_z = std::numeric_limits<float>::max();
+        float max_z = std::numeric_limits<float>::lowest();
+        for (size_t i = 0; i < input_soup.pos.size(); ++i) {
+            const Vec3f &input  = input_soup.pos[i];
+            const Vec3f &actual = output.pos[i];
+            CHECK_THAT(actual.x(), WithinAbs(input.x(), 1e-6f));
+            CHECK_THAT(actual.y(), WithinAbs(input.y(), 1e-6f));
+            const size_t column = size_t(input.x());
+            REQUIRE(column < expected_z.size());
+            CHECK_THAT(actual.z(), WithinAbs(expected_z[column], 1e-5f));
+            min_z = std::min(min_z, actual.z());
+            max_z = std::max(max_z, actual.z());
+        }
+        CHECK(min_z >= -1e-6f);
+        CHECK(max_z <= 1.f + 1e-6f);
+    };
+
+    const TextureBake::TriSoup ramp = TextureBake::apply_displacement(strip, sample, settings, bounds);
+    check_output(strip, ramp, { 0.f, 0.f, 0.5f, 1.f });
+
+    settings.boundary_falloff = 0.f;
+    const TextureBake::TriSoup hard = TextureBake::apply_displacement(strip, sample, settings, bounds);
+    check_output(strip, hard, { 0.f, 0.f, 1.f, 1.f });
+
+    TextureBake::TriSoup unmasked = strip;
+    std::fill(unmasked.exclude_weight.begin(), unmasked.exclude_weight.end(), 0.f);
+    settings.boundary_falloff = 2.f;
+    const TextureBake::TriSoup unmasked_output =
+        TextureBake::apply_displacement(unmasked, sample, settings, bounds);
+    check_output(unmasked, unmasked_output, { 1.f, 1.f, 1.f, 1.f });
+}
+
+
+TEST_CASE("Joining charts aligns a reversed shared edge to the placed parent", "[TextureDisplacement]")
+{
+    PatchUnwrap unwrap;
+    unwrap.uvs = { Vec2f(0.f, 0.f), Vec2f(2.f, 0.f), Vec2f(0.f, -1.f),
+                   Vec2f(7.f, 5.f), Vec2f(5.f, 5.f), Vec2f(7.f, 6.f) };
+    unwrap.source_vertex = { 0, 1, 2, 1, 0, 3 };
+    unwrap.vertex_chart = { 0, 0, 0, 1, 1, 1 };
+    unwrap.chart_centroid = { Vec2f(1.f, 0.f), Vec2f(6.f, 5.f) };
+    unwrap.boundary_edges = { { 0, 1 }, { 3, 4 } };
+
+    std::vector<TextureIsland> placements(2);
+    placements[0].rotation_deg = 90.f;
+    placements[0].offset = Vec2f(10.f, 20.f);
+
+    TextureIsland joined;
+    REQUIRE(join_chart_placement(unwrap, placements, 1, 0, joined));
+    CHECK_THAT(joined.scale, WithinAbs(1.f, 1e-6f));
+
+    // Applying the returned placement puts the child's shared base vertices at the parent's
+    // already-placed endpoints. This checks the public geometry without pinning an angle encoding.
+    placements[1] = joined;
+    const Vec2f child_base0 = apply_island_transform(unwrap.uvs[4], 1, unwrap, placements);
+    const Vec2f child_base1 = apply_island_transform(unwrap.uvs[3], 1, unwrap, placements);
+    CHECK_THAT(child_base0.x(), WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(child_base0.y(), WithinAbs(19.f, 1e-4f));
+    CHECK_THAT(child_base1.x(), WithinAbs(11.f, 1e-4f));
+    CHECK_THAT(child_base1.y(), WithinAbs(21.f, 1e-4f));
+    CHECK_THAT(placements[0].rotation_deg, WithinAbs(90.f, 1e-6f));
+    CHECK_THAT(placements[0].offset.x(), WithinAbs(10.f, 1e-6f));
+    CHECK_THAT(placements[0].offset.y(), WithinAbs(20.f, 1e-6f));
+
+    const auto failed_join_preserves_child_geometry = [&](const PatchUnwrap &candidate, int child, int parent) {
+        placements[1] = joined;
+        const Vec2f before0 = apply_island_transform(candidate.uvs[4], 1, candidate, placements);
+        const Vec2f before1 = apply_island_transform(candidate.uvs[3], 1, candidate, placements);
+        CHECK_FALSE(join_chart_placement(candidate, placements, child, parent, joined));
+        placements[1] = joined;
+        const Vec2f after0 = apply_island_transform(candidate.uvs[4], 1, candidate, placements);
+        const Vec2f after1 = apply_island_transform(candidate.uvs[3], 1, candidate, placements);
+        CHECK_THAT(after0.x(), WithinAbs(before0.x(), 1e-6f));
+        CHECK_THAT(after0.y(), WithinAbs(before0.y(), 1e-6f));
+        CHECK_THAT(after1.x(), WithinAbs(before1.x(), 1e-6f));
+        CHECK_THAT(after1.y(), WithinAbs(before1.y(), 1e-6f));
+    };
+
+    PatchUnwrap unshared = unwrap;
+    unshared.source_vertex[3] = 4;
+    unshared.source_vertex[4] = 5;
+    failed_join_preserves_child_geometry(unshared, 1, 0);
+    failed_join_preserves_child_geometry(unwrap, 2, 0);
+    failed_join_preserves_child_geometry(unwrap, -1, 0);
+    failed_join_preserves_child_geometry(unwrap, 1, -1);
+    failed_join_preserves_child_geometry(unwrap, 0, 0);
+}
+
+TEST_CASE("Averaging island scales preserves placement and handles small inputs", "[TextureDisplacement]")
+{
+    std::vector<TextureIsland> islands(3);
+    islands[0].scale = 2.f;
+    islands[0].rotation_deg = 15.f;
+    islands[0].offset = Vec2f(1.f, 2.f);
+    islands[1].scale = 4.f;
+    islands[1].rotation_deg = -30.f;
+    islands[1].offset = Vec2f(-3.f, 4.f);
+    islands[2].scale = 6.f;
+    islands[2].rotation_deg = 90.f;
+    islands[2].offset = Vec2f(5.f, -6.f);
+
+    average_island_scales(islands);
+
+    for (const TextureIsland &island : islands)
+        CHECK_THAT(island.scale, WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(islands[0].rotation_deg, WithinAbs(15.f, 1e-6f));
+    CHECK_THAT(islands[0].offset.x(), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(islands[0].offset.y(), WithinAbs(2.f, 1e-6f));
+    CHECK_THAT(islands[1].rotation_deg, WithinAbs(-30.f, 1e-6f));
+    CHECK_THAT(islands[1].offset.x(), WithinAbs(-3.f, 1e-6f));
+    CHECK_THAT(islands[1].offset.y(), WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(islands[2].rotation_deg, WithinAbs(90.f, 1e-6f));
+    CHECK_THAT(islands[2].offset.x(), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT(islands[2].offset.y(), WithinAbs(-6.f, 1e-6f));
+
+    std::vector<TextureIsland> empty;
+    average_island_scales(empty);
+    CHECK(empty.empty());
+
+    std::vector<TextureIsland> singleton(1);
+    singleton[0].scale = 2.5f;
+    average_island_scales(singleton);
+    CHECK_THAT(singleton[0].scale, WithinAbs(2.5f, 1e-6f));
+}
+
+TEST_CASE("RGB texture smoothing preserves flat channels and reduces image contrast", "[TextureDisplacement]")
+{
+    constexpr size_t width = 4;
+    constexpr size_t height = 4;
+    std::vector<uint8_t> pixels;
+    pixels.reserve(width * height * 3);
+    for (size_t y = 0; y < height; ++y)
+        for (size_t x = 0; x < width; ++x) {
+            pixels.push_back((x + y) % 2 == 0 ? 255 : 0);
+            pixels.push_back(73);
+            pixels.push_back(y % 2 == 0 ? 20 : 220);
+        }
+
+    TextureDisplacementLayer layer;
+    layer.image_data = make_rgb_png(width, height, pixels);
+    const std::vector<unsigned char> encoded_before = *layer.image_data;
+
+    layer.smoothing = 0.f;
+    const DecodedHeightTexture raw = decode_height_texture(layer);
+    REQUIRE_FALSE(raw.empty());
+    REQUIRE(raw.has_color());
+    REQUIRE(raw.rgb.size() == width * height * 3);
+
+    layer.smoothing = 1.f;
+    const DecodedHeightTexture smoothed = decode_height_texture(layer);
+    REQUIRE(smoothed.has_color());
+    REQUIRE(smoothed.rgb.size() == raw.rgb.size());
+
+    uint8_t raw_red_min = 255, raw_red_max = 0;
+    uint8_t smooth_red_min = 255, smooth_red_max = 0;
+    uint8_t raw_blue_min = 255, raw_blue_max = 0;
+    uint8_t smooth_blue_min = 255, smooth_blue_max = 0;
+    for (size_t i = 0; i < width * height; ++i) {
+        const uint8_t raw_red = raw.rgb[i * 3];
+        const uint8_t smooth_red = smoothed.rgb[i * 3];
+        const uint8_t raw_green = raw.rgb[i * 3 + 1];
+        const uint8_t smooth_green = smoothed.rgb[i * 3 + 1];
+        const uint8_t raw_blue = raw.rgb[i * 3 + 2];
+        const uint8_t smooth_blue = smoothed.rgb[i * 3 + 2];
+
+        raw_red_min = std::min(raw_red_min, raw_red);
+        raw_red_max = std::max(raw_red_max, raw_red);
+        smooth_red_min = std::min(smooth_red_min, smooth_red);
+        smooth_red_max = std::max(smooth_red_max, smooth_red);
+        raw_blue_min = std::min(raw_blue_min, raw_blue);
+        raw_blue_max = std::max(raw_blue_max, raw_blue);
+        smooth_blue_min = std::min(smooth_blue_min, smooth_blue);
+        smooth_blue_max = std::max(smooth_blue_max, smooth_blue);
+
+        CHECK(raw_green == 73);
+        CHECK(smooth_green == 73);
+    }
+    CHECK(raw_red_min == 0);
+    CHECK(raw_red_max == 255);
+    CHECK(raw_blue_min == 20);
+    CHECK(raw_blue_max == 220);
+    CHECK(smooth_red_max - smooth_red_min < raw_red_max - raw_red_min);
+    CHECK(smooth_blue_max - smooth_blue_min < raw_blue_max - raw_blue_min);
+
+    const DecodedHeightTexture cached = decode_height_texture(layer);
+    CHECK(cached.rgb == smoothed.rgb);
+    CHECK(cached.pixels == smoothed.pixels);
+    CHECK(*layer.image_data == encoded_before);
+
+    layer.smoothing = 0.f;
+    const DecodedHeightTexture unsmoothed_again = decode_height_texture(layer);
+    CHECK(unsmoothed_again.rgb == raw.rgb);
+    CHECK(unsmoothed_again.pixels == raw.pixels);
+}

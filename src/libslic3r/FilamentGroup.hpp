@@ -210,6 +210,7 @@ namespace Slic3r
         std::vector<int> fil_nozzle_match;
     };
 
+    // Throws std::invalid_argument if a nonempty layer is requested without physical nozzles.
     std::vector<FilamentPlanRes> plan_filament_nozzle_mapping_and_order(const FilamentGroupContext& ctx);
 
 

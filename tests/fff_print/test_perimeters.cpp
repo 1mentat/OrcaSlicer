@@ -1,3 +1,7 @@
+#include "libslic3r/PrintBase.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/Surface.hpp"
+#include <array>
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -992,5 +996,803 @@ TEST_CASE("A hole whose outer wall touches the contour's runs with it", "[Perime
         REQUIRE(layers[i].holes_ccw.size() == 1);
         CHECK(layers[i].contours_ccw.front() == ccw);
         CHECK(layers[i].holes_ccw.front() == ccw);
+    }
+}
+
+
+namespace {
+
+double zero_shell_cube_perimeter_length(bool top, bool one_wall)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "wall_generator",             "classic" },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops",                 3 },
+        { "top_shell_layers",           top ? 0 : 3 },
+        { "bottom_shell_layers",        top ? 3 : 0 },
+        { "top_shell_thickness",        0.0 },
+        { "bottom_shell_thickness",     0.0 },
+        { "top_surface_density",        "100%" },
+        { "sparse_infill_density",       "15%" },
+        { "only_one_wall_top",          top && one_wall },
+        { "only_one_wall_first_layer",  !top && one_wall },
+    });
+    TriangleMesh shape = cube(20.0);
+    shape.scale(Vec3f(1.f, 1.f, 0.2f));
+    Print print;
+    init_and_process_print({ shape }, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const SliceLengths lengths = slice_lengths(print);
+    REQUIRE(lengths.perimeters.size() > 1);
+    return top ? lengths.perimeters.back() : lengths.perimeters.front();
+}
+
+
+} // namespace
+
+namespace {
+
+struct CounterboreFillSnapshot {
+    double annulus = 0.;
+    double bore = 0.;
+};
+
+ExPolygon counterbore_rectangle(double x0, double y0, double x1, double y1, const Point &center_offset)
+{
+    // Layer polygons are centered by PrintObject before clipping; convert the
+    // model-space fixture bounds into that same coordinate frame.
+    return ExPolygon({ Point::new_scale(x0, y0) - center_offset, Point::new_scale(x1, y0) - center_offset,
+                       Point::new_scale(x1, y1) - center_offset, Point::new_scale(x0, y1) - center_offset });
+}
+
+double counterbore_area_in(const Layer &layer, const ExPolygon &clip)
+{
+    ExPolygons clipped_surfaces;
+    for (const LayerRegion *region : layer.regions()) {
+        for (const Surface &surface : region->fill_surfaces.surfaces) {
+            const ExPolygons clipped = intersection_ex(surface.expolygon, clip);
+            clipped_surfaces.insert(clipped_surfaces.end(), clipped.begin(), clipped.end());
+        }
+    }
+    double result = 0.;
+    for (const ExPolygon &expolygon : union_ex(clipped_surfaces))
+        result += expolygon.area();
+    return result;
+}
+
+CounterboreFillSnapshot counterbore_fill_snapshot(const Layer &layer, const Point &center_offset)
+{
+    const ExPolygon cavity = counterbore_rectangle(5., 5., 25., 25., center_offset);
+    const ExPolygon bore   = counterbore_rectangle(13., 13., 17., 17., center_offset);
+    const double bore_area = counterbore_area_in(layer, bore);
+    return { counterbore_area_in(layer, cavity) - bore_area, bore_area };
+}
+
+} // namespace
+
+TEST_CASE("Counterbore bridging modes keep the bore open or fill a sacrificial layer", "[Perimeters][CounterboreHoleBridging]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    CAPTURE(wall_generator);
+
+    struct Mode {
+        const char *token;
+        CounterboreHoleBridgingOption value;
+    };
+    const std::array<Mode, 3> modes = {{
+        { "none",             chbNone },
+        { "partiallybridge",  chbBridges },
+        { "sacrificiallayer", chbFilled },
+    }};
+    std::array<CounterboreFillSnapshot, 3> snapshots;
+
+    for (size_t mode_idx = 0; mode_idx < modes.size(); ++mode_idx) {
+        const Mode &mode = modes[mode_idx];
+        CAPTURE(mode.token);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "wall_generator", wall_generator },
+            { "counterbore_hole_bridging", mode.token },
+            { "layer_height", 0.2 },
+            { "initial_layer_print_height", 0.2 },
+            { "nozzle_diameter", "0.4" },
+            // Relative-E Marlin validation requires an exact uppercase reset.
+            { "gcode_flavor", "marlin" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
+            { "wall_loops", 2 },
+            { "sparse_infill_density", "15%" },
+            { "top_shell_layers", 3 },
+            { "bottom_shell_layers", 3 },
+            { "enable_support", false },
+            { "brim_type", "no_brim" },
+            { "skirt_loops", 0 },
+        });
+
+        Print print;
+        Model model;
+        box_over_cavity(print, model, config);
+        const StringObjectException validation = print.validate();
+        INFO("counterbore mode=" << mode.token << ", wall_generator=" << wall_generator);
+        INFO("counterbore validation=" << validation.string);
+        INFO("counterbore validation opt_key=" << validation.opt_key);
+        REQUIRE(validation.string.empty());
+
+        REQUIRE_FALSE(print.objects().empty());
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.num_printing_regions() > 0);
+        const auto parsed_mode = object.printing_region(0).config().counterbore_hole_bridging.value;
+        REQUIRE(static_cast<int>(parsed_mode) == static_cast<int>(mode.value));
+        REQUIRE_NOTHROW(print.process());
+
+        const Layer *ceiling = nullptr;
+        for (const Layer *layer : object.layers()) {
+            if (std::abs(layer->print_z - cavity_ceiling_z) < EPSILON) {
+                ceiling = layer;
+                break;
+            }
+        }
+        REQUIRE(ceiling != nullptr);
+        snapshots[mode_idx] = counterbore_fill_snapshot(*ceiling, object.center_offset());
+    }
+
+    // Areas are scaled integer geometry. A half-mm square is a deliberately
+    // conservative tolerance for clipping/offset noise, far below the 4x4 bore.
+    const double area_tolerance = double(scale_(0.5)) * double(scale_(0.5));
+    for (const CounterboreFillSnapshot &snapshot : snapshots) {
+        REQUIRE(std::isfinite(snapshot.annulus));
+        REQUIRE(std::isfinite(snapshot.bore));
+        // Every mode must retain a real annulus; this prevents a delete-all
+        // partial-fill mutant from satisfying only the negative delta check.
+        REQUIRE(snapshot.annulus > area_tolerance);
+        REQUIRE(snapshot.bore >= 0.);
+    }
+    REQUIRE(snapshots[0].annulus + snapshots[0].bore > 0.);
+    CHECK(snapshots[0].bore <= area_tolerance);
+
+    // Partial bridging is a mask over unsupported annulus material. The
+    // production path keeps only its bridgeable/anchor mask and removes the
+    // remainder from the normal fill surface; it does not fill the central
+    // bore. Therefore the annulus and total cavity fill must decrease while
+    // the bore remains unchanged.
+    const double partial_annulus_delta = snapshots[1].annulus - snapshots[0].annulus;
+    INFO("partial annulus delta=" << partial_annulus_delta << ", tolerance=" << area_tolerance);
+    CHECK(partial_annulus_delta < -area_tolerance);
+
+    const double partial_bore_delta = snapshots[1].bore - snapshots[0].bore;
+    INFO("partial bore delta=" << partial_bore_delta << ", tolerance=" << area_tolerance);
+    CHECK(std::abs(partial_bore_delta) <= area_tolerance);
+
+    const double full_bore_delta = snapshots[2].bore - snapshots[0].bore;
+    INFO("full bore delta=" << full_bore_delta << ", tolerance=" << area_tolerance);
+    CHECK(full_bore_delta > area_tolerance);
+
+    const double none_total = snapshots[0].annulus + snapshots[0].bore;
+    const double partial_total = snapshots[1].annulus + snapshots[1].bore;
+    const double full_total = snapshots[2].annulus + snapshots[2].bore;
+    INFO("none total=" << none_total << ", partial total=" << partial_total
+         << ", full total=" << full_total << ", tolerance=" << area_tolerance);
+    CHECK(partial_total < none_total - area_tolerance);
+    CHECK(full_total > partial_total + area_tolerance);
+}
+
+
+
+
+namespace {
+
+// A centered lower square supports part of the wider shelf, while the remaining first-layer area
+// is an analytic overhang band and the shared footprint attaches the shelf to the preceding layer.
+void process_supported_step(Print &print, Model &model, double lower_width, double shelf_width,
+                            const DynamicPrintConfig &config)
+{
+    ModelObject *object = model.add_object();
+    object->name = "supported_overhang_step.stl";
+    TriangleMesh support = make_cube(lower_width, lower_width, 5.);
+    const float lower_origin = float(40. - lower_width / 2.);
+    support.translate(lower_origin, lower_origin, 0.f);
+    object->add_volume(std::move(support), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh shelf = make_cube(shelf_width, shelf_width, 2.);
+    const float shelf_origin = float(40. - shelf_width / 2.);
+    shelf.translate(shelf_origin, shelf_origin, 5.f);
+    object->add_volume(std::move(shelf), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("supported-step validation=" << validation.string);
+    INFO("supported-step validation opt_key=" << validation.opt_key);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    REQUIRE_NOTHROW(print.process());
+}
+
+struct OverhangStepEvidence {
+    double lower_area_mm2 = 0.;
+    double current_area_mm2 = 0.;
+    double unsupported_area_mm2 = 0.;
+    double unsupported_overhang_path_mm = 0.;
+    double unsupported_overhang_material_mm3 = 0.;
+    double first_layer_perimeter_mm = 0.;
+    size_t unsupported_overhang_paths = 0;
+    size_t invalid_flow_paths = 0;
+};
+
+double area_mm2(const ExPolygons &polygons)
+{
+    return area(polygons) / (double(scale_(1.)) * double(scale_(1.)));
+}
+
+OverhangStepEvidence overhang_step_evidence(const Print &print)
+{
+    OverhangStepEvidence evidence;
+    const PrintObject &object = *print.objects().front();
+    evidence.first_layer_perimeter_mm = unscale<double>(perimeter_length_at(print, first_layer_z));
+
+    const auto &layers = object.layers();
+    double largest_band_mm2 = 0.;
+    for (size_t layer_idx = 1; layer_idx < layers.size(); ++layer_idx) {
+        const Layer *below = layers[layer_idx - 1];
+        const Layer *layer = layers[layer_idx];
+        const ExPolygons unsupported = diff_ex(layer->lslices, below->lslices);
+        const double band_mm2 = area_mm2(unsupported);
+        if (band_mm2 <= largest_band_mm2)
+            continue;
+
+        largest_band_mm2 = band_mm2;
+        evidence.lower_area_mm2 = area_mm2(below->lslices);
+        evidence.current_area_mm2 = area_mm2(layer->lslices);
+        evidence.unsupported_area_mm2 = band_mm2;
+        evidence.unsupported_overhang_path_mm = 0.;
+        evidence.unsupported_overhang_material_mm3 = 0.;
+        evidence.unsupported_overhang_paths = 0;
+        evidence.invalid_flow_paths = 0;
+
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&](const ExtrusionPath &path) {
+                if (path.role() != erOverhangPerimeter)
+                    return;
+                const Polylines portions = intersection_pl(Polylines{path.as_polyline()}, unsupported);
+                const double clipped_mm = unscale<double>(total_length(portions));
+                if (clipped_mm <= 0.)
+                    return;
+
+                ++evidence.unsupported_overhang_paths;
+                evidence.unsupported_overhang_path_mm += clipped_mm;
+                evidence.unsupported_overhang_material_mm3 += clipped_mm * path.mm3_per_mm;
+                if (!std::isfinite(path.width) || !std::isfinite(path.height) || !std::isfinite(path.mm3_per_mm) ||
+                    path.width <= 0. || path.height <= 0. || path.mm3_per_mm <= 0.)
+                    ++evidence.invalid_flow_paths;
+            });
+        }
+    }
+    return evidence;
+}
+
+DynamicPrintConfig extra_overhang_perimeter_config(bool enabled)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "wall_generator",                    "classic" },
+        { "layer_height",                       0.2 },
+        { "initial_layer_print_height",          0.2 },
+        { "nozzle_diameter",                    "0.4" },
+        { "gcode_flavor",                        "marlin" },
+        { "use_relative_e_distances",            true },
+        { "layer_change_gcode",                  "G92 E0\n" },
+        { "outer_wall_line_width",               0.42 },
+        { "inner_wall_line_width",               0.45 },
+        { "wall_loops",                         3 },
+        { "detect_overhang_wall",                true },
+        { "extra_perimeters_on_overhangs",       enabled },
+        { "overhang_reverse",                    false },
+        { "overhang_reverse_internal_only",      false },
+        { "unsupported_wall_last",               false },
+        { "only_one_wall_top",                   false },
+        { "only_one_wall_first_layer",           false },
+        { "detect_thin_wall",                    false },
+        { "top_shell_layers",                    2 },
+        { "bottom_shell_layers",                 2 },
+        { "sparse_infill_density",               "15%" },
+        { "skirt_loops",                         0 },
+        { "brim_type",                           "no_brim" },
+        { "raft_layers",                         0 },
+        { "printable_area",                      "0x0,100x0,100x100,0x100" },
+    });
+    return config;
+}
+
+} // namespace
+
+// The added paths must occupy the unsupported part of the step, keep the analytic attached footprint,
+// and carry valid extrusion flow. This checks the public Print geometry rather than only counting paths.
+TEST_CASE("Extra overhang perimeters add material in the unsupported step band", "[Perimeters][OverhangExtraPerimeters]")
+{
+    const auto [lower_width, shelf_width] = GENERATE(table<double, double>({
+        { 20., 40. },
+        {  8., 12. },
+    }));
+    CAPTURE(lower_width, shelf_width);
+    const double expected_lower_area_mm2 = lower_width * lower_width;
+    const double expected_current_area_mm2 = shelf_width * shelf_width;
+    const double expected_unsupported_area_mm2 = expected_current_area_mm2 - expected_lower_area_mm2;
+
+    auto slice = [lower_width = lower_width, shelf_width = shelf_width](bool enabled) {
+        Print print;
+        Model model;
+        process_supported_step(print, model, lower_width, shelf_width, extra_overhang_perimeter_config(enabled));
+        REQUIRE_FALSE(print.objects().empty());
+        return overhang_step_evidence(print);
+    };
+
+    const OverhangStepEvidence regular = slice(false);
+    const OverhangStepEvidence extra = slice(true);
+
+    CHECK_THAT(regular.lower_area_mm2, Catch::Matchers::WithinAbs(expected_lower_area_mm2, 2.));
+    CHECK_THAT(regular.current_area_mm2, Catch::Matchers::WithinAbs(expected_current_area_mm2, 2.));
+    CHECK_THAT(regular.unsupported_area_mm2, Catch::Matchers::WithinAbs(expected_unsupported_area_mm2, 2.));
+    CHECK_THAT(extra.lower_area_mm2, Catch::Matchers::WithinAbs(regular.lower_area_mm2, 0.01));
+    CHECK_THAT(extra.current_area_mm2, Catch::Matchers::WithinAbs(regular.current_area_mm2, 0.01));
+    CHECK_THAT(extra.unsupported_area_mm2, Catch::Matchers::WithinAbs(regular.unsupported_area_mm2, 0.01));
+    CHECK_THAT(extra.first_layer_perimeter_mm, Catch::Matchers::WithinAbs(regular.first_layer_perimeter_mm, 0.1));
+
+    CHECK(extra.unsupported_overhang_paths > regular.unsupported_overhang_paths);
+    CHECK(extra.unsupported_overhang_path_mm > regular.unsupported_overhang_path_mm + 1.0);
+    CHECK(extra.unsupported_overhang_material_mm3 > regular.unsupported_overhang_material_mm3);
+    CHECK(extra.unsupported_overhang_paths > 0);
+    CHECK(extra.invalid_flow_paths == 0);
+}
+
+
+TEST_CASE("Zero top shells keep every wall on a flat top face", "[Perimeters][ZeroShellWalls]")
+{
+    const double normal = zero_shell_cube_perimeter_length(true, false);
+    const double one_wall_enabled = zero_shell_cube_perimeter_length(true, true);
+    REQUIRE(normal > 0.);
+    CHECK_THAT(one_wall_enabled, Catch::Matchers::WithinAbs(normal, 1.0));
+}
+
+TEST_CASE("Zero bottom shells keep every wall on a flat first layer", "[Perimeters][ZeroShellWalls]")
+{
+    const double normal = zero_shell_cube_perimeter_length(false, false);
+    const double one_wall_enabled = zero_shell_cube_perimeter_length(false, true);
+    REQUIRE(normal > 0.);
+    CHECK_THAT(one_wall_enabled, Catch::Matchers::WithinAbs(normal, 1.0));
+}
+
+
+
+namespace fuzzy_mode_pipeline_contracts {
+
+struct Segment {
+    Point a;
+    Point b;
+};
+
+struct OuterPerimeterSnapshot {
+    std::vector<float> widths;
+    std::vector<Segment> segments;
+    std::vector<Point> points;
+};
+
+void append_path(const ExtrusionPath &path, OuterPerimeterSnapshot &snapshot)
+{
+    if (path.role() != erExternalPerimeter || path.polyline.points.size() < 2)
+        return;
+
+    snapshot.widths.push_back(path.width);
+    snapshot.points.reserve(snapshot.points.size() + path.polyline.points.size());
+    for (size_t i = 0; i < path.polyline.points.size(); ++i) {
+        snapshot.points.push_back(path.polyline.points[i].to_point());
+        if (i > 0)
+            snapshot.segments.push_back({path.polyline.points[i - 1].to_point(), path.polyline.points[i].to_point()});
+    }
+}
+
+OuterPerimeterSnapshot outer_perimeters_at(const Print &print, size_t layer_index)
+{
+    REQUIRE(print.objects().size() == 1);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layer_index < layers.size());
+    OuterPerimeterSnapshot snapshot;
+    for (const LayerRegion *region : layers[layer_index]->regions()) {
+        for (const ExtrusionEntity *entity : region->perimeters.flatten().entities) {
+            if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
+                if (loop->inset_idx != 0)
+                    continue;
+                for (const ExtrusionPath &path : loop->paths)
+                    append_path(path, snapshot);
+            } else if (const auto *multi_path = dynamic_cast<const ExtrusionMultiPath *>(entity)) {
+                if (entity->role() != erExternalPerimeter)
+                    continue;
+                for (const ExtrusionPath &path : multi_path->paths)
+                    append_path(path, snapshot);
+            } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity)) {
+                append_path(*path, snapshot);
+            }
+        }
+    }
+    REQUIRE_FALSE(snapshot.widths.empty());
+    REQUIRE_FALSE(snapshot.segments.empty());
+    REQUIRE_FALSE(snapshot.points.empty());
+    REQUIRE(snapshot.points.size() <= 4000);
+    return snapshot;
+}
+
+DynamicPrintConfig fuzzy_mode_config(const char *mode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "arachne"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", "external"},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_mode", mode},
+        {"fuzzy_skin_noise_type", "classic"},
+        // This is below the minimum extrusion-width floor, making the
+        // Extrusion/Combined width increase strictly positive for every
+        // possible Classic-noise sample.
+        {"fuzzy_skin_thickness", 0.02},
+        {"fuzzy_skin_point_distance", 0.75},
+        {"enable_arc_fitting", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+OuterPerimeterSnapshot slice_mode(const char *mode, size_t &layer_index)
+{
+    Print print;
+    // The control disables fuzzy_skin, but fuzzy_skin_mode itself is an enum
+    // with no "none" value. Keep the registered mode key valid in the
+    // control configuration before disabling the independent type key.
+    DynamicPrintConfig config = fuzzy_mode_config(std::string(mode) == "none" ? "displacement" : mode);
+    if (std::string(mode) == "none")
+        config.set_deserialize_strict({{"fuzzy_skin", "none"}});
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    const size_t layer_count = print.objects().front()->layers().size();
+    REQUIRE(layer_count == 4);
+    layer_index = layer_count / 2;
+    return outer_perimeters_at(print, layer_index);
+}
+
+constexpr double kFuzzyMaxSampleIntervalMm = 0.75 * 1.25;
+constexpr double kFuzzyDistanceTieMm = 1e-9;
+
+double reference_segment_distance_mm(const Point &point, const Segment &segment, double &t, double &length)
+{
+    const Vec2d p(unscale_(point.x()), unscale_(point.y()));
+    const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+    const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+    const Vec2d ab = b - a;
+    length = ab.norm();
+    if (length <= 1e-12) {
+        t = 0.;
+        return (p - a).norm();
+    }
+    t = std::clamp((p - a).dot(ab) / ab.squaredNorm(), 0., 1.);
+    return (p - (a + t * ab)).norm();
+}
+
+double nearest_safe_reference_distance_mm(const Point &point,
+                                          const OuterPerimeterSnapshot &reference,
+                                          bool &is_interior)
+{
+    double nearest = std::numeric_limits<double>::max();
+    for (const Segment &segment : reference.segments) {
+        double t = 0., length = 0.;
+        nearest = std::min(nearest, reference_segment_distance_mm(point, segment, t, length));
+    }
+    is_interior = false;
+    if (!std::isfinite(nearest))
+        return nearest;
+
+    // First choose the nearest segment over the complete reference. Then reject
+    // the point when any tied nearest segment is in a corner neighborhood. This
+    // prevents an eligible farther segment from hiding a corner chord.
+    bool have_nearest = false;
+    for (const Segment &segment : reference.segments) {
+        double t = 0., length = 0.;
+        const double distance = reference_segment_distance_mm(point, segment, t, length);
+        if (distance > nearest + kFuzzyDistanceTieMm)
+            continue;
+        have_nearest = true;
+        if (length <= 1e-12 || t * length <= kFuzzyMaxSampleIntervalMm ||
+            (1.0 - t) * length <= kFuzzyMaxSampleIntervalMm) {
+            is_interior = false;
+            return nearest;
+        }
+    }
+    is_interior = have_nearest;
+    return nearest;
+}
+
+double maximum_width(const OuterPerimeterSnapshot &snapshot)
+{
+    return *std::max_element(snapshot.widths.begin(), snapshot.widths.end());
+}
+
+void require_fuzzy_mode_registry()
+{
+    const ConfigOptionDef *mode = print_config_def.get("fuzzy_skin_mode");
+    REQUIRE(mode != nullptr);
+    REQUIRE(mode->type == coEnum);
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "displacement") != mode->enum_values.end());
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "extrusion") != mode->enum_values.end());
+    REQUIRE(std::find(mode->enum_values.begin(), mode->enum_values.end(), "combined") != mode->enum_values.end());
+}
+
+TEST_CASE("Arachne fuzzy skin modes preserve their mode-specific perimeter contract", "[FuzzySkinModePipeline][Perimeters]")
+{
+    require_fuzzy_mode_registry();
+    const char *mode = GENERATE("displacement", "extrusion", "combined");
+    CAPTURE(mode);
+
+    size_t control_layer = 0;
+    const OuterPerimeterSnapshot control = slice_mode("none", control_layer);
+    size_t mode_layer = 0;
+    const OuterPerimeterSnapshot actual = slice_mode(mode, mode_layer);
+    REQUIRE(mode_layer == control_layer);
+    REQUIRE(actual.points.size() <= 4000);
+
+    const double control_min_width = *std::min_element(control.widths.begin(), control.widths.end());
+    const double control_max_width = maximum_width(control);
+    size_t interior_samples = 0;
+    double max_interior_distance = 0.;
+    for (const Point &point : actual.points) {
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+        if (is_interior) {
+            ++interior_samples;
+            max_interior_distance = std::max(max_interior_distance, distance);
+        }
+    }
+    if (std::string(mode) != "displacement") {
+        // Check the positive width adjustment before requiring interior samples,
+        // so a missing width adjustment is reported even if no safe sample remains.
+        CHECK(maximum_width(actual) > control_max_width + 0.01);
+    }
+    REQUIRE(interior_samples > 0);
+
+    if (std::string(mode) == "displacement") {
+        // Displacement copies p1.w at every generated junction. The final
+        // variable-width conversion therefore stays within the smooth
+        // control's width range. This case intentionally claims width routing,
+        // not a full geometric displacement invariant.
+        for (const float width : actual.widths) {
+            CHECK(width >= control_min_width - 0.002);
+            CHECK(width <= *std::max_element(control.widths.begin(), control.widths.end()) + 0.002);
+        }
+        return;
+    }
+
+    if (std::string(mode) == "extrusion") {
+        // Extrusion mode leaves pa on p0-p1. Exclude the exact corner neighborhoods
+        // where conversion can legally bridge adjacent segments; every retained
+        // interior sample must remain on its source segment within coordinate rounding.
+        size_t checked_interior_samples = 0;
+        for (const Point &point : actual.points) {
+            bool is_interior = false;
+            const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+            if (!is_interior)
+                continue;
+            ++checked_interior_samples;
+            CHECK(distance <= 0.002);
+        }
+        REQUIRE(checked_interior_samples > 0);
+    } else {
+        // Combined mode uses the same positive width delta as a transverse
+        // offset of half that amount. The interior witness avoids counting a
+        // corner-connection chord as mode displacement.
+        CHECK(max_interior_distance > 0.005);
+    }
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
+
+namespace fuzzy_mode_pipeline_contracts {
+namespace fuzzy_noise_pipeline_followup {
+
+OuterPerimeterSnapshot slice_noise(const char *noise_type, const char *fuzzy_type)
+{
+    DynamicPrintConfig config = fuzzy_mode_config("displacement");
+    config.set_deserialize_strict({
+        {"fuzzy_skin", fuzzy_type},
+        {"fuzzy_skin_noise_type", noise_type},
+        {"fuzzy_skin_thickness", 0.25},
+        {"fuzzy_skin_point_distance", 0.75},
+        {"fuzzy_skin_scale", 1.0},
+        {"fuzzy_skin_octaves", 4},
+        {"fuzzy_skin_persistence", 0.5},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+        {"fuzzy_skin_layers_between_ripple_offset", 1},
+    });
+
+    Print print;
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->layers().size() == 4);
+    return outer_perimeters_at(print, print.objects().front()->layers().size() / 2);
+}
+
+struct InteriorDisplacement {
+    size_t samples = 0;
+    double maximum_distance = 0.;
+};
+
+InteriorDisplacement displacement_from(const OuterPerimeterSnapshot &actual,
+                                       const OuterPerimeterSnapshot &reference)
+{
+    InteriorDisplacement result;
+    for (const Point &point : actual.points) {
+        CHECK(std::isfinite(unscale<double>(point.x())));
+        CHECK(std::isfinite(unscale<double>(point.y())));
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, reference, is_interior);
+        if (is_interior) {
+            ++result.samples;
+            result.maximum_distance = std::max(result.maximum_distance, distance);
+        }
+    }
+    return result;
+}
+
+void require_fuzzy_noise_registry()
+{
+    const ConfigOptionDef *noise = print_config_def.get("fuzzy_skin_noise_type");
+    REQUIRE(noise != nullptr);
+    REQUIRE(noise->type == coEnum);
+    const std::vector<std::string> expected_values{"classic", "perlin", "billow", "ridgedmulti", "voronoi", "ripple"};
+    REQUIRE(noise->enum_values == expected_values);
+    const t_config_enum_values expected_map{
+        {"classic", int(NoiseType::Classic)},
+        {"perlin", int(NoiseType::Perlin)},
+        {"billow", int(NoiseType::Billow)},
+        {"ridgedmulti", int(NoiseType::RidgedMulti)},
+        {"voronoi", int(NoiseType::Voronoi)},
+        {"ripple", int(NoiseType::Ripple)},
+    };
+    REQUIRE(noise->enum_keys_map != nullptr);
+    REQUIRE(*noise->enum_keys_map == expected_map);
+}
+
+} // namespace fuzzy_noise_pipeline_followup
+
+TEST_CASE("Registered fuzzy skin noises produce finite sampled external perimeters",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    require_fuzzy_noise_registry();
+    const char *noise_type = GENERATE("classic", "perlin", "billow", "ridgedmulti", "voronoi", "ripple");
+    CAPTURE(noise_type);
+
+    const OuterPerimeterSnapshot reference = slice_noise(noise_type, "none");
+    const OuterPerimeterSnapshot actual = slice_noise(noise_type, "external");
+    REQUIRE_FALSE(reference.points.empty());
+    REQUIRE_FALSE(actual.points.empty());
+    // Sampling a 12 mm square at the explicit 0.75 mm point distance must add
+    // public perimeter junctions for every registered noise implementation.
+    REQUIRE(actual.points.size() > reference.points.size());
+
+    size_t interior_samples = 0;
+    for (const Point &point : actual.points) {
+        CHECK(std::isfinite(unscale<double>(point.x())));
+        CHECK(std::isfinite(unscale<double>(point.y())));
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, reference, is_interior);
+        CHECK(std::isfinite(distance));
+        if (is_interior)
+            ++interior_samples;
+    }
+    REQUIRE(interior_samples > 0);
+
+    if (std::string(noise_type) != "ripple") {
+        const InteriorDisplacement displacement = displacement_from(actual, reference);
+        REQUIRE(displacement.samples > 0);
+        CHECK(displacement.maximum_distance > 0.001);
+    }
+}
+
+TEST_CASE("Ripple noise path produces a positive external-wall offset",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    const OuterPerimeterSnapshot reference = slice_noise("ripple", "none");
+    const OuterPerimeterSnapshot actual = slice_noise("ripple", "external");
+    REQUIRE(actual.points.size() > reference.points.size());
+
+    const InteriorDisplacement displacement = displacement_from(actual, reference);
+    REQUIRE(displacement.samples > 0);
+    CHECK(displacement.maximum_distance > 0.005);
+}
+
+TEST_CASE("Disabled fuzzy skin is a no-op for the registered noise pipeline",
+          "[FuzzySkinNoisePipeline][Perimeters]")
+{
+    using namespace fuzzy_noise_pipeline_followup;
+    const OuterPerimeterSnapshot none = slice_noise("ripple", "none");
+    const OuterPerimeterSnapshot disabled = slice_noise("ripple", "disabled_fuzzy");
+
+    REQUIRE(disabled.points.size() == none.points.size());
+    REQUIRE(disabled.widths.size() == none.widths.size());
+    for (size_t i = 0; i < none.points.size(); ++i)
+        CHECK(disabled.points[i] == none.points[i]);
+    for (size_t i = 0; i < none.widths.size(); ++i)
+        CHECK_THAT(disabled.widths[i], Catch::Matchers::WithinAbs(none.widths[i], 1e-6));
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
+
+
+namespace fuzzy_mode_pipeline_contracts {
+
+OuterPerimeterSnapshot slice_perlin_displacement(size_t &layer_index)
+{
+    DynamicPrintConfig config = fuzzy_mode_config("displacement");
+    config.set_deserialize_strict({
+        {"fuzzy_skin_noise_type", "perlin"},
+        {"fuzzy_skin_thickness", 0.4},
+        {"fuzzy_skin_point_distance", 0.5},
+        {"fuzzy_skin_scale", 2.0},
+        {"fuzzy_skin_octaves", 2},
+        {"fuzzy_skin_persistence", 0.5},
+    });
+    Print print;
+    init_and_process_print({make_cube(12., 12., 0.8)}, print, config);
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->layers().size() == 4);
+    layer_index = print.objects().front()->layers().size() / 2;
+    return outer_perimeters_at(print, layer_index);
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
+
+TEST_CASE("Arachne displacement fuzzy skin applies a positive transverse offset",
+          "[FuzzySkinModePipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    size_t control_layer = 0;
+    const OuterPerimeterSnapshot control = slice_mode("none", control_layer);
+    size_t actual_layer = 0;
+    const OuterPerimeterSnapshot actual = slice_perlin_displacement(actual_layer);
+    REQUIRE(actual_layer == control_layer);
+    REQUIRE_FALSE(actual.points.empty());
+    REQUIRE_FALSE(control.points.empty());
+
+    double maximum_interior_offset = 0.0;
+    size_t interior_samples = 0;
+    for (const Point &point : actual.points) {
+        bool is_interior = false;
+        const double distance = nearest_safe_reference_distance_mm(point, control, is_interior);
+        REQUIRE(std::isfinite(distance));
+        if (!is_interior)
+            continue;
+        ++interior_samples;
+        maximum_interior_offset = std::max(maximum_interior_offset, distance);
+    }
+    REQUIRE(interior_samples > 0);
+    // The Perlin field is deterministic, but point placement uses stochastic offsets.
+    // The 0.4 mm thickness and 0.5 mm sampling pins make a nonzero transverse
+    // displacement observable without asserting any implementation-specific sample.
+    CHECK(maximum_interior_offset > 0.01);
+
+    const double control_min_width = *std::min_element(control.widths.begin(), control.widths.end());
+    const double control_max_width = *std::max_element(control.widths.begin(), control.widths.end());
+    for (const float width : actual.widths) {
+        CHECK(width >= control_min_width - 0.002);
+        CHECK(width <= control_max_width + 0.002);
     }
 }

@@ -569,7 +569,7 @@ ExtrusionLoopSloped::ExtrusionLoopSloped(ExtrusionPaths&   original_paths,
     double remaining_length = slope_min_length;
 
     ExtrusionPaths::iterator path        = original_paths.begin();
-    double                   start_ratio = start_slope_ratio;
+    double                   start_ratio = slope_min_length == 0.0 ? 1.0 : start_slope_ratio;
     for (; path != original_paths.end() && remaining_length > 0; ++path) {
         const double path_len = unscale_(path->length());
         if (path_len > remaining_length) {

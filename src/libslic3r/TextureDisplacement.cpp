@@ -1948,19 +1948,29 @@ bool compute_layer_paint_anchor(const indexed_triangle_set                    &b
     if (patch.indices.empty())
         return false;
 
-    Vec3f  centroid_sum = Vec3f::Zero();
-    Vec3f  normal_sum   = Vec3f::Zero();
+    Vec3d  weighted_centroid_sum = Vec3d::Zero();
+    Vec3f  fallback_centroid_sum = Vec3f::Zero();
+    Vec3f  normal_sum            = Vec3f::Zero();
+    double total_area2          = 0.;
     for (const stl_triangle_vertex_indices &tri : patch.indices) {
         const Vec3f &a = patch.vertices[tri[0]];
         const Vec3f &b = patch.vertices[tri[1]];
         const Vec3f &c = patch.vertices[tri[2]];
-        // Cross product magnitude is twice the face area, so this area-weights both sums the same
-        // way texture_displacement_vertex_normals() does above.
+        // Use unsigned geometric area for the centroid and retain the signed
+        // normal policy. Double intermediates avoid overflowing area * position.
+        const Vec3d a_double = a.cast<double>();
+        const Vec3d b_double = b.cast<double>();
+        const Vec3d c_double = c.cast<double>();
+        const double area2 = (b_double - a_double).cross(c_double - a_double).norm();
+        weighted_centroid_sum += area2 * ((a_double + b_double + c_double) / 3.);
+        total_area2 += area2;
         normal_sum   += (b - a).cross(c - a);
-        centroid_sum += (a + b + c) / 3.f;
+        fallback_centroid_sum += (a + b + c) / 3.f;
     }
 
-    anchor_pos    = centroid_sum / float(patch.indices.size());
+    // An all-degenerate patch keeps the existing arithmetic-centroid fallback.
+    anchor_pos = total_area2 > 0. ? Vec3f((weighted_centroid_sum / total_area2).cast<float>()) :
+                                   Vec3f(fallback_centroid_sum / float(patch.indices.size()));
     anchor_normal = (normal_sum.norm() > 1e-8f) ? Vec3f(normal_sum.normalized()) : Vec3f::UnitZ();
     return true;
 }

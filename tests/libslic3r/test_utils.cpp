@@ -991,6 +991,7 @@ TEST_CASE("BBL monitor and remaining time formatters use compact units", "[utils
     CHECK(get_bbl_monitor_time_dhm(0.f) == "0m");
     CHECK(get_bbl_monitor_time_dhm(60.f) == "1m");
     CHECK(get_bbl_monitor_time_dhm(3600.f) == "1h0m");
+    CHECK(get_bbl_monitor_time_dhm(-60.f).empty());
     CHECK(get_bbl_remain_time_dhms(61.f) == "1m1s");
     CHECK(get_bbl_remain_time_dhms(3661.f) == "1h1m1s");
     CHECK(get_bbl_remain_time_dhms(86400.f) == "1d0h0m0s");
@@ -1002,14 +1003,17 @@ TEST_CASE("Logging level names map the supported severities both ways", "[utils]
         CHECK(level_string_to_boost(names[i]) == i);
         CHECK(get_string_logging_level(i) == names[i]);
     }
+    CHECK(get_string_logging_level(99) == "error");
 }
 
 TEST_CASE("Published model links accept the canonical site roots over http and https", "[utils]") {
     CHECK(is_printables_link("https://printables.com"));
     CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
     CHECK(is_makerworld_link("https://makerworld.com"));
     CHECK(is_makerworld_link("http://makerworld.com"));
     CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
     CHECK_FALSE(is_printables_link("ftp://printables.com"));
     CHECK_FALSE(is_makerworld_link("https://example.com"));
     CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));

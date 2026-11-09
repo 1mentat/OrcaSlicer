@@ -13,8 +13,11 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode.cpp
 	test_gcodeprocessor.cpp
 	test_gcodewriter.cpp
+	test_interlocking.cpp
+	test_layer_height_variance.cpp
 	test_model.cpp
 	test_multifilament.cpp
+	test_painted_segmentation.cpp
 	test_perimeters.cpp
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
 	test_precise_seam.cpp
@@ -26,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_slicing_pipeline_hook.cpp
 	test_support_material.cpp
 	test_texture_displacement.cpp
+	test_toolordering_nozzle_group.cpp
 	test_tree_support.cpp
 	test_trianglemesh.cpp
 	test_wipe.cpp

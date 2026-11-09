@@ -4436,7 +4436,7 @@ TEST_CASE("BBS 3MF tolerates an unrecognised custom-gcode mode and still loads t
     REQUIRE(load_model(archive.string(), loaded_model, loaded));
     REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
     const CustomGCode::Info &info = loaded_model.plates_custom_gcodes.at(0);
-    // The mode an unrecognised value maps to is deliberately not asserted: it is not a specified contract.
+    CHECK(info.mode == CustomGCode::Mode::MultiExtruder);
     REQUIRE(info.gcodes.size() == 1);
     CHECK_THAT(info.gcodes.front().print_z, Catch::Matchers::WithinAbs(0.6, 1e-9));
     CHECK(info.gcodes.front().type == CustomGCode::PausePrint);
