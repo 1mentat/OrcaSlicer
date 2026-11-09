@@ -215,6 +215,25 @@ class RecordedProcessTests(unittest.TestCase):
             self.assertIs(caught.exception, interruption)
 
 
+    def test_incomplete_cleanup_is_recorded_without_masking_original_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            timeout = subprocess.TimeoutExpired(["native-tool"], .5, output="partial")
+            timeout.returncode = 1
+            timeout.cleanup_incomplete = True
+            timeout.add_note("Windows command cleanup incomplete: bounded drain expired")
+            with patch.object(slicer_process, "run_captured", side_effect=timeout):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_recorded(["native-tool"], cwd=root, env=dict(os.environ), timeout=.5,
+                                 log_path=root / "output.log", receipt_path=root / "receipt.json")
+            self.assertIs(caught.exception, timeout)
+            receipt = json.loads((root / "receipt.json").read_text())
+            self.assertTrue(receipt["timed_out"])
+            self.assertTrue(receipt["cleanup_incomplete"])
+            self.assertEqual(receipt["returncode"], 1)
+            self.assertEqual(receipt["cleanup_notes"], timeout.__notes__)
+
+
 class PortableInterruptionTests(unittest.TestCase):
     def test_main_thread_interruption_stops_ready_grandchild_before_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

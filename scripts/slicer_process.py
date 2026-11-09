@@ -25,7 +25,10 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
     buffered in Python; the returned stdout/stderr are then None.
     """
     if os.name == "nt":
-        from _slicer_windows_job import run_captured as run_windows_captured
+        if __package__:
+            from ._slicer_windows_job import run_captured as run_windows_captured
+        else:
+            from _slicer_windows_job import run_captured as run_windows_captured
         return run_windows_captured(argv, cwd=cwd, env=env, timeout=timeout,
                                     input_data=input_data, output_file=output_file)
 
@@ -169,6 +172,9 @@ def run_recorded(argv: Sequence[str], *, cwd: Path | str, env: dict[str, str],
                 "type": type(error).__name__,
                 "message": str(error),
             }
+            if getattr(error, "cleanup_incomplete", False):
+                result["cleanup_incomplete"] = True
+                result["cleanup_notes"] = list(getattr(error, "__notes__", []))
         return result
 
     completed: subprocess.CompletedProcess | None = None
