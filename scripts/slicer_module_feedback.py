@@ -501,7 +501,9 @@ def run(args: argparse.Namespace) -> int:
             try:
                 save_receipt(receipt_path, receipt)
             except OSError as receipt_error:
-                exc.add_note(f"Cannot persist interrupted receipt: {receipt_error}")
+                add_note = getattr(exc, "add_note", None)
+                if callable(add_note):
+                    add_note(f"Cannot persist interrupted receipt: {receipt_error}")
             raise
         try:
             receipt["tracked_after_failure"] = git_snapshot(root)
