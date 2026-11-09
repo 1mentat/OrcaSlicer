@@ -62,6 +62,7 @@ class CapturedProcessTests(unittest.TestCase):
             self.assertEqual(Path(lines[0]).resolve(), Path(directory).resolve())
             self.assertEqual(lines[1], "scoped")
 
+    @unittest.skipUnless(os.name == "posix", "self SIGINT is safe only on POSIX")
     def test_keyboard_interrupt_stops_grandchild_before_worktree_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "late-write"
@@ -250,6 +251,43 @@ class WindowsTimeoutCleanupTests(unittest.TestCase):
 
     def test_taskkill_timeout_preserves_original_timeout_and_drains(self):
         self.check_taskkill_failure(subprocess.TimeoutExpired(["taskkill"], 10))
+
+
+class PortableInterruptionTests(unittest.TestCase):
+    def test_main_thread_interruption_stops_ready_grandchild_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "late-write"
+            ready = Path(directory) / "grandchild-ready"
+            child = ("from pathlib import Path; import sys,time; "
+                     "Path(sys.argv[2]).write_text('ready'); "
+                     "time.sleep(0.9); Path(sys.argv[1]).write_text('still running')")
+            parent = ("import subprocess,sys,time; "
+                      "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]]); "
+                      "time.sleep(10)")
+            communicate = subprocess.Popen.communicate
+            injected = False
+            ready_observed = False
+
+            def interrupt_once(process, *args, **kwargs):
+                nonlocal injected, ready_observed
+                if not injected:
+                    injected = True
+                    self.assertIs(threading.current_thread(), threading.main_thread())
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    ready_observed = ready.exists()
+                    self.assertTrue(ready_observed, "grandchild did not become ready before interruption")
+                    raise KeyboardInterrupt("portable main-thread interruption")
+                return communicate(process, *args, **kwargs)
+
+            with patch.object(subprocess.Popen, "communicate", new=interrupt_once):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_captured([sys.executable, "-c", parent, child, str(marker), str(ready)], timeout=5)
+            self.assertTrue(injected)
+            self.assertTrue(ready_observed)
+            time.sleep(1.1)
+            self.assertFalse(marker.exists(), "an interrupted descendant survived process cleanup")
 
 
 if __name__ == "__main__":
