@@ -8,6 +8,8 @@ on:
       - 'scripts/clang_tidy_diff.py'
       - 'scripts/tests/test_slicer_process.py'
       - 'scripts/tests/test_clang_tidy_diff.py'
+      - 'scripts/slicer_module_feedback.py'
+      - 'scripts/tests/test_slicer_module_feedback.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -16,6 +18,8 @@ on:
       - 'scripts/clang_tidy_diff.py'
       - 'scripts/tests/test_slicer_process.py'
       - 'scripts/tests/test_clang_tidy_diff.py'
+      - 'scripts/slicer_module_feedback.py'
+      - 'scripts/tests/test_slicer_module_feedback.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -43,3 +47,5 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
       - name: Test clang-tidy diff handling
         run: python -B -m unittest discover -s scripts/tests -p test_clang_tidy_diff.py -v
+      - name: Test module feedback handling
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_module_feedback.py -v

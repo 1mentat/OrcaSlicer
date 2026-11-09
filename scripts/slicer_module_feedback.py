@@ -402,6 +402,9 @@ def run(args: argparse.Namespace) -> int:
                     result = run_captured(argv, cwd=root, env=stage_env or env,
                                           timeout=args.timeout, output_file=stream)
             record["returncode"] = result.returncode
+        except KeyboardInterrupt:
+            record.update({"returncode": None, "interrupted": True})
+            raise
         except subprocess.TimeoutExpired:
             record.update({"returncode": 124, "timed_out": True})
             raise WorkflowError(f"stage timed out: {name}")
@@ -412,7 +415,9 @@ def run(args: argparse.Namespace) -> int:
             record["elapsed_seconds"] = round(time.perf_counter() - tick, 3)
             record["ended_utc"] = utc_now()
             receipt["stages"].append(record)
-            save_receipt(receipt_path, receipt)
+            # The outer handler publishes the interrupted status with this stage.
+            if not record.get("interrupted"):
+                save_receipt(receipt_path, receipt)
         if result.returncode != 0 and not allow_failure:
             raise WorkflowError(f"stage {name} failed with exit {result.returncode}")
         return result
@@ -485,11 +490,19 @@ def run(args: argparse.Namespace) -> int:
         receipt["ended_utc"] = utc_now()
         save_receipt(receipt_path, receipt)
         return 0
-    except Exception as exc:
-        receipt["status"] = "failed"
-        receipt["error"] = str(exc)
+    except (Exception, KeyboardInterrupt) as exc:
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        receipt["status"] = "interrupted" if interrupted else "failed"
+        receipt["error"] = str(exc) or type(exc).__name__
         receipt["ended_utc"] = utc_now()
         receipt["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        if interrupted:
+            # Record cancellation before any diagnostic command can be interrupted.
+            try:
+                save_receipt(receipt_path, receipt)
+            except OSError as receipt_error:
+                exc.add_note(f"Cannot persist interrupted receipt: {receipt_error}")
+            raise
         try:
             receipt["tracked_after_failure"] = git_snapshot(root)
             receipt["hashes_after_failure"] = file_snapshot({"test_source": test_source,

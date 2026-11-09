@@ -66,6 +66,32 @@ elif a and a[0] in {"report", "show"}:
 '''
 
 
+# Launch only these owned fake executables through Python. The production CLI's
+# native tool argv and its build/binary ownership checks stay unchanged.
+LAUNCHER = r'''import os
+from pathlib import Path
+import runpy
+import sys
+
+import slicer_process
+
+cli, fake, binary = sys.argv[1:4]
+sys.argv = [cli, *sys.argv[4:]]
+fake_commands = {Path(fake), Path(binary)}
+run_captured = slicer_process.run_captured
+
+def run_fixture_command(argv, **kwargs):
+    if Path(argv[0]) in fake_commands:
+        if "--build" in argv and os.environ.get("FAKE_INTERRUPT_BUILD") == "1":
+            raise KeyboardInterrupt
+        argv = [sys.executable, *argv]
+    return run_captured(argv, **kwargs)
+
+slicer_process.run_captured = run_fixture_command
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
 class ModuleFeedbackTests(unittest.TestCase):
     def fixture(self, mode="ok", expected=2, bad_source=False, timeout=5):
         tmp = tempfile.TemporaryDirectory(prefix="module feedback & safe ")
@@ -120,7 +146,10 @@ class ModuleFeedbackTests(unittest.TestCase):
                     "FAKE_ARGV_LOG": str(argv_log)})
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")) if item)
-        args = [sys.executable, str(CLI), "--root", str(root), "--build", str(build),
+        launcher = base / "run_feedback.py"
+        launcher.write_text(LAUNCHER, encoding="utf-8")
+        args = [sys.executable, str(launcher), str(CLI), str(fake), str(binary),
+                "--root", str(root), "--build", str(build),
                 "--binary", str(binary), "--test-source", str(source), "--production-source", str(prod),
                 "--compile-commands", str(compile_db), "--out", str(out), "--target", "module-tests",
                 "--tag", "ModuleTag", "--expected-cases", str(expected), "--cmake", str(fake),
@@ -431,6 +460,26 @@ class ModuleFeedbackTests(unittest.TestCase):
         self.assertTrue(receipt["stages"][0]["timed_out"])
         self.assertEqual(receipt["stages"][0]["returncode"], 124)
         self.assertFalse((out / "coverage-summary.txt").exists())
+
+    def test_interrupted_build_records_cancellation_without_later_stages(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        env["FAKE_INTERRUPT_BUILD"] = "1"
+        result = subprocess.run(args, env=env, text=True, capture_output=True,
+                                timeout=10, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "interrupted")
+        self.assertEqual(receipt["error"], "KeyboardInterrupt")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertTrue(receipt["stages"][0]["interrupted"])
+        self.assertIsNone(receipt["stages"][0]["returncode"])
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse((out / "coverage-summary.txt").exists())
+        self.assertEqual(Path(args[args.index("--test-source") + 1]).read_text(),
+                         "// test source\n")
+        self.assertEqual(Path(args[args.index("--production-source") + 1]).read_text(),
+                         "// production source\n")
 
 
 if __name__ == "__main__":
