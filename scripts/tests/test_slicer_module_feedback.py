@@ -77,7 +77,7 @@ import slicer_process
 
 cli, fake, binary = sys.argv[1:4]
 sys.argv = [cli, *sys.argv[4:]]
-fake_commands = {Path(fake), Path(binary)}
+fake_commands = {Path(fake).resolve(strict=False), Path(binary).resolve(strict=False)}
 run_captured = slicer_process.run_captured
 
 def run_fixture_command(argv, **kwargs):
