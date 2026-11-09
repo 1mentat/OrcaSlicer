@@ -62,7 +62,7 @@ jobs:
         if: steps.source.outputs.measure == 'true'
         id: toolchain
         run: |
-          key=$(dpkg-query -W clang-18 llvm-18 lld-18 cmake ninja-build | sha256sum | cut -c1-16)
+          key=$(bash scripts/build_coverage.sh --deps-key)
           echo "key=$key" >> "$GITHUB_OUTPUT"
       - name: Check collector and report contracts
         if: steps.source.outputs.measure == 'true'
@@ -77,7 +77,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: deps/build-coverage/OrcaSlicer_dep
-          key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}-${{ hashFiles('deps/**', 'cmake/modules/**') }}
+          key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}
       - name: Build and measure Release core
         if: steps.source.outputs.measure == 'true'
         run: bash scripts/build_coverage.sh

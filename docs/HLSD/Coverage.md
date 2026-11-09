@@ -38,7 +38,10 @@ jobs set no coverage threshold.
 dependency prefix and instrumented test targets, then invokes
 `scripts/slicer_coverage.py`. The entire process tree has two-CPU affinity so that
 dependency recipes that count CPUs themselves respect the same bound. A cached
-dependency prefix must be keyed by dependency inputs and the selected toolchain.
+dependency prefix is keyed by dependency inputs, build profile, architecture and
+the selected toolchain. `bash scripts/build_coverage.sh --deps-key` prints that
+identity without configuring or building. Its completed-prefix marker stores the
+same identity; a stale marker does not authorize reuse.
 
 The collector preserves source manifests, compiler and binary evidence, tool
 versions, test output, raw coverage export and profiles. These artifacts identify

@@ -8,6 +8,34 @@ out=${COVERAGE_OUTPUT_DIR:-$root/coverage-output}
 export CC=clang-18 CXX=clang++-18
 export CMAKE_BUILD_PARALLEL_LEVEL=2 CTEST_PARALLEL_LEVEL=2
 
+# A local prefix needs the same input binding as a CI cache. Never silently use
+# an old prefix after dependency sources, build tools or the profile change.
+deps_key=$(python3 - "$root" <<'PY'
+import hashlib
+import subprocess
+import sys
+
+root = sys.argv[1]
+subprocess.run(["git", "-C", root, "diff", "--exit-code", "HEAD", "--", "deps", "cmake/modules"],
+               check=True, stdout=subprocess.DEVNULL)
+commands = (["git", "-C", root, "ls-tree", "-r", "HEAD", "deps", "cmake/modules"],
+            ["clang-18", "--version"], ["ld.lld-18", "--version"],
+            ["cmake", "--version"], ["ninja", "--version"], ["uname", "-m"])
+digest = hashlib.sha256(b"linux-clang18-release-core-cad-v1\0")
+for command in commands:
+    digest.update(subprocess.check_output(command))
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+)
+if [[ ${1:-} == --deps-key && $# == 1 ]]; then
+  printf '%s\n' "$deps_key"
+  exit 0
+elif (( $# != 0 )); then
+  echo 'Usage: build_coverage.sh [--deps-key]' >&2
+  exit 2
+fi
+
 # Some dependency recipes count CPUs themselves instead of honoring --parallel.
 # Keep the entire process tree on two available CPUs, including nested builds.
 if [[ ${ORCA_COVERAGE_AFFINITY_SET:-0} != 1 ]]; then
@@ -39,12 +67,13 @@ if command -v ccache >/dev/null; then
 fi
 # Instrument only project code. Dependencies keep the repository's ordinary build
 # settings; GUI/media-only dependency targets are unnecessary for this scope.
-if [[ ! -f "$deps/OrcaSlicer_dep/.coverage-ready" ]]; then
+marker=$deps/OrcaSlicer_dep/.coverage-ready
+if [[ ! -f "$marker" || $(cat "$marker") != "$deps_key" ]]; then
   stage deps-configure cmake -S "$root/deps" -B "$deps" -G Ninja "${common[@]}" -DSLIC3R_CAD=ON
   stage deps-build cmake --build "$deps" --parallel 1 --target \
     dep_Boost dep_Eigen dep_TBB dep_Cereal dep_CGAL dep_Draco dep_NLopt \
     dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise dep_Qhull
-  touch "$deps/OrcaSlicer_dep/.coverage-ready"
+  printf '%s\n' "$deps_key" > "$marker"
 fi
 stage configure cmake -S "$root" -B "$build" -G Ninja "${common[@]}" \
   -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_STATIC=ON -DBUILD_TESTS=ON \
