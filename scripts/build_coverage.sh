@@ -59,6 +59,18 @@ if [[ ${ORCA_COVERAGE_AFFINITY_SET:-0} != 1 ]]; then
   export ORCA_COVERAGE_AFFINITY_SET=1
   exec taskset --cpu-list "$cpus" bash "$0" "$@"
 fi
+if [[ $deps_only != true ]]; then
+  # These canonical tests otherwise skip their comma-decimal locale cases.
+  python3 - <<'PY'
+import locale
+try:
+    locale.setlocale(locale.LC_NUMERIC, "de_DE.UTF-8")
+except locale.Error:
+    raise SystemExit("Coverage tests require de_DE.UTF-8; install locale data and generate that locale first.")
+if locale.localeconv()["decimal_point"] != ",":
+    raise SystemExit("de_DE.UTF-8 must provide a comma decimal separator for the locale tests.")
+PY
+fi
 mkdir -p "$out"
 stage() {
   local name=$1; shift
@@ -73,6 +85,7 @@ stage() {
   cmake --version
   ninja --version
   taskset -pc $$
+  locale -a
   df -h "$out"
 } > "$out/environment.txt"
 common=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-18

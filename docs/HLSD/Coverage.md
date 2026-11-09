@@ -46,6 +46,9 @@ identity without configuring or building. Its completed-prefix marker stores the
 same identity; a stale marker does not authorize reuse.
 `--deps-only` builds or validates this prefix separately, allowing CI to save it
 before a later instrumented build or test failure.
+The runtime needs the generated `de_DE.UTF-8` locale for the canonical
+comma-decimal tests. Full collection checks it before building; CI adapters
+install the locale data and generate it so those cases cannot silently skip.
 
 The collector preserves source manifests, compiler and binary evidence, tool
 versions, test output, raw coverage export and profiles. These artifacts identify

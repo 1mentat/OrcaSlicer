@@ -67,7 +67,8 @@ jobs:
         if: steps.source.outputs.measure == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time
+          sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time locales
+          sudo localedef -i de_DE -f UTF-8 de_DE.UTF-8
       - name: Check build storage headroom
         if: steps.source.outputs.measure == 'true'
         run: |
