@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end checks of cmake/SlicerCoverage.cmake and slicer_coverage.py with real Clang.
+"""End-to-end checks of the Linux LLVM collector with real Clang and ELF build IDs.
 
 A small CMake project mirrors Orca's layout: a static production library
 under src/libslic3r with a called file, a file no test calls, an inline header
@@ -31,6 +31,8 @@ CMAKE_PROJECT = r"""
 cmake_minimum_required(VERSION 3.16)
 project(SlicerCoverageFixture LANGUAGES C CXX)
 enable_testing()
+set(CMAKE_REQUIRED_FLAGS "-DFIXTURE_CALLER_FLAG=1")
+set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,--as-needed")
 if (NOT FIXTURE_WITHOUT_COVERAGE_MODULE)
     include("${SLICER_COVERAGE_MODULE}")
 else ()
@@ -38,6 +40,10 @@ else ()
     endfunction()
     function(slicer_force_link_static_library)
     endfunction()
+endif ()
+if (NOT CMAKE_REQUIRED_FLAGS STREQUAL "-DFIXTURE_CALLER_FLAG=1" OR
+    NOT CMAKE_REQUIRED_LINK_OPTIONS STREQUAL "-Wl,--as-needed")
+    message(FATAL_ERROR "Coverage configuration changed the caller's compiler-check settings")
 endif ()
 
 add_library(fixture_dep INTERFACE)
@@ -139,6 +145,7 @@ def _command_lines(build: Path) -> list[str]:
     return result.stdout.splitlines()
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "compiled profile-identity fixtures require Linux ELF")
 class SlicerCoverageFixtureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -331,6 +338,7 @@ class CatchDiscoveryProfileIsolationTests(unittest.TestCase):
             # Script mode runs discovery on include, as CTest's PRE_TEST mode does in-process.
             script.write_text(
                 f'set(TEST_EXECUTABLE "{fake.as_posix()}")\n'
+                f'set(TEST_EXECUTOR "{Path(sys.executable).as_posix()}")\n'
                 f'set(TEST_WORKING_DIR "{root.as_posix()}")\n'
                 'set(TEST_REPORTER console)\n'
                 'set(TEST_LIST fixture_tests)\n'
@@ -394,7 +402,7 @@ add_subdirectory("{self.SUITE.as_posix()}" filament_group)
                 commands = json.loads((build / "compile_commands.json").read_text(encoding="utf-8"))
                 self.assertEqual(len(commands), 1)
                 defines[state] = commands[0]["command"]
-            self.assertIn("-DSLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1", defines["ON"])
+            self.assertRegex(defines["ON"], r"[-/]DSLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1")
             self.assertNotIn("SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY", defines["OFF"])
 
     def test_release_ceiling_is_enforced_without_the_macro_and_recorded_with_it(self):

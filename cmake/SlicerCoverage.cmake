@@ -43,11 +43,12 @@ endif ()
 # lost, and LLVM derives some counters from others, so lost increments can
 # credit regions that never ran. Refuse a compiler that cannot do atomic updates.
 include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_FLAGS "-fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic")
 set(CMAKE_REQUIRED_LINK_OPTIONS "-fprofile-instr-generate")
 check_cxx_source_compiles("int main() { return 0; }" SLICER_LLVM_COVERAGE_FLAGS_WORK)
-unset(CMAKE_REQUIRED_FLAGS)
-unset(CMAKE_REQUIRED_LINK_OPTIONS)
+cmake_pop_check_state()
 if (NOT SLICER_LLVM_COVERAGE_FLAGS_WORK)
     message(FATAL_ERROR
         "${CMAKE_CXX_COMPILER} cannot compile and link with "

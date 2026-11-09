@@ -59,6 +59,7 @@ class CapturedProcessTests(unittest.TestCase):
             self.assertEqual(Path(lines[0]).resolve(), Path(directory).resolve())
             self.assertEqual(lines[1], "scoped")
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX SIGINT delivery")
     def test_keyboard_interrupt_stops_grandchild_before_worktree_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "late-write"

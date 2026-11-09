@@ -504,7 +504,7 @@ def parse_export(export: dict[str, Any], *, source_root: Path,
         "files": [{"filename": item["filename"], "summary": item["summary"]} for item in files],
         "summary": _merge_summaries(files),
     }
-    missing = sorted({str(path) for path in manifest if _path_key(path) not in selected})
+    missing = sorted({str(path.resolve()) for path in manifest if _path_key(path) not in selected})
     return report, missing, duplicates
 
 
