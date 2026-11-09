@@ -2558,11 +2558,12 @@ TEST_CASE("Voronoi SVG limits rays and subdivides curved edges", "[VoronoiVisual
             const Vec2d direction = directrix.b.cast<double>() - origin;
             const Vec2d focus = source_point(point_cell).cast<double>() - origin;
             REQUIRE(direction.squaredNorm() > 0.0);
-            REQUIRE(int(direction.x() == 0.0) + int(direction.y() == 0.0) == 1);
-            REQUIRE(direction.x() * focus.y() - direction.y() * focus.x() != 0.0);
+            const auto zero_matcher = Catch::Matchers::WithinAbs(0.0, 0.0);
+            REQUIRE(zero_matcher.match(direction.x()) != zero_matcher.match(direction.y()));
+            REQUIRE_THAT(direction.x() * focus.y() - direction.y() * focus.x(), !zero_matcher);
             const double projection0 = direction.dot(Vec2d(edge.vertex0()->x(), edge.vertex0()->y()) - origin);
             const double projection1 = direction.dot(Vec2d(edge.vertex1()->x(), edge.vertex1()->y()) - origin);
-            REQUIRE(projection0 != projection1);
+            REQUIRE_THAT(projection0, !Catch::Matchers::WithinAbs(projection1, 0.0));
             // For this axis-aligned fixture, the parabolic normal coordinate
             // stays between its directrix and the maximum of its two seeds.
             // Thus the checked input/vertex bounds also enclose subdivisions.
