@@ -5,6 +5,7 @@
 #include <map>
 #include "libslic3r/Polygon.hpp"
 #include <exception>
+#include <string>
 #include <optional>
 #include <vector>
 
@@ -31,6 +32,7 @@ class ArrangeJob : public Job
     std::vector<int> m_uncompatible_plates;  // plate indices with different printing sequence than global
 
     arrangement::ArrangeParams params;
+    std::string m_bed_error;
     int current_plate_index = 0;
     Polygon bed_poly;
     Plater *m_plater;

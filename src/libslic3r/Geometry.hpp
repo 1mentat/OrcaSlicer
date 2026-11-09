@@ -431,6 +431,11 @@ public:
     void set_offset(const Vec3d& offset) { m_matrix.translation() = offset; }
     void set_offset(Axis axis, double offset) { m_matrix.translation()[axis] = offset; }
 
+    // Numerically full-rank finite left-handed matrices use A = R*S*M with
+    // M = diag(-1,1,1), proper R, and positive-definite S (TransformationSVD).
+    // Mirror labels/Euler angles are canonical display values, not original edit
+    // history. Full-matrix serialization is unchanged. Proper transforms retain
+    // their existing rotation/scale convention.
     Vec3d get_rotation() const;
     Vec3d get_rotation_by_quaternion() const;
     double get_rotation(Axis axis) const { return get_rotation()[axis]; }
@@ -458,9 +463,10 @@ public:
 
     Transform3d get_mirror_matrix() const;
 
-    bool is_left_handed() const {
-        return m_matrix.linear().determinant() < 0;
-    }
+    // Well-conditioned finite reflections use the existing fixed-X SVD convention
+    // for joint rotation/scale/mirror readback. Numerically rank-ambiguous inputs
+    // retain the legacy decomposition; no transform state or file encoding changes.
+    bool is_left_handed() const;
 
     void set_mirror(const Vec3d& mirror);
     void set_mirror(Axis axis, double mirror);

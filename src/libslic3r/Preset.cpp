@@ -527,8 +527,8 @@ void Preset::normalize(DynamicPrintConfig &config)
         auto* filament_diameter = dynamic_cast<const ConfigOptionFloats*>(config.option("filament_diameter"));
         if (filament_diameter != nullptr) {
             n = filament_diameter->values.size();
-            // Loaded the FFF Printer settings. Verify, that all extruder dependent values have enough values.
-            config.set_num_filaments((unsigned int) n);
+            // Ordinary material values are sized by the pass below. Project colour
+            // slots and printer/nozzle variants have independent axes.
         }
     } else {
         auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter"));
@@ -1481,71 +1481,6 @@ static std::vector<std::string> s_Preset_print_options{
     "ironing_expansion",
 };
 
-static std::vector<std::string> s_Preset_filament_options {/*"filament_colour", */ "default_filament_colour", "required_nozzle_HRC", "filament_diameter", "pellet_flow_coefficient", "volumetric_speed_coefficients", "filament_type",
-                                                          "filament_soluble", "filament_is_support", "filament_printable", "filament_extruder_compatibility",
-    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed",
-    "filament_flow_ratio", "filament_density", "filament_adhesiveness_category", "filament_cost", "filament_minimal_purge_on_wipe_tower",
-    "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length", "filament_tower_ironing_area", "filament_tower_interface_purge_volume",
-    "filament_tower_interface_print_temp",
-    "nozzle_temperature", "nozzle_temperature_initial_layer",
-    // BBS
-    "cool_plate_temp", "textured_cool_plate_temp", "eng_plate_temp", "hot_plate_temp", "textured_plate_temp", "cool_plate_temp_initial_layer", "textured_cool_plate_temp_initial_layer", "eng_plate_temp_initial_layer", "hot_plate_temp_initial_layer", "textured_plate_temp_initial_layer", "supertack_plate_temp_initial_layer", "supertack_plate_temp",
-    // "bed_type",
-    //BBS:temperature_vitrification
-    "temperature_vitrification", "reduce_fan_stop_start_freq","dont_slow_down_outer_wall", "slow_down_for_layer_cooling", "fan_min_speed",
-    "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "close_additional_fan_first_x_layers", "first_x_layer_fan_speed", "full_fan_speed_layer", "initial_layer_fan_speed", "additional_fan_full_speed_layer", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
-    "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
-    //exhaust fan control
-    "activate_air_filtration","activate_air_filtration_during_print","activate_air_filtration_on_completion","during_print_exhaust_fan_speed","complete_print_exhaust_fan_speed",
-    // Retract overrides
-    "filament_deretraction_speed",
-    "filament_retract_after_wipe", // Orca
-    "filament_retract_before_wipe",
-    "filament_retract_lift_above",
-    "filament_retract_lift_below",
-    "filament_retract_lift_enforce",
-    "filament_retract_restart_extra",
-    "filament_retract_when_changing_layer",
-    "filament_retraction_length",
-    "filament_retraction_minimum_travel",
-    "filament_retraction_speed",
-    "filament_retract_length_toolchange",
-    "filament_retract_restart_extra_toolchange",
-    "filament_wipe",
-    "filament_z_hop",
-    "filament_z_hop_types",
-    // Profile compatibility
-    "filament_vendor", "compatible_prints", "compatible_prints_condition", "compatible_printers", "compatible_printers_condition", "inherits",
-    //BBS
-    "filament_wipe_distance", "additional_cooling_fan_speed",
-    "nozzle_temperature_range_low", "nozzle_temperature_range_high",
-    "filament_extruder_variant",
-    //SoftFever
-    "enable_pressure_advance", "pressure_advance","adaptive_pressure_advance","adaptive_pressure_advance_model","adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges","chamber_temperature", "filament_shrink","filament_shrinkage_compensation_z", "support_material_interface_fan_speed","internal_bridge_fan_speed", "filament_notes" /*,"filament_seam_gap"*/,
-    "ironing_fan_speed",
-    // Filament ironing overrides
-    "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
-    "filament_loading_speed", "filament_loading_speed_start",
-    "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
-    "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
-    "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control", "chamber_minimal_temperature",
-    "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
-    //BBS filament change length while the extruder color
-    "filament_change_length","filament_flush_volumetric_speed","filament_flush_temp","filament_flush_temp_fast", "filament_cooling_before_tower",
-    // Multi-nozzle pre-cooling / ramming / nozzle-change (nc) filament overrides
-    "filament_ramming_volumetric_speed", "filament_ramming_volumetric_speed_nc",
-    "filament_ramming_travel_time", "filament_ramming_travel_time_nc",
-    "filament_pre_cooling_temperature", "filament_pre_cooling_temperature_nc",
-    "filament_preheat_temperature_delta", "filament_retract_length_nc",
-    "filament_change_length_nc", "filament_prime_volume", "filament_prime_volume_nc",
-    "long_retractions_when_ec", "retraction_distances_when_ec",
-    "filament_plugin_config_overrides",
-    //ams chamber
-    "filament_dev_ams_drying_ams_limitations", "filament_dev_ams_drying_temperature", "filament_dev_ams_drying_time", "filament_dev_ams_drying_heat_distortion_temperature",
-    "filament_dev_chamber_drying_bed_temperature", "filament_dev_chamber_drying_time",
-    "filament_dev_drying_softening_temperature", "filament_dev_drying_cooling_temperature"
-    };
-
 static std::vector<std::string> s_Preset_machine_limits_options {
     "machine_max_acceleration_extruding", "machine_max_acceleration_retracting", "machine_max_acceleration_travel",
     "machine_max_acceleration_x", "machine_max_acceleration_y", "machine_max_acceleration_z", "machine_max_acceleration_e",
@@ -1689,7 +1624,7 @@ static std::vector<std::string> s_Preset_sla_printer_options {
 };
 
 const std::vector<std::string>& Preset::print_options()          { return s_Preset_print_options; }
-const std::vector<std::string>& Preset::filament_options()       { return s_Preset_filament_options; }
+const std::vector<std::string>& Preset::filament_options()       { return filament_preset_option_keys(); }
 const std::vector<std::string>& Preset::machine_limits_options() { return s_Preset_machine_limits_options; }
 // The following nozzle options of a printer profile will be adjusted to match the size
 // of the nozzle_diameter vector.

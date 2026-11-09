@@ -1411,6 +1411,10 @@ namespace client
                 check_numeric(rhs_value);
                 static_cast<ConfigOptionFloats*>(opt)->values.assign(count, rhs_value.as_d());
                 break;
+            case coPercents:
+                check_numeric(rhs_value);
+                static_cast<ConfigOptionVector<double>*>(opt)->values.assign(count, rhs_value.as_d());
+                break;
             case coInts:
                 check_numeric(rhs_value);
                 static_cast<ConfigOptionInts*>(opt)->values.assign(count, rhs_value.as_i());
@@ -1602,6 +1606,7 @@ namespace client
                     // or
                     // scalar_var = ( scalar, scalar, ... )
                     ctx->throw_exception("Cannot assign a vector value to a scalar variable.", lhs.it_range);
+                return;
             }
 
             auto check_numeric_vector = [](const std::vector<expr> &il) {
@@ -1615,6 +1620,10 @@ namespace client
             case coFloats:
                 check_numeric_vector(il);
                 fill_vector_from_initializer_list<ConfigOptionFloats>(opt, il, [](auto &v){ return v.as_d(); });
+                break;
+            case coPercents:
+                check_numeric_vector(il);
+                fill_vector_from_initializer_list<ConfigOptionVector<double>>(opt, il, [](auto &v){ return v.as_d(); });
                 break;
             case coInts:
                 check_numeric_vector(il);
@@ -1989,6 +1998,11 @@ namespace client
     // If an invalid UTF-8 sequence is encountered, a qi::expectation_failure is thrown.
     struct utf8_char_parser : qi::primitive_parser<utf8_char_parser>
     {
+        utf8_char_parser() = default;
+        explicit utf8_char_parser(bool check_final) : check_final_continuation(check_final) {}
+        // Preserve historical byte handling outside quoted expression strings.
+        bool check_final_continuation = false;
+
         // Define the attribute type exposed by this parser component
         template <typename Context, typename Iterator>
         struct attribute
@@ -2031,7 +2045,7 @@ namespace client
                     goto err;
                 c = static_cast<boost::uint8_t>(*it ++);
                 // We must have a continuation byte:
-                if (cnt > 1 && (c & 0xC0) != 0x80)
+                if ((check_final_continuation || cnt > 1) && (c & 0xC0) != 0x80)
                     goto err;
             }
             first = it;
@@ -2191,6 +2205,7 @@ namespace client
             qi::real_parser<double, strict_real_policies_without_nan_inf> strict_double;
             spirit_encoding::char_type  char_;
             utf8_char_parser            utf8char;
+            utf8_char_parser            literal_utf8char{true};
             spirit::bool_type           bool_;
             spirit::int_type            int_;
             spirit::double_type         double_;
@@ -2428,7 +2443,7 @@ namespace client
                 |   (strict_double > iter_pos)                      [ px::bind(&FactorActions::double_, _r1, _1, _2, _val) ]
                 |   (int_      > iter_pos)                          [ px::bind(&FactorActions::int_,    _r1, _1, _2, _val) ]
                 |   (kw[bool_] > iter_pos)                          [ px::bind(&FactorActions::bool_,   _r1, _1, _2, _val) ]
-                |   raw[lexeme['"' > *((utf8char - char_('\\') - char_('"')) | ('\\' > char_)) > '"']]
+                |   raw[lexeme['"' > *((literal_utf8char - char_('\\') - char_('"')) | ('\\' > char_)) > '"']]
                                                                     [ px::bind(&FactorActions::string_, _r1, _1,     _val) ]
                 );
             unary_expression.name("unary_expression");

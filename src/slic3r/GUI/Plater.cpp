@@ -8,6 +8,7 @@
 
 #include <boost/assert/source_location.hpp>
 #include <boost/optional/optional.hpp>
+#include <boost/thread.hpp>
 #include <cmath>
 #include <boost/algorithm/string/join.hpp>
 #include <cassert>
@@ -16125,170 +16126,135 @@ void Plater::import_model_id(wxString download_info)
     if (filename.empty())
         filename = "untitled.3mf";
 
-    bool download_ok = false;
-    int retry_count = 0;
-    const int max_retries = 3;
-
-    /* jump to 3D eidtor */
     wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
 
-    /* prepare progress dialog */
-    bool cont = true;
+    bool download_ok = false; // Written by the worker; read only after joining it.
+    enum class DownloadStatus { Preparing, Downloading, Progress, UnsupportedFormat, SizeError, Failed };
+    std::atomic<DownloadStatus> status{DownloadStatus::Preparing};
+    std::atomic<bool> cont{true};
+    std::atomic<int> percent{0};
     bool cont_dlg = true;
-    bool cancel = false;
-    wxString msg;
     wxString dlg_title = _L("Importing Model");
+    ProgressDialog dlg(dlg_title, wxString(' ', 100) + "\n\n\n\n", 100, this,
+                       wxPD_CAN_ABORT | wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH);
 
-    int percent = 0;
-    ProgressDialog dlg(dlg_title,
-        wxString(' ', 100) + "\n\n\n\n",
-        100,    // range
-        this,   // parent
-        wxPD_CAN_ABORT |
-        wxPD_APP_MODAL |
-        wxPD_AUTO_HIDE |
-        wxPD_SMOOTH);
-
-    boost::filesystem::path target_path;
-
-    //reset params
+    // Snapshot app/UI state before entering the worker. Only plain owned data crosses threads.
+    const fs::path download_folder(wxGetApp().app_config->get("download_path"));
+    const std::string requested_url = into_u8(download_url);
+    const std::string requested_filename = into_u8(filename);
+    fs::path target_path;
     p->project.reset();
 
-    /* prepare project and profile */
-    boost::thread import_thread = Slic3r::create_thread([&percent, &cont, &retry_count, &msg, &target_path, &download_ok, download_url, &filename] {
-
-        // Orca: NetworkAgent is not needed and only prevents this from running
-//        NetworkAgent* m_agent = Slic3r::GUI::wxGetApp().getAgent();
-//        if (!m_agent) return;
-
-        int res = 0;
-        std::string http_body;
-
-        msg = _L("Preparing 3MF file...");
-
-        target_path = fs::path(wxGetApp().app_config->get("download_path"));
-
-        //check file suffix
-        wxString extension = fs::path(filename.wx_str()).extension().c_str();
-        if (!extension.Contains(".3mf")) {
-            msg = _L("Download failed; unknown file format.");
-            return;
+    const auto message = [&]() -> wxString {
+        switch (status.load()) {
+        case DownloadStatus::Preparing:         return _L("Preparing 3MF file...");
+        case DownloadStatus::Downloading:       return _L("Downloading project...");
+        case DownloadStatus::Progress:          return wxString::Format(_L("Project downloaded %d%%"), percent.load());
+        case DownloadStatus::UnsupportedFormat: return _L("Download failed; unknown file format.");
+        case DownloadStatus::SizeError:         return _L("Download failed; File size exception.");
+        case DownloadStatus::Failed:            return _L("Importing to Orca Slicer failed. Please download the file and manually import it.");
         }
+        return wxEmptyString;
+    };
 
-        //never replace an existing file
-        std::string unused_filename;
-        try {
-            if (!find_unused_filename(target_path, into_u8(filename), {}, unused_filename))
-                unused_filename.clear();
-        } catch (const std::exception&) {
-            unused_filename.clear();
-        }
-        if (unused_filename.empty()) {
-            msg = _L("Importing to Orca Slicer failed. Please download the file and manually import it.");
-            return;
-        }
-        filename = from_u8(unused_filename);
-
-
-        msg = _L("Downloading project...");
-
-        //target_path = wxStandardPaths::Get().GetTempDir().utf8_str().data();
-
-
-        //target_path = wxGetApp().get_local_models_path().c_str();
-        boost::uuids::uuid uuid = boost::uuids::random_generator()();
-        std::string unique = to_string(uuid).substr(0, 6);
-
-        //target_path /= (boost::format("%1%_%2%.3mf") % filename % unique).str();
-        target_path /= fs::path(filename.wc_str());
-
-        fs::path tmp_path = target_path;
-        tmp_path += format(".%1%", ".download");
-
-        auto filesize = 0;
-        bool size_limit = false;
-        auto http = Http::get(download_url.ToStdString());
-
-        while (cont && retry_count < max_retries) {
-            retry_count++;
-            http.on_progress([&percent, &cont, &msg, &filesize, &size_limit](Http::Progress progress, bool& cancel) {
-
-                    if (!cont) cancel = true;
-                    if (progress.dltotal != 0) {
-
-                        if (filesize == 0) {
-                            filesize = progress.dltotal;
-                            double megabytes = static_cast<double>(progress.dltotal) / (1024 * 1024);
-                            //The maximum size of a 3mf file is 500mb
-                            if (megabytes > 500) {
-                                cont = false;
-                                size_limit = true;
-                            }
-                        }
-                        percent = progress.dlnow * 100 / progress.dltotal;
-                    }
-
-                    if (size_limit) {
-                        msg = _L("Download failed; File size exception.");
-                    }
-                    else {
-                        msg = wxString::Format(_L("Project downloaded %d%%"), percent);
-                    }
-                })
-                .on_error([&msg, &cont, &retry_count](std::string body, std::string error, unsigned http_status) {
-                    (void)body;
-                    BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%",
-                        body,
-                        http_status,
-                        error);
-
-                    if (retry_count == max_retries) {
-                        msg = _L("Importing to Orca Slicer failed. Please download the file and manually import it.");
-                        cont = false;
-                    }
-                })
-                .on_complete([&cont, &download_ok, &msg, tmp_path, &target_path](std::string body, unsigned /* http_status */) {
-                        fs::fstream file(tmp_path, std::ios::out | std::ios::binary | std::ios::trunc);
-                        file.write(body.c_str(), body.size());
-                        file.close();
-                        cont = false;
-                        try {
-                            // Another file may have taken the name while downloading.
-                            std::string unused_filename;
-                            if (find_unused_filename(target_path.parent_path(), target_path.filename().string(), {}, unused_filename)) {
-                                target_path = target_path.parent_path() / unused_filename;
-                                fs::rename(tmp_path, target_path);
-                                download_ok = true;
-                                return;
-                            }
-                        } catch (const std::exception &e) {
-                            BOOST_LOG_TRIVIAL(error) << "import_model_id: failed to move the download into place: " << e.what();
-                        }
-                        boost::system::error_code ec;
-                        fs::remove(tmp_path, ec);
-                        msg = _L("Importing to Orca Slicer failed. Please download the file and manually import it.");
-                }).perform_sync();
-
-                // for break while
-                //cont = false;
-        }
-
+    boost::thread import_thread;
+    ScopeGuard join_import([&]() {
+        cont = false;
+        if (import_thread.joinable())
+            import_thread.join();
     });
+    try {
+        import_thread = Slic3r::create_thread([&percent, &cont, &status, &target_path, &download_ok,
+                                              download_folder, requested_url, requested_filename] {
+            try {
+                ScopeGuard finished([&cont]() { cont = false; });
+                target_path = download_folder;
+                if (fs::path(requested_filename).extension().string().find(".3mf") == std::string::npos) {
+                    status = DownloadStatus::UnsupportedFormat;
+                    return;
+                }
+
+                std::string unused_filename;
+                if (!find_unused_filename(target_path, requested_filename, {}, unused_filename) || unused_filename.empty()) {
+                    status = DownloadStatus::Failed;
+                    return;
+                }
+                target_path /= fs::path(unused_filename);
+                fs::path tmp_path = target_path;
+                tmp_path += format(".%1%", ".download");
+                auto http = Http::get(requested_url);
+                int retry_count = 0;
+                constexpr int max_retries = 3;
+                auto filesize = 0;
+                bool size_limit = false;
+                status = DownloadStatus::Downloading;
+
+                while (cont && retry_count < max_retries) {
+                    ++retry_count;
+                    http.on_progress([&](Http::Progress progress, bool& cancel) {
+                            if (!cont)
+                                cancel = true;
+                            if (progress.dltotal != 0) {
+                                if (filesize == 0) {
+                                    filesize = progress.dltotal;
+                                    const double megabytes = static_cast<double>(progress.dltotal) / (1024 * 1024);
+                                    if (megabytes > 500) {
+                                        cont = false;
+                                        size_limit = true;
+                                    }
+                                }
+                                percent = progress.dlnow * 100 / progress.dltotal;
+                            }
+                            status = size_limit ? DownloadStatus::SizeError : DownloadStatus::Progress;
+                        })
+                        .on_error([&](std::string body, std::string error, unsigned http_status) {
+                            BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", body, http_status, error);
+                            if (retry_count == max_retries) {
+                                status = DownloadStatus::Failed;
+                                cont = false;
+                            }
+                        })
+                        .on_complete([&](std::string body, unsigned /* http_status */) {
+                            fs::fstream file(tmp_path, std::ios::out | std::ios::binary | std::ios::trunc);
+                            file.write(body.c_str(), body.size());
+                            file.close();
+                            cont = false;
+                            try {
+                                // Recheck the destination in case a file appeared while downloading.
+                                std::string final_filename;
+                                if (find_unused_filename(target_path.parent_path(), target_path.filename().string(), {}, final_filename)) {
+                                    target_path = target_path.parent_path() / final_filename;
+                                    fs::rename(tmp_path, target_path);
+                                    download_ok = true;
+                                    return;
+                                }
+                            } catch (const std::exception& e) {
+                                BOOST_LOG_TRIVIAL(error) << "import_model_id: failed to move the download into place: " << e.what();
+                            }
+                            boost::system::error_code ec;
+                            fs::remove(tmp_path, ec);
+                            status = DownloadStatus::Failed;
+                        }).perform_sync();
+                }
+            } catch (...) {
+                status = DownloadStatus::Failed;
+                cont = false;
+            }
+        });
+    } catch (...) {
+        show_error(this, _L("Importing to Orca Slicer failed. Please download the file and manually import it."));
+        return;
+    }
 
     while (cont && cont_dlg) {
         wxMilliSleep(50);
-        cont_dlg = dlg.Update(percent, msg);
-        if (!cont_dlg) {
-            cont = cont_dlg;
-            cancel = true;
-        }
-
-        if (download_ok)
-            break;
+        cont_dlg = dlg.Update(percent.load(), message());
+        if (!cont_dlg)
+            cont = false;
     }
-
     if (import_thread.joinable())
         import_thread.join();
+    const wxString msg = message();
 
     dlg.Hide();
 
@@ -16612,6 +16578,18 @@ void Plater::calib_pa(const Calib_Params& params)
 
 void Plater::_calib_pa_pattern(const Calib_Params& params)
 {
+    // new_project has already applied the user's keep/discard preset choice.
+    // Reject its actual bed before changing calibration settings or adding a model.
+    arrangement::ArrangeParams arrange_params;
+    Points bedpts;
+    const DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
+    try {
+        bedpts = arrangement::get_shrink_bedpts(&config, arrange_params);
+    } catch (const Slic3r::RuntimeError &ex) {
+        show_error(this, ex.what());
+        return;
+    }
+
     std::vector<double> speeds{params.speeds};
     std::vector<double> accels{params.accelerations};
     std::vector<size_t> object_idxs{};
@@ -16748,9 +16726,6 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
 
     arrangement::ArrangePolygons arranged_items;
     {
-        arrangement::ArrangeParams ap;
-        Points bedpts = arrangement::get_shrink_bedpts(&full_config, ap);
-
         for(size_t i = 0; i < speeds.size() * accels.size(); i++) {
             arrangement::ArrangePolygon p;
             cube->instances[0]->get_arrange_polygon(&p);
@@ -16758,7 +16733,7 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
             arranged_items.emplace_back(p);
         }
 
-        arrangement::arrange(arranged_items, bedpts, ap);
+        arrangement::arrange(arranged_items, bedpts, arrange_params);
     }
 
     /* scale cube back to the size of test pattern 'handle' */
@@ -22032,6 +22007,8 @@ std::vector<Vec2f> Plater::get_empty_cells(const Vec2f step)
 {
     PartPlate* plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
     BoundingBoxf3 build_volume = plate->get_build_volume(true);
+    if (!build_volume.defined)
+        return {};
     Vec2d vmin(build_volume.min.x(), build_volume.min.y()), vmax(build_volume.max.x(), build_volume.max.y());
     BoundingBoxf bbox(vmin, vmax);
     std::vector<Vec2f> cells;

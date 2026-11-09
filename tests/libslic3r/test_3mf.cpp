@@ -7271,8 +7271,9 @@ struct MakerMetadata
 // Stores a minimal archive carrying the MakerLab fields and two custom metadata entries and
 // returns the model-level metadata the importer reads back; also checks that the serialized
 // model is well-formed XML with exactly one metadata element per key.
-std::map<std::string, std::string> round_trip(const MakerMetadata& values)
+std::map<std::string, std::string> round_trip(const MakerMetadata& values, int cycles = 1)
 {
+    REQUIRE(cycles > 0);
     ScopedTemporaryDir backup("orca_bbs_maker_metadata_store");
     Model source;
     source.set_backup_path(backup.string());
@@ -7294,27 +7295,42 @@ std::map<std::string, std::string> round_trip(const MakerMetadata& values)
     params.config          = &config;
     params.plate_data_list = {&plate};
     params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    REQUIRE(store_bbs_3mf(params));
+    std::unique_ptr<bbs_archive_contracts::LoadedProject> loaded;
+    std::unique_ptr<Model> loaded_model;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        CAPTURE(cycle);
+        REQUIRE(store_bbs_3mf(params));
 
-    std::string model_xml;
-    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
-    std::stringstream input(model_xml);
-    boost::property_tree::ptree tree;
-    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
-    std::map<std::string, int> element_count;
-    for (const auto& node : tree.get_child("model"))
-        if (node.first == "metadata")
-            ++element_count[node.second.get<std::string>("<xmlattr>.name")];
-    for (const char* key : {"MakerLab", "MakerLabVersion", "MakerWorkflow", "MakerRevision"}) {
-        INFO(key);
-        CHECK(element_count[key] == 1);
+        std::string model_xml;
+        REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+        std::stringstream input(model_xml);
+        boost::property_tree::ptree tree;
+        REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+        std::map<std::string, int> element_count;
+        for (const auto& node : tree.get_child("model"))
+            if (node.first == "metadata")
+                ++element_count[node.second.get<std::string>("<xmlattr>.name")];
+        for (const char* key : {"MakerLab", "MakerLabVersion", "MakerWorkflow", "MakerRevision"}) {
+            INFO(key);
+            CHECK(element_count[key] == 1);
+        }
+
+        auto next_model = std::make_unique<Model>();
+        auto next_loaded = std::make_unique<bbs_archive_contracts::LoadedProject>();
+        REQUIRE(bbs_archive_contracts::load_model(archive.string(), *next_model, *next_loaded));
+        REQUIRE(next_model->model_info != nullptr);
+        // Later cycles use imported metadata_items, not the fresh-value overrides.
+        next_model->mk_name.clear();
+        next_model->mk_version.clear();
+        next_model->md_name.clear();
+        next_model->md_value.clear();
+        loaded_model = std::move(next_model);
+        loaded = std::move(next_loaded);
+        params.model = loaded_model.get();
+        params.config = &loaded->config;
+        params.plate_data_list = loaded->plates;
     }
-
-    Model loaded_model;
-    bbs_archive_contracts::LoadedProject loaded;
-    REQUIRE(bbs_archive_contracts::load_model(archive.string(), loaded_model, loaded));
-    REQUIRE(loaded_model.model_info != nullptr);
-    return loaded_model.model_info->metadata_items;
+    return loaded_model->model_info->metadata_items;
 }
 
 } // namespace
@@ -7339,17 +7355,34 @@ TEST_CASE("BBS export round-trips markup and entity-like MakerLab and custom met
     }
 }
 
-TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata][!shouldfail]")
+TEST_CASE("BBS export round-trips quote characters in MakerLab and custom metadata", "[3MF][Bbs3mfMakerLabMetadata]")
 {
     const MakerMetadata values{"Maker \"quoted\" 'single' name", "maker-7 \"quoted\" 'single'", "prototype \"quoted\" 'single'",
                                "rev 7"};
     const auto metadata = round_trip(values);
-    // Known bug: the importer's xml_unescape() decodes &amp; &lt; &gt; but not &quot; or &apos;, so
-    // quotes come back as entities; fixed by the follow-up fix PR. The unquoted entry is not
-    // affected and is checked above.
     CHECK(metadata.at("MakerLab") == values.maker_name);
     CHECK(metadata.at("MakerLabVersion") == values.maker_version);
     CHECK(metadata.at("MakerWorkflow") == values.workflow);
+}
+
+TEST_CASE("BBS metadata preserves mixed quote characters and literal quote entities across saves", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    const MakerMetadata values{"Maker \"double\" &quot; 'single' &apos; & <Lab>",
+                               "version \"seven\" &quot; 'one' &apos;",
+                               "workflow \"quoted\" &quot; 'single' &apos; &unknown;",
+                               "revision \"two\" &quot; 'three' &apos;"};
+    for (int cycles : {1, 2, 3}) {
+        CAPTURE(cycles);
+        const auto metadata = round_trip(values, cycles);
+        for (const auto &entry : std::map<std::string, std::string>{
+                 {"MakerLab", values.maker_name}, {"MakerLabVersion", values.maker_version},
+                 {"MakerWorkflow", values.workflow}, {"MakerRevision", values.revision}}) {
+            INFO(entry.first);
+            const auto found = metadata.find(entry.first);
+            REQUIRE(found != metadata.end());
+            CHECK(found->second == entry.second);
+        }
+    }
 }
 
 } // namespace bbs_maker_metadata_contracts
@@ -8786,23 +8819,15 @@ TEST_CASE("BBS plate thumbnails keep the small preview size for source blocks wi
     CHECK(small_preview_has_expected_size(small_preview(make_pattern(384, 256))));
 }
 
-// Known bug: the downsampler steps the source by (sw wide, sh tall) blocks but indexes the small
-// image with `i / sw` and `j / sh` (the divisors are swapped), so for non-square blocks (3 x 2 pixels
-// here) blocks land on the wrong small pixels: pixel (0, 0) holds a neighbouring block's average.
-// Fixed by a follow-up fix PR. The previous case asserts the size precondition; if it does not hold
-// here the test runs no assertion and is reported as an unexpected pass.
-TEST_CASE("BBS plate thumbnails downsample wide source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample][!shouldfail]")
+TEST_CASE("BBS plate thumbnails downsample wide source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample]")
 {
     const png::ImageColorscale decoded = small_preview(make_pattern(384, 256));
-    if (!small_preview_has_expected_size(decoded))
-        return;
+    REQUIRE(small_preview_has_expected_size(decoded));
     check_small_preview_pixels(decoded);
 }
 
-// Known bug: with 2 x 3 pixel blocks (256 x 384) the same swapped indexes (`i / sw` runs up to 190,
-// past the 128 rows of the small image) write beyond the small pixel buffer, a heap overflow that
-// crashes the process here; hidden so the suite does not abort. Fixed by the same follow-up PR.
-TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small preview", "[.][3MF][Bbs3mfThumbnailDownsample][Bbs3mfThumbnailDownsampleTall]")
+// Fixed-production control: the old swapped divisors write past the small buffer here.
+TEST_CASE("BBS plate thumbnails downsample tall source blocks into the small preview", "[3MF][Bbs3mfThumbnailDownsample][Bbs3mfThumbnailDownsampleTall]")
 {
     const png::ImageColorscale decoded = small_preview(make_pattern(256, 384));
     REQUIRE(small_preview_has_expected_size(decoded));
@@ -9673,3 +9698,100 @@ TEST_CASE("BBS SkipModel export writes the project shell without object resource
 }
 
 } // namespace bbs_skip_model_contracts
+
+namespace bbs_archive_contracts {
+
+TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world vertices", "[3MF][Transformation][Geometry]")
+{
+    const bool bbs_format = GENERATE(false, true);
+    const bool shear = GENERATE(false, true);
+    const bool on_volume = GENERATE(false, true);
+    CAPTURE(bbs_format, shear, on_volume);
+    ScopedTemporaryDir source_backup("orca_affine_roundtrip_store");
+    Model source;
+    source.set_backup_path(source_backup.string());
+    // A centered asymmetric box separates mesh centering from placement
+    // normalization; unequal dimensions distinguish swapped axes.
+    TriangleMesh box = make_cube(4., 6., 8.);
+    box.translate(-2.f, -3.f, -4.f);
+    ModelObject *object = source.add_object("affine-box", "affine-box.stl", box);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->volumes.size() == 1);
+    ModelInstance *instance = object->add_instance();
+    REQUIRE(instance != nullptr);
+    Matrix3d stretch = Vec3d(2., 3., 4.).asDiagonal();
+    if (shear)
+        stretch(0, 1) = stretch(1, 0) = .5; // SPD: leading minor 6-.25 > 0.
+    const Matrix3d rotation = Eigen::AngleAxisd(.37, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
+    Transform3d expected = Transform3d::Identity();
+    expected.linear() = rotation * stretch * Vec3d(-1., 1., 1.).asDiagonal();
+    expected.translation() = Vec3d(11.125, -13.25, 17.5);
+    if (on_volume)
+        object->volumes.front()->set_transformation(expected);
+    else
+        instance->set_transformation(Geometry::Transformation(expected));
+    const Geometry::Transformation &transform = on_volume ? object->volumes.front()->get_transformation() : instance->get_transformation();
+    CHECK((transform.get_rotation_matrix().linear() * transform.get_scaling_factor_matrix().linear() *
+           transform.get_mirror_matrix().linear()).isApprox(expected.linear(), 1e-12));
+    CHECK(transform.get_matrix().matrix() == expected.matrix());
+    const TriangleMesh expected_mesh = source.mesh();
+    REQUIRE(expected_mesh.its.vertices.size() == 8);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    if (bbs_format)
+        store_model(archive.string(), source, config, plates);
+    else
+        REQUIRE(store_3mf(archive.string().c_str(), &source, &config, false));
+    CHECK(transform.get_matrix().matrix() == expected.matrix());
+
+    // Keep the imported Model alive only while its project-owned backup exists.
+    LoadedProject loaded;
+    Model destination;
+    if (bbs_format)
+        REQUIRE(load_model(archive.string(), destination, loaded));
+    else {
+        loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_affine_roundtrip_load");
+        destination.set_backup_path(loaded.backup->string());
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        REQUIRE(load_3mf(archive.string().c_str(), loaded.config, substitutions, &destination, false));
+    }
+    REQUIRE(destination.objects.size() == 1);
+    const ModelObject *restored = destination.objects.front();
+    REQUIRE(restored->instances.size() == 1);
+    REQUIRE(restored->volumes.size() == 1);
+    // Conventional 3MF bakes a volume's affine transform into its mesh and
+    // retains the original full matrix in source.transform for reload. BBS
+    // normalizes a single volume's offset into its instance while preserving
+    // the full instance * volume placement and the volume's linear transform.
+    Transform3d actual = !on_volume ? restored->instances.front()->get_matrix() :
+        bbs_format ? restored->volumes.front()->get_matrix() : restored->volumes.front()->source.transform.get_matrix();
+    if (bbs_format && on_volume) {
+        const Transform3d &volume_matrix = restored->volumes.front()->get_matrix();
+        const Transform3d &instance_matrix = restored->instances.front()->get_matrix();
+        actual = instance_matrix * volume_matrix;
+        for (int row = 0; row < 3; ++row) {
+            CHECK_THAT(volume_matrix(row, 3), Catch::Matchers::WithinAbs(0., 1e-6));
+            CHECK_THAT(instance_matrix(row, 3), Catch::Matchers::WithinAbs(expected(row, 3), 1e-6));
+            for (int column = 0; column < 3; ++column)
+                CHECK_THAT(volume_matrix(row, column), Catch::Matchers::WithinAbs(expected(row, column), 1e-6));
+        }
+    }
+    // Exporters use max_digits10(float) for model XML. Compare every coefficient,
+    // including translation, rather than just determinant or canonical labels.
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            CHECK_THAT(actual(row, column), Catch::Matchers::WithinAbs(expected(row, column), 1e-6));
+    const TriangleMesh actual_mesh = destination.mesh();
+    REQUIRE(actual_mesh.its.vertices.size() == expected_mesh.its.vertices.size());
+    // Each expected box corner is distinct, so equal cardinality plus membership
+    // proves the world-vertex set without depending on importer vertex ordering.
+    for (const Vec3f &vertex : expected_mesh.its.vertices)
+        CHECK(std::any_of(actual_mesh.its.vertices.begin(), actual_mesh.its.vertices.end(),
+                          [&vertex](const Vec3f &candidate) { return (candidate - vertex).norm() < 1e-4f; }));
+}
+
+} // namespace bbs_archive_contracts

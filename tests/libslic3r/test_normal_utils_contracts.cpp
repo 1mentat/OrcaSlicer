@@ -87,8 +87,7 @@ TEST_CASE("Triangle normals preserve orientation, angles, and rigid-scale invari
     check_vec(transformed_normals.front(), expected_normal);
 }
 
-// Known bug: indice_angle() reads mesh vertices 0, 1 and 2 instead of the face's vertices; fixed by the follow-up fix PR
-TEST_CASE("Angle-weighted normals honor noncontiguous face indices", "[NormalUtils][NormalUtilsAngles][!shouldfail]")
+TEST_CASE("Angle-weighted normals honor noncontiguous face indices", "[NormalUtils][NormalUtilsAngles]")
 {
     const indexed_triangle_set fan = asymmetric_fan();
     const Vec3i32 second_face = fan.indices[1];

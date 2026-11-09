@@ -2480,6 +2480,7 @@ void GLGizmoMeasure::update_world_plane_features(Measure::Measuring *cur_measuri
     if (cur_measuring) {
         const auto &[idx, normal, pt] = feautre.get_plane();
         feautre.plane_indices       = const_cast<std::vector<int> *>(&cur_measuring->get_plane_triangle_indices(idx));
+        feautre.set_plane_triangles(cur_measuring->get_its(), *feautre.plane_indices, feautre.world_tran);
         auto cur_plane_features       = const_cast<std::vector<Measure::SurfaceFeature> *>(&cur_measuring->get_plane_features(idx));
         if (cur_plane_features) {
             if (!feautre.world_plane_features) {
@@ -2516,6 +2517,9 @@ void GLGizmoMeasure::update_feature_by_tran(Measure::SurfaceFeature &feature)
         if (feature.get_type() == Measure::SurfaceFeatureType::Plane) {
             if (cur_measuring) {
                 update_world_plane_features(cur_measuring, feature);
+            } else {
+                // A failed refresh must not advertise the previous mesh region.
+                feature.plane_triangles = std::make_shared<const Measure::SurfaceFeature::PlaneTriangles>();
             }
         }
         break;

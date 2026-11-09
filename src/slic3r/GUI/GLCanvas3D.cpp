@@ -1918,6 +1918,8 @@ static std::pair<bool, bool> construct_extruder_unprintable_error(ObjectFilament
         left_x_max = printable_areas[0][2][0];
         left_y_max = printable_areas[0][2][1];
 
+    }
+    if (printable_areas.size() == 2 && printable_areas[1].size() == 4) {
         right_x_min = printable_areas[1][0][0];
         right_y_min = printable_areas[1][0][1];
         right_x_max = printable_areas[1][2][0];

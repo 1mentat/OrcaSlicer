@@ -341,6 +341,12 @@ DynamicPrintConfig PresetBundle::construct_full_config(
     std::vector<std::string> filamnet_preset_names;
     for (auto preset : in_filament_presets) {
         filamnet_preset_names.emplace_back(preset.name);
+        if (num_filaments > 1) {
+            compatible_printers_condition.emplace_back(preset.compatible_printers_condition());
+            compatible_prints_condition.emplace_back(preset.compatible_prints_condition());
+            inherits.emplace_back(preset.inherits());
+            filament_ids.emplace_back(preset.filament_id);
+        }
     }
     out.option<ConfigOptionString>("print_settings_id", true)->value      = in_print_preset.name;
     out.option<ConfigOptionStrings>("filament_settings_id", true)->values = filamnet_preset_names;

@@ -3690,7 +3690,7 @@ int CLI::run(int argc, char **argv)
                 auto *opt_vec_dst = dynamic_cast<ConfigOptionVectorBase *>(m_print_config.option(opt_key));
                 if (opt_vec_dst == nullptr || opt_vec_dst->size() < size_t(old_start + old_variant_count))
                     continue;
-                // set_with_restore_2() pads its source in place
+                // Keep a snapshot of the old destination while restoring its variant slots.
                 std::unique_ptr<ConfigOption> old_values(opt_vec_dst->clone());
                 opt_vec_dst->set_with_restore_2(static_cast<ConfigOptionVectorBase *>(old_values.get()), kept_variant_indice, old_start,
                                                 old_variant_count, true);
@@ -4784,6 +4784,18 @@ int CLI::run(int argc, char **argv)
     Points beds = get_bed_shape(m_print_config);
     ArrangeParams arrange_cfg;
 
+    // Keep expected bed rejection on the CLI's structured arrange-error path.
+    const auto update_arrange_bed = [&]() {
+        try {
+            beds = get_shrink_bedpts(&m_print_config, arrange_cfg);
+            return true;
+        } catch (const Slic3r::RuntimeError &ex) {
+            boost::nowide::cerr << "error: " << ex.what() << std::endl;
+            record_exit_reson(outfile_dir, CLI_OBJECT_ARRANGE_FAILED, 0, cli_errors[CLI_OBJECT_ARRANGE_FAILED], sliced_info);
+            return false;
+        }
+    };
+
     BOOST_LOG_TRIVIAL(info) << "will start transforms, commands count " << m_transforms.size() << "\n";
 #if defined(__linux__) || defined(__LINUX__)
     if (g_cli_callback_mgr.is_started()) {
@@ -4898,6 +4910,9 @@ int CLI::run(int argc, char **argv)
                 if (!all_objects_have_instances) model.add_default_instances();
 
                 try {
+                    const auto *areas = m_print_config.opt<ConfigOptionPointsGroups>("extruder_printable_area");
+                    if (beds.empty() && areas && !areas->values.empty() && get_shared_poly(areas->values).empty())
+                        throw Slic3r::RuntimeError("Extruder printable areas have no common printable region.");
                     if (dups > 1) {
                         // if all input objects have defined position(s) apply duplication to the whole model
                         duplicate(model, size_t(dups), beds, arrange_cfg);
@@ -5382,11 +5397,13 @@ int CLI::run(int argc, char **argv)
                 }
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
+                if (!update_arrange_bed()) {
+                    flush_and_exit(CLI_OBJECT_ARRANGE_FAILED);
+                }
+
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
-
-                beds = get_shrink_bedpts(&m_print_config, arrange_cfg);
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
 
@@ -5854,11 +5871,13 @@ int CLI::run(int argc, char **argv)
                 }
 
                 arrangement::update_arrange_params(arrange_cfg, &m_print_config, selected);
+                if (!update_arrange_bed()) {
+                    flush_and_exit(CLI_OBJECT_ARRANGE_FAILED);
+                }
+
                 arrangement::update_selected_items_inflation(selected, &m_print_config, arrange_cfg);
                 arrangement::update_unselected_items_inflation(unselected, &m_print_config, arrange_cfg);
                 arrangement::update_selected_items_axis_align(selected, &m_print_config, arrange_cfg);
-
-                beds=get_shrink_bedpts(&m_print_config, arrange_cfg);
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
 

@@ -714,14 +714,15 @@ TEST_CASE("Circle lying in a plane has witnesses at a common circle point", "[Me
     check_on_circle(face_result.distance_strict->from, ring);
 }
 
-// Known bug: the edge-plane and circle-plane branches measure only to the face's boundary edges, so a
-// feature above the face interior gets the distance to the boundary instead; needs a fix PR
-TEST_CASE("Edge and circle distances to a bounded plane reach the face interior", "[Measure][MeasureContracts][!shouldfail]")
+TEST_CASE("Edge and circle distances to a bounded plane reach the face interior", "[Measure][MeasureContracts]")
 {
     const auto boundary = std::make_shared<std::vector<SurfaceFeature>>(std::vector<SurfaceFeature>{
         edge(Vec3d(-1.0, -1.0, 0.0), Vec3d(1.0, -1.0, 0.0)), edge(Vec3d(1.0, -1.0, 0.0), Vec3d(1.0, 1.0, 0.0)),
         edge(Vec3d(1.0, 1.0, 0.0), Vec3d(-1.0, 1.0, 0.0)), edge(Vec3d(-1.0, 1.0, 0.0), Vec3d(-1.0, -1.0, 0.0))});
-    const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
+    SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
+    floor.plane_triangles = std::make_shared<const SurfaceFeature::PlaneTriangles>(SurfaceFeature::PlaneTriangles{
+        {Vec3d(-1., -1., 0.), Vec3d(1., -1., 0.), Vec3d(1., 1., 0.)},
+        {Vec3d(-1., -1., 0.), Vec3d(1., 1., 0.), Vec3d(-1., 1., 0.)}});
 
     // The lower end (0, 0, 3) of a rising edge lies right above the face center, 3 away.
     const MeasurementResult diagonal_floor = get_measurement(edge(Vec3d(0.0, 0.0, 3.0), Vec3d(4.0, 0.0, 5.0)), floor);
@@ -955,4 +956,347 @@ TEST_CASE("Skew circle distances scale under a common rigid placement", "[Measur
         REQUIRE(moved.distance_infinite.has_value());
         CHECK_THAT(moved.distance_infinite->dist, WithinAbs(scale * original.distance_infinite->dist, 1e-6));
     }
+}
+
+namespace {
+using FaceTriangles = SurfaceFeature::PlaneTriangles;
+
+FaceTriangles rectangle_face(double x0, double y0, double x1, double y1)
+{
+    const Vec3d a(x0, y0, 0.), b(x1, y0, 0.), c(x1, y1, 0.), d(x0, y1, 0.);
+    return {{a, b, c}, {a, c, d}};
+}
+
+SurfaceFeature face_with_triangles(FaceTriangles triangles)
+{
+    REQUIRE_FALSE(triangles.empty());
+    Vec3d normal = (triangles.front()[1] - triangles.front()[0]).cross(triangles.front()[2] - triangles.front()[0]);
+    normal = normal.norm() > 0.0 ? Vec3d(normal.normalized()) : Vec3d::UnitZ();
+    SurfaceFeature face = plane(71, normal, triangles.front()[0]);
+    face.plane_triangles = std::make_shared<const FaceTriangles>(std::move(triangles));
+    return face;
+}
+
+void check_face_witness(const Vec3d &point, const SurfaceFeature &face)
+{
+    REQUIRE(face.plane_triangles);
+    bool inside = false;
+    for (const auto &triangle : *face.plane_triangles) {
+        const Vec3d a = triangle[1] - triangle[0], b = triangle[2] - triangle[0], p = point - triangle[0];
+        const double denominator = a.squaredNorm() * b.squaredNorm() - a.dot(b) * a.dot(b);
+        if (denominator <= 0.0)
+            continue;
+        const double u = (b.squaredNorm() * a.dot(p) - a.dot(b) * b.dot(p)) / denominator;
+        const double v = (a.squaredNorm() * b.dot(p) - a.dot(b) * a.dot(p)) / denominator;
+        inside = inside || (u >= -1e-7 && v >= -1e-7 && u + v <= 1.0 + 1e-7 &&
+                             std::abs(p.dot(a.cross(b).normalized())) < 1e-7);
+    }
+    CHECK(inside);
+}
+
+void check_bounded_distance(const SurfaceFeature &feature, const SurfaceFeature &face, double expected,
+                            bool center_mode = false)
+{
+    const MeasurementResult result = get_measurement(feature, face, center_mode);
+    const auto &distance = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+    check_witnessed_distance(distance, expected);
+    REQUIRE(distance->from.allFinite());
+    REQUIRE(distance->to.allFinite());
+    check_face_witness(distance->to, face);
+    if (feature.get_type() == SurfaceFeatureType::Circle) {
+        if (center_mode)
+            check_vec(distance->from, std::get<0>(feature.get_circle()));
+        else
+            check_on_circle(distance->from, feature);
+    } else {
+        const auto endpoints = feature.get_edge();
+        const Vec3d delta = endpoints.second - endpoints.first;
+        const double t = delta.squaredNorm() > 0.0 ? (distance->from - endpoints.first).dot(delta) / delta.squaredNorm() : 0.0;
+        CHECK(t >= -1e-7);
+        CHECK(t <= 1.0 + 1e-7);
+        check_vec(distance->from, endpoints.first + t * delta);
+    }
+    const MeasurementResult swapped = get_measurement(face, feature, center_mode);
+    const auto &reverse = swapped.distance_infinite ? swapped.distance_infinite : swapped.distance_strict;
+    check_witnessed_distance(reverse, expected);
+    check_vec(reverse->from, distance->to);
+    check_vec(reverse->to, distance->from);
+}
+} // namespace
+
+TEST_CASE("Bounded face distances preserve holes and concave material regions", "[Measure][MeasureContracts]")
+{
+    FaceTriangles annulus;
+    for (const FaceTriangles &strip : {rectangle_face(-3., -3., 3., -1.), rectangle_face(-3., 1., 3., 3.),
+                                       rectangle_face(-3., -1., -1., 1.), rectangle_face(1., -1., 3., 1.)})
+        annulus.insert(annulus.end(), strip.begin(), strip.end());
+    const SurfaceFeature face = face_with_triangles(annulus);
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), face, std::sqrt(10.));
+    const SurfaceFeature ring = circle(Vec3d(0., 0., 5.), Vec3d::UnitX(), 2.);
+    check_bounded_distance(ring, face, std::sqrt(26.) - 2.);
+    check_bounded_distance(ring, face, std::sqrt(26.), true);
+
+    FaceTriangles l_shape = rectangle_face(-2., -2., 2., 0.);
+    const FaceTriangles upper = rectangle_face(-2., 0., 0., 2.);
+    l_shape.insert(l_shape.end(), upper.begin(), upper.end());
+    const SurfaceFeature concave = face_with_triangles(l_shape);
+    check_bounded_distance(edge(Vec3d(-1., 1., 3.), Vec3d(-1., 1., 5.)), concave, 3.);
+    check_bounded_distance(edge(Vec3d(1., 1., 3.), Vec3d(1., 1., 5.)), concave, std::sqrt(10.));
+}
+
+TEST_CASE("Circle face distances include both plane crossings and restricted coplanar minima", "[Measure][MeasureContracts]")
+{
+    // Only the positive-Y intersection lies in the triangle. A single arbitrary root is insufficient.
+    const SurfaceFeature triangle = face_with_triangles({{Vec3d(0., 0., -1.), Vec3d(0., 2., -1.), Vec3d(0., 1., 1.)}});
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.), triangle, 0.);
+    const SurfaceFeature floor = face_with_triangles(rectangle_face(-1., -1., 1., 1.));
+    check_bounded_distance(circle(Vec3d(0., 0., 1.), Vec3d::UnitX(), 1.), floor, 0.);
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitZ(), 2.), floor,
+                           std::sqrt(25. + std::pow(2. - std::sqrt(2.), 2.)));
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitZ(), 2.), floor, 5., true);
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 0.5), floor, 0.);
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.),
+                           face_with_triangles(rectangle_face(3., -1., 4., 1.)), 2.);
+    FaceTriangles hole;
+    for (const FaceTriangles &strip : {rectangle_face(-3., -3., 3., -2.), rectangle_face(-3., 2., 3., 3.),
+                                       rectangle_face(-3., -2., -2., 2.), rectangle_face(2., -2., 3., 2.)})
+        hole.insert(hole.end(), strip.begin(), strip.end());
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.), face_with_triangles(hole), 1.);
+}
+
+TEST_CASE("Circle face boundaries include global skew segment stationary points", "[Measure][MeasureContracts]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.);
+    // The triangle lies at x>=2; the closest point is inside its x=2 edge (2,t,1+t).
+    const SurfaceFeature face = face_with_triangles({{Vec3d(2., -1., 0.), Vec3d(2., 1., 2.), Vec3d(3., -1., 0.)}});
+    check_bounded_distance(ring, face, 1.1571513541583016);
+    const auto result = get_measurement(ring, face);
+    REQUIRE(result.distance_infinite);
+    const double t = result.distance_infinite->to.y();
+    check_vec(result.distance_infinite->to, Vec3d(2., t, 1. + t));
+    // Independent unsquared derivative, not a sampled distance oracle or the squared quartic.
+    CHECK_THAT(2. * t + 1. - t / std::sqrt(4. + t * t), WithinAbs(0., 1e-8));
+
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(7., -3., 2.));
+    transform.rotate(Eigen::AngleAxisd(0.41, Vec3d::UnitX()));
+    transform.rotate(Eigen::AngleAxisd(-0.28, Vec3d::UnitY()));
+    transform.scale(2.);
+    SurfaceFeature moved_face = face, moved_ring = ring;
+    moved_face.translate(transform);
+    moved_ring.translate(transform);
+    check_bounded_distance(moved_ring, moved_face, 2. * 1.1571513541583016);
+    const auto moved = get_measurement(moved_ring, moved_face);
+    REQUIRE(moved.distance_infinite);
+    check_vec(moved.distance_infinite->from, transform * result.distance_infinite->from, 1e-7);
+    check_vec(moved.distance_infinite->to, transform * result.distance_infinite->to, 1e-7);
+}
+
+TEST_CASE("Bounded face snapshots survive copies transforms and measuring lifetime", "[Measure][MeasureContracts]")
+{
+    SurfaceFeature face = plane(71, Vec3d::UnitZ(), Vec3d::Zero());
+    Vec3d center, normal;
+    {
+        const indexed_triangle_set mesh = make_cube(2., 2., 2.).its;
+        const auto &first = mesh.indices.front();
+        center = (mesh.vertices[first[0]] + mesh.vertices[first[1]] + mesh.vertices[first[2]]).cast<double>() / 3.;
+        Measuring measuring(mesh);
+        const auto selected = measuring.get_feature(0, center, Transform3d::Identity(), true);
+        REQUIRE(selected);
+        face = *selected;
+        REQUIRE(face.plane_triangles);
+        REQUIRE(face.plane_triangles->size() == 2);
+        normal = std::get<1>(face.get_plane());
+    }
+    check_bounded_distance(edge(center + 3. * normal, center + 5. * normal), face, 3.);
+    const auto original = face.plane_triangles;
+    const Vec3d first = original->front().front();
+    SurfaceFeature copy = face;
+    copy.translate(Vec3d(5., -2., 1.));
+    CHECK(face.plane_triangles == original);
+    CHECK(copy.plane_triangles != original);
+    check_vec(original->front().front(), first);
+    check_vec(copy.plane_triangles->front().front(), first + Vec3d(5., -2., 1.));
+    copy.clone(face);
+    CHECK(copy.plane_triangles == original);
+    copy.clone(plane(72, Vec3d::UnitZ(), Vec3d::Zero()));
+    CHECK_FALSE(copy.plane_triangles);
+}
+
+
+TEST_CASE("Circle face boundaries handle axis singularities and reduced degree", "[Measure][MeasureContracts]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.);
+    const SurfaceFeature axis = face_with_triangles({{Vec3d(0., 0., -2.), Vec3d(0., 0., 2.), Vec3d(0., 0., -2.)}});
+    const auto axis_result = get_measurement(ring, axis);
+    check_witnessed_distance(axis_result.distance_infinite, 1.);
+    check_on_circle(axis_result.distance_infinite->from, ring);
+    check_vec(axis_result.distance_infinite->to, Vec3d::Zero());
+    const SurfaceFeature line = face_with_triangles({{Vec3d(2., -1., 3.), Vec3d(2., 1., 3.), Vec3d(2., -1., 3.)}});
+    const auto line_result = get_measurement(ring, line);
+    check_witnessed_distance(line_result.distance_infinite, std::sqrt(10.));
+    check_vec(line_result.distance_infinite->from, Vec3d(1., 0., 0.));
+    check_vec(line_result.distance_infinite->to, Vec3d(2., 0., 3.));
+    const SurfaceFeature point = face_with_triangles({{Vec3d(0., 0., 3.), Vec3d(0., 0., 3.), Vec3d(0., 0., 3.)}});
+    const auto point_result = get_measurement(ring, point);
+    check_witnessed_distance(point_result.distance_infinite, std::sqrt(10.));
+    check_on_circle(point_result.distance_infinite->from, ring);
+    check_vec(point_result.distance_infinite->to, Vec3d(0., 0., 3.));
+    const SurfaceFeature floor = face_with_triangles(rectangle_face(-2., -2., 2., 2.));
+    check_bounded_distance(circle(Vec3d(0., 0., 3.), Vec3d::UnitZ(), 0.), floor, 3.);
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 3.)), floor, 3.);
+}
+
+TEST_CASE("Bounded face stationary distances scale with their geometry", "[Measure][MeasureContracts]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.);
+    const SurfaceFeature face = face_with_triangles({{Vec3d(2., -1., 0.), Vec3d(2., 1., 2.), Vec3d(3., -1., 0.)}});
+    for (double scale : std::vector<double>{1e-4, 1., 1e4}) {
+        CAPTURE(scale);
+        Transform3d transform = Transform3d::Identity();
+        transform.scale(scale);
+        SurfaceFeature scaled_ring = ring, scaled_face = face;
+        scaled_ring.translate(transform);
+        scaled_face.translate(transform);
+        check_bounded_distance(scaled_ring, scaled_face, scale * 1.1571513541583016);
+    }
+}
+
+TEST_CASE("Owned empty or invalid face regions do not become unbounded planes", "[Measure][MeasureContracts]")
+{
+    SurfaceFeature face = face_with_triangles(rectangle_face(-2., -2., 2., 2.));
+    const indexed_triangle_set mesh = make_cube(2., 2., 2.).its;
+    Transform3d transform = Transform3d::Identity();
+    transform.translate(Vec3d(3., -2., 1.));
+    face.set_plane_triangles(mesh, std::vector<int>{0}, transform);
+    REQUIRE(face.plane_triangles);
+    REQUIRE(face.plane_triangles->size() == 1);
+    check_vec(face.plane_triangles->front().front(), transform * mesh.vertices[mesh.indices[0][0]].cast<double>());
+    face.set_plane_triangles(mesh, std::vector<int>{-1}, transform);
+    REQUIRE(face.plane_triangles);
+    CHECK(face.plane_triangles->empty());
+    CHECK_FALSE(get_measurement(circle(Vec3d(0., 0., 3.), Vec3d::UnitZ(), 1.), face).has_distance_data());
+    CHECK_FALSE(get_measurement(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), face).has_distance_data());
+}
+
+
+TEST_CASE("Thin bounded faces retain their analytic interior projection", "[Measure][MeasureContracts]")
+{
+    // Strictly interior barycentric weights are (.25, .5, .25). Dot-product
+    // region tests lose the 1e-20 relative squared width and select AB instead.
+    for (int axis = 0; axis < 3; ++axis) {
+        for (bool reverse : {false, true}) {
+            CAPTURE(axis, reverse);
+            const auto permute = [axis](const Vec3d &p) {
+                return Vec3d(p[axis], p[(axis + 1) % 3], p[(axis + 2) % 3]);
+            };
+            FaceTriangles triangles{{permute(Vec3d::Zero()), permute(Vec3d(10000., 0., 0.)),
+                                      permute(Vec3d(10000., 1e-6, 0.))}};
+            if (reverse)
+                std::swap(triangles[0][1], triangles[0][2]);
+            const SurfaceFeature face = face_with_triangles(std::move(triangles));
+            const Vec3d center = permute(Vec3d(7500., 2.5e-7, 1e-7));
+            const Vec3d expected = permute(Vec3d(7500., 2.5e-7, 0.));
+            const SurfaceFeature ring = circle(center, permute(Vec3d::UnitZ()), 1.);
+            const auto result = get_measurement(ring, face, true);
+            const auto &chosen = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+            REQUIRE(chosen);
+            const auto &distance = *chosen;
+            REQUIRE(distance.from.allFinite());
+            REQUIRE(distance.to.allFinite());
+            CHECK_THAT(distance.dist, WithinAbs(1e-7, 1e-16));
+            CHECK_THAT((distance.to - expected).stableNorm(), WithinAbs(0., 1e-16));
+            CHECK_THAT((distance.from - center).stableNorm(), WithinAbs(0., 1e-16));
+            const auto swapped = get_measurement(face, ring, true);
+            const auto &reverse_distance = swapped.distance_infinite ? swapped.distance_infinite : swapped.distance_strict;
+            REQUIRE(reverse_distance);
+            CHECK_THAT(reverse_distance->dist, WithinAbs(1e-7, 1e-16));
+            CHECK_THAT((reverse_distance->from - expected).stableNorm(), WithinAbs(0., 1e-16));
+            CHECK_THAT((reverse_distance->to - center).stableNorm(), WithinAbs(0., 1e-16));
+            // The same thin face still clamps an exterior projection to AB.
+            const Vec3d outside = permute(Vec3d(7500., -2.5e-7, 1e-7));
+            const auto exterior = get_measurement(circle(outside, permute(Vec3d::UnitZ()), 1.), face, true);
+            const auto &outside_distance = exterior.distance_infinite ? exterior.distance_infinite : exterior.distance_strict;
+            REQUIRE(outside_distance);
+            CHECK_THAT(outside_distance->dist, WithinAbs(std::hypot(2.5e-7, 1e-7), 1e-16));
+            CHECK_THAT((outside_distance->to - permute(Vec3d(7500., 0., 0.))).stableNorm(), WithinAbs(0., 1e-16));
+        }
+    }
+}
+
+TEST_CASE("Face box pruning retains later interior and boundary minima", "[Measure][MeasureContracts]")
+{
+    const auto preceded = [](FaceTriangles near) {
+        FaceTriangles regions = rectangle_face(1000., 1000., 1001., 1001.);
+        regions.insert(regions.end(), near.begin(), near.end());
+        return face_with_triangles(std::move(regions));
+    };
+    const SurfaceFeature square = preceded(rectangle_face(-2., -2., 2., 2.));
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), square, 3.);
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.), square, 3.);
+    check_bounded_distance(circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.), square, 5., true);
+    check_bounded_distance(circle(Vec3d(3., 3., 2.), Vec3d::UnitZ(), 1.),
+                           preceded(rectangle_face(-1., -1., 1., 1.)),
+                           std::hypot(std::sqrt(8.) - 1., 2.));
+    FaceTriangles hole;
+    for (const FaceTriangles &strip : {rectangle_face(-5., -5., -2., 5.), rectangle_face(2., -5., 5., 5.),
+                                      rectangle_face(-2., -5., 2., -2.), rectangle_face(-2., 2., 2., 5.)})
+        hole.insert(hole.end(), strip.begin(), strip.end());
+    const SurfaceFeature annulus = preceded(std::move(hole));
+    check_bounded_distance(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.), annulus, 1.);
+    check_bounded_distance(edge(Vec3d(0., 0., 3.), Vec3d(0., 0., 5.)), annulus, std::sqrt(13.));
+
+    // A center-only query box could wrongly prune these later zero-distance
+    // regions after finding a small positive distance on the first patch.
+    for (bool tangent : {false, true}) {
+        CAPTURE(tangent);
+        FaceTriangles regions = tangent ? rectangle_face(.25, -.1, .5, .1) : rectangle_face(2.1, -.1, 2.2, .1);
+        const auto contact = tangent ? rectangle_face(-.1, -.1, .1, .1) : rectangle_face(1.5, -.25, 2., .25);
+        regions.insert(regions.end(), contact.begin(), contact.end());
+        check_bounded_distance(circle(Vec3d(0., 0., tangent ? 2. : 1.), Vec3d::UnitY(), 2.),
+                               face_with_triangles(std::move(regions)), 0.);
+    }
+    const auto axis_face = preceded({{Vec3d(0., 0., -2.), Vec3d(0., 0., 2.), Vec3d(0., 0., -2.)}});
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.);
+    const auto axis_result = get_measurement(ring, axis_face);
+    const auto &axis_distance = axis_result.distance_infinite ? axis_result.distance_infinite : axis_result.distance_strict;
+    check_witnessed_distance(axis_distance, 1.);
+    check_on_circle(axis_distance->from, ring);
+    check_vec(axis_distance->to, Vec3d::Zero());
+}
+
+TEST_CASE("Face box pruning keeps scale margins and overflowing bounds conservative", "[Measure][MeasureContracts]")
+{
+    FaceTriangles triangles = rectangle_face(1000., 1000., 1001., 1001.);
+    const auto square = rectangle_face(-2., -2., 2., 2.);
+    triangles.insert(triangles.end(), square.begin(), square.end());
+    for (double scale : {1e-9, 1., 1e9}) {
+        CAPTURE(scale);
+        Transform3d transform = Transform3d::Identity();
+        transform.scale(scale);
+        SurfaceFeature face = face_with_triangles(triangles);
+        SurfaceFeature ring = circle(Vec3d(0., 0., 5.), Vec3d::UnitY(), 2.);
+        face.translate(transform);
+        ring.translate(transform);
+        const auto result = get_measurement(ring, face);
+        const auto &distance = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+        REQUIRE(distance);
+        REQUIRE(distance->from.allFinite());
+        REQUIRE(distance->to.allFinite());
+        CHECK_THAT(distance->dist / scale, WithinAbs(3., 1e-7));
+        CHECK_THAT((distance->to - distance->from).stableNorm() / scale, WithinAbs(3., 1e-7));
+        CHECK_THAT(distance->to.z() / scale, WithinAbs(0., 1e-7));
+        CHECK(std::abs(distance->to.x() / scale) <= 2. + 1e-7);
+        CHECK(std::abs(distance->to.y() / scale) <= 2. + 1e-7);
+    }
+    // The circle passes through the origin but center+radius overflows its box.
+    // Finite exact endpoint witnesses remain usable when pruning is disabled.
+    FaceTriangles overflow_regions = rectangle_face(10., 10., 11., 11.);
+    overflow_regions.push_back({Vec3d::Zero(), Vec3d::UnitX(), Vec3d::UnitY()});
+    const auto result = get_measurement(circle(Vec3d(1e308, 0., 0.), Vec3d::UnitZ(), 1e308),
+                                        face_with_triangles(std::move(overflow_regions)));
+    const auto &distance = result.distance_infinite ? result.distance_infinite : result.distance_strict;
+    check_witnessed_distance(distance, 0.);
+    check_vec(distance->from, Vec3d::Zero());
+    check_vec(distance->to, Vec3d::Zero());
 }

@@ -26,6 +26,10 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/I18N.hpp"
+#include "libslic3r/GCode/TimelapsePosPicker.hpp"
+#include <optional>
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Support/TreeModelVolumes.hpp"
@@ -1518,5 +1522,108 @@ TEST_CASE("Belt supports reach the belt under a leading overhang", "[Print][belt
         // ...and resting on the belt: within a few layers of the floor beneath its own lines.
         CHECK(lowest->print_z - floor_under_lowest < 4. * 0.2 + EPSILON);
         CHECK(lowest->print_z - floor_under_lowest > -0.2 - EPSILON);
+    }
+}
+
+TEST_CASE("Shared wipe regions retain explicit empty areas and legacy malformed fallbacks", "[Print][BedShape]")
+{
+    const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
+    const size_t nozzle_count = GENERATE(size_t(1), size_t(2));
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_count, 0.4));
+    Print print{};
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({bed, Vec2ds{}}));
+    print.apply_config_for_render(config);
+    CHECK(print.get_extruder_shared_printable_polygon().empty());
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups());
+    print.apply_config_for_render(config);
+    CHECK_FALSE(print.get_extruder_shared_printable_polygon().empty());
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({Vec2ds{Vec2d(1., 2.)}}));
+    print.apply_config_for_render(config);
+    CHECK_FALSE(print.get_extruder_shared_printable_polygon().empty());
+}
+
+TEST_CASE("Timelapse distinguishes a missing extruder area from a present empty region", "[Print][Timelapse][BedShape]")
+{
+    const Vec2ds bed{Vec2d(20., 20.), Vec2d(100., 20.), Vec2d(100., 100.), Vec2d(20., 100.)};
+    const bool empty_region = GENERATE(false, true);
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats(2, 0.4));
+    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(TimelapseType::tlSmooth));
+    config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(0.));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(
+        empty_region ? std::vector<Vec2ds>{bed, Vec2ds{}} : std::vector<Vec2ds>{bed}));
+    Print print{};
+    print.apply_config_for_render(config);
+    // Layer is constructible only by its owners; this empty test layer has no PrintObject.
+    struct TimelapseLayer final : Layer {
+        TimelapseLayer() : Layer(0, nullptr, 0.2, 0.2, 0.1) {}
+    } layer;
+    TimelapsePosPicker picker;
+    picker.init(&print, Point(0, 0));
+    const PosPickCtx context{Point(0, 0), &layer, 0, 0, std::nullopt, std::nullopt};
+    const Point position = picker.pick_pos(context);
+    if (empty_region)
+        CHECK(position == DefaultTimelapsePos);
+    else
+        CHECK(Polygon::new_scale(bed).contains(Point::new_scale(static_cast<double>(position.x()), static_cast<double>(position.y()))));
+}
+
+TEST_CASE("Prime Tower generation rejects an explicit empty shared printable region", "[Print][WipeTower][BedShape]")
+{
+    // One physical nozzle bypasses multi-nozzle geometric mapping; two object-assigned
+    // filaments still require real tool ordering and Prime Tower generation.
+    const int region = GENERATE(0, 1, 2); // missing, valid, explicitly empty
+    INFO("printable region mode " << region);
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"nozzle_diameter", "0.4"},
+        {"single_extruder_multi_material", 1},
+        {"enable_prime_tower", 1},
+        {"prime_tower_width", 35},
+        {"wipe_tower_x", "50"},
+        {"wipe_tower_y", "50"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+    });
+    if (region == 0)
+        config.erase("extruder_printable_area");
+    else
+        config.set_deserialize_strict("extruder_printable_area",
+            region == 1 ? "0x0,200x0,200x200,0x200" : "0x0,200x0,200x200,0x200#");
+
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}}, {{"extruder", 2}}};
+    Print print;
+    Model model;
+    REQUIRE_NOTHROW(init_print(std::vector<TriangleMesh>{cube(2), cube(2)}, print, model, config, &overrides));
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.has_wipe_tower());
+    if (region == 2) {
+        REQUIRE(print.config().extruder_printable_area.values.size() == 2);
+        REQUIRE(print.config().extruder_printable_area.values.back().empty());
+        bool rejected = false;
+        try {
+            print.process();
+        } catch (const SlicingError &error) {
+            rejected = true;
+            CHECK(std::string(error.what()) == I18N::translate("Prime Tower") +
+                I18N::translate(" is partially outside the printable area, and it cannot be printed.\n"));
+        }
+        REQUIRE(rejected);
+        // An earlier validation failure cannot satisfy these: _make_wipe_tower has
+        // populated tool ordering, but rejects the region before generating paths.
+        CHECK(print.step_state_with_timestamp(psWipeTower).state == PrintStateBase::STARTED);
+        CHECK(print.wipe_tower_data().tool_ordering.has_wipe_tower());
+        CHECK(print.wipe_tower_data().tool_changes.empty());
+    } else {
+        REQUIRE_NOTHROW(print.process());
+        CHECK(print.is_step_done(psWipeTower));
+        CHECK(print.wipe_tower_data().tool_ordering.has_wipe_tower());
+        CHECK_FALSE(print.wipe_tower_data().tool_changes.empty());
     }
 }

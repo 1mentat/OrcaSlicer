@@ -724,8 +724,7 @@ TEST_CASE("Framework copying preserves relative symlink targets", "[utils]") {
 }
 #endif
 
-// Known bug: copy_framework (utils.cpp) ignores the result of its recursive call for a nested directory and still returns true; fixed by the follow-up fix PR
-TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils][!shouldfail]") {
+TEST_CASE("Framework copying propagates a failure from a nested directory", "[utils]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
     boost::filesystem::create_directories(src / "nested");
@@ -768,16 +767,7 @@ TEST_CASE("Recursive directory copying throws when a directory occupies a file's
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
 
-// Known bug: ScopeGuard move leaves the moved-from std::function non-empty on libc++ (double fire); fixed by the follow-up fix PR.
-// ScopeGuard relies on a moved-from std::function being empty. libstdc++ and MSVC empty it; libc++ keeps a
-// small closure in the source, so the moved-from guard fires too. The move tests can only fail where that happens.
-#ifdef _LIBCPP_VERSION
-#define SCOPE_GUARD_MOVE_TAGS "[utils][!shouldfail]"
-#else
-#define SCOPE_GUARD_MOVE_TAGS "[utils]"
-#endif
-
-TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils]") {
     size_t calls = 0;
     {
         std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
@@ -789,7 +779,7 @@ TEST_CASE("ScopeGuard move construction transfers the callback to the new guard"
     CHECK(calls == 1);
 }
 
-TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils]") {
     size_t calls = 0;
     {
         ScopeGuard guard;
@@ -801,7 +791,7 @@ TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", SCO
     CHECK(calls == 1);
 }
 
-TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", SCOPE_GUARD_MOVE_TAGS) {
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils]") {
     size_t calls = 0;
     {
         ScopeGuard destination([&calls] { calls += 10; });
@@ -813,8 +803,6 @@ TEST_CASE("ScopeGuard move assignment replaces the destination callback without 
     }
     CHECK(calls == 1);
 }
-
-#undef SCOPE_GUARD_MOVE_TAGS
 
 TEST_CASE("ScopeGuard reset suppresses the callback", "[utils]") {
     size_t calls = 0;
@@ -1027,23 +1015,47 @@ TEST_CASE("Published model links accept the canonical site roots over http and h
     CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
 }
 
-// Known bug: unescaped '.' in the is_printables_link host pattern (Utils.hpp) matches any character; fixed by the follow-up fix PR
-TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_printables_link("https://printablesXcom"));
 }
 
-// Known bug: unescaped '.' in the is_makerworld_link host pattern (Utils.hpp); fixed by the follow-up fix PR
-TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_makerworld_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_makerworld_link("https://makerworldXcom"));
 }
 
-// Known bug: unescaped '.' in the is_thingiverse_link host pattern (Utils.hpp); fixed by the follow-up fix PR
-TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils][!shouldfail]") {
+TEST_CASE("is_thingiverse_link matches the dots in its host name literally", "[utils]") {
     CHECK_FALSE(is_thingiverse_link("https://wwwXthingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://www.thingiverseXcom"));
 }
 
-// Known bug: is_makerworld_link (Utils.hpp) uses regex_match, so only the bare site root matches and a MakerWorld model URL
-// does not; fixed by the follow-up fix PR
-TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils][!shouldfail]") {
+TEST_CASE("is_makerworld_link accepts a MakerWorld model URL, not only the site root", "[utils]") {
     CHECK(is_makerworld_link("https://makerworld.com/en/models/12345"));
+}
+
+TEST_CASE("MakerWorld links retain their exact HTTP origin across resource suffixes", "[utils]") {
+    const std::vector<std::string> urls{
+        "https://makerworld.com", "http://makerworld.com/", "HTTP://MAKERWORLD.COM/en/models/12345",
+        "https://makerworld.com/en/models/12345?from=app#profileId-67", "https://makerworld.com?from=app",
+        "https://makerworld.com/#profile", "https://makerworld.com/en/@user", "https://makerworld.com/api/file.3mf?name=My%20File"};
+    for (const auto& url : urls) {
+        CAPTURE(url);
+        CHECK(is_makerworld_link(url));
+    }
+}
+
+TEST_CASE("MakerWorld links reject alternate authorities and malformed HTTP origins", "[utils]") {
+    const std::vector<std::string> urls{
+        "", "makerworld.com/en/models/12345", "//makerworld.com/en/models/12345", "ftp://makerworld.com/x",
+        "https://makerworldXcom/x", "https://makerworld.com.evil/x", "https://evil.example/makerworld.com",
+        "https://makerworld.com@evil.example/x", "https://user@makerworld.com/x", "https://www.makerworld.com/x",
+        "https://makerworld.com.cn/x", "https://makerworld.bblmw.com/x", "https://makerworld.com:443/x",
+        "https://makerworld.com./x", "https://makerworld%2ecom/x", "https://makerworld.com%40evil.example/x",
+        "https://makerworld.com\\@evil.example/x", "https://makerworld.com/x\\y", " https://makerworld.com/x",
+        "https://makerworld.com/x ", "https://makerworld.com/line\nfeed", "https://makerworld.com/\tfile",
+        std::string("https://makerworld.com") + '\0' + "/file", std::string("https://makerworld.com/") + char(0x7f),
+        "orcaslicer://open?file=https://makerworld.com/en/models/12345"};
+    for (const auto& url : urls) {
+        CAPTURE(url);
+        CHECK_FALSE(is_makerworld_link(url));
+    }
 }

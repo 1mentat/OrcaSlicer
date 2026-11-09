@@ -1,6 +1,8 @@
 #include "FillBedJob.hpp"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Exception.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -240,6 +242,7 @@ void FillBedJob::prepare()
 
 void FillBedJob::process(Ctl &ctl)
 {
+    m_bed_error.clear();
     auto statustxt = _u8L("Filling");
     ctl.call_on_main_thread([this] { prepare(); }).wait();
     ctl.update_status(0, statustxt);
@@ -247,7 +250,12 @@ void FillBedJob::process(Ctl &ctl)
     if (m_object_idx == -1 || m_selected.empty()) return;
 
     update_arrange_params(params, m_plater->config(), m_selected);
-    m_bedpts = get_shrink_bedpts(m_plater->config(), params);
+    try {
+        m_bedpts = get_shrink_bedpts(m_plater->config(), params);
+    } catch (const Slic3r::RuntimeError &ex) {
+        m_bed_error = ex.what();
+        return;
+    }
 
     auto &partplate_list               = m_plater->get_partplate_list();
     auto &print                        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
@@ -302,6 +310,11 @@ FillBedJob::FillBedJob(bool instances) : m_plater{wxGetApp().plater()}, m_instan
 
 void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
+    if (!m_bed_error.empty()) {
+        if (!canceled)
+            show_error(m_plater, m_bed_error);
+        return;
+    }
     // Ignore the arrange result if aborted.
     if (canceled || eptr)
         return;

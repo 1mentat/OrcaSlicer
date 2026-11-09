@@ -8,6 +8,7 @@
 #include <array>
 #include <functional>
 #include <opencv2/core/mat.hpp>
+#include <opencv2/core/types.hpp>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,12 @@ struct TextureToColorSettings {
 bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
                     std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings = TextureToColorSettings(),
                     AlgoProgressCallback progress_callback = nullptr, AlgoCancelCallback cancel_callback = nullptr);
+
+// Per-face regions use local UVs in [0,1] and restrict bilinear reads to the
+// selected atlas rectangle. An empty vector retains full-image sampling.
+bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
+                    std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings,
+                    AlgoProgressCallback progress_callback, AlgoCancelCallback cancel_callback, const std::vector<cv::Rect>& texture_regions);
 
 /**
  * @brief Turn pre-computed per-face colors into a clustered color mesh (no texture/UV).

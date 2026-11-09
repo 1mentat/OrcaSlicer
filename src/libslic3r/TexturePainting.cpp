@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <limits>
 #include <opencv2/core/mat.hpp>
+#include <opencv2/core/types.hpp>
 #include <opencv2/core/matx.hpp>
 #include <set>
 #include <string>
@@ -136,21 +138,16 @@ static void extract_painted_mesh(
     painted.cluster_colors.assign(unique_colors.begin(), unique_colors.end());
 }
 
-// Build a vertically-stacked atlas from multiple textures and remap per-face UVs.
-//
-// Sub-textures are laid out left-aligned (x=0) at successive y offsets, with
-// atlas_w taken as the maximum width across all sub-textures. UVs must therefore
-// be remapped on BOTH axes so that faces belonging to a sub-texture narrower
-// than atlas_w sample inside that sub-texture's region (left side of the atlas)
-// instead of the right-side zero-padding. Materials that carry only a baseColor
-// (no map_Kd / glTF baseColorTexture) get their own 1x1 swatch at the bottom of
-// the atlas so their faces sample the correct flat colour rather than being
-// silently aliased onto textures[0].
+// Keep material regions in integer pixel coordinates. Local UVs are sampled
+// within each region so atlas dimensions cannot blend neighbouring materials.
 static bool build_multi_texture_atlas(
     const TexturedMesh& textured,
     cv::Mat& out_atlas,
-    std::vector<std::vector<Vec2f>>& out_uv_coords)
+    std::vector<std::vector<Vec2f>>& out_uv_coords,
+    std::vector<cv::Rect>& out_texture_regions)
 {
+    if (textured.textures.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return false;
     std::vector<cv::Mat> decoded;
     decoded.reserve(textured.textures.size());
     for (const auto& ti : textured.textures)
@@ -176,6 +173,8 @@ static bool build_multi_texture_atlas(
     int first_usable_tex = -1;
     for (size_t i = 0; i < decoded.size(); ++i) {
         if (decoded[i].empty()) continue;
+        if (decoded[i].rows > std::numeric_limits<int>::max() - atlas_h)
+            return false;
         if (first_usable_tex < 0) first_usable_tex = static_cast<int>(i);
         y_offsets[i] = atlas_h;
         atlas_w = std::max(atlas_w, decoded[i].cols);
@@ -195,10 +194,18 @@ static bool build_multi_texture_atlas(
         if (resolve_tex_idx(mat_idx) >= 0) continue;
         if (static_cast<size_t>(mat_idx) >= textured.material_colors.size()) continue;
         if (mat_solid_y.find(mat_idx) != mat_solid_y.end()) continue;
+        if (atlas_h == std::numeric_limits<int>::max())
+            return false;
         mat_solid_y[mat_idx]     = atlas_h++;
         mat_solid_color[mat_idx] = textured.material_colors[mat_idx];
     }
 
+    if (static_cast<size_t>(atlas_w) > std::numeric_limits<size_t>::max() / 3)
+        return false;
+    const size_t row_bytes = static_cast<size_t>(atlas_w) * 3;
+    if (static_cast<size_t>(atlas_h) > std::numeric_limits<size_t>::max() / row_bytes ||
+        static_cast<size_t>(atlas_h) > static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / row_bytes)
+        return false;
     out_atlas = cv::Mat::zeros(atlas_h, atlas_w, CV_8UC3);
     for (size_t i = 0; i < decoded.size(); ++i) {
         if (decoded[i].empty()) continue;
@@ -215,12 +222,13 @@ static bool build_multi_texture_atlas(
     }
 
     out_uv_coords.resize(nf);
+    out_texture_regions.resize(nf);
     for (size_t fi = 0; fi < nf; ++fi) {
         const int mat_idx = (fi < textured.material_ids.size()) ? textured.material_ids[fi] : -1;
         const int tex_idx = resolve_tex_idx(mat_idx);
 
         // Pick the atlas region this face samples from.
-        int  y_off = 0, x_off = 0, th = atlas_h, tw = atlas_w;
+        int y_off = 0, th = atlas_h, tw = atlas_w;
         bool use_solid = false;
         if (tex_idx >= 0) {
             y_off = y_offsets[tex_idx];
@@ -232,16 +240,13 @@ static bool build_multi_texture_atlas(
             tw        = 1;
             use_solid = true;
         } else if (first_usable_tex >= 0) {
-            // Last-resort fallback: faces without a material or without any
-            // baseColor still need somewhere to sample; the first usable
-            // texture preserves legacy behaviour and, with the per-axis
-            // remapping below, no longer aliases onto the zero-padded right
-            // margin even when sub-textures have unequal widths.
+            // Preserve the first-usable-texture fallback for a material-less face.
             y_off = y_offsets[first_usable_tex];
             th    = decoded[first_usable_tex].rows;
             tw    = decoded[first_usable_tex].cols;
         }
 
+        out_texture_regions[fi] = cv::Rect(0, y_off, tw, th);
         out_uv_coords[fi].resize(3);
         for (int vi = 0; vi < 3; ++vi) {
             float u = 0.f, v = 0.f;
@@ -259,22 +264,12 @@ static bool build_multi_texture_atlas(
                 }
             }
             if (use_solid) {
-                // Aim at the centre of the 1x1 swatch so bilinear sampling
-                // (in tex2color) cannot drift into neighbouring rows.
-                const float u_atlas = (x_off + 0.5f) / static_cast<float>(atlas_w);
-                const float v_atlas = (y_off + 0.5f) / static_cast<float>(atlas_h);
-                out_uv_coords[fi][vi] = Vec2f(u_atlas, v_atlas);
+                out_uv_coords[fi][vi] = Vec2f(0.f, 0.f);
             } else {
-                // Wrap to [0,1) on both axes (OBJ tile UVs may step outside
-                // the unit square), then scale by the sub-texture extents so
-                // samples land inside its actual region. Without scaling u,
-                // any sub-texture narrower than atlas_w would have all its
-                // faces sampled from the right-side zero-padding.
-                u = u - std::floor(u);
-                v = v - std::floor(v);
-                const float u_atlas = (x_off + u * tw) / static_cast<float>(atlas_w);
-                const float v_atlas = (y_off + v * th) / static_cast<float>(atlas_h);
-                out_uv_coords[fi][vi] = Vec2f(u_atlas, v_atlas);
+                if (!std::isfinite(u) || !std::isfinite(v))
+                    return false;
+                // Preserve the existing per-vertex repetition of tiled UVs.
+                out_uv_coords[fi][vi] = Vec2f(u - std::floor(u), v - std::floor(v));
             }
         }
     }
@@ -295,12 +290,13 @@ bool texture_to_painting(
     tex2color::TriMesh input_mesh;
     std::vector<std::vector<Vec2f>> uv_coords;
 
+    std::vector<cv::Rect> texture_regions;
     const bool multi_tex = textured.textures.size() > 1 && !textured.material_texture_map.empty();
 
     if (multi_tex) {
-        if (!build_multi_texture_atlas(textured, texture, uv_coords))
+        if (!build_multi_texture_atlas(textured, texture, uv_coords, texture_regions))
             return false;
-        // Build mesh geometry (atlas UVs already computed above)
+        // Build mesh geometry (local UVs and material regions computed above)
         const size_t nv = textured.vertices.size();
         const size_t nf = textured.indices.size();
         input_mesh.vertices.resize(nv);
@@ -355,7 +351,7 @@ bool texture_to_painting(
     bool ok = tex2color::TextureToColor(
         input_mesh, uv_coords, texture,
         color_mesh, face_colors,
-        algo_settings, algo_progress, algo_cancel);
+        algo_settings, algo_progress, algo_cancel, texture_regions);
 
     if (!ok)
         return false;

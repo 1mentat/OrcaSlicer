@@ -1,4 +1,6 @@
 #include "Arrange.hpp"
+#include "Config.hpp"
+#include "Exception.hpp"
 #include "ExPolygon.hpp"
 #include "Point.hpp"
 #include "Print.hpp"
@@ -307,6 +309,13 @@ void update_selected_items_axis_align(ArrangePolygons& selected, const DynamicPr
 Points get_shrink_bedpts(const DynamicPrintConfig* print_cfg, const ArrangeParams& params)
 {
     Points bedpts = get_bed_shape(*print_cfg);
+    if (bedpts.empty()) {
+        const auto *areas = print_cfg->opt<ConfigOptionPointsGroups>("extruder_printable_area");
+        if (areas && !areas->values.empty() && get_shared_poly(areas->values).empty())
+            throw RuntimeError("Extruder printable areas have no common printable region.");
+        // Preserve the generic missing-bed/infinite-bed convention.
+        return bedpts;
+    }
     // shrink bed by moving to center by dist
     auto shrinkFun = [](Points& bedpts, double dist, int direction) {
 #define SGN(x) ((x) >= 0 ? 1 : -1)
