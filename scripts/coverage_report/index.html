@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>OrcaSlicer · Coverage</title>
+    <style>
+      :root {
+        --paper: #f7faf9;
+        --panel: #fff;
+        --ink: #172d2a;
+        --muted: #506863;
+        --line: #cfddd8;
+        --accent: #08776d;
+        --soft: #e4f2ed;
+        --error: #a73930;
+        --focus: #087f75;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #13201e;
+          --panel: #192a27;
+          --ink: #e9f3ef;
+          --muted: #a9c0b7;
+          --line: #38524a;
+          --accent: #69d2b9;
+          --soft: #233e35;
+          --error: #ffb4a9;
+          --focus: #a0ecd7;
+          color-scheme: dark;
+        }
+      }
+      [data-theme="light"] {
+        --paper: #f7faf9;
+        --panel: #fff;
+        --ink: #172d2a;
+        --muted: #506863;
+        --line: #cfddd8;
+        --accent: #08776d;
+        --soft: #e4f2ed;
+        --error: #a73930;
+        --focus: #087f75;
+        color-scheme: light;
+      }
+      [data-theme="dark"] {
+        --paper: #13201e;
+        --panel: #192a27;
+        --ink: #e9f3ef;
+        --muted: #a9c0b7;
+        --line: #38524a;
+        --accent: #69d2b9;
+        --soft: #233e35;
+        --error: #ffb4a9;
+        --focus: #a0ecd7;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+        scrollbar-color: var(--muted) var(--paper);
+      }
+      ::selection {
+        background: var(--ink);
+        color: var(--paper);
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          16px/1.55 system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+      a {
+        color: var(--accent);
+        text-underline-offset: 3px;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+        color: inherit;
+      }
+      button,
+      select {
+        cursor: pointer;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 3px;
+      }
+      button {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 6px;
+        padding: 7px 12px;
+      }
+      button:hover {
+        background: var(--soft);
+      }
+      button[aria-pressed="true"] {
+        background: var(--ink);
+        color: var(--paper);
+        border-color: var(--ink);
+      }
+      .wrap {
+        max-width: 1180px;
+        margin: auto;
+        padding: 0 36px;
+      }
+      .top {
+        border-bottom: 1px solid var(--line);
+      }
+      .top .wrap {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 76px;
+        gap: 20px;
+      }
+      .brand {
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .brand span {
+        font-weight: 400;
+        color: var(--muted);
+        margin-left: 12px;
+      }
+      .tools {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        font-size: 14px;
+      }
+      main {
+        padding-top: 44px !important;
+        padding-bottom: 36px !important;
+      }
+      h1 {
+        font-size: 36px;
+        font-weight: 650;
+        letter-spacing: -0.03em;
+        line-height: 1.15;
+        margin: 0 0 12px;
+      }
+      h2 {
+        font-size: 22px;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+        margin: 0;
+      }
+      p {
+        max-width: 75ch;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 20px;
+        margin-top: 20px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      code,
+      .numeric,
+      .file-path {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      .meta code {
+        color: var(--ink);
+      }
+      .notice {
+        background: var(--soft);
+        padding: 14px 18px;
+        margin: 24px 0 0;
+        border-radius: 6px;
+      }
+      .notice.error {
+        color: var(--error);
+      }
+      .measures {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 26px 60px;
+        padding: 30px 0 26px;
+      }
+      .measure .label {
+        font-size: 14px;
+        color: var(--muted);
+        display: block;
+      }
+      .measure .value {
+        font-size: 28px;
+        line-height: 1.4;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .measure .count {
+        font-size: 13px;
+        color: var(--muted);
+        display: block;
+      }
+      .delta {
+        font-size: 14px;
+        color: var(--muted);
+        margin-left: 12px;
+        white-space: nowrap;
+      }
+      .trend {
+        padding: 24px 26px 12px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .section-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .range {
+        display: flex;
+        gap: 6px;
+      }
+      .range button {
+        font-size: 13px;
+        padding: 5px 10px;
+      }
+      .chart {
+        width: 100%;
+        height: auto;
+        display: block;
+        margin-top: 18px;
+        overflow: visible;
+      }
+      .chart text {
+        font:
+          12px system-ui,
+          sans-serif;
+        fill: var(--muted);
+      }
+      .chart .grid {
+        stroke: var(--line);
+        stroke-width: 1;
+      }
+      .chart .series {
+        stroke: var(--accent);
+        stroke-width: 2.5;
+        fill: none;
+      }
+      .chart circle {
+        fill: var(--accent);
+        stroke: var(--panel);
+        stroke-width: 2;
+      }
+      .chart circle:focus {
+        outline: none;
+        stroke: var(--ink);
+        stroke-width: 3;
+      }
+      .chart-note {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 12px 0;
+      }
+      .inventory {
+        margin-top: 44px;
+      }
+      .inventory .section-head {
+        align-items: flex-end;
+      }
+      .filter {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: flex-end;
+      }
+      .filter label {
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+      input,
+      select {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        min-height: 38px;
+        padding: 7px 10px;
+        font-size: 14px;
+      }
+      input {
+        width: 250px;
+        caret-color: var(--accent);
+      }
+      input::placeholder {
+        color: var(--muted);
+        opacity: 1;
+      }
+      .table-scroll {
+        overflow-x: auto;
+        margin-top: 20px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      th {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      th,
+      td {
+        padding: 12px 14px;
+        text-align: right;
+        border-bottom: 1px solid var(--line);
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+        padding-left: 0;
+      }
+      th:last-child,
+      td:last-child {
+        padding-right: 0;
+      }
+      tbody tr:hover {
+        background: var(--soft);
+      }
+      .file-path {
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        display: inline;
+      }
+      .file-links {
+        font:
+          11px system-ui,
+          sans-serif;
+        margin-left: 12px;
+        white-space: nowrap;
+      }
+      .empty {
+        padding: 32px 0;
+        color: var(--muted);
+      }
+      .table-note {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 14px;
+      }
+      .evidence {
+        margin-top: 44px;
+        padding-top: 24px;
+        border-top: 1px solid var(--line);
+      }
+      details {
+        margin-top: 16px;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 150px minmax(0, 1fr);
+        gap: 8px 22px;
+        font-size: 13px;
+        max-width: 900px;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        background: var(--panel);
+        padding: 18px;
+        overflow: auto;
+        font-size: 12px;
+        max-height: 300px;
+      }
+      .footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid var(--line);
+        padding-top: 24px;
+        margin-top: 34px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 700px) {
+        .wrap {
+          padding: 0 20px;
+        }
+        .top .wrap {
+          min-height: 66px;
+        }
+        .tools {
+          gap: 12px;
+        }
+        .brand span {
+          display: none;
+        }
+        main {
+          padding-top: 30px !important;
+        }
+        h1 {
+          font-size: 30px;
+        }
+        .measures {
+          gap: 20px 30px;
+        }
+        .measure .value {
+          font-size: 25px;
+        }
+        .delta {
+          display: block;
+          margin-left: 0;
+          font-size: 12px;
+        }
+        .trend {
+          padding: 18px 16px 10px;
+        }
+        .section-head {
+          align-items: flex-start;
+        }
+        .filter {
+          width: 100%;
+          gap: 10px;
+        }
+        .filter input {
+          width: 100%;
+        }
+        .filter > div:first-child {
+          flex: 1;
+          min-width: 170px;
+        }
+        th,
+        td {
+          padding: 12px 10px;
+        }
+        .file-path {
+          font-size: 11px;
+          min-width: 170px;
+        }
+        .file-links {
+          display: block;
+          margin-left: 0;
+          margin-top: 3px;
+        }
+        dl {
+          grid-template-columns: 1fr;
+          gap: 2px;
+        }
+        dd {
+          margin-bottom: 9px;
+        }
+        .tools a {
+          display: none;
+        }
+      }
+      @media print {
+        button,
+        .filter,
+        .tools {
+          display: none;
+        }
+        body {
+          background: white;
+          color: black;
+        }
+        .wrap {
+          max-width: none;
+        }
+        .trend {
+          break-inside: avoid;
+        }
+        table {
+          font-size: 11px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <div class="brand">OrcaSlicer <span>/ Coverage</span></div>
+        <nav class="tools" aria-label="Report tools">
+          <a href="summary.json">Measurement JSON</a
+          ><button id="theme" type="button">Dark theme</button>
+        </nav>
+      </div>
+    </header>
+    <main class="wrap">
+      <h1>Coverage history</h1>
+      <p class="sub" id="scope"></p>
+      <div class="meta">
+        <span id="branch"></span><code id="commit"></code
+        ><time id="measured"></time><a id="run" hidden>View CI run ↗</a>
+      </div>
+      <div class="notice" id="notice" role="status" hidden></div>
+      <section
+        class="measures"
+        id="measures"
+        aria-label="Current measurement"
+      ></section>
+      <section class="trend" aria-labelledby="history-heading">
+        <div class="section-head">
+          <h2 id="history-heading">Line coverage over time</h2>
+          <div class="range" aria-label="History range">
+            <button type="button" data-range="30" aria-pressed="true">
+              30 runs</button
+            ><button type="button" data-range="90" aria-pressed="false">
+              90 runs
+            </button>
+          </div>
+        </div>
+        <svg
+          id="chart"
+          class="chart"
+          viewBox="0 0 1000 265"
+          role="img"
+          aria-label="Line coverage history"
+        ></svg>
+        <p class="chart-note" id="history-note"></p>
+      </section>
+      <section class="inventory" aria-labelledby="files-heading">
+        <div class="section-head">
+          <div>
+            <h2 id="files-heading">Source files</h2>
+            <p class="sub" id="file-count"></p>
+          </div>
+          <div class="filter">
+            <div>
+              <label for="search">Find a file</label
+              ><input
+                id="search"
+                type="search"
+                placeholder="Search source paths"
+                autocomplete="off"
+              />
+            </div>
+            <div>
+              <label for="sort">Sort by</label
+              ><select id="sort">
+                <option value="path">Source path</option>
+                <option value="gaps">Most uncovered lines</option>
+                <option value="coverage">Lowest coverage</option>
+                <option value="change">Largest decrease</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Source path</th>
+                <th scope="col">Lines</th>
+                <th scope="col">Covered / total</th>
+                <th scope="col">Uncovered</th>
+                <th scope="col">Change</th>
+              </tr>
+            </thead>
+            <tbody id="files"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="empty" hidden>
+          No source paths match this search.
+        </p>
+        <p class="table-note">
+          Changes are percentage points against the previous compatible
+          measurement. A dash means there is no comparison.<span
+            id="annotation-link"
+          ></span>
+        </p>
+      </section>
+      <section class="evidence" aria-labelledby="evidence-heading">
+        <h2 id="evidence-heading">Scope &amp; evidence</h2>
+        <p class="sub" id="exclusions"></p>
+        <details>
+          <summary>Measurement configuration</summary>
+          <dl id="config"></dl>
+        </details>
+        <details id="diagnostics" hidden>
+          <summary>Incomplete-run diagnostics</summary>
+          <pre id="errors"></pre>
+        </details>
+      </section>
+      <footer class="footer">
+        <span>Coverage describes executed code, not correctness.</span
+        ><span
+          >Report works offline · <a href="summary.md">Markdown summary</a> ·
+          <a href="history.json">History JSON</a></span
+        >
+      </footer>
+      <noscript
+        ><p>
+          This report uses local JavaScript for its history and file table. The
+          complete measurement is available in
+          <a href="summary.json">summary.json</a> and
+          <a href="summary.md">summary.md</a>.
+        </p></noscript
+      >
+    </main>
+    <script id="coverage-data" type="application/json">
+      __COVERAGE_DATA__
+    </script>
+    <script>
+      "use strict";
+      const report = JSON.parse(
+        document.getElementById("coverage-data").textContent,
+      );
+      const node = (id) => document.getElementById(id);
+      const count = (value) => value.toLocaleString("en-US");
+      const percent = (value) =>
+        value ? value.percent.toFixed(2) + "%" : "Not measured";
+      const delta = (value) =>
+        value === null || value === undefined
+          ? "—"
+          : (value >= 0 ? "+" : "") + value.toFixed(2) + " pp";
+      node("scope").textContent = report.scope;
+      node("branch").textContent = report.branch;
+      node("commit").textContent = report.commit.slice(0, 12);
+      node("measured").dateTime = report.measured_at;
+      node("measured").textContent = new Date(
+        report.measured_at,
+      ).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      if (report.run_url) {
+        node("run").href = report.run_url;
+        node("run").hidden = false;
+      }
+      const ageHours = Math.max(
+        0,
+        (Date.now() - Date.parse(report.measured_at)) / 3600000,
+      );
+      if (!report.valid) {
+        node("notice").hidden = false;
+        node("notice").classList.add("error");
+        node("notice").textContent =
+          "Incomplete measurement: " +
+          (report.source_verified
+            ? report.status.replaceAll("_", " ")
+            : "source identity could not be verified") +
+          ". This run does not establish a coverage baseline.";
+        node("diagnostics").hidden = false;
+        node("errors").textContent = JSON.stringify(
+          report.integrity_failures,
+          null,
+          2,
+        );
+      } else if (ageHours > 48) {
+        node("notice").hidden = false;
+        node("notice").textContent =
+          "This measurement is " +
+          Math.floor(ageHours / 24) +
+          " days old. The source commit and measurement time identify what was tested.";
+      }
+      for (const key of ["lines", "functions", "branches"]) {
+        const value = report.valid ? report.summary[key] : null;
+        const item = document.createElement("div");
+        item.className = "measure";
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = key[0].toUpperCase() + key.slice(1);
+        const number = document.createElement("span");
+        number.className = "value numeric";
+        number.textContent = percent(value);
+        item.append(label, number);
+        if (key === "lines") {
+          const change = document.createElement("span");
+          change.className = "delta";
+          change.textContent = report.baseline
+            ? delta(report.change)
+            : report.history.length > 1
+              ? "No compatible comparison"
+              : "First compatible baseline";
+          if (!report.valid) change.textContent = "No valid result";
+          item.append(change);
+        }
+        const totals = document.createElement("span");
+        totals.className = "count numeric";
+        totals.textContent = value
+          ? count(value.covered) + " / " + count(value.count) + " executable"
+          : "Outside this measurement";
+        item.append(totals);
+        node("measures").append(item);
+      }
+      function svgElement(name, attrs, text) {
+        const result = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          name,
+        );
+        for (const [key, value] of Object.entries(attrs))
+          result.setAttribute(key, String(value));
+        if (text !== undefined) result.textContent = text;
+        return result;
+      }
+      function drawHistory(limit) {
+        const chart = node("chart");
+        chart.replaceChildren();
+        const data = report.history.slice(-limit);
+        for (const tick of [0, 25, 50, 75, 100]) {
+          const y = 225 - tick * 2;
+          chart.append(
+            svgElement("line", {
+              x1: 50,
+              x2: 980,
+              y1: y,
+              y2: y,
+              class: "grid",
+            }),
+            svgElement(
+              "text",
+              { x: 39, y: y + 4, "text-anchor": "end" },
+              tick + "%",
+            ),
+          );
+        }
+        if (!data.length) {
+          chart.append(
+            svgElement(
+              "text",
+              { x: 520, y: 125, "text-anchor": "middle" },
+              "No valid measurements in this configuration yet",
+            ),
+          );
+          node("history-note").textContent =
+            "Incomplete runs are excluded from this series.";
+          return;
+        }
+        const firstTime = Date.parse(data[0].measured_at);
+        const elapsed =
+          Date.parse(data[data.length - 1].measured_at) - firstTime;
+        const x = (index) =>
+          elapsed === 0
+            ? 515
+            : 60 +
+              ((Date.parse(data[index].measured_at) - firstTime) * 910) /
+                elapsed;
+        const y = (item) => 225 - item.summary.lines.percent * 2;
+        if (data.length > 1) {
+          chart.append(
+            svgElement("polyline", {
+              points: data
+                .map((item, index) => x(index) + "," + y(item))
+                .join(" "),
+              class: "series",
+            }),
+          );
+        }
+        data.forEach((item, index) => {
+          const title =
+            new Date(item.measured_at).toLocaleString() +
+            " · " +
+            item.commit.slice(0, 12) +
+            " · " +
+            percent(item.summary.lines);
+          const point = svgElement("circle", {
+            cx: x(index),
+            cy: y(item),
+            r: data.length > 50 ? 3 : 4.5,
+            tabindex: 0,
+            "aria-label": title,
+          });
+          point.append(svgElement("title", {}, title));
+          chart.append(point);
+        });
+        const date = (item) =>
+          new Date(item.measured_at).toLocaleDateString(undefined, {
+            month: "short",
+            day: "numeric",
+          });
+        chart.append(svgElement("text", { x: 60, y: 253 }, date(data[0])));
+        if (data.length > 1)
+          chart.append(
+            svgElement(
+              "text",
+              { x: 970, y: 253, "text-anchor": "end" },
+              date(data[data.length - 1]),
+            ),
+          );
+        node("history-note").textContent =
+          data.length === 1
+            ? "Baseline established. A second compatible run will show the first change."
+            : data.length +
+              " valid measurements · same scope and toolchain · incomplete runs excluded";
+        chart.setAttribute(
+          "aria-label",
+          "Line coverage: " +
+            percent(data[0].summary.lines) +
+            " on " +
+            date(data[0]) +
+            " to " +
+            percent(data[data.length - 1].summary.lines) +
+            " on " +
+            date(data[data.length - 1]) +
+            ". " +
+            data.length +
+            " measurements.",
+        );
+      }
+      document.querySelectorAll("[data-range]").forEach((button) =>
+        button.addEventListener("click", () => {
+          document
+            .querySelectorAll("[data-range]")
+            .forEach((other) =>
+              other.setAttribute("aria-pressed", String(other === button)),
+            );
+          drawHistory(Number(button.dataset.range));
+        }),
+      );
+      function renderFiles() {
+        const query = node("search").value.toLowerCase();
+        let files = report.files.filter((item) =>
+          item.path.toLowerCase().includes(query),
+        );
+        const value = (item) => item.summary.lines;
+        const order = node("sort").value;
+        files.sort((a, b) => {
+          if (order === "gaps")
+            return (
+              (value(b)?.count ?? 0) -
+              (value(b)?.covered ?? 0) -
+              ((value(a)?.count ?? 0) - (value(a)?.covered ?? 0))
+            );
+          if (order === "coverage")
+            return (value(a)?.percent ?? 101) - (value(b)?.percent ?? 101);
+          if (order === "change")
+            return (a.change ?? Infinity) - (b.change ?? Infinity);
+          return a.path.localeCompare(b.path);
+        });
+        node("files").replaceChildren();
+        for (const file of files) {
+          const row = document.createElement("tr");
+          const first = document.createElement("td");
+          const path = document.createElement(
+            file.annotation_url || file.source_url ? "a" : "span",
+          );
+          path.className = "file-path";
+          path.textContent = file.path;
+          if (path.tagName === "A")
+            path.href = file.annotation_url || file.source_url;
+          first.append(path);
+          if (file.annotation_url && file.source_url) {
+            const source = document.createElement("a");
+            source.className = "file-links";
+            source.textContent = "Source ↗";
+            source.href = file.source_url;
+            first.append(source);
+          }
+          row.append(first);
+          const value = report.valid ? file.summary.lines : null;
+          for (const text of [
+            percent(value),
+            value ? count(value.covered) + " / " + count(value.count) : "—",
+            value ? count(value.count - value.covered) : "—",
+            delta(file.change),
+          ]) {
+            const cell = document.createElement("td");
+            cell.className = "numeric";
+            cell.textContent = text;
+            row.append(cell);
+          }
+          node("files").append(row);
+        }
+        node("empty").hidden = files.length > 0;
+        node("file-count").textContent =
+          count(files.length) + " of " + count(report.files.length) + " files";
+      }
+      node("search").addEventListener("input", renderFiles);
+      node("sort").addEventListener("change", renderFiles);
+      node("exclusions").textContent =
+        "Excluded: " +
+        report.exclusions +
+        ". Percentages use the compiler's executable source mappings.";
+      for (const [label, value] of Object.entries({
+        Configuration: report.configuration,
+        Backend: report.backend,
+        Integrity: report.integrity_status,
+        Commit: report.commit,
+        "Measured at": report.measured_at,
+        "Baseline commit": report.baseline?.commit ?? "No compatible baseline",
+        Toolchain: JSON.stringify(report.tool_versions),
+      })) {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const detail = document.createElement("dd");
+        detail.textContent = value;
+        node("config").append(term, detail);
+      }
+      if (report.annotation_index) {
+        const link = document.createElement("a");
+        link.href = report.annotation_index;
+        link.textContent = " Browse all annotated source.";
+        node("annotation-link").append(link);
+      }
+      let theme;
+      try {
+        theme = localStorage.getItem("orca-coverage-theme");
+      } catch (error) {}
+      if (theme) document.documentElement.dataset.theme = theme;
+      function dark() {
+        return document.documentElement.dataset.theme
+          ? document.documentElement.dataset.theme === "dark"
+          : matchMedia("(prefers-color-scheme: dark)").matches;
+      }
+      function themeLabel() {
+        node("theme").textContent = dark() ? "Light theme" : "Dark theme";
+      }
+      node("theme").addEventListener("click", () => {
+        const theme = dark() ? "light" : "dark";
+        document.documentElement.dataset.theme = theme;
+        try {
+          localStorage.setItem("orca-coverage-theme", theme);
+        } catch (error) {}
+        themeLabel();
+      });
+      themeLabel();
+      drawHistory(30);
+      renderFiles();
+    </script>
+  </body>
+</html>
