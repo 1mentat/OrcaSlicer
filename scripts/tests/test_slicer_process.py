@@ -214,5 +214,43 @@ class RecordedProcessTests(unittest.TestCase):
             self.assertIs(caught.exception, interruption)
 
 
+class WindowsTimeoutCleanupTests(unittest.TestCase):
+    def check_taskkill_failure(self, cleanup_error):
+        process = unittest.mock.MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+        process.returncode = None
+        original_timeout = subprocess.TimeoutExpired(["native-tool"], 0.5)
+        process.communicate.side_effect = [original_timeout, ("partial stdout", "partial stderr")]
+        process.kill.side_effect = lambda: setattr(process, "returncode", 1)
+        process.__enter__.return_value = process
+        with patch.object(slicer_process.os, "name", "nt"), \
+                patch.object(slicer_process.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                patch.object(slicer_process.subprocess, "Popen", return_value=process) as launch, \
+                patch.object(slicer_process.subprocess, "run", side_effect=cleanup_error) as taskkill:
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                run_captured(["native-tool"], timeout=0.5)
+        launch.assert_called_once()
+        self.assertFalse(launch.call_args.kwargs["shell"])
+        self.assertEqual(launch.call_args.kwargs["creationflags"], 512)
+        taskkill.assert_called_once_with(
+            ["taskkill", "/PID", "12345", "/T", "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+        )
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.communicate.call_count, 2)
+        self.assertEqual(caught.exception.cmd, ["native-tool"])
+        self.assertEqual(caught.exception.timeout, 0.5)
+        self.assertEqual(caught.exception.output, "partial stdout")
+        self.assertEqual(caught.exception.stderr, "partial stderr")
+        self.assertEqual(caught.exception.returncode, 1)
+
+    def test_taskkill_oserror_preserves_original_timeout_and_drains(self):
+        self.check_taskkill_failure(OSError("taskkill unavailable"))
+
+    def test_taskkill_timeout_preserves_original_timeout_and_drains(self):
+        self.check_taskkill_failure(subprocess.TimeoutExpired(["taskkill"], 10))
+
+
 if __name__ == "__main__":
     unittest.main()
