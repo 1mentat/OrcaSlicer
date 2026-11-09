@@ -1,6 +1,8 @@
 Build
 Build.bat
 /build*/
+/coverage-output/
+/coverage-baseline/
 /out/
 CMakeLists.txt.user
 CMakeUserPresets.json

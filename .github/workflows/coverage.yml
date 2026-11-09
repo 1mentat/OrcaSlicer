@@ -1,0 +1,214 @@
+name: Core Coverage
+
+# Measurements are independent of pull requests, builds, and required checks.
+# Repositories opt into the daily run with COVERAGE_TRACKING=true.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Measure again even if this source commit is already recorded
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-coverage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    if: github.event_name == 'workflow_dispatch' || vars.COVERAGE_TRACKING == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      # Standard public runners have four CPUs. The script also caps this at
+      # available affinity; local Forgejo controllers retain the two-CPU default.
+      COVERAGE_BUILD_JOBS: 4
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      valid: ${{ steps.render.outputs.valid }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Identify source and restore durable history
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          python3 .github/scripts/coverage_history.py fetch coverage-baseline
+          measure=true
+          if [[ "$FORCE" != true && -f coverage-baseline/summary.json ]]; then
+            previous=$(python3 -c 'import json; print(json.load(open("coverage-baseline/summary.json"))["commit"])')
+            if [[ "$previous" == "$commit" ]]; then measure=false; fi
+          fi
+          echo "measure=$measure" >> "$GITHUB_OUTPUT"
+          if [[ "$measure" == false ]]; then
+            echo 'This exact source commit is already measured. Use a forced manual run to refresh the toolchain or measurement.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Reclaim unused hosted-runner SDK space
+        if: steps.source.outputs.measure == 'true'
+        run: |
+          # This disposable Linux job does not build Android or .NET software.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
+          df -h "$GITHUB_WORKSPACE"
+      - name: Install project system dependencies
+        if: steps.source.outputs.measure == 'true'
+        uses: ./.github/actions/apt-install-deps
+      - name: Install coverage toolchain
+        if: steps.source.outputs.measure == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang-18 llvm-18 lld-18 libclang-rt-18-dev cmake ninja-build ccache time locales
+          sudo localedef -i de_DE -f UTF-8 de_DE.UTF-8
+      - name: Check build storage headroom
+        if: steps.source.outputs.measure == 'true'
+        run: |
+          available=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')
+          if (( available < 18 * 1024 * 1024 )); then
+            echo 'Coverage needs at least 18 GiB free for cold dependencies, instrumented objects and profiles.' >&2
+            df -h "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+      - name: Identify dependency toolchain
+        if: steps.source.outputs.measure == 'true'
+        id: toolchain
+        run: |
+          key=$(bash scripts/build_coverage.sh --deps-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Check collector and report contracts
+        if: steps.source.outputs.measure == 'true'
+        env:
+          SLICER_COVERAGE_CLANG: clang++-18
+        run: |
+          python3 -m unittest scripts.tests.test_slicer_coverage scripts.tests.test_slicer_process \
+            scripts.tests.test_slicer_coverage_fixture scripts.tests.test_coverage_report \
+            scripts.tests.test_coverage_history
+      - name: Cache built dependency prefix
+        if: steps.source.outputs.measure == 'true'
+        id: dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: deps/build-coverage/OrcaSlicer_dep
+          key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}
+      - name: Build or validate dependency prefix
+        if: steps.source.outputs.measure == 'true'
+        run: bash scripts/build_coverage.sh --deps-only
+      - name: Save completed dependencies before measuring
+        if: steps.source.outputs.measure == 'true' && steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: deps/build-coverage/OrcaSlicer_dep
+          key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}
+      - name: Build and measure Release core
+        if: steps.source.outputs.measure == 'true'
+        run: bash scripts/build_coverage.sh
+      - name: Render report and summary
+        id: render
+        if: always() && steps.source.outputs.measure == 'true'
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          raw=coverage-output/measurement/coverage-report.json
+          if [[ ! -f "$raw" ]]; then
+            echo 'No coverage measurement was produced. Build diagnostics are attached; no baseline was published.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mkdir -p coverage-output/site
+          if [[ -d coverage-output/measurement/html ]]; then
+            cp -a coverage-output/measurement/html coverage-output/site/source
+          fi
+          previous=()
+          if [[ -f coverage-baseline/history.json ]]; then
+            previous+=(--history coverage-baseline/history.json --baseline coverage-baseline/summary.json)
+          fi
+          python3 scripts/coverage_report.py --report "$raw" --root . --out coverage-output/site \
+            --commit "$SOURCE_COMMIT" --repository "$SOURCE_REPOSITORY" --run-url "$RUN_URL" \
+            --branch "$SOURCE_BRANCH" --configuration 'linux-clang18-release-core-cad-v1' "${previous[@]}"
+          cat coverage-output/site/summary.md >> "$GITHUB_STEP_SUMMARY"
+          valid=$(python3 -c 'import json; print(str(json.load(open("coverage-output/site/summary.json"))["valid"]).lower())')
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
+      - name: Upload offline report
+        if: always() && steps.source.outputs.measure == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-coverage-report
+          path: coverage-output/site/
+          retention-days: 7
+          compression-level: 9
+          if-no-files-found: ignore
+      - name: Upload diagnostic evidence
+        if: always() && steps.source.outputs.measure == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-coverage-evidence
+          path: |
+            coverage-output/*.txt
+            coverage-output/*.log
+            coverage-output/measurement/
+            !coverage-output/measurement/html/
+          retention-days: 3
+          compression-level: 9
+          if-no-files-found: warn
+      - name: Package optional Pages site
+        if: success() && steps.render.outputs.valid == 'true' && github.ref == 'refs/heads/main' && vars.COVERAGE_PAGES == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: coverage-output/site
+
+  record:
+    name: Record coverage history
+    needs: measure
+    if: needs.measure.outputs.valid == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      promoted: ${{ steps.publish.outputs.promoted }}
+    steps:
+      # Only trusted main-branch CI helpers execute here. Never execute a file
+      # from the measurement artifact or restore a compiler/test cache here.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v8
+        with:
+          name: core-coverage-report
+          path: report
+      - name: Record validated metadata on the data branch
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.measure.outputs.commit }}
+        run: python3 .github/scripts/coverage_history.py publish report --commit "$SOURCE_COMMIT"
+
+  pages:
+    name: Publish optional coverage site
+    needs: [measure, record]
+    if: needs.record.outputs.promoted == 'true' && vars.COVERAGE_PAGES == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy report
+        id: deployment
+        uses: actions/deploy-pages@v4

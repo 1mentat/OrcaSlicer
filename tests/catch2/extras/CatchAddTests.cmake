@@ -72,19 +72,29 @@ function(catch_discover_tests_impl)
     set(ENV{DYLD_FRAMEWORK_PATH} "${paths}")
   endif()
 
+  # Discovery runs the test binary only to list tests. An LLVM-instrumented
+  # binary would still write a profile, either into the caller's coverage
+  # LLVM_PROFILE_FILE or as default.profraw in the working directory. Give
+  # discovery a private profile directory, removed afterwards, and restore the
+  # caller's environment (PRE_TEST discovery runs inside CTest itself).
+  string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef discovery_profile_id)
+  get_filename_component(discovery_profile_dir "${_CTEST_FILE}" ABSOLUTE)
+  get_filename_component(discovery_profile_dir "${discovery_profile_dir}" DIRECTORY)
+  set(discovery_profile_dir "${discovery_profile_dir}/.catch-discovery-${discovery_profile_id}")
+  if(DEFINED ENV{LLVM_PROFILE_FILE})
+    set(discovery_saved_profile_defined TRUE)
+    set(discovery_saved_profile "$ENV{LLVM_PROFILE_FILE}")
+  else()
+    set(discovery_saved_profile_defined FALSE)
+  endif()
+  set(ENV{LLVM_PROFILE_FILE} "${discovery_profile_dir}/%p-%m.profraw")
+
   execute_process(
     COMMAND ${_TEST_EXECUTOR} "${_TEST_EXECUTABLE}" ${spec} --list-tests --reporter json
     OUTPUT_VARIABLE listing_output
     RESULT_VARIABLE result
     WORKING_DIRECTORY "${_TEST_WORKING_DIR}"
   )
-  if(NOT ${result} EQUAL 0)
-    message(FATAL_ERROR
-      "Error listing tests from executable '${_TEST_EXECUTABLE}':\n"
-      "  Result: ${result}\n"
-      "  Output: ${listing_output}\n"
-    )
-  endif()
 
   # Prepare reporter
   if(reporter)
@@ -99,6 +109,24 @@ function(catch_discover_tests_impl)
       RESULT_VARIABLE reporter_check_result
       WORKING_DIRECTORY "${_TEST_WORKING_DIR}"
     )
+  endif()
+
+  if(discovery_saved_profile_defined)
+    set(ENV{LLVM_PROFILE_FILE} "${discovery_saved_profile}")
+  else()
+    unset(ENV{LLVM_PROFILE_FILE})
+  endif()
+  file(REMOVE_RECURSE "${discovery_profile_dir}")
+
+  if(NOT ${result} EQUAL 0)
+    message(FATAL_ERROR
+      "Error listing tests from executable '${_TEST_EXECUTABLE}':\n"
+      "  Result: ${result}\n"
+      "  Output: ${listing_output}\n"
+    )
+  endif()
+
+  if(reporter)
     if(${reporter_check_result} EQUAL 255)
       message(FATAL_ERROR
         "\"${reporter}\" is not a valid reporter!\n"
