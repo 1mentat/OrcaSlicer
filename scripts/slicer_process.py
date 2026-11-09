@@ -24,9 +24,13 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
     With ``output_file``, both streams go directly to that file without being
     buffered in Python; the returned stdout/stderr are then None.
     """
+    if os.name == "nt":
+        from _slicer_windows_job import run_captured as run_windows_captured
+        return run_windows_captured(argv, cwd=cwd, env=env, timeout=timeout,
+                                    input_data=input_data, output_file=output_file)
+
     text_mode = not isinstance(input_data, bytes)
-    group_options = ({"start_new_session": True} if os.name == "posix" else
-                     {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP})
+    group_options = {"start_new_session": True}
     with subprocess.Popen(
         list(argv), cwd=cwd, env=env, shell=False,
         stdin=subprocess.PIPE if input_data is not None else None,
@@ -43,17 +47,6 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            else:
-                # taskkill is supplied by Windows and terminates the tree (/T).
-                try:
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   timeout=10, check=False)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                finally:
-                    if process.poll() is None:
-                        process.kill()
             stdout, stderr = process.communicate()
             error = subprocess.TimeoutExpired(list(argv), timeout, output=stdout, stderr=stderr)
             # Keep the actual post-cleanup status available to recorded callers.
@@ -71,15 +64,6 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            else:
-                try:
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   timeout=10, check=False)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                if process.poll() is None:
-                    process.kill()
             try:
                 process.communicate()
             except BaseException:

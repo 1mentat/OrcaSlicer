@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'scripts/slicer_process.py'
+      - 'scripts/_slicer_windows_job.py'
       - 'scripts/clang_tidy_diff.py'
       - 'scripts/tests/test_slicer_process.py'
       - 'scripts/tests/test_clang_tidy_diff.py'
@@ -11,6 +12,7 @@ on:
   push:
     paths:
       - 'scripts/slicer_process.py'
+      - 'scripts/_slicer_windows_job.py'
       - 'scripts/clang_tidy_diff.py'
       - 'scripts/tests/test_slicer_process.py'
       - 'scripts/tests/test_clang_tidy_diff.py'
