@@ -3164,7 +3164,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
     if (filament_maps != nullptr) {
-        m_filament_maps = filament_maps->values;
+        // Use the same master-extruder fallback already resolved for filament offsets.
+        m_filament_maps = filament_map;
         std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
     }
 
@@ -3381,10 +3382,12 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     }
 
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
-    if (filament_maps != nullptr) {
+    m_filament_maps.clear();
+    if (filament_maps != nullptr)
         m_filament_maps = filament_maps->values;
-        std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
-    }
+    const auto *master_extruder = config.option<ConfigOptionInt>("master_extruder_id");
+    m_filament_maps.resize(m_result.filaments_count, master_extruder != nullptr ? master_extruder->value : 1);
+    std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
 
     //BBS
     const ConfigOptionFloats* filament_costs = config.option<ConfigOptionFloats>("filament_cost");
