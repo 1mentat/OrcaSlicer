@@ -147,6 +147,10 @@ FullPrintConfig full_fixture_config()
     config.filament_colour.values = {"#112233"};
     config.filament_map.values = {1};
     config.master_extruder_id.value = 2;
+    config.single_extruder_multi_material.value = false;
+    config.enable_pre_heating.value = false;
+    config.printer_extruder_id.values = {1, 2};
+    config.printer_extruder_variant.values = {"Direct Drive Standard", "Direct Drive Standard"};
     config.nozzle_diameter.values = {0.4, 0.4};
     config.nozzle_volume.values = {0.0, 0.0};
     config.physical_extruder_map.values = {0, 1};
