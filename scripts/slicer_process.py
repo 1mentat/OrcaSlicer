@@ -49,6 +49,8 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                     subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    timeout=10, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
                 finally:
                     if process.poll() is None:
                         process.kill()
