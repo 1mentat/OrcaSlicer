@@ -1311,7 +1311,8 @@ namespace {
 FullPrintConfig legacy_config(bool semm = false,
                               WipeTowerWallType wall = WipeTowerWallType::wtwRectangle,
                               bool sparse = false,
-                              bool arc_fitting = false)
+                              bool arc_fitting = false,
+                              bool same_extruder = false)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_filaments(2);
@@ -1338,8 +1339,17 @@ FullPrintConfig legacy_config(bool semm = false,
         {"flush_volumes_matrix", "0,80,80,0"},
         {"filament_adhesiveness_category", "0,1"},
     });
+    // Match the physical extruders in group_for_two_filaments, after the nozzle override.
+    config.set_num_extruders(same_extruder ? 1 : 2);
+    config.set_deserialize_strict({
+        {"filament_map", same_extruder ? "1,1" : "1,2"},
+        {"physical_extruder_map", same_extruder ? "0" : "0,1"},
+        {"extruder_max_nozzle_count", same_extruder ? "2" : "1,1"},
+    });
     FullPrintConfig full;
     full.apply(config);
+    REQUIRE(full.filament_ramming_volumetric_speed.size() == 1);
+    REQUIRE(full.filament_ramming_volumetric_speed_nc.size() == 1);
     return full;
 }
 
@@ -1361,6 +1371,33 @@ std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> group_for_two_filament
         std::vector<int>{0, 1}, nozzles, std::vector<unsigned int>{0, 1});
 }
 
+void require_legacy_topology(const FullPrintConfig &config,
+                             const MultiNozzleUtils::LayeredNozzleGroupResult &group)
+{
+    REQUIRE(config.nozzle_diameter.size() == size_t(group.get_extruder_count()));
+    REQUIRE(config.physical_extruder_map.size() == config.nozzle_diameter.size());
+    REQUIRE(config.extruder_printable_height.size() == config.nozzle_diameter.size());
+    for (int extruder : group.get_used_extruders()) {
+        REQUIRE(extruder >= 0);
+        REQUIRE(size_t(extruder) < config.nozzle_diameter.size());
+        REQUIRE(config.physical_extruder_map.get_at(size_t(extruder)) == extruder);
+        REQUIRE(config.extruder_max_nozzle_count.get_at(size_t(extruder)) >= int(group.get_used_nozzles_in_extruder(extruder).size()));
+    }
+    for (unsigned int filament : group.get_used_filaments())
+        REQUIRE(config.filament_map.get_at(filament) == group.get_extruder_id(int(filament)) + 1);
+    // These variant columns deliberately retain singleton defaults: the producer must
+    // resolve their fallback before checking nil, just as it does before using the value.
+    REQUIRE_FALSE(config.filament_ramming_volumetric_speed.empty());
+    REQUIRE_FALSE(config.filament_ramming_volumetric_speed_nc.empty());
+    REQUIRE_FALSE(config.filament_ramming_travel_time.empty());
+    REQUIRE_FALSE(config.filament_ramming_travel_time_nc.empty());
+    REQUIRE_FALSE(config.nozzle_temperature.empty());
+    REQUIRE_FALSE(config.nozzle_temperature_initial_layer.empty());
+    REQUIRE_FALSE(config.hotend_cooling_rate.empty());
+    REQUIRE_FALSE(config.filament_pre_cooling_temperature.empty());
+    REQUIRE_FALSE(config.filament_pre_cooling_temperature_nc.empty());
+}
+
 DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, unsigned int, float>> &plan,
                      bool semm = false,
                      WipeTowerWallType wall = WipeTowerWallType::wtwRectangle,
@@ -1368,9 +1405,10 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
                      bool arc_fitting = false,
                      bool same_extruder = false)
 {
-    FullPrintConfig config = legacy_config(semm, wall, sparse, arc_fitting);
+    FullPrintConfig config = legacy_config(semm, wall, sparse, arc_fitting, same_extruder);
     auto group = group_for_two_filaments(same_extruder);
     REQUIRE(group.has_value());
+    legacy_tower_direct_contracts::require_legacy_topology(config, *group);
     WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f,
                     std::vector<unsigned int>{0, 1});
     tower.set_nozzle_group_result(*group);
@@ -1585,6 +1623,7 @@ PrimeTowerSettingRun run_prime_tower_settings(
     const auto group = group_for_two_filaments(false);
     REQUIRE(group.has_value());
 
+    legacy_tower_direct_contracts::require_legacy_topology(config, *group);
     WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f, {0, 1});
     tower.set_nozzle_group_result(*group);
     tower.set_used_filament_ids({0, 1});
@@ -3794,9 +3833,10 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
                      bool arc_fitting = false,
                      bool same_extruder = false)
 {
-    FullPrintConfig config = legacy_config(semm, wall, sparse, arc_fitting);
+    FullPrintConfig config = legacy_config(semm, wall, sparse, arc_fitting, same_extruder);
     auto group = group_for_two_filaments(same_extruder);
     REQUIRE(group.has_value());
+    legacy_tower_direct_contracts::require_legacy_topology(config, *group);
     WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f, {0, 1});
     tower.set_nozzle_group_result(*group);
     tower.set_used_filament_ids({0, 1});
@@ -4373,7 +4413,7 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
                      TimelapseType timelapse = TimelapseType::tlTraditional,
                      bool gap_wall = false)
 {
-    FullPrintConfig config = legacy_tower_direct_contracts::legacy_config(semm, wall, sparse, arc_fitting);
+    FullPrintConfig config = legacy_tower_direct_contracts::legacy_config(semm, wall, sparse, arc_fitting, same_extruder);
     config.set_deserialize_strict({
         {"enable_tower_interface_features", interface_features},
         {"filament_tower_interface_print_temp", "215,220"},
@@ -4387,6 +4427,7 @@ DirectRun run_direct(const std::vector<std::tuple<float, float, unsigned int, un
     config.wipe_tower_rotation_angle.value = 0.;
     auto group = group_for_two_filaments(same_extruder);
     REQUIRE(group.has_value());
+    legacy_tower_direct_contracts::require_legacy_topology(config, *group);
     WipeTower tower(config, 0, Vec3d::Zero(), 0, 8.f,
                     std::vector<unsigned int>{0, 1});
     Polygon bed;
