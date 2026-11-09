@@ -4550,31 +4550,22 @@ GridStats grid_stats(const WipeTower::ToolChangeResult &tcr)
                 result.feedrates.push_back(value);
         }
     }
-    for (const std::string &raw : [&]() {
-        std::vector<std::string> lines;
-        std::istringstream stream(tcr.gcode);
-        for (std::string line; std::getline(stream, line);)
-            lines.push_back(std::move(line));
-        return lines;
-    }()) {
-        const std::size_t m109 = raw.find("M109 S");
-        const std::size_t m104 = raw.find("M104 S");
-        auto parse_temp = [&](std::size_t offset, std::vector<int> &temps) {
-            try {
-                const int temp = std::stoi(raw.substr(offset));
-                temps.push_back(temp);
-            } catch (...) {
-            }
-        };
-        if (m109 != std::string::npos) {
+    GCodeReader reader;
+    reader.parse_buffer(tcr.gcode, [&result](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        float temperature = 0.f;
+        if (!line.has_value('S', temperature) || !std::isfinite(temperature) ||
+            double(temperature) < double(std::numeric_limits<int>::min()) ||
+            double(temperature) > double(std::numeric_limits<int>::max()))
+            return;
+        if (line.cmd_is("M109")) {
             ++result.m109_count;
-            parse_temp(m109 + 6, result.m109_temps);
+            result.m109_temps.push_back(int(temperature));
         }
-        if (m104 != std::string::npos) {
+        if (line.cmd_is("M104")) {
             ++result.m104_count;
-            parse_temp(m104 + 6, result.m104_temps);
+            result.m104_temps.push_back(int(temperature));
         }
-    }
+    });
     bool have_first = false;
     for (std::size_t i = 0; i < tcr.extrusions.size(); ++i) {
         const auto &extrusion = tcr.extrusions[i];
