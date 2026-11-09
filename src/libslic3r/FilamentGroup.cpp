@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <deque>
+#include <stdexcept>
 #include <random>
 #include <cassert>
 #include <set>
@@ -1363,6 +1364,15 @@ namespace Slic3r
 
     std::vector<FilamentPlanRes> plan_filament_nozzle_mapping_and_order(const FilamentGroupContext &ctx)
     {
+        // Empty layers are a valid no-op even for a context with no physical nozzles.
+        // A requested filament cannot be planned without a physical destination.
+        if (ctx.nozzle_info.nozzle_list.empty()) {
+            for (const auto &layer : ctx.model_info.layer_filaments)
+                if (!layer.empty())
+                    throw std::invalid_argument("cannot plan requested filaments without physical nozzles");
+            return std::vector<FilamentPlanRes>(ctx.model_info.layer_filaments.size());
+        }
+
         std::vector<FilamentPlanRes> res;
 
         // right nodes: nozzles
@@ -1409,11 +1419,13 @@ namespace Slic3r
                 std::vector<int>  remaining_l_nodes;
                 std::vector<int>  remaining_r_nodes;
                 std::vector<int>  remaining_r_nodes_to_origin;
+                std::vector<int>  remaining_r_nodes_group;
                 std::vector<bool> used_r_nodes(r_nodes.size(), false);
 
                 remaining_l_nodes.reserve(l_nodes.size());
                 remaining_r_nodes.reserve(r_nodes.size());
                 remaining_r_nodes_to_origin.reserve(r_nodes.size());
+                remaining_r_nodes_group.reserve(r_nodes.size());
 
                 for (int f_id : l_nodes) {
                     auto it = filament_to_nozzle.find(f_id);
@@ -1429,20 +1441,38 @@ namespace Slic3r
                 }
                 l_nodes = std::move(remaining_l_nodes);
 
+                if (l_nodes.empty())
+                    break;
+
                 for (int r_id = 0; r_id < r_nodes.size(); r_id++) {
                     if (!used_r_nodes[r_id]) {
                         remaining_r_nodes.emplace_back(r_nodes[r_id]);
                         remaining_r_nodes_to_origin.emplace_back(r_id);
+                        remaining_r_nodes_group.emplace_back(r_nodes_group[r_id]);
+                    }
+                }
+
+                // If every nozzle was kept for a filament already requested in this
+                // epoch, the remaining filaments must trigger nozzle changes. Reopen
+                // all physical nozzles for the next assignment rather than constructing
+                // a solver with an empty right side.
+                if (remaining_r_nodes.empty()) {
+                    for (int r_id = 0; r_id < r_nodes.size(); ++r_id) {
+                        remaining_r_nodes.emplace_back(r_nodes[r_id]);
+                        remaining_r_nodes_to_origin.emplace_back(r_id);
+                        remaining_r_nodes_group.emplace_back(r_nodes_group[r_id]);
                     }
                 }
 
                 // 2. run min-cost flow on the remaining nodes
-                GroupMinCostFlowSolver s(flush_matrix, l_nodes, remaining_r_nodes, r_nodes_group);
-                auto                            match = s.solve();
+                GroupMinCostFlowSolver s(flush_matrix, l_nodes, remaining_r_nodes, remaining_r_nodes_group);
+                // Use right-node positions. Values may repeat and -1 is a valid dummy value.
+                auto                            match_indices = s.solve_indices();
                 int                             write = 0;
                 for (int l_id = 0; l_id < l_nodes.size(); l_id++) {
-                    if (match[l_id] >= 0 && match[l_id] < remaining_r_nodes.size()) {
-                        int noz_id                          = remaining_r_nodes_to_origin[match[l_id]];
+                    int match_index = match_indices[l_id];
+                    if (match_index >= 0 && match_index < static_cast<int>(remaining_r_nodes.size())) {
+                        int noz_id                          = remaining_r_nodes_to_origin[match_index];
                         int filament_id                     = l_nodes[l_id];
                         layer_fil_nozzle_match[filament_id] = noz_id;
                         r_nodes[noz_id]                     = filament_id;

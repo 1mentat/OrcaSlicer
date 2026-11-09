@@ -1,3 +1,6 @@
+#include "libslic3r/Flow.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include "test_helpers.hpp"
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 
@@ -1408,4 +1411,627 @@ TEST_CASE("Belt brim slices when every object is a flush target", "[SkirtBrim][b
     REQUIRE(print.validate().string.empty());
     const std::string out = gcode(print);
     CHECK(out.find(";TYPE:Brim") != std::string::npos);
+}
+
+namespace brim_flow_variance {
+namespace {
+
+struct Material {
+    double e = 0.0;
+    double xy = 0.0;
+    size_t moves = 0;
+};
+
+struct Evidence {
+    Material brim;
+    Material first_layer_object;
+    Material later_object;
+    size_t layers = 0;
+    size_t brim_xy_moves = 0;
+    size_t brim_loops = 0;
+    double brim_geometry_length = 0.0;
+};
+
+DynamicPrintConfig configuration(double brim_ratio, double first_layer_ratio)
+{
+    const ConfigOptionDef *definition = print_config_def.get("brim_flow_ratio");
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloat);
+    REQUIRE(definition->is_value_valid(brim_ratio));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2}, {"top_shell_layers", 0}, {"bottom_shell_layers", 1},
+        {"bottom_shell_thickness", 0.0}, {"sparse_infill_density", "20%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"brim_type", "outer_only"}, {"brim_width", 2.0},
+        {"brim_object_gap", 0.1}, {"skirt_loops", 0}, {"raft_layers", 0},
+        {"enable_support", false}, {"gcode_comments", true},
+        {"gcode_flavor", "marlin"}, {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"}, {"enable_arc_fitting", false},
+        {"slow_down_for_layer_cooling", false},
+        {"filament_max_volumetric_speed", "200"},
+        {"set_other_flow_ratios", true}, {"first_layer_flow_ratio", first_layer_ratio},
+        {"brim_flow_ratio", brim_ratio}, {"filament_flow_ratio", "1.0"},
+        {"print_flow_ratio", 1.0}
+    });
+    return config;
+}
+
+// Accept role markers only at the beginning of the comment, so serialized
+// settings and custom text cannot masquerade as a production role transition.
+std::string_view role_marker(std::string_view comment)
+{
+    while (!comment.empty() && comment.front() == ' ')
+        comment.remove_prefix(1);
+    for (std::string_view prefix : {std::string_view("TYPE:"), std::string_view("FEATURE:")}) {
+        if (comment.substr(0, prefix.size()) == prefix) {
+            comment.remove_prefix(prefix.size());
+            while (!comment.empty() && comment.front() == ' ')
+                comment.remove_prefix(1);
+            while (!comment.empty() && (comment.back() == ' ' || comment.back() == '\r'))
+                comment.remove_suffix(1);
+            return comment;
+        }
+    }
+    return {};
+}
+
+Evidence slice(double brim_ratio, double first_layer_ratio = 1.0)
+{
+    const DynamicPrintConfig config = configuration(brim_ratio, first_layer_ratio);
+    Print print;
+    Model model;
+    TriangleMesh mesh = cube(8.0);
+    mesh.scale(Vec3f(1.0f, 1.0f, 0.1f));
+    init_print({mesh}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.size() < 4u * 1024u * 1024u);
+    REQUIRE(std::count(output.begin(), output.end(), '\n') < 100000);
+
+    Evidence result;
+    for (const auto &entry : print.get_brimMap()) {
+        result.brim_loops += entry.second.items_count();
+        for_each_extrusion_path(entry.second, [&](const ExtrusionPath &path) {
+            result.brim_geometry_length += path.length();
+        });
+    }
+    GCodeReader reader;
+    reader.apply_config(config);
+    std::string role;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++result.layers;
+        if (const std::string_view marker = role_marker(line.comment()); !marker.empty())
+            role = std::string(marker);
+        if (!line.cmd_is("G1"))
+            return;
+        const double xy = line.dist_XY(self);
+        REQUIRE(std::isfinite(xy));
+        if (xy <= EPSILON)
+            return;
+        if (role == "Brim")
+            ++result.brim_xy_moves;
+        if (!line.extruding(self))
+            return;
+        const double e = line.dist_E(self);
+        REQUIRE(std::isfinite(e));
+        REQUIRE(e > 0.0);
+        Material *material = role == "Brim" ? &result.brim
+            : result.layers == 1 ? &result.first_layer_object : &result.later_object;
+        // The cube has no support, skirt, purge tower or custom extrusion.
+        // Require a named role to prevent preamble moves entering the oracle.
+        REQUIRE_FALSE(role.empty());
+        material->e += e;
+        material->xy += xy;
+        ++material->moves;
+    });
+    REQUIRE(result.layers == 4);
+    REQUIRE(result.brim_loops > 0);
+    REQUIRE(result.brim_geometry_length > 0.0);
+    REQUIRE(result.brim_xy_moves > 0);
+    REQUIRE(result.first_layer_object.moves > 0);
+    REQUIRE(result.later_object.moves > 0);
+    return result;
+}
+
+double rounding_bound(const Material &base, const Material &changed, double ratio)
+{
+    // Relative E is emitted to five decimal places. Each independent summed
+    // move contributes at most half a decimal quantum plus float parse error.
+    return 0.000006 * (ratio * base.moves + changed.moves)
+        + 4.0 * std::numeric_limits<float>::epsilon() * (ratio * base.e + changed.e);
+}
+
+void require_material(const Material &base, const Material &changed, double ratio)
+{
+    REQUIRE(base.moves > 0);
+    REQUIRE(base.e > 0.0);
+    const double tolerance = rounding_bound(base, changed, ratio);
+    if (ratio > 0.0) {
+        CHECK(changed.moves == base.moves);
+        CHECK_THAT(changed.xy, Catch::Matchers::WithinAbs(base.xy, 1e-5));
+    } else {
+        CHECK(changed.moves == 0);
+    }
+    if (ratio != 1.0)
+        REQUIRE(tolerance < std::abs(base.e * (ratio - 1.0)));
+    CHECK_THAT(changed.e, Catch::Matchers::WithinAbs(base.e * ratio, tolerance));
+}
+
+void require_same_brim_geometry(const Evidence &base, const Evidence &changed)
+{
+    CHECK(changed.brim_loops == base.brim_loops);
+    CHECK_THAT(changed.brim_geometry_length,
+               Catch::Matchers::WithinAbs(base.brim_geometry_length, 1e-5));
+}
+
+} // namespace
+} // namespace brim_flow_variance
+
+TEST_CASE("Brim flow boundaries scale brim material independently of first layer flow",
+          "[SkirtBrim][BrimFlowVariance][SettingsVariance]")
+{
+    using namespace brim_flow_variance;
+    const Evidence base = slice(1.0);
+    REQUIRE(base.brim.moves > 0);
+    REQUIRE(base.brim.e > 0.0);
+    for (double ratio : {0.0, 0.5, 2.0}) {
+        CAPTURE(ratio);
+        const Evidence changed = slice(ratio);
+        require_same_brim_geometry(base, changed);
+        require_material(base.brim, changed.brim, ratio);
+        require_material(base.first_layer_object, changed.first_layer_object, 1.0);
+        require_material(base.later_object, changed.later_object, 1.0);
+    }
+    // The public option contract excludes brims from the first-layer ratio.
+    // Positive object extrusion proves that this control actually took effect.
+    const Evidence first_layer_changed = slice(1.0, 0.6);
+    require_same_brim_geometry(base, first_layer_changed);
+    require_material(base.brim, first_layer_changed.brim, 1.0);
+    require_material(base.first_layer_object, first_layer_changed.first_layer_object, 0.6);
+    require_material(base.later_object, first_layer_changed.later_object, 1.0);
+}
+
+namespace draft_shield_single_loop_contracts {
+
+namespace {
+
+struct SkirtLoopEvidence {
+    std::vector<size_t> loops_per_layer;
+    std::vector<double> loop_xy_lengths;
+    size_t non_skirt_extrusion_moves = 0;
+    double non_skirt_xy_path = 0.0;
+    double non_skirt_filament = 0.0;
+    bool finite = true;
+};
+
+struct DraftShieldExport {
+    std::string gcode;
+    DynamicPrintConfig config;
+};
+
+SkirtLoopEvidence inspect_skirt_loops(const DraftShieldExport &exported)
+{
+    SkirtLoopEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(exported.config);
+    size_t layer = size_t(-1);
+    std::string current_role;
+    bool in_skirt_run = false;
+    bool travel_after_skirt = false;
+    size_t active_run = size_t(-1);
+    reader.parse_buffer(exported.gcode, [&evidence, &layer, &current_role, &in_skirt_run,
+                                &travel_after_skirt, &active_run](GCodeReader &self,
+                                                                  const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos ||
+            comment.find("CHANGE_LAYER") != std::string_view::npos) {
+            ++layer;
+            evidence.loops_per_layer.resize(layer + 1, 0);
+            current_role.clear();
+            in_skirt_run = false;
+            travel_after_skirt = false;
+            active_run = size_t(-1);
+        }
+
+        if (const std::string_view marker = brim_flow_variance::role_marker(comment); !marker.empty()) {
+            current_role = std::string(marker);
+            if (current_role != "Skirt") {
+                in_skirt_run = false;
+                travel_after_skirt = false;
+                active_run = size_t(-1);
+            }
+        }
+
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion)
+            return;
+        const double xy = line.dist_XY(self);
+        const double filament = std::abs(line.dist_E(self));
+        if (!std::isfinite(xy) || !std::isfinite(filament)) {
+            evidence.finite = false;
+            return;
+        }
+
+        if (current_role == "Skirt" && !line.extruding(self) && xy > EPSILON) {
+            travel_after_skirt = true;
+            return;
+        }
+        if (!line.extruding(self) || xy <= EPSILON)
+            return;
+
+        if (current_role == "Skirt") {
+            if (!in_skirt_run || travel_after_skirt) {
+                REQUIRE(layer != size_t(-1));
+                evidence.loops_per_layer[layer] += 1;
+                evidence.loop_xy_lengths.push_back(0.0);
+                active_run = evidence.loop_xy_lengths.size() - 1;
+                in_skirt_run = true;
+            }
+            travel_after_skirt = false;
+            REQUIRE(active_run != size_t(-1));
+            evidence.loop_xy_lengths[active_run] += xy;
+            return;
+        }
+
+        in_skirt_run = false;
+        travel_after_skirt = false;
+        active_run = size_t(-1);
+        ++evidence.non_skirt_extrusion_moves;
+        evidence.non_skirt_xy_path += xy;
+        evidence.non_skirt_filament += filament;
+    });
+    return evidence;
+}
+
+DraftShieldExport export_draft_shield_case(bool single_loop)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"skirt_loops", 3},
+        {"skirt_height", 0},
+        {"skirt_distance", 3.0},
+        {"min_skirt_length", 0.0},
+        {"skirt_type", "combined"},
+        {"draft_shield", "enabled"},
+        {"single_loop_draft_shield", single_loop},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"enable_arc_fitting", false},
+        {"spiral_mode", false},
+        {"gcode_comments", true},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"file_start_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"print_sequence", "by layer"},
+    });
+
+    Model model;
+    Print print;
+    const TriangleMesh mesh = make_cube(8.0, 8.0, 0.8);
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    DraftShieldExport output;
+    output.config = config;
+    output.gcode = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.gcode.empty());
+    return output;
+}
+
+} // namespace
+
+TEST_CASE("Single-loop draft shields retain all first-layer loops and limit later layers",
+          "[DraftShieldSingleLoop][SkirtBrim]")
+{
+    const DraftShieldExport all_output = export_draft_shield_case(false);
+    const DraftShieldExport one_output = export_draft_shield_case(true);
+    const SkirtLoopEvidence all_evidence = inspect_skirt_loops(all_output);
+    const SkirtLoopEvidence one_evidence = inspect_skirt_loops(one_output);
+
+    REQUIRE(all_evidence.finite);
+    REQUIRE(one_evidence.finite);
+    REQUIRE(all_evidence.loops_per_layer.size() == 4);
+    REQUIRE(one_evidence.loops_per_layer.size() == 4);
+    REQUIRE(all_evidence.non_skirt_extrusion_moves > 0);
+    REQUIRE(one_evidence.non_skirt_extrusion_moves > 0);
+    REQUIRE(all_evidence.non_skirt_xy_path > 0.0);
+    REQUIRE(one_evidence.non_skirt_xy_path > 0.0);
+    REQUIRE(all_evidence.non_skirt_filament > 0.0);
+    REQUIRE(one_evidence.non_skirt_filament > 0.0);
+    CHECK_THAT(one_evidence.non_skirt_xy_path,
+               Catch::Matchers::WithinRel(all_evidence.non_skirt_xy_path, 1e-4));
+    CHECK_THAT(one_evidence.non_skirt_filament,
+               Catch::Matchers::WithinRel(all_evidence.non_skirt_filament, 1e-4));
+
+    CHECK(all_evidence.loops_per_layer.front() == 3);
+    CHECK(one_evidence.loops_per_layer.front() == 3);
+    for (size_t layer = 1; layer < all_evidence.loops_per_layer.size(); ++layer) {
+        CAPTURE(layer);
+        CHECK(all_evidence.loops_per_layer[layer] == 3);
+        CHECK(one_evidence.loops_per_layer[layer] == 1);
+    }
+    REQUIRE(all_evidence.loop_xy_lengths.size() == 12);
+    REQUIRE(one_evidence.loop_xy_lengths.size() == 6);
+    for (const double length : all_evidence.loop_xy_lengths)
+        REQUIRE(length > 1.0);
+    for (const double length : one_evidence.loop_xy_lengths)
+        REQUIRE(length > 1.0);
+}
+
+} // namespace draft_shield_single_loop_contracts
+
+namespace skirt_settings_variance {
+
+struct Bounds {
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+};
+
+struct SkirtEvidence {
+    size_t positive_xy_moves = 0;
+    double xy_length = 0.0;
+    double filament = 0.0;
+    double first_x = std::numeric_limits<double>::quiet_NaN();
+    double first_y = std::numeric_limits<double>::quiet_NaN();
+    double first_feed_mm_s = std::numeric_limits<double>::quiet_NaN();
+    Bounds bounds;
+    bool finite = true;
+};
+
+struct SkirtSample {
+    SkirtEvidence skirt;
+    Bounds model_bounds;
+    double spacing = 0.0;
+};
+
+Bounds first_layer_model_bounds(const Print &print)
+{
+    Bounds bounds;
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->instances().size() == 1);
+    REQUIRE_FALSE(object->layers().empty());
+    REQUIRE_FALSE(object->layers().front()->lslices.empty());
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point world_shift = object->instances().front().shift_without_plate_offset();
+    world_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    for (const ExPolygon &slice : object->layers().front()->lslices) {
+        for (const Point &point : slice.contour.points) {
+            const double x = unscale<double>((point + world_shift).x());
+            const double y = unscale<double>((point + world_shift).y());
+            bounds.min_x = std::min(bounds.min_x, x);
+            bounds.max_x = std::max(bounds.max_x, x);
+            bounds.min_y = std::min(bounds.min_y, y);
+            bounds.max_y = std::max(bounds.max_y, y);
+        }
+    }
+    REQUIRE(std::isfinite(bounds.min_x));
+    REQUIRE(std::isfinite(bounds.max_x));
+    REQUIRE(std::isfinite(bounds.min_y));
+    REQUIRE(std::isfinite(bounds.max_y));
+    return bounds;
+}
+
+SkirtEvidence inspect_skirt(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    SkirtEvidence evidence;
+    std::string role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&evidence, &role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (const std::string_view marker = brim_flow_variance::role_marker(line.comment()); !marker.empty())
+            role.assign(marker.begin(), marker.end());
+        if (role != "Skirt" || !line.extruding(self))
+            return;
+        const double xy = line.dist_XY(self);
+        if (!std::isfinite(xy) || xy <= EPSILON)
+            return;
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        const double e = line.dist_E(self);
+        const double feed = double(line.new_F(self)) / 60.0;
+        if (!std::isfinite(start_x) || !std::isfinite(start_y) ||
+            !std::isfinite(end_x) || !std::isfinite(end_y) ||
+            !std::isfinite(e) || !std::isfinite(feed)) {
+            evidence.finite = false;
+            return;
+        }
+        if (evidence.positive_xy_moves == 0) {
+            evidence.first_x = start_x;
+            evidence.first_y = start_y;
+            evidence.first_feed_mm_s = feed;
+        }
+        for (const auto &[x, y] : { std::pair<double, double>{start_x, start_y},
+                                    std::pair<double, double>{end_x, end_y} }) {
+            evidence.bounds.min_x = std::min(evidence.bounds.min_x, x);
+            evidence.bounds.max_x = std::max(evidence.bounds.max_x, x);
+            evidence.bounds.min_y = std::min(evidence.bounds.min_y, y);
+            evidence.bounds.max_y = std::max(evidence.bounds.max_y, y);
+        }
+        ++evidence.positive_xy_moves;
+        evidence.xy_length += xy;
+        evidence.filament += e;
+    });
+    return evidence;
+}
+
+SkirtSample export_skirt(double distance, double angle, double speed)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "initial_layer_line_width", 0.5 },
+        { "elefant_foot_compensation", 0.0 },
+        { "xy_contour_compensation", 0.0 },
+        { "xy_hole_compensation", 0.0 },
+        { "filament_shrink", "100%" },
+        { "printable_area", "0x0,250x0,250x210,0x210" },
+        { "wall_loops", 1 },
+        { "top_shell_layers", 1 },
+        { "bottom_shell_layers", 1 },
+        { "sparse_infill_density", "0%" },
+        { "skirt_loops", 1 },
+        { "skirt_height", 1 },
+        { "min_skirt_length", 0.0 },
+        { "skirt_type", "combined" },
+        { "skirt_distance", distance },
+        { "skirt_start_angle", angle },
+        { "skirt_speed", speed },
+        { "brim_type", "no_brim" },
+        { "raft_layers", 0 },
+        { "draft_shield", "disabled" },
+        { "enable_support", false },
+        { "enable_prime_tower", false },
+        { "gcode_flavor", "marlin" },
+        { "use_relative_e_distances", true },
+        { "enable_arc_fitting", false },
+        { "slow_down_for_layer_cooling", false },
+        { "gcode_comments", true },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "file_start_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+        { "print_sequence", "by layer" },
+        // The first-layer generic extrusion path supplies the zero-speed fallback.
+        { "initial_layer_infill_speed", 23.0 },
+        { "support_speed", 41.0 },
+        { "filament_max_volumetric_speed", "200" },
+    });
+
+    TriangleMesh mesh = make_cube(20.0, 20.0, 0.8);
+    mesh.translate(115.f, 95.f, 0.f);
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(mesh));
+    Print print;
+    Model model;
+    Slic3r::Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    SkirtSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    sample.spacing = print.skirt_flow().spacing();
+    REQUIRE(std::isfinite(sample.spacing));
+    REQUIRE(sample.spacing > 0.0);
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.skirt = inspect_skirt(output, config);
+    return sample;
+}
+
+void require_same_loop_geometry(const SkirtEvidence &reference, const SkirtEvidence &changed)
+{
+    REQUIRE(reference.finite);
+    REQUIRE(changed.finite);
+    REQUIRE(reference.positive_xy_moves > 0);
+    REQUIRE(changed.positive_xy_moves > 0);
+    REQUIRE(reference.filament > 0.0);
+    REQUIRE(changed.filament > 0.0);
+    CHECK_THAT(changed.xy_length, Catch::Matchers::WithinAbs(reference.xy_length, 0.02));
+    CHECK_THAT(changed.filament, Catch::Matchers::WithinAbs(reference.filament, 0.01));
+    CHECK_THAT(changed.bounds.min_x, Catch::Matchers::WithinAbs(reference.bounds.min_x, 0.01));
+    CHECK_THAT(changed.bounds.max_x, Catch::Matchers::WithinAbs(reference.bounds.max_x, 0.01));
+    CHECK_THAT(changed.bounds.min_y, Catch::Matchers::WithinAbs(reference.bounds.min_y, 0.01));
+    CHECK_THAT(changed.bounds.max_y, Catch::Matchers::WithinAbs(reference.bounds.max_y, 0.01));
+}
+
+} // namespace skirt_settings_variance
+
+TEST_CASE("Skirt distance endpoints preserve analytic model clearance",
+          "[SkirtBrim][SettingsVariance][SkirtDistance]")
+{
+    using namespace skirt_settings_variance;
+    constexpr Bounds known_model{115.0, 135.0, 95.0, 115.0};
+    for (double distance : {0.0, 3.0, 60.0}) {
+        CAPTURE(distance);
+        const SkirtSample sample = export_skirt(distance, 0.0, 37.0);
+        REQUIRE(sample.skirt.finite);
+        REQUIRE(sample.skirt.positive_xy_moves > 0);
+        REQUIRE(sample.skirt.xy_length > 0.0);
+        REQUIRE(sample.skirt.filament > 0.0);
+        CHECK_THAT(sample.model_bounds.min_x, Catch::Matchers::WithinAbs(known_model.min_x, 0.01));
+        CHECK_THAT(sample.model_bounds.max_x, Catch::Matchers::WithinAbs(known_model.max_x, 0.01));
+        CHECK_THAT(sample.model_bounds.min_y, Catch::Matchers::WithinAbs(known_model.min_y, 0.01));
+        CHECK_THAT(sample.model_bounds.max_y, Catch::Matchers::WithinAbs(known_model.max_y, 0.01));
+
+        // Print::make_skirt_offsets starts at distance-spacing/2 then applies one
+        // spacing offset. Removing half-spacing from each measured centerline gap
+        // recovers the configured physical clearance on all four sides.
+        const double left_clearance = known_model.min_x - sample.skirt.bounds.min_x - sample.spacing / 2.0;
+        const double right_clearance = sample.skirt.bounds.max_x - known_model.max_x - sample.spacing / 2.0;
+        const double bottom_clearance = known_model.min_y - sample.skirt.bounds.min_y - sample.spacing / 2.0;
+        const double top_clearance = sample.skirt.bounds.max_y - known_model.max_y - sample.spacing / 2.0;
+        CHECK_THAT(left_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(right_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(bottom_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+        CHECK_THAT(top_clearance, Catch::Matchers::WithinAbs(distance, 0.03));
+    }
+}
+
+TEST_CASE("Skirt angle selects the registered start and zero speed uses layer fallback",
+          "[SkirtBrim][SettingsVariance][SkirtAngle][SkirtSpeed]")
+{
+    using namespace skirt_settings_variance;
+    const SkirtSample base = export_skirt(3.0, 0.0, 37.0);
+    REQUIRE(base.skirt.finite);
+    REQUIRE(base.skirt.positive_xy_moves > 0);
+    REQUIRE(base.skirt.filament > 0.0);
+    REQUIRE(std::isfinite(base.skirt.first_x));
+    REQUIRE(std::isfinite(base.skirt.first_y));
+
+    constexpr double center_x = 125.0;
+    constexpr double center_y = 105.0;
+    SkirtSample negative_half_turn;
+    SkirtSample positive_half_turn;
+    for (double angle : {-180.0, -90.0, 0.0, 90.0, 180.0}) {
+        CAPTURE(angle);
+        const SkirtSample sample = export_skirt(3.0, angle, 37.0);
+        if (angle == -180.0)
+            negative_half_turn = sample;
+        if (angle == 180.0)
+            positive_half_turn = sample;
+        require_same_loop_geometry(base.skirt, sample.skirt);
+        CHECK_THAT(sample.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
+        const double dx = sample.skirt.first_x - center_x;
+        const double dy = sample.skirt.first_y - center_y;
+        REQUIRE(std::hypot(dx, dy) > 1.0);
+        const double actual_angle = std::atan2(dy, dx) * 180.0 / PI;
+        const double wrapped_delta = std::remainder(actual_angle - angle, 360.0);
+        CHECK_THAT(wrapped_delta, Catch::Matchers::WithinAbs(0.0, 2.0));
+    }
+    REQUIRE(negative_half_turn.skirt.positive_xy_moves > 0);
+    REQUIRE(positive_half_turn.skirt.positive_xy_moves > 0);
+    CHECK_THAT(positive_half_turn.skirt.first_x,
+               Catch::Matchers::WithinAbs(negative_half_turn.skirt.first_x, 0.01));
+    CHECK_THAT(positive_half_turn.skirt.first_y,
+               Catch::Matchers::WithinAbs(negative_half_turn.skirt.first_y, 0.01));
+
+    const SkirtSample fallback = export_skirt(3.0, 0.0, 0.0);
+    require_same_loop_geometry(base.skirt, fallback.skirt);
+    CHECK_THAT(fallback.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(23.0, 0.05));
+    CHECK_THAT(base.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
 }

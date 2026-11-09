@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Arachne/BeadingStrategy/BeadingStrategy.hpp"
@@ -35,6 +36,11 @@ coord_t OuterWallInsetBeadingStrategy::getOptimalBeadCount(coord_t thickness) co
 coord_t OuterWallInsetBeadingStrategy::getTransitioningLength(coord_t lower_bead_count) const
 {
     return parent->getTransitioningLength(lower_bead_count);
+}
+
+std::vector<coord_t> OuterWallInsetBeadingStrategy::getNonlinearThicknesses(coord_t lower_bead_count) const
+{
+    return parent->getNonlinearThicknesses(lower_bead_count);
 }
 
 std::string OuterWallInsetBeadingStrategy::toString() const

@@ -5,6 +5,7 @@
 #define OUTER_WALL_INSET_BEADING_STRATEGY_H
 
 #include <string>
+#include <vector>
 
 #include "BeadingStrategy.hpp"
 #include "libslic3r/libslic3r.h"
@@ -27,6 +28,7 @@ namespace Slic3r::Arachne
         coord_t getTransitionThickness(coord_t lower_bead_count) const override;
         coord_t getOptimalBeadCount(coord_t thickness) const override;
         coord_t getTransitioningLength(coord_t lower_bead_count) const override;
+        std::vector<coord_t> getNonlinearThicknesses(coord_t lower_bead_count) const override;
         
         std::string toString() const override;
         

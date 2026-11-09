@@ -1,3 +1,5 @@
+#include "infill_geometry_helpers.hpp"
+
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
@@ -6,13 +8,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include "libslic3r/Fill/FillBase.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Surface.hpp"
 #include "libslic3r/Point.hpp"
 #include <iterator>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Line.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -22,6 +28,7 @@
 #include <memory>
 #include <math.h>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -39,6 +46,8 @@
 #include "libslic3r/Fill/FillGyroid.hpp"
 #include "libslic3r/Fill/FillTpmsAdaptive.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/GCodeReader.hpp"
+#include <string_view>
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/IntersectionPoints.hpp"
 #include "libslic3r/Layer.hpp"
@@ -1158,6 +1167,215 @@ static SparseInfillShape sparse_infill_shape(const Print &print)
     return shape;
 }
 
+TEST_CASE("Z contouring gates fill-direction alternation", "[Fill][ZContouringSettings]")
+{
+    struct Observation {
+        std::vector<int> angles;
+        SparseInfillShape sparse;
+        std::vector<double> slice_offsets;
+    };
+
+    auto observe = [](bool zaa_enabled, bool dont_alternate, double min_z) {
+        Print print;
+        Slic3r::Test::init_and_process_print({make_cube(8., 8., 1.2)}, print,
+                                            {{"sparse_infill_pattern", "line"},
+                                             {"sparse_infill_density", "40%"},
+                                             // An empty template leaves the public layer alternation visible.
+                                             {"sparse_infill_rotate_template", ""},
+                                             {"infill_direction", 0},
+                                             {"wall_loops", 0},
+                                             {"top_shell_layers", 0},
+                                             {"bottom_shell_layers", 0},
+                                             {"top_shell_thickness", 0},
+                                             {"bottom_shell_thickness", 0},
+                                             {"initial_layer_print_height", 0.2},
+                                             {"zaa_enabled", zaa_enabled},
+                                             {"zaa_dont_alternate_fill_direction", dont_alternate},
+                                             {"zaa_min_z", min_z},
+                                             // There are no perimeters in this fixture; keep this gate explicit.
+                                             {"zaa_minimize_perimeter_height", 0},
+                                             {"layer_height", 0.2}});
+
+        Observation result;
+        result.angles = angles_per_layer(print, sparse_role);
+        result.sparse = sparse_infill_shape(print);
+        for (const Layer *layer : print.objects().front()->layers())
+            result.slice_offsets.push_back(layer->slice_z - layer->bottom_z());
+        return result;
+    };
+
+    auto distinct_angles = [](const std::vector<int> &angles) {
+        std::vector<int> distinct = angles;
+        std::sort(distinct.begin(), distinct.end());
+        distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+        return distinct.size();
+    };
+
+    const Observation disabled_alternating = observe(false, false, 0.05);
+    const Observation disabled_flagged    = observe(false, true, 0.05);
+    const Observation enabled_alternating = observe(true, false, 0.05);
+    const Observation enabled_fixed       = observe(true, true, 0.05);
+
+    for (const Observation &observation : {disabled_alternating, disabled_flagged, enabled_alternating, enabled_fixed}) {
+        REQUIRE(observation.angles.size() >= 4);
+        REQUIRE(std::count(observation.angles.begin(), observation.angles.end(), -1) == 0);
+        REQUIRE(observation.sparse.path_count > 0);
+        CHECK(observation.sparse.point_count > observation.sparse.path_count);
+        CHECK(observation.sparse.length > 0.);
+        CHECK(std::isfinite(observation.sparse.length));
+    }
+
+    // The secondary flag is gated by zaa_enabled: it is inert in both disabled rows.
+    CHECK(disabled_alternating.angles == disabled_flagged.angles);
+    // Without an explicit rotation template, enabled Z contouring either alternates the line
+    // direction or deliberately holds it, which is visible over the multi-layer fixture.
+    CHECK(distinct_angles(enabled_alternating.angles) > 1);
+    CHECK(distinct_angles(enabled_fixed.angles) == 1);
+    CHECK(enabled_alternating.angles != enabled_fixed.angles);
+
+    // zaa_min_z is an observable slice-plane offset on the later layers.
+    const Observation low_min_z  = observe(true, true, 0.02);
+    const Observation high_min_z = observe(true, true, 0.08);
+    REQUIRE(low_min_z.slice_offsets.size() >= 4);
+    REQUIRE(high_min_z.slice_offsets.size() == low_min_z.slice_offsets.size());
+    CHECK_THAT(low_min_z.slice_offsets[1], Catch::Matchers::WithinAbs(0.02, 0.002));
+    CHECK_THAT(high_min_z.slice_offsets[1], Catch::Matchers::WithinAbs(0.08, 0.002));
+    CHECK(high_min_z.slice_offsets[1] - low_min_z.slice_offsets[1] > 0.04);
+    CHECK(low_min_z.angles == high_min_z.angles);
+}
+
+namespace z_contouring_perimeter_contracts {
+
+struct PerimeterHeightEvidence {
+    size_t path_count = 0;
+    size_t contoured_path_count = 0;
+    double xy_length = 0.0;
+    double z_integral = 0.0;
+    double z_min = std::numeric_limits<double>::max();
+    double z_max = std::numeric_limits<double>::lowest();
+
+    double mean_z() const
+    {
+        return z_integral / xy_length;
+    }
+};
+
+PerimeterHeightEvidence perimeter_height_evidence(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->layers().size() >= 4);
+
+    PerimeterHeightEvidence result;
+    for (const Layer *layer : object->layers()) {
+        REQUIRE(layer != nullptr);
+        for (const LayerRegion *region : layer->regions()) {
+            REQUIRE(region != nullptr);
+            for_each_extrusion_path(region->perimeters, [&result](const ExtrusionPath &path) {
+                if (path.role() != erPerimeter && path.role() != erExternalPerimeter)
+                    return;
+                REQUIRE(path.polyline.points.size() >= 2);
+                ++result.path_count;
+                result.contoured_path_count += path.z_contoured ? 1 : 0;
+                for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+                    const Point3 &a = path.polyline.points[i - 1];
+                    const Point3 &b = path.polyline.points[i];
+                    const double segment_length = unscale<double>((b - a).head<2>().cast<double>().norm());
+                    REQUIRE(std::isfinite(segment_length));
+                    if (segment_length <= 0.0)
+                        continue;
+                    const double za = unscale<double>(a.z());
+                    const double zb = unscale<double>(b.z());
+                    REQUIRE(std::isfinite(za));
+                    REQUIRE(std::isfinite(zb));
+                    result.xy_length += segment_length;
+                    // Integrate the linearly interpolated Z correction over physical XY length.
+                    result.z_integral += 0.5 * (za + zb) * segment_length;
+                    result.z_min = std::min(result.z_min, std::min(za, zb));
+                    result.z_max = std::max(result.z_max, std::max(za, zb));
+                }
+            });
+        }
+    }
+    REQUIRE(result.path_count > 0);
+    REQUIRE(result.xy_length > 0.0);
+    REQUIRE(std::isfinite(result.xy_length));
+    REQUIRE(std::isfinite(result.z_integral));
+    REQUIRE(std::isfinite(result.mean_z()));
+    REQUIRE(std::isfinite(result.z_min));
+    REQUIRE(std::isfinite(result.z_max));
+    return result;
+}
+
+PerimeterHeightEvidence run_perimeter_height_case(bool zaa_enabled, double threshold)
+{
+    Print print;
+    // Uniformly scaled slopy_cube keeps its 45-degree roof facets while reducing the run to
+    // 50 layers. ContourZ enters its threshold gate when threshold < facet slope: 35 degrees
+    // adjusts this roof, while 90 degrees is above it and leaves the baseline unchanged.
+    TriangleMesh shape = Slic3r::Test::mesh(Slic3r::Test::TestMesh::slopy_cube);
+    shape.scale(0.5f);
+    Slic3r::Test::init_and_process_print({shape}, print, {
+        {"wall_generator", "classic"},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"initial_layer_print_height", 0.2},
+        {"layer_height", 0.2},
+        {"zaa_enabled", zaa_enabled},
+        {"zaa_min_z", 0.05},
+        {"zaa_minimize_perimeter_height", threshold},
+    });
+    return perimeter_height_evidence(print);
+}
+
+} // namespace z_contouring_perimeter_contracts
+
+TEST_CASE("Perimeter height minimization follows the configured slope threshold", "[Fill][ZContouringSettings][ZContouringPerimeter]")
+{
+    using namespace z_contouring_perimeter_contracts;
+
+    const PerimeterHeightEvidence disabled = run_perimeter_height_case(false, 90.0);
+    const PerimeterHeightEvidence zero_threshold = run_perimeter_height_case(true, 0.0);
+    const PerimeterHeightEvidence moderate_threshold = run_perimeter_height_case(true, 35.0);
+    const PerimeterHeightEvidence high_threshold = run_perimeter_height_case(true, 90.0);
+
+    // The disabled row is a real geometry control, rather than a config-only check.
+    CHECK(disabled.contoured_path_count == 0);
+    CHECK_THAT(disabled.mean_z(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(disabled.z_min, Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(disabled.z_max, Catch::Matchers::WithinAbs(0.0, 1e-9));
+
+    // Every enabled row has finite positive perimeter geometry; a threshold may legitimately
+    // leave a path unmarked when its sampled correction is zero.
+    for (const PerimeterHeightEvidence &evidence : {zero_threshold, moderate_threshold, high_threshold}) {
+        REQUIRE(evidence.path_count > 0);
+        REQUIRE(evidence.xy_length > 0.0);
+        CHECK(std::isfinite(evidence.mean_z()));
+    }
+
+    // The threshold only changes Z correction. XY path topology and physical path length stay
+    // invariant; the integral is normalized by that length, so point resampling is immaterial.
+    CHECK(zero_threshold.path_count == moderate_threshold.path_count);
+    CHECK(moderate_threshold.path_count == high_threshold.path_count);
+    CHECK_THAT(zero_threshold.xy_length, Catch::Matchers::WithinAbs(moderate_threshold.xy_length, 0.01));
+    CHECK_THAT(moderate_threshold.xy_length, Catch::Matchers::WithinAbs(high_threshold.xy_length, 0.01));
+
+    // The 35-degree row activates the source correction on the 45-degree sloped perimeter;
+    // zero and 90 degrees leave that correction disabled. The roof contributes a real negative
+    // perimeter correction in the middle row, independently of path-point count.
+    CHECK(moderate_threshold.z_min < -0.001);
+    CHECK(moderate_threshold.mean_z() < zero_threshold.mean_z() - 0.001);
+    CHECK(moderate_threshold.mean_z() < high_threshold.mean_z() - 0.001);
+    CHECK_THAT(high_threshold.mean_z(), Catch::Matchers::WithinAbs(zero_threshold.mean_z(), 0.002));
+    CHECK_THAT(high_threshold.z_min, Catch::Matchers::WithinAbs(zero_threshold.z_min, 0.002));
+}
+
+
 TEST_CASE("Lightning infill slices the same model the same way twice", "[Fill][Regression]")
 {
     // Slicing twice in one process catches a generator that carries state from one slice to the
@@ -1848,6 +2066,159 @@ static Polylines layer_paths(const Layer &layer, ExtrusionRole role)
     return polylines;
 }
 
+namespace infill_setting_geometry_contracts {
+
+static DynamicPrintConfig crosszag_shift_config(double shift_step)
+{
+    const ConfigOptionDef *shift_step_definition = print_config_def.get("infill_shift_step");
+    REQUIRE(shift_step_definition != nullptr);
+    REQUIRE(shift_step_definition->type == coFloat);
+    CHECK_THAT(shift_step_definition->min, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK_THAT(shift_step_definition->max, Catch::Matchers::WithinAbs(10., 1e-12));
+    REQUIRE(shift_step_definition->is_value_valid(0.));
+    REQUIRE(shift_step_definition->is_value_valid(10.));
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", "crosszag"},
+                                   {"sparse_infill_density", "43%"},
+                                   {"sparse_infill_line_width", 0.45},
+                                   {"nozzle_diameter", 0.4},
+                                   {"infill_direction", 0.},
+                                   {"infill_shift_step", shift_step},
+                                   {"infill_anchor", 0.},
+                                   {"infill_anchor_max", 0.},
+                                   {"infill_wall_overlap", 0.},
+                                   {"sparse_infill_rotate_template", ""},
+                                   {"wall_loops", 0},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"top_shell_thickness", 0.},
+                                   {"bottom_shell_thickness", 0.},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2},
+                                   {"xy_contour_compensation", 0.}});
+    return config;
+}
+
+static DynamicPrintConfig lateral_honeycomb_print_config(double angle_degrees)
+{
+    DynamicPrintConfig config = crosszag_shift_config(0.);
+    config.set_deserialize_strict({{"sparse_infill_pattern", "lateral-honeycomb"},
+                                   {"infill_overhang_angle", angle_degrees}});
+    return config;
+}
+
+static double median_line_pitch(const std::vector<double> &positions)
+{
+    REQUIRE(positions.size() >= 5);
+    std::vector<double> gaps;
+    gaps.reserve(positions.size() - 1);
+    for (size_t i = 1; i < positions.size(); ++i)
+        gaps.push_back(positions[i] - positions[i - 1]);
+    std::sort(gaps.begin(), gaps.end());
+    return gaps[gaps.size() / 2];
+}
+
+static double lattice_phase(const std::vector<double> &positions, double origin, double pitch)
+{
+    REQUIRE(positions.size() >= 5);
+    REQUIRE(pitch > 0.1);
+    double cosine = 0., sine = 0.;
+    for (double position : positions) {
+        const double phase = 2. * M_PI * (position - origin) / pitch;
+        cosine += std::cos(phase);
+        sine += std::sin(phase);
+    }
+    REQUIRE(std::hypot(cosine, sine) > positions.size() * 0.5);
+    return pitch * std::atan2(sine, cosine) / (2. * M_PI);
+}
+
+} // namespace infill_setting_geometry_contracts
+
+TEST_CASE("Sliced lateral honeycomb tracks follow the region overhang angle", "[Fill][InfillOverhangForwarding]")
+{
+    using namespace infill_setting_geometry_contracts;
+
+    Print minimum_angle_print, maximum_angle_print;
+    slice_parts(minimum_angle_print, lateral_honeycomb_print_config(15.), {make_cube(20., 20., 1.6)});
+    slice_parts(maximum_angle_print, lateral_honeycomb_print_config(75.), {make_cube(20., 20., 1.6)});
+
+    REQUIRE(minimum_angle_print.objects().size() == 1);
+    REQUIRE(maximum_angle_print.objects().size() == 1);
+    const PrintObject &minimum_object = *minimum_angle_print.objects().front();
+    const PrintObject &maximum_object = *maximum_angle_print.objects().front();
+    REQUIRE(minimum_object.layer_count() > 4);
+    REQUIRE(maximum_object.layer_count() > 4);
+
+    const Layer *minimum_config_layer = minimum_object.get_layer(1);
+    const Layer *maximum_config_layer = maximum_object.get_layer(1);
+    REQUIRE(minimum_config_layer != nullptr);
+    REQUIRE(maximum_config_layer != nullptr);
+    REQUIRE_FALSE(minimum_config_layer->regions().empty());
+    REQUIRE_FALSE(maximum_config_layer->regions().empty());
+    const PrintRegionConfig &minimum_region_config = minimum_config_layer->regions().front()->region().config();
+    const PrintRegionConfig &maximum_region_config = maximum_config_layer->regions().front()->region().config();
+    CAPTURE(minimum_region_config.infill_overhang_angle.value, maximum_region_config.infill_overhang_angle.value);
+    REQUIRE_THAT(minimum_region_config.infill_overhang_angle.value, Catch::Matchers::WithinAbs(15., 1e-6));
+    REQUIRE_THAT(maximum_region_config.infill_overhang_angle.value, Catch::Matchers::WithinAbs(75., 1e-6));
+
+    // Layer 1 (Z=0.4 mm) and layer 4 (Z=1.0 mm) occupy the same single/double-line
+    // phase contrast at the registered 15 and 75 degree endpoints.
+    const std::array<int, 2> layer_ids{1, 4};
+    for (const int layer_id : layer_ids) {
+        const Polylines minimum_paths = layer_paths(*minimum_object.get_layer(layer_id), erInternalInfill);
+        const Polylines maximum_paths = layer_paths(*maximum_object.get_layer(layer_id), erInternalInfill);
+        const std::vector<double> minimum_lines = long_axis_line_positions(minimum_paths, true);
+        const std::vector<double> maximum_lines = long_axis_line_positions(maximum_paths, true);
+        CAPTURE(layer_id, minimum_lines.size(), maximum_lines.size());
+        REQUIRE(minimum_lines.size() >= 8);
+        CHECK(maximum_lines.size() > minimum_lines.size() + 2);
+    }
+}
+
+TEST_CASE("Crosszag shift step advances alternate layer-pair phases", "[Fill][InfillShiftStep]")
+{
+    using namespace infill_setting_geometry_contracts;
+
+    Print zero_step, maximum_step;
+    slice_parts(zero_step, crosszag_shift_config(0.), {make_cube(20., 20., 1.6)});
+    slice_parts(maximum_step, crosszag_shift_config(10.), {make_cube(20., 20., 1.6)});
+    REQUIRE(zero_step.objects().size() == 1);
+    REQUIRE(maximum_step.objects().size() == 1);
+    const PrintObject &zero_object = *zero_step.objects().front();
+    const PrintObject &maximum_object = *maximum_step.objects().front();
+    REQUIRE(zero_object.layer_count() >= 4);
+    REQUIRE(maximum_object.layer_count() >= 4);
+
+    for (size_t layer_id = 0; layer_id < 4; ++layer_id) {
+        const bool vertical = layer_id % 2 != 0;
+        const bool reverse_normal = vertical; // Odd layers rotate the local pattern normal onto negative global X.
+        const std::vector<double> zero_positions = long_axis_line_positions(
+            layer_paths(*zero_object.get_layer(int(layer_id)), erInternalInfill), vertical, reverse_normal);
+        const std::vector<double> maximum_positions = long_axis_line_positions(
+            layer_paths(*maximum_object.get_layer(int(layer_id)), erInternalInfill), vertical, reverse_normal);
+        CAPTURE(layer_id, vertical);
+        REQUIRE(zero_positions.size() >= 5);
+        REQUIRE(maximum_positions.size() >= 5);
+
+        const double pitch = median_line_pitch(zero_positions);
+        const double axis_center = unscale<double>(vertical ? -zero_object.bounding_box().center().x()
+                                                             : zero_object.bounding_box().center().y());
+        const double zero_phase = lattice_phase(zero_positions, axis_center, pitch);
+        const double maximum_phase = lattice_phase(maximum_positions, axis_center, pitch);
+        const double observed_delta = std::remainder(maximum_phase - zero_phase, pitch);
+        const double sign = (layer_id % 2 == 0) ? -1. : 1.;
+        const double expected_delta = std::remainder(sign * 10. * (layer_id / 2), pitch);
+        CAPTURE(pitch, observed_delta, expected_delta);
+        if (layer_id < 2)
+            CHECK_THAT(observed_delta, Catch::Matchers::WithinAbs(0., 0.04));
+        else {
+            REQUIRE(std::abs(expected_delta) > 0.15);
+            CHECK_THAT(observed_delta, Catch::Matchers::WithinAbs(expected_delta, 0.04));
+        }
+    }
+}
+
 // Orca: Share of the paths of a role that the other body does not repeat around its own center.
 static double unmatched_between_bodies(const Print &print, ExtrusionRole role)
 {
@@ -1887,6 +2258,157 @@ static double unmatched_between_prints(const Print &a, const Print &b, Extrusion
     }
     REQUIRE(sampled > 0);
     return double(unmatched) / double(sampled);
+}
+
+namespace symmetric_infill_y_axis_contracts {
+
+struct LayerSnapshot {
+    Polylines infill;
+    double    area = 0.;
+    double    perimeter_length = 0.;
+    size_t    perimeter_paths = 0;
+};
+
+struct PrintSnapshot {
+    BoundingBox                object_bbox;
+    std::vector<LayerSnapshot> layers;
+};
+
+static TriangleMesh l_mesh(bool mirrored)
+{
+    TriangleMesh mesh = make_cube(20., 6., .4);
+    TriangleMesh stem = make_cube(6., 14., .4);
+    stem.translate(mirrored ? 14. : 0., 6., 0.);
+    mesh.merge(stem);
+    return mesh;
+}
+
+static DynamicPrintConfig config_for(const std::string &pattern, bool symmetric)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "30%"},
+                                   {"sparse_infill_line_width", .45},
+                                   {"nozzle_diameter", .4},
+                                   {"infill_direction", 25.},
+                                   {"infill_shift_step", 0.},
+                                   {"infill_anchor", 0},
+                                   {"infill_anchor_max", 0},
+                                   {"wall_loops", 2},
+                                   {"wall_generator", "classic"},
+                                   {"outer_wall_line_width", .45},
+                                   {"inner_wall_line_width", .45},
+                                   {"symmetric_infill_y_axis", symmetric},
+                                   {"separated_infills", false},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"top_shell_thickness", 0},
+                                   {"bottom_shell_thickness", 0},
+                                   {"layer_height", .2},
+                                   {"initial_layer_print_height", .2},
+                                   {"initial_layer_line_width", 0},
+                                   {"sparse_infill_rotate_template", ""},
+                                   {"xy_contour_compensation", 0},
+                                   {"infill_wall_overlap", 0}});
+    return config;
+}
+
+static double perimeter_length(const Layer &layer, size_t &path_count)
+{
+    Polylines paths;
+    for (const LayerRegion *region : layer.regions())
+        region->perimeters.collect_polylines(paths);
+    path_count = paths.size();
+    double length = 0.;
+    for (const Polyline &path : paths)
+        length += unscale<double>(path.length());
+    return length;
+}
+
+static PrintSnapshot snapshot(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    PrintSnapshot out;
+    out.object_bbox = object.bounding_box();
+    REQUIRE(object.layer_count() == 2);
+    out.layers.reserve(object.layer_count());
+    for (size_t i = 0; i < object.layer_count(); ++i) {
+        const Layer &layer = *object.get_layer(int(i));
+        REQUIRE(layer.lslices.size() == 1);
+        LayerSnapshot current;
+        current.infill = layer_paths(layer, erInternalInfill);
+        REQUIRE_FALSE(current.infill.empty());
+        current.area = unscale<double>(unscale<double>(area(layer.lslices)));
+        REQUIRE_THAT(current.area, Catch::Matchers::WithinAbs(204., 1e-3));
+        current.perimeter_length = perimeter_length(layer, current.perimeter_paths);
+        REQUIRE(current.perimeter_paths > 0);
+        REQUIRE(current.perimeter_length > 0.);
+        out.layers.emplace_back(std::move(current));
+    }
+    return out;
+}
+
+static Polylines reflect_x(Polylines paths, coord_t axis)
+{
+    for (Polyline &path : paths)
+        for (Point &point : path.points)
+            point.x() = 2 * axis - point.x();
+    return paths;
+}
+
+static double mismatch_ratio(const Polylines &a, const Polylines &b)
+{
+    size_t sampled = 0, unmatched = 0;
+    count_unmatched(a, b, sampled, unmatched);
+    REQUIRE(sampled > 0);
+    return double(unmatched) / double(sampled);
+}
+
+} // namespace symmetric_infill_y_axis_contracts
+
+TEST_CASE("Symmetric Y-axis infill reflects asymmetric zigzag and crosszag geometry", "[Fill][SymmetricInfill]")
+{
+    using namespace symmetric_infill_y_axis_contracts;
+    const std::string pattern = GENERATE("zigzag", "crosszag");
+    CAPTURE(pattern);
+
+    Print original_off, original_on, mirrored_off;
+    slice_parts(original_off, config_for(pattern, false), {l_mesh(false)});
+    slice_parts(original_on, config_for(pattern, true), {l_mesh(false)});
+    slice_parts(mirrored_off, config_for(pattern, false), {l_mesh(true)});
+
+    const PrintSnapshot off = snapshot(original_off);
+    const PrintSnapshot on = snapshot(original_on);
+    const PrintSnapshot mirrored = snapshot(mirrored_off);
+    REQUIRE(off.object_bbox.min == on.object_bbox.min);
+    REQUIRE(off.object_bbox.max == on.object_bbox.max);
+    REQUIRE(off.object_bbox.min == mirrored.object_bbox.min);
+    REQUIRE(off.object_bbox.max == mirrored.object_bbox.max);
+    const coord_t axis = off.object_bbox.center().x();
+    REQUIRE(axis == on.object_bbox.center().x());
+    REQUIRE(axis == mirrored.object_bbox.center().x());
+    REQUIRE_THAT(unscale<double>(off.object_bbox.size().x()), Catch::Matchers::WithinAbs(20., 1e-6));
+    REQUIRE_THAT(unscale<double>(off.object_bbox.size().y()), Catch::Matchers::WithinAbs(20., 1e-6));
+
+    for (size_t layer_idx = 0; layer_idx < off.layers.size(); ++layer_idx) {
+        CAPTURE(layer_idx);
+        CHECK_THAT(on.layers[layer_idx].area, Catch::Matchers::WithinAbs(off.layers[layer_idx].area, 1e-3));
+        CHECK_THAT(mirrored.layers[layer_idx].area, Catch::Matchers::WithinAbs(off.layers[layer_idx].area, 1e-3));
+        CHECK(on.layers[layer_idx].perimeter_paths == off.layers[layer_idx].perimeter_paths);
+        CHECK(mirrored.layers[layer_idx].perimeter_paths == off.layers[layer_idx].perimeter_paths);
+        CHECK_THAT(on.layers[layer_idx].perimeter_length,
+                   Catch::Matchers::WithinAbs(off.layers[layer_idx].perimeter_length, 1e-3));
+        CHECK_THAT(mirrored.layers[layer_idx].perimeter_length,
+                   Catch::Matchers::WithinAbs(off.layers[layer_idx].perimeter_length, 1e-3));
+
+        const Polylines expected = reflect_x(mirrored.layers[layer_idx].infill, axis);
+        const double reflected_mismatch = mismatch_ratio(on.layers[layer_idx].infill, expected);
+        CHECK(reflected_mismatch <= 0.02);
+
+        const double on_off_mismatch = mismatch_ratio(off.layers[layer_idx].infill, on.layers[layer_idx].infill);
+        CHECK(on_off_mismatch > 0.05);
+    }
 }
 
 TEST_CASE("Separated infill centers the sparse infill of each body on itself", "[Fill][Regression]")
@@ -2041,7 +2563,7 @@ static Polygons centered_square(double half)
     return {Polygon({Point::new_scale(-half, -half), Point::new_scale(half, -half), Point::new_scale(half, half), Point::new_scale(-half, half)})};
 }
 
-TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill]")
+TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill][TpmsAdaptiveDensity]")
 {
     // The modes following the distance print more lines than their target where its levels meet: along the shells, or
     // where the patterns blend.
@@ -2135,6 +2657,55 @@ TEST_CASE("2D adaptive TPMS infill does not change along its axis", "[Fill]")
     CHECK(middle > 0.8 * end);
     CHECK(middle < 1.25 * end);
     CHECK(middle < 0.7 * core(uniform, false));
+}
+
+TEST_CASE("Adaptive TPMS normal Y is invariant along its axis", "[Fill][TpmsAdaptiveNormalY]")
+{
+    // A 30 x 90 x 30 mm gyroid fixture: normal_y sections are XZ slices and
+    // therefore keep density stable along Y while still grading across X.
+    auto slice = [](const std::string &adaptive, Print &print) {
+        Slic3r::Test::init_and_process_print({make_cube(30., 90., 30.)}, print,
+                                            {{"sparse_infill_pattern", "gyroid"},
+                                             {"sparse_infill_density", "25%"},
+                                             {"tpms_adaptive", adaptive},
+                                             {"tpms_interior_density", "5%"},
+                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"wall_loops", 2},
+                                             {"top_shell_layers", 0},
+                                             {"bottom_shell_layers", 0},
+                                             {"layer_height", 0.4},
+                                             {"initial_layer_print_height", 0.4}});
+    };
+    Print uniform, adaptive;
+    slice("disabled", uniform);
+    slice("normal_y", adaptive);
+
+    auto strip = [](double x0, double y0, double x1, double y1) {
+        return Polygons{Polygon({Point::new_scale(x0, y0), Point::new_scale(x1, y0),
+                                 Point::new_scale(x1, y1), Point::new_scale(x0, y1)})};
+    };
+    // The section-normal axis is Y: the end and middle strips should have the
+    // same adaptive density, while the X shell remains denser than its core.
+    const double y_end    = sparse_infill_length(adaptive, 10., 20., strip(-5., -40., 5., -30.));
+    const double y_middle = sparse_infill_length(adaptive, 10., 20., strip(-5., -5., 5., 5.));
+    const double x_shell  = sparse_infill_length(adaptive, 10., 20., strip(-13., -5., -9., 5.));
+    const double x_core   = sparse_infill_length(adaptive, 10., 20., strip(-5., -5., 5., 5.));
+    const double uniform_x_core = sparse_infill_length(uniform, 10., 20., strip(-5., -5., 5., 5.));
+    for (const double length : {y_end, y_middle, x_shell, x_core, uniform_x_core})
+        REQUIRE(std::isfinite(length));
+    REQUIRE(y_end > 0.);
+    REQUIRE(y_middle > 0.);
+    REQUIRE(x_shell > 0.);
+    REQUIRE(x_core > 0.);
+    REQUIRE(uniform_x_core > 0.);
+    CHECK(y_middle > 0.8 * y_end);
+    CHECK(y_middle < 1.25 * y_end);
+    // Compare path length per square millimeter: the shell strip is 4 x 10 mm
+    // and the core strip is 10 x 10 mm. Both span the same layers.
+    const double shell_area = (13. - 9.) * (5. - (-5.));
+    const double core_area = (5. - (-5.)) * (5. - (-5.));
+    CHECK(x_shell / shell_area > 1.25 * (x_core / core_area));
+    CHECK(x_core < 0.7 * uniform_x_core);
 }
 
 TEST_CASE("Adaptive TPMS shells and blend keep the whole deep core of a tall object sparse", "[Fill]")
@@ -2352,4 +2923,811 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][InternalBrid
         for (const Point &point : path.equally_spaced_points(scale_(0.25)))
             max_distance = std::max(max_distance, printed_tree.distance_from_lines<false>(point));
     CHECK(unscale<double>(max_distance) <= 0.012);
+}
+
+namespace ironing_multiregion_contracts {
+
+TEST_CASE("Ironing preserves each region's speed flow and direction", "[Fill][MultiRegionIroning]")
+{
+    enum class Difference { None, Speed, Flow, Angle };
+    const Difference difference = GENERATE(Difference::None, Difference::Speed, Difference::Flow, Difference::Angle);
+    CAPTURE(static_cast<int>(difference));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1}, {"top_shell_layers", 1}, {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "15%"}, {"top_surface_pattern", "monotonic"},
+        {"ironing_type", "topmost"}, {"ironing_pattern", "rectilinear"},
+        {"ironing_spacing", 0.2}, {"ironing_inset", 0.2},
+        {"ironing_speed", 20.}, {"ironing_flow", "10%"},
+        {"filament_ironing_speed", "nil"}, {"filament_ironing_flow", "nil"},
+        {"filament_ironing_spacing", "nil"}, {"filament_ironing_inset", "nil"},
+        {"ironing_angle", 0.}, {"ironing_angle_fixed", true},
+        {"align_infill_direction_to_model", false}, {"top_layer_direction", -1.},
+        {"solid_infill_rotate_template", ""},
+        {"slow_down_for_layer_cooling", false}, {"slow_down_layer_time", 0.},
+        {"enable_support", false}, {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"enable_arc_fitting", false}, {"gcode_comments", true},
+        {"use_relative_e_distances", false}, {"layer_change_gcode", ""},
+    });
+    DynamicPrintConfig changed;
+    if (difference == Difference::Speed) changed.set_deserialize_strict("ironing_speed", "35");
+    if (difference == Difference::Flow) changed.set_deserialize_strict("ironing_flow", "20%");
+    if (difference == Difference::Angle) changed.set_deserialize_strict("ironing_angle", "90");
+    // A harmless region difference keeps two regions even in the equal-ironing
+    // control, so it also exercises grouping of equivalent ironing parameters.
+    changed.set_deserialize_strict("sparse_infill_density", "20%");
+    TriangleMesh left = make_cube(8., 8., 0.8);
+    left.translate(10., 10., 0.);
+    TriangleMesh right = make_cube(8., 8., 0.8);
+    right.translate(30., 10., 0.);
+    Print print;
+    slice_parts(print, config, {left, right}, {{right, changed}});
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.num_print_regions() >= 2);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    const std::string output = Slic3r::Test::gcode(print);
+
+    struct RegionMotion {
+        size_t moves = 0;
+        double length = 0.;
+        double filament = 0.;
+        double longest = 0.;
+        double longest_dx = 0.;
+        double longest_dy = 0.;
+    };
+    std::array<RegionMotion, 2> regions;
+    GCodeReader reader;
+    reader.apply_config(config);
+    bool ironing = false;
+    reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const auto comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            ironing = comment.find("Ironing") != std::string_view::npos;
+        if (!ironing || !line.extruding(self) || line.dist_XY(self) <= 0.)
+            return;
+        REQUIRE(std::isfinite(line.new_X(self)));
+        REQUIRE(std::isfinite(line.new_Y(self)));
+        REQUIRE(std::isfinite(line.dist_E(self)));
+        size_t matches = 0;
+        for (size_t i = 0; i < regions.size(); ++i) {
+            const double min_x = 10. + 20. * i;
+            const auto inside = [min_x](double x, double y) {
+                return x >= min_x - 0.01 && x <= min_x + 8.01 && y >= 9.99 && y <= 18.01;
+            };
+            if (!inside(self.x(), self.y()) || !inside(line.new_X(self), line.new_Y(self)))
+                continue;
+            ++matches;
+            INFO("region=" << i << " line=" << line.raw());
+            const double speed = i == 1 && difference == Difference::Speed ? 35. : 20.;
+            CHECK_THAT(double(line.new_F(self)), Catch::Matchers::WithinAbs(60. * speed, 0.1));
+            CHECK_THAT(double(line.new_Z(self)), Catch::Matchers::WithinAbs(0.8, 1e-4));
+            RegionMotion &motion = regions[i];
+            ++motion.moves;
+            motion.length += line.dist_XY(self);
+            motion.filament += line.dist_E(self);
+            if (line.dist_XY(self) > motion.longest) {
+                motion.longest = line.dist_XY(self);
+                motion.longest_dx = std::abs(line.dist_X(self));
+                motion.longest_dy = std::abs(line.dist_Y(self));
+            }
+        }
+        REQUIRE(matches == 1);
+    });
+    for (size_t i = 0; i < regions.size(); ++i) {
+        CAPTURE(i);
+        const RegionMotion &motion = regions[i];
+        REQUIRE(motion.moves > 5);
+        REQUIRE(motion.filament > 0.);
+        REQUIRE(motion.length > 0.);
+        REQUIRE(motion.longest > 5.);
+        if (i == 1 && difference == Difference::Angle)
+            CHECK(motion.longest_dy / motion.longest > 0.99);
+        else
+            CHECK(motion.longest_dx / motion.longest > 0.99);
+    }
+    const double flow_ratio = (regions[1].filament / regions[1].length) /
+                              (regions[0].filament / regions[0].length);
+    CHECK_THAT(flow_ratio, Catch::Matchers::WithinRel(difference == Difference::Flow ? 2. : 1., 0.03));
+}
+
+} // namespace ironing_multiregion_contracts
+
+namespace flow_calibration_order_contracts {
+
+struct TopFillSnapshot {
+    std::vector<Points> paths;
+    std::vector<double> path_lengths_mm;
+    Point                center;
+    double               total_length_mm = 0.;
+    double               footprint_area_mm2 = 0.;
+    bool                 protected_order = true;
+    Polygons             _covered;
+};
+
+static TopFillSnapshot snapshot_top_fill(const Print &print)
+{
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->layer_count() > 0);
+    const Layer *layer = object->get_layer(int(object->layer_count() - 1));
+    REQUIRE(layer != nullptr);
+    REQUIRE_FALSE(layer->lslices.empty());
+
+    TopFillSnapshot result;
+    result.center = get_extents(layer->lslices.front()).center();
+    auto collect = [&](const auto &self, const ExtrusionEntity *entity, bool inherited_no_sort) -> void {
+        REQUIRE(entity != nullptr);
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+            const bool no_sort = inherited_no_sort || collection->no_sort;
+            for (const ExtrusionEntity *child : collection->entities)
+                self(self, child, no_sort);
+            return;
+        }
+        if (entity->role() != erTopSolidInfill)
+            return;
+        const auto *path = dynamic_cast<const ExtrusionPath *>(entity);
+        REQUIRE(path != nullptr);
+        const Polyline polyline = path->polyline.to_polyline();
+        REQUIRE(polyline.points.size() >= 2);
+        REQUIRE(path->length() > 0.);
+        result.paths.push_back(polyline.points);
+        const double path_length_mm = unscale<double>(path->length());
+        result.path_lengths_mm.push_back(path_length_mm);
+        result.total_length_mm += path_length_mm;
+        result.protected_order &= inherited_no_sort && !path->can_reverse();
+        path->polygons_covered_by_width(result._covered, 0.f);
+    };
+
+    // Read the ordered public fill entities produced by the slicing pipeline.
+    for (const LayerRegion *region : layer->regions()) {
+        REQUIRE(region != nullptr);
+        for (const ExtrusionEntity *entity : region->fills.entities)
+            collect(collect, entity, false);
+    }
+    REQUIRE(result.paths.size() >= 2);
+    REQUIRE(!result._covered.empty());
+    result.footprint_area_mm2 = std::abs(unscale<double>(unscale<double>(area(union_(result._covered)))));
+    REQUIRE(std::isfinite(result.total_length_mm));
+    REQUIRE(std::isfinite(result.footprint_area_mm2));
+    REQUIRE(result.total_length_mm > 0.);
+    REQUIRE(result.footprint_area_mm2 > 0.);
+    return result;
+}
+
+static DynamicPrintConfig config_for(bool special_order, const std::string &fill_order)
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"calib_flowrate_topinfill_special_order", special_order},
+        {"top_surface_pattern", "archimedeanchords"},
+        {"top_surface_fill_order", fill_order},
+        {"top_surface_density", "100%"},
+        {"top_surface_line_width", 0.42},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"wall_loops", 2},
+        {"wall_generator", "classic"},
+        {"center_of_surface_pattern", "each_surface"},
+        {"solid_infill_direction", 0.0},
+        {"align_infill_direction_to_model", false},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"enable_arc_fitting", false},
+        {"resolution", 0.01}
+    });
+    return config;
+}
+
+static TopFillSnapshot run_case(bool special_order, const std::string &fill_order)
+{
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = config_for(special_order, fill_order);
+    Slic3r::Test::init_print({make_cube(12., 20., 0.8)}, print, model, config, nullptr, false);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().calib_flowrate_topinfill_special_order == special_order);
+    return snapshot_top_fill(print);
+}
+
+static double center_distance_squared(const Point &point, const Point &center)
+{
+    const double dx = unscale<double>(point.x() - center.x());
+    const double dy = unscale<double>(point.y() - center.y());
+    return dx * dx + dy * dy;
+}
+
+} // namespace flow_calibration_order_contracts
+
+TEST_CASE("Flow calibration special order keeps the Archimedean top fill inside-out", "[Fill][FlowCalibrationOrder]")
+{
+    using namespace flow_calibration_order_contracts;
+    const TopFillSnapshot ordinary = run_case(false, "default");
+    const TopFillSnapshot calibrated = run_case(true, "default");
+
+    REQUIRE(ordinary.paths.size() >= 2);
+    REQUIRE(calibrated.paths.size() >= 2);
+    REQUIRE(calibrated.protected_order);
+    REQUIRE(calibrated.paths.back().size() >= 2);
+    const auto longest = std::max_element(calibrated.path_lengths_mm.begin(), calibrated.path_lengths_mm.end());
+    REQUIRE(longest != calibrated.path_lengths_mm.end());
+    const size_t longest_index = size_t(longest - calibrated.path_lengths_mm.begin());
+    REQUIRE(longest_index == calibrated.paths.size() - 1);
+    REQUIRE(center_distance_squared(calibrated.paths.back().front(), calibrated.center) <
+            center_distance_squared(calibrated.paths.back().back(), calibrated.center));
+
+    // Reordering/reversing the public extrusion paths must conserve deposition.
+    CHECK_THAT(calibrated.total_length_mm, Catch::Matchers::WithinAbs(ordinary.total_length_mm, 1e-6));
+    CHECK_THAT(calibrated.footprint_area_mm2, Catch::Matchers::WithinAbs(ordinary.footprint_area_mm2, 1e-6));
+}
+
+TEST_CASE("Explicit Archimedean top-fill order overrides flow calibration ordering", "[Fill][FlowCalibrationOrder]")
+{
+    using namespace flow_calibration_order_contracts;
+    const std::string fill_order = GENERATE("outward", "inward");
+    CAPTURE(fill_order);
+    const TopFillSnapshot ordinary = run_case(false, fill_order);
+    const TopFillSnapshot calibrated = run_case(true, fill_order);
+
+    REQUIRE(ordinary.paths.size() >= 2);
+    REQUIRE(calibrated.paths.size() == ordinary.paths.size());
+    REQUIRE(ordinary.protected_order);
+    REQUIRE(calibrated.protected_order);
+    // The explicit public order is authoritative even when the calibration
+    // flag is enabled, so both public ordered path sequences must match.
+    CHECK(calibrated.paths == ordinary.paths);
+    CHECK_THAT(calibrated.total_length_mm, Catch::Matchers::WithinAbs(ordinary.total_length_mm, 1e-6));
+    CHECK_THAT(calibrated.footprint_area_mm2, Catch::Matchers::WithinAbs(ordinary.footprint_area_mm2, 1e-6));
+}
+
+namespace external_bridge_direction_contracts {
+
+struct BridgeDirections {
+    std::vector<double> surfaces;
+    std::vector<double> interior_segments;
+};
+
+DynamicPrintConfig config(double angle, bool relative, bool aligned)
+{
+    DynamicPrintConfig result = DynamicPrintConfig::full_print_config();
+    result.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"}, {"line_width", 0.42},
+        {"wall_generator", "classic"}, {"wall_loops", 2},
+        {"top_shell_layers", 2}, {"bottom_shell_layers", 2},
+        {"top_shell_thickness", 0.}, {"bottom_shell_thickness", 0.},
+        {"sparse_infill_density", "15%"}, {"sparse_infill_pattern", "rectilinear"},
+        {"bridge_angle", angle}, {"internal_bridge_angle", 0.},
+        {"relative_bridge_angle", relative}, {"align_infill_direction_to_model", aligned},
+        {"infill_direction", 17.}, {"solid_infill_rotate_template", ""},
+        {"bridge_density", "100%"}, {"bridge_flow", 1.}, {"thick_bridges", false},
+        {"enable_support", false}, {"raft_layers", 0},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"}, {"resolution", 0.012},
+        {"use_relative_e_distances", true}, {"layer_change_gcode", "G92 E0\n"},
+    });
+    return result;
+}
+
+BridgeDirections slice(double angle, bool relative, bool aligned, double rotation)
+{
+    // A roof spans the 12 mm gap between two pillars. The 0.2 mm overlap
+    // joins the roof to the pillars without a coplanar-only mesh contact.
+    TriangleMesh bridge = make_cube(4., 8., 4.);
+    TriangleMesh pillar = make_cube(4., 8., 4.);
+    pillar.translate(16., 0., 0.);
+    bridge.merge(pillar);
+    TriangleMesh roof = make_cube(20., 8., 0.6);
+    roof.translate(0., 0., 3.8);
+    bridge.merge(roof);
+
+    const DynamicPrintConfig settings = config(angle, relative, aligned);
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({bridge}, print, model, settings, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    model.objects.front()->instances.front()->set_rotation(
+        Vec3d(0., 0., Geometry::deg2rad(rotation)));
+    print.apply(model, settings);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+
+    BridgeDirections result;
+    for (const Layer *layer : print.objects().front()->layers()) {
+        for (const LayerRegion *region : layer->regions()) {
+            ExPolygons bridge_regions;
+            for (const Surface &surface : region->fill_surfaces.surfaces) {
+                if (surface.surface_type == stBottomBridge) {
+                    result.surfaces.push_back(surface.bridge_angle);
+                    bridge_regions.push_back(surface.expolygon);
+                }
+            }
+            if (bridge_regions.empty())
+                continue;
+            // Contour connectors share the bridge role and may be long. Keep
+            // only path portions inside the bridge, a millimeter from its
+            // boundaries, so those connectors cannot stand in for fill spans.
+            const Polygons interior = shrink(to_polygons(bridge_regions), scale_(1.));
+            REQUIRE_FALSE(interior.empty());
+            for_each_extrusion_path(region->fills, [&result, &interior](const ExtrusionPath &path) {
+                if (path.role() != erBridgeInfill)
+                    return;
+                const Polylines clipped = intersection_pl(Polylines{path.as_polyline()}, interior);
+                for (const Polyline &span : clipped) {
+                    for (size_t i = 1; i < span.points.size(); ++i) {
+                        const Point &a = span.points[i - 1];
+                        const Point &b = span.points[i];
+                        const double dx = unscale<double>(b.x() - a.x());
+                        const double dy = unscale<double>(b.y() - a.y());
+                        if (std::hypot(dx, dy) > 1.)
+                            result.interior_segments.push_back(std::atan2(dy, dx));
+                    }
+                }
+            });
+        }
+    }
+    REQUIRE_FALSE(result.surfaces.empty());
+    REQUIRE(result.interior_segments.size() >= 2);
+    return result;
+}
+
+double direction_error(double actual, double expected)
+{
+    return std::abs(std::remainder(actual - expected, PI));
+}
+
+void expect_direction(const BridgeDirections &actual, double expected)
+{
+    for (double angle : actual.surfaces) {
+        REQUIRE(std::isfinite(angle));
+        REQUIRE(angle >= 0.);
+        CHECK_THAT(direction_error(angle, expected), Catch::Matchers::WithinAbs(0., 0.003));
+    }
+    for (double angle : actual.interior_segments) {
+        REQUIRE(std::isfinite(angle));
+        CHECK_THAT(direction_error(angle, expected), Catch::Matchers::WithinAbs(0., 0.003));
+    }
+}
+
+TEST_CASE("External bridge angles reach the printed spans including the horizontal endpoint",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const double angle = GENERATE(1., 30., 90., 180.);
+    CAPTURE(angle);
+    expect_direction(slice(angle, false, false, 0.), Geometry::deg2rad(angle));
+}
+
+TEST_CASE("External bridge alignment adds the model rotation only when enabled",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const bool aligned = GENERATE(false, true);
+    CAPTURE(aligned);
+    const double expected = Geometry::deg2rad(aligned ? 67. : 30.);
+    expect_direction(slice(30., false, aligned, 37.), expected);
+}
+
+TEST_CASE("Relative external bridge angles offset automatic direction once",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const double offset = GENERATE(30., 120.);
+    const bool aligned = GENERATE(false, true);
+    CAPTURE(offset, aligned);
+    const BridgeDirections automatic = slice(0., false, false, 37.);
+    const double detected = automatic.surfaces.front();
+    expect_direction(automatic, detected);
+    // A rotated bridge makes an accidental absolute-angle override observable.
+    REQUIRE(direction_error(detected, 0.) > Geometry::deg2rad(10.));
+    expect_direction(slice(offset, true, aligned, 37.), detected + Geometry::deg2rad(offset));
+}
+
+TEST_CASE("Zero external bridge angle keeps automatic direction under both mode switches",
+          "[Fill][ExternalBridgeDirection]")
+{
+    const BridgeDirections automatic = slice(0., false, false, 37.);
+    const double detected = automatic.surfaces.front();
+    expect_direction(automatic, detected);
+    REQUIRE(direction_error(detected, 0.) > Geometry::deg2rad(10.));
+    for (bool relative : {false, true}) {
+        for (bool aligned : {false, true}) {
+            if (!relative && !aligned)
+                continue; // Already observed above.
+            CAPTURE(relative, aligned);
+            expect_direction(slice(0., relative, aligned, 37.), detected);
+        }
+    }
+}
+
+} // namespace external_bridge_direction_contracts
+
+namespace fill_rotation_template_contracts {
+
+DynamicPrintConfig rotation_config(const std::string &rotation_template)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"solid_infill_rotate_template", rotation_template},
+        {"sparse_infill_density", "100%"},
+        {"sparse_infill_pattern", "monotonic"},
+        {"internal_solid_infill_pattern", "monotonic"},
+        {"top_surface_pattern", "monotonic"},
+        {"wall_loops", 0},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", 0.4},
+        {"line_width", 0.4},
+        {"infill_direction", 0.0},
+        {"solid_infill_direction", 0.0},
+        {"top_layer_direction", -1.0},
+        {"align_infill_direction_to_model", false},
+        {"infill_shift_step", 0.0},
+        {"infill_combination", false},
+        {"fill_multiline", 1},
+        {"raft_layers", 0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_arc_fitting", false},
+    });
+    return config;
+}
+
+std::vector<int> observe_angles(const std::string &rotation_template)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({make_cube(10., 10., 1.6)}, print, rotation_config(rotation_template));
+    const std::vector<int> angles = angles_per_layer(print, solid_role);
+    REQUIRE(angles.size() == 8);
+    for (const int angle : angles) {
+        REQUIRE(angle >= 0);
+        REQUIRE(angle < 180);
+    }
+    return angles;
+}
+
+struct JointCheckpoints
+{
+    char token;
+    std::array<double, 4> degrees;
+};
+
+// Literal checkpoints independently evaluated from the documented joint
+// meanings at progress 1/4, 1/2, 3/4 and 1. The test intentionally does not
+// call or duplicate the production switch as its expected-value oracle.
+const std::array<JointCheckpoints, 14> deterministic_checkpoints = {{
+    {'/', {22.500000, 45.000000, 67.500000, 90.000000}},
+    {'N', {8.176055, 45.000000, 81.823945, 90.000000}},
+    {'n', {15.338028, 45.000000, 74.661972, 90.000000}},
+    {'Z', {36.823945, 45.000000, 53.176055, 90.000000}},
+    {'z', {29.661972, 45.000000, 60.338028, 90.000000}},
+    {'$', {30.000000, 45.000000, 60.000000, 90.000000}},
+    {'L', {34.441509, 63.639610, 83.149158, 90.000000}},
+    {'l', {6.850842, 26.360390, 55.558491, 90.000000}},
+    {'U', {39.375000, 67.500000, 84.375000, 90.000000}},
+    {'u', {50.625000, 22.500000, 5.625000, 0.000000}},
+    {'Q', {52.031250, 78.750000, 88.593750, 90.000000}},
+    {'q', {37.968750, 11.250000, 1.406250, 0.000000}},
+    {'|', {45.000000, 45.000000, 45.000000, 45.000000}},
+    {'#', {90.000000, 90.000000, 90.000000, 90.000000}},
+}};
+
+double axial_distance(double actual, double expected)
+{
+    const double direct = std::abs(actual - expected);
+    return std::min(direct, 180. - direct);
+}
+
+} // namespace fill_rotation_template_contracts
+
+TEST_CASE("Rotation-template deterministic joints follow analytic interpolation curves",
+          "[Fill][FillRotationTemplates]")
+{
+    using namespace fill_rotation_template_contracts;
+    for (const JointCheckpoints &checkpoint : deterministic_checkpoints) {
+        const std::vector<int> angles = observe_angles(std::string("+90") + checkpoint.token + "4");
+        for (size_t i = 0; i < checkpoint.degrees.size(); ++i) {
+            const double distance = axial_distance(static_cast<double>(angles[i]), checkpoint.degrees[i]);
+            CAPTURE(checkpoint.token, i, angles[i], checkpoint.degrees[i], distance);
+            CHECK_THAT(distance, Catch::Matchers::WithinAbs(0., 1.01));
+        }
+    }
+}
+
+TEST_CASE("Rotation-template duration units advance across the same eight physical layers",
+          "[Fill][FillRotationTemplates]")
+{
+    using namespace fill_rotation_template_contracts;
+    const std::vector<int> reference = observe_angles("+90/4");
+    const std::vector<std::string> equivalent_templates = {
+        "+90/0.8mm",
+        "+90/0.08cm",
+        "+90/0.0008m",
+        "+90/0.03149606299212598\"",
+        "+90/0.0026246719160104985'",
+        "+90/50%",
+    };
+    REQUIRE(reference.size() == 8);
+    for (const std::string &rotation_template : equivalent_templates) {
+        const std::vector<int> actual = observe_angles(rotation_template);
+        REQUIRE(actual.size() == reference.size());
+        for (size_t i = 0; i < reference.size(); ++i) {
+            const double distance = axial_distance(static_cast<double>(actual[i]), static_cast<double>(reference[i]));
+            CAPTURE(rotation_template, i, actual[i], reference[i], distance);
+            CHECK_THAT(distance, Catch::Matchers::WithinAbs(0., 1.01));
+        }
+    }
+}
+
+namespace fill_ironing_option_boundaries {
+
+struct IroningEvidence {
+    size_t paths = 0;
+    double length_mm = 0.;
+    double filament_mm3 = 0.;
+};
+
+DynamicPrintConfig config(bool two_filaments = false)
+{
+    DynamicPrintConfig result = two_filaments ? Slic3r::Test::multifilament_config(2, {})
+                                              : DynamicPrintConfig::full_print_config();
+    result.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"nozzle_diameter", "0.4"},
+        {"line_width", 0.4},
+        {"wall_loops", 1},
+        {"top_shell_layers", 1},
+        {"bottom_shell_layers", 1},
+        {"sparse_infill_density", "15%"},
+        {"top_surface_pattern", "monotonic"},
+        {"top_surface_filament_id", 1},
+        {"ironing_type", "top"},
+        {"ironing_pattern", "rectilinear"},
+        {"ironing_spacing", 0.2},
+        {"ironing_flow", "10%"},
+        {"ironing_speed", 20.},
+        {"ironing_inset", 0.4},
+        {"slow_down_for_layer_cooling", false},
+        {"slow_down_layer_time", 0.},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+    });
+    if (two_filaments)
+        result.set_deserialize_strict({
+            {"filament_ironing_flow", "nil,nil"},
+            {"filament_ironing_spacing", "nil,nil"},
+            {"filament_ironing_speed", "nil,nil"},
+            {"filament_ironing_inset", "nil,nil"},
+        });
+    return result;
+}
+
+IroningEvidence evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    IroningEvidence result;
+    const std::pair<size_t, double> extent = ironing_extent(print);
+    result.paths = extent.first;
+    result.length_mm = extent.second;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            for_each_extrusion_path(region->fills, [&result](const ExtrusionPath &path) {
+                if (path.role() != erIroning)
+                    return;
+                const double length_mm = unscale<double>(path.length());
+                result.filament_mm3 += length_mm * path.mm3_per_mm;
+            });
+    return result;
+}
+
+std::set<int> ironing_feeds(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    const std::string output = Slic3r::Test::gcode(print);
+    std::set<int> result;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&result](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.dist_XY(self) <= 0. ||
+            line.comment().find("ironing") == std::string_view::npos)
+            return;
+        result.insert(int(std::lround(line.new_F(self))));
+    });
+    return result;
+}
+
+struct ModelDepositionEvidence {
+    size_t paths = 0;
+    double length_mm = 0.;
+    double filament_mm3 = 0.;
+};
+
+ModelDepositionEvidence non_ironing_model_deposition(const Print &print)
+{
+    ModelDepositionEvidence result;
+    auto collect = [&result](const ExtrusionPath &path) {
+        if (path.role() == erIroning)
+            return;
+        ++result.paths;
+        const double length_mm = unscale<double>(path.length());
+        result.length_mm += length_mm;
+        result.filament_mm3 += length_mm * path.mm3_per_mm;
+    };
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, collect);
+            for_each_extrusion_path(region->fills, collect);
+        }
+    return result;
+}
+
+struct SpacingEvidence {
+    std::pair<size_t, double> ironing;
+    ModelDepositionEvidence model;
+};
+
+SpacingEvidence spacing_evidence(const DynamicPrintConfig &config)
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({Slic3r::Test::cube(10.)}, print, config);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layer_count() > 1);
+    return {ironing_extent(print), non_ironing_model_deposition(print)};
+}
+
+} // namespace fill_ironing_option_boundaries
+
+TEST_CASE("Zero ironing flow retains fill geometry without extrusion volume",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero = config();
+    zero.set_deserialize_strict("ironing_flow", "0%");
+    const IroningEvidence disabled = evidence(zero);
+    const IroningEvidence positive = evidence(config());
+
+    REQUIRE(disabled.paths > 0);
+    REQUIRE(positive.paths > 0);
+    CHECK(disabled.paths == positive.paths);
+    CHECK_THAT(disabled.length_mm, Catch::Matchers::WithinAbs(positive.length_mm, 1e-9));
+    CHECK_THAT(disabled.filament_mm3, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK(positive.filament_mm3 > 0.1);
+}
+
+TEST_CASE("Zero filament ironing flow overrides the process flow",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero_override = config(true);
+    zero_override.set_deserialize_strict("filament_ironing_flow", "0%,nil");
+    const IroningEvidence disabled = evidence(zero_override);
+
+    DynamicPrintConfig inherited = config(true);
+    const IroningEvidence positive = evidence(inherited);
+
+    REQUIRE(disabled.paths > 0);
+    REQUIRE(positive.paths > 0);
+    CHECK(disabled.paths == positive.paths);
+    CHECK_THAT(disabled.length_mm, Catch::Matchers::WithinAbs(positive.length_mm, 1e-9));
+    CHECK_THAT(disabled.filament_mm3, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK(positive.filament_mm3 > 0.1);
+}
+
+TEST_CASE("Minimum ironing speed emits the configured 1 mm per second feed",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig minimum = config();
+    minimum.set_deserialize_strict({{"ironing_speed", 1.}});
+    const std::set<int> minimum_feeds = ironing_feeds(minimum);
+    const std::set<int> positive_feeds = ironing_feeds(config());
+
+    REQUIRE(minimum_feeds == std::set<int>{60});
+    CHECK(positive_feeds == std::set<int>{1200});
+}
+
+TEST_CASE("Minimum filament ironing speed overrides process speed",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig minimum = config(true);
+    minimum.set_deserialize_strict("filament_ironing_speed", "1,nil");
+    const std::set<int> minimum_feeds = ironing_feeds(minimum);
+    const std::set<int> inherited_feeds = ironing_feeds(config(true));
+
+    REQUIRE(minimum_feeds == std::set<int>{60});
+    CHECK(inherited_feeds == std::set<int>{1200});
+}
+
+TEST_CASE("Zero ironing inset keeps half a nozzle diameter from the edge",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero = config();
+    zero.set_deserialize_strict({{"ironing_inset", 0.}});
+    const IroningEvidence half_nozzle = evidence(zero);
+
+    DynamicPrintConfig explicit_half_nozzle = config();
+    explicit_half_nozzle.set_deserialize_strict({{"ironing_inset", 0.2}});
+    const IroningEvidence explicit_half = evidence(explicit_half_nozzle);
+
+    const IroningEvidence positive_inset = evidence(config());
+    REQUIRE(half_nozzle.paths > 0);
+    REQUIRE(explicit_half.paths > 0);
+    REQUIRE(positive_inset.paths > 0);
+    CHECK(half_nozzle.paths == explicit_half.paths);
+    CHECK_THAT(half_nozzle.length_mm, Catch::Matchers::WithinAbs(explicit_half.length_mm, 1e-9));
+    CHECK(half_nozzle.length_mm > positive_inset.length_mm + 0.1);
+}
+
+TEST_CASE("Zero filament ironing inset uses half-nozzle geometry over inherited inset",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig zero_override = config(true);
+    zero_override.set_deserialize_strict("filament_ironing_inset", "0,nil");
+    const IroningEvidence half_nozzle = evidence(zero_override);
+
+    DynamicPrintConfig inherited_half_nozzle = config(true);
+    inherited_half_nozzle.set_deserialize_strict({{"ironing_inset", 0.2}});
+    const IroningEvidence explicit_half = evidence(inherited_half_nozzle);
+
+    const IroningEvidence inherited_process = evidence(config(true));
+    REQUIRE(half_nozzle.paths > 0);
+    REQUIRE(explicit_half.paths > 0);
+    REQUIRE(inherited_process.paths > 0);
+    CHECK(half_nozzle.paths == explicit_half.paths);
+    CHECK_THAT(half_nozzle.length_mm, Catch::Matchers::WithinAbs(explicit_half.length_mm, 1e-9));
+    CHECK(half_nozzle.length_mm > inherited_process.length_mm + 0.1);
+}
+
+TEST_CASE("Nil filament ironing spacing inherits process geometry",
+          "[Fill][IroningOptionBoundaries]")
+{
+    using namespace fill_ironing_option_boundaries;
+    DynamicPrintConfig inherited = config(true);
+    inherited.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                      {"filament_ironing_spacing", "nil,nil"}});
+    const SpacingEvidence from_process = spacing_evidence(inherited);
+
+    DynamicPrintConfig explicit_process = config(true);
+    explicit_process.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                             {"filament_ironing_spacing", "0.4,nil"}});
+    const SpacingEvidence same_as_process = spacing_evidence(explicit_process);
+
+    DynamicPrintConfig explicit_distinct = config(true);
+    explicit_distinct.set_deserialize_strict({{"ironing_spacing", 0.4},
+                                              {"filament_ironing_spacing", "0.2,nil"}});
+    const SpacingEvidence from_filament = spacing_evidence(explicit_distinct);
+
+    REQUIRE(from_process.ironing.first > 0);
+    REQUIRE(same_as_process.ironing.first > 0);
+    REQUIRE(from_filament.ironing.first > 0);
+    CHECK(from_process.ironing.first == same_as_process.ironing.first);
+    CHECK_THAT(from_process.ironing.second, Catch::Matchers::WithinAbs(same_as_process.ironing.second, 1e-9));
+    CHECK(from_filament.ironing.second > from_process.ironing.second + 0.1);
+
+    CHECK(from_process.model.paths == same_as_process.model.paths);
+    CHECK(from_process.model.paths == from_filament.model.paths);
+    CHECK_THAT(from_process.model.length_mm, Catch::Matchers::WithinAbs(same_as_process.model.length_mm, 1e-9));
+    CHECK_THAT(from_process.model.length_mm, Catch::Matchers::WithinAbs(from_filament.model.length_mm, 1e-9));
+    CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(same_as_process.model.filament_mm3, 1e-9));
+    CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(from_filament.model.filament_mm3, 1e-9));
 }

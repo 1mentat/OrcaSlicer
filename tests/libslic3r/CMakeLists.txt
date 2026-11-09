@@ -35,6 +35,9 @@ add_executable(${_TEST_NAME}_tests
     test_drc.cpp
     test_edge_grid.cpp
     test_gcodereader.cpp
+    test_filament_group.cpp
+    test_filament_group_utils.cpp
+    test_tool_order_utils.cpp
     test_toolordering_nozzle_group.cpp
     test_parallel_resolve.cpp
     test_preset_bundle_loading.cpp
@@ -57,6 +60,10 @@ add_executable(${_TEST_NAME}_tests
     test_flush_volume_contracts.cpp
     test_fill_plane_path.cpp
     test_fill_tpms_adaptive.cpp
+    test_fill_lateral_honeycomb.cpp
+    test_flow.cpp
+    test_fuzzy_skin.cpp
+    test_small_area_infill_flow_compensator.cpp
     test_geometry.cpp
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
@@ -73,6 +80,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj_color_utils.cpp
     test_orient.cpp
     test_sl1.cpp
+    test_slicing.cpp
     test_zipper_archive_import.cpp
     test_step.cpp
     test_stl.cpp
@@ -108,6 +116,9 @@ add_executable(${_TEST_NAME}_tests
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
     test_texture_displacement.cpp
+    test_texture_bake_regularize.cpp
+    test_texture_bake_relocate.cpp
+    test_texture_bake_debug.cpp
     test_texture_to_color_cluster.cpp
     test_texture_to_color_repair.cpp
     test_instance_lock.cpp

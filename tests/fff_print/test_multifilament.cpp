@@ -1,3 +1,11 @@
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <cstddef>
+#include <map>
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Layer.hpp"
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1084,4 +1092,582 @@ TEST_CASE("Each filament cools with the fan speeds of its extruder variant", "[M
         CHECK(fan_speeds(gcode, "M106 P2 S") == std::set<int>{ additional_fan_speed });
         CHECK(gcode.find("; start range high " + std::to_string(range_high) + "\n") != std::string::npos);
     }
+}
+
+// Unlike the older inline-comment helper, this parser follows emitted TYPE:/FEATURE: state.
+// A tool switch clears that state so toolchange priming cannot inherit the previous feature.
+static std::string_view marked_role(std::string_view comment);
+
+using MarkedRoleTools = std::map<std::string, std::set<int>>;
+
+static MarkedRoleTools tools_for_marked_roles_after_toolchange(const std::string &gcode,
+                                                               const DynamicPrintConfig &config)
+{
+    MarkedRoleTools tools;
+    int current_tool = 0;
+    std::string active_role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role](GCodeReader &self,
+                                                                     const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1]))) {
+            current_tool = std::stoi(command.substr(1));
+            active_role.clear();
+            return;
+        }
+
+        const std::string_view comment(line.comment());
+        const std::string_view marker = marked_role(comment);
+        if (comment.find("TYPE:") != std::string_view::npos || comment.find("FEATURE:") != std::string_view::npos) {
+            active_role.clear();
+            if (!marker.empty())
+                active_role.assign(marker.data(), marker.size());
+        }
+        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && !active_role.empty())
+            tools[active_role].insert(current_tool);
+    });
+    return tools;
+}
+
+static std::set<int> observed_tools_for_role(const MarkedRoleTools &tools, std::string_view role)
+{
+    const auto found = tools.find(std::string(role));
+    return found == tools.end() ? std::set<int>{} : found->second;
+}
+
+TEST_CASE("Role filament assignments honor default and available-ID endpoints",
+          "[MultiFilament][RoleFilamentEndpoints][SettingsVariance]")
+{
+    const std::vector<std::pair<const char *, const char *>> role_settings{
+        { "outer_wall_filament_id",     "Outer wall" },
+        { "inner_wall_filament_id",     "Inner wall" },
+        { "sparse_infill_filament_id",  "Sparse infill" },
+        { "internal_solid_filament_id", "Internal solid infill" },
+        { "top_surface_filament_id",    "Top surface" },
+        { "bottom_surface_filament_id", "Bottom surface" },
+    };
+    constexpr int filament_count = 3;
+    // Source-reviewed consequences of setting one role to filament 3 while the
+    // other five IDs remain at Default (0). Keep this behavioral expectation
+    // table explicit instead of mirroring normalize_fdm_1()'s branching code.
+    const std::vector<std::pair<std::string_view, std::vector<std::string_view>>> roles_on_selected_tool{
+        { "outer_wall_filament_id",     { "outer_wall_filament_id" } },
+        { "inner_wall_filament_id",     { "inner_wall_filament_id" } },
+        { "sparse_infill_filament_id",  { "sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id" } },
+        { "internal_solid_filament_id", { "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id" } },
+        { "top_surface_filament_id",    { "top_surface_filament_id", "internal_solid_filament_id" } },
+        { "bottom_surface_filament_id", { "bottom_surface_filament_id", "internal_solid_filament_id" } },
+    };
+
+    auto config_for = [](const char *override_key, int filament_id) {
+        DynamicPrintConfig config = multifilament_config(3, {
+            { "enable_prime_tower", false },
+            { "gcode_flavor", "marlin2" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
+            { "skirt_loops",        0 },
+            { "brim_type",          "no_brim" },
+            { "gcode_comments",     true },
+            { "wall_loops",         2 },
+            { "top_shell_layers",   2 },
+            { "bottom_shell_layers",2 },
+            { "sparse_infill_density", "20%" },
+            { "extra_solid_infills", "3" },
+            { "layer_height",       0.2 },
+            { "initial_layer_print_height", 0.2 },
+        });
+        config.set_deserialize_strict({
+            { "outer_wall_filament_id",     0 },
+            { "inner_wall_filament_id",     0 },
+            { "sparse_infill_filament_id",  0 },
+            { "internal_solid_filament_id", 0 },
+            { "top_surface_filament_id",    0 },
+            { "bottom_surface_filament_id", 0 },
+        });
+        if (override_key != nullptr)
+            config.set_deserialize_strict(override_key, std::to_string(filament_id));
+        return config;
+    };
+
+    const DynamicPrintConfig default_config = config_for(nullptr, 0);
+    const std::string default_gcode = slice({ cube(20) }, default_config);
+    for (const auto &[key, role] : role_settings) {
+        CAPTURE(key, role);
+        const ConfigOptionDef *definition = print_config_def.get(key);
+        REQUIRE(definition != nullptr);
+        REQUIRE(definition->type == coInt);
+        CHECK_FALSE(definition->nullable);
+        CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(0.0, 0.0));
+        REQUIRE(definition->default_value.get() != nullptr);
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == 0);
+        CHECK_FALSE(definition->is_value_valid(-1));
+        REQUIRE(definition->is_value_valid(0));
+        CHECK(definition->is_value_valid(1));
+        CHECK(definition->is_value_valid(2));
+        REQUIRE(definition->is_value_valid(filament_count));
+        REQUIRE(definition->is_value_valid(filament_count + 1));
+        CHECK(default_config.option(key)->getInt() == 0);
+    }
+    const auto default_tools = tools_for_marked_roles_after_toolchange(default_gcode, default_config);
+    for (const auto &[key, role] : role_settings) {
+        CAPTURE(key, role);
+        CHECK(observed_tools_for_role(default_tools, role) == std::set<int>{ 0 });
+
+        const DynamicPrintConfig highest_config = config_for(key, filament_count);
+        REQUIRE(highest_config.option(key) != nullptr);
+        REQUIRE(highest_config.option(key)->getInt() == filament_count);
+        const std::string highest_gcode = slice({ cube(20) }, highest_config);
+        const auto highest_tools = tools_for_marked_roles_after_toolchange(highest_gcode, highest_config);
+        const std::string_view selected_key(key);
+        const auto expected_row = std::find_if(roles_on_selected_tool.begin(), roles_on_selected_tool.end(),
+            [selected_key](const auto &row) { return row.first == selected_key; });
+        REQUIRE(expected_row != roles_on_selected_tool.end());
+        for (const auto &[peer_key, peer_role] : role_settings) {
+            const bool receives_assignment =
+                std::find(expected_row->second.begin(), expected_row->second.end(), peer_key) != expected_row->second.end();
+            const int expected_tool = receives_assignment ? filament_count - 1 : 0;
+            CAPTURE(key, role, peer_key, peer_role, expected_tool);
+            CHECK(observed_tools_for_role(highest_tools, peer_role) == std::set<int>{ expected_tool });
+        }
+    }
+
+    // All six roles use the same configured count. Check both interior available IDs and the
+    // first unavailable ID together so each key receives the same physical-output oracle.
+    const std::vector<std::pair<int, int>> domain_cases{ { 1, 0 }, { 2, 1 }, { 4, 0 } };
+    for (const auto &[filament_id, expected_tool] : domain_cases) {
+        DynamicPrintConfig domain_config = config_for(nullptr, 0);
+        for (const auto &[key, role] : role_settings)
+            domain_config.set_deserialize_strict(key, std::to_string(filament_id));
+
+        for (const auto &[key, role] : role_settings) {
+            CAPTURE(filament_id, key, role);
+            REQUIRE(domain_config.option(key) != nullptr);
+            CHECK(domain_config.option(key)->getInt() == filament_id);
+        }
+
+        Print domain_print;
+        Model domain_model;
+        init_print({ cube(20) }, domain_print, domain_model, domain_config);
+        const auto validation = domain_print.validate();
+        CAPTURE(filament_id);
+        INFO(validation.string);
+        REQUIRE(validation.string.empty());
+        const std::string domain_gcode = Slic3r::Test::gcode(domain_print);
+        const auto domain_tools = tools_for_marked_roles_after_toolchange(domain_gcode, domain_config);
+        for (const auto &[key, role] : role_settings) {
+            CAPTURE(filament_id, expected_tool, key, role);
+            CHECK(observed_tools_for_role(domain_tools, role) == std::set<int>{ expected_tool });
+        }
+    }
+}
+// Public Print::apply routing for machine-gated filament cut distances.
+static DynamicPrintConfig single_variant_two_extruder_retraction_config()
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                   "marlin" },
+        { "single_extruder_multi_material", 0 },
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "extruder_printable_height",      "0,0" },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+    });
+    // Use typed vectors for every machine/print/filament variant list so this fixture does not
+    // depend on ConfigOptionStrings delimiter parsing.
+    config.set_key_value("printer_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "Direct Drive Standard", "Direct Drive Standard" }));
+    config.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 2 }));
+    config.set_key_value("filament_map", new ConfigOptionInts({ 2, 1 }));
+    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+    config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values = { etDirectDrive, etDirectDrive };
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nvtStandard, nvtStandard };
+    return config;
+}
+
+static std::vector<double> cut_distance_override_values(LongRectrationLevel gate, const std::string &filament_value)
+{
+    DynamicPrintConfig config = single_variant_two_extruder_retraction_config();
+    config.set_deserialize_strict({
+        { "enable_long_retraction_when_cut", int(gate) },
+        { "retraction_distances_when_cut", "11,17" },
+        { "filament_retraction_distances_when_cut", filament_value },
+    });
+
+    Print print;
+    Model model;
+    init_print({ cube(5.) }, print, model, config);
+    REQUIRE(print.config().filament_map.values == std::vector<int>{ 2, 1 });
+    REQUIRE(print.config().filament_map_2.values == std::vector<int>{ 1, 0 });
+    REQUIRE(print.config().retraction_distances_when_cut.values.size() == 2);
+    return print.config().retraction_distances_when_cut.values;
+}
+
+TEST_CASE("Machine-gated filament cut distances follow the mapped machine slots",
+          "[MultiFilament][FilamentCutRetractionOverride][Pipeline]")
+{
+    auto [gate, filament_value, expect_explicit] = GENERATE(table<int, std::string, bool>({
+        { int(LongRectrationLevel::Disabled),       "nil,nil", false },
+        { int(LongRectrationLevel::Disabled),       "12,16",   false },
+        { int(LongRectrationLevel::EnableMachine),  "nil,nil", false },
+        { int(LongRectrationLevel::EnableMachine),  "12,16",   false },
+        { int(LongRectrationLevel::EnableFilament), "nil,nil", false },
+        { int(LongRectrationLevel::EnableFilament), "12,16",   true  },
+    }));
+    DYNAMIC_SECTION("gate " << gate << ", filament_values=" << filament_value) {
+        const std::vector<double> expected = expect_explicit ? std::vector<double>{ 12., 16. } :
+                                                                 std::vector<double>{ 17., 11. };
+        const std::vector<double> actual = cut_distance_override_values(static_cast<LongRectrationLevel>(gate), filament_value);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t index = 0; index < expected.size(); ++index)
+            CHECK_THAT(actual[index], Catch::Matchers::WithinAbs(expected[index], 1e-9));
+    }
+}
+
+struct RetractionPlaceholderObservation {
+    std::set<std::string> marker_lines;
+    std::map<int, double> positive_extrusion_by_tool;
+};
+
+static RetractionPlaceholderObservation observe_retraction_placeholders(const std::string &gcode,
+                                                                          const DynamicPrintConfig &config)
+{
+    RetractionPlaceholderObservation observation;
+    int current_tool = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&observation, &current_tool](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view command = line.cmd();
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(std::string(command.substr(1)));
+
+        const std::string_view comment = line.comment();
+        const size_t comment_start = comment.find_first_not_of(" \t");
+        constexpr std::string_view marker_prefix = "RETRACTION_CONTRACT filament=";
+        if (comment_start != std::string_view::npos &&
+            comment.substr(comment_start, marker_prefix.size()) == marker_prefix) {
+            std::istringstream fields(std::string(comment.substr(comment_start)));
+            std::string label, filament, cut_values, ec_values;
+            if (fields >> label >> filament >> cut_values >> ec_values)
+                observation.marker_lines.insert(label + "|" + filament + "|" + cut_values + "|" + ec_values);
+        }
+
+        if (line.extruding(self))
+            observation.positive_extrusion_by_tool[current_tool] += line.dist_E(self);
+    });
+    return observation;
+}
+
+// This checks exported macro values only: these placeholders expose settings to user G-code and
+// do not prove that the slicer itself performs a physical filament cut or long retract.
+TEST_CASE("Cut and extruder-change placeholders follow mapped explicit settings",
+          "[MultiFilament][FilamentCutRetractionOverride][Pipeline]")
+{
+    struct Case {
+        const char *name;
+        LongRectrationLevel gate;
+        std::vector<unsigned char> filament_cut_bools;
+        std::vector<double> filament_cut_distances;
+        std::vector<unsigned char> extruder_change_bools;
+        std::vector<double> extruder_change_distances;
+        std::vector<std::string> expected_markers;
+    };
+    const std::vector<Case> cases = {
+        {
+            "disabled gate inherits mapped machine cut values; EC uses explicit endpoints",
+            LongRectrationLevel::Disabled,
+            { ConfigOptionBoolsNullable::nil_value(), ConfigOptionBoolsNullable::nil_value() },
+            { ConfigOptionFloatsNullable::nil_value(), ConfigOptionFloatsNullable::nil_value() },
+            { false, true }, { 0., 10. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=0,0",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=1,10" },
+        },
+        {
+            "machine gate ignores explicit filament cut values and EC endpoints export",
+            LongRectrationLevel::EnableMachine,
+            { false, true }, { 10., 18. }, { true, false }, { 10., 0. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=1,10",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=0,0" },
+        },
+        {
+            "filament gate with nil cut overrides inherits machine cut values",
+            LongRectrationLevel::EnableFilament,
+            { ConfigOptionBoolsNullable::nil_value(), ConfigOptionBoolsNullable::nil_value() },
+            { ConfigOptionFloatsNullable::nil_value(), ConfigOptionFloatsNullable::nil_value() },
+            { true, true }, { 0., 10. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,18|ec=1,0",
+              "RETRACTION_CONTRACT|filament=1|cut=0,10|ec=1,10" },
+        },
+        {
+            "filament gate exports explicit cut endpoints and EC minimum",
+            LongRectrationLevel::EnableFilament,
+            { true, false }, { 10., 18. }, { false, false }, { 10., 0. },
+            { "RETRACTION_CONTRACT|filament=0|cut=1,10|ec=0,10",
+              "RETRACTION_CONTRACT|filament=1|cut=0,18|ec=0,0" },
+        },
+    };
+
+    const std::string filament_start_gcode =
+        "; RETRACTION_CONTRACT filament=[filament_extruder_id] cut=[long_retraction_when_cut],[retraction_distance_when_cut] "
+        "ec=[long_retraction_when_ec],[retraction_distance_when_ec]";
+    std::optional<std::map<int, double>> reference_extrusion;
+    for (const Case &test_case : cases) {
+        CAPTURE(test_case.name);
+        DynamicPrintConfig config = single_variant_two_extruder_retraction_config();
+        config.set_deserialize_strict({
+            { "enable_long_retraction_when_cut", int(test_case.gate) },
+        });
+        config.set_key_value("long_retractions_when_cut", new ConfigOptionBools({ false, true }));
+        config.set_key_value("retraction_distances_when_cut", new ConfigOptionFloats({ 10., 18. }));
+        config.set_key_value("filament_long_retractions_when_cut",
+                             new ConfigOptionBoolsNullable(test_case.filament_cut_bools));
+        config.set_key_value("filament_retraction_distances_when_cut",
+                             new ConfigOptionFloatsNullable(test_case.filament_cut_distances));
+        config.set_key_value("long_retractions_when_ec",
+                             new ConfigOptionBoolsNullable(test_case.extruder_change_bools));
+        config.set_key_value("retraction_distances_when_ec",
+                             new ConfigOptionFloatsNullable(test_case.extruder_change_distances));
+        config.set_key_value("filament_start_gcode",
+                             new ConfigOptionStrings({ filament_start_gcode, filament_start_gcode }));
+
+        const std::string output = slice_with_object_overrides(
+            { cube(5.), cube(5.) }, config,
+            { { { "extruder", 1 } }, { { "extruder", 2 } } });
+        const RetractionPlaceholderObservation observation = observe_retraction_placeholders(output, config);
+        const std::set<std::string> expected_markers(test_case.expected_markers.begin(),
+                                                      test_case.expected_markers.end());
+        CHECK(observation.marker_lines == expected_markers);
+
+        REQUIRE(observation.positive_extrusion_by_tool.count(0) == 1);
+        REQUIRE(observation.positive_extrusion_by_tool.count(1) == 1);
+        CHECK(observation.positive_extrusion_by_tool.at(0) > 0.0);
+        CHECK(observation.positive_extrusion_by_tool.at(1) > 0.0);
+        if (!reference_extrusion.has_value()) {
+            reference_extrusion = observation.positive_extrusion_by_tool;
+        } else {
+            CHECK_THAT(observation.positive_extrusion_by_tool.at(0),
+                       Catch::Matchers::WithinAbs(reference_extrusion->at(0), 1e-4));
+            CHECK_THAT(observation.positive_extrusion_by_tool.at(1),
+                       Catch::Matchers::WithinAbs(reference_extrusion->at(1), 1e-4));
+        }
+    }
+}
+
+
+// The exporter emits the role marker on its own line before the following extrusion moves.
+// Accept both public compatibility spellings (TYPE:/FEATURE:) and keep the active role across
+// travels and layer changes until the next marker.
+static std::string_view marked_role(std::string_view comment)
+{
+    while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+        comment.remove_prefix(1);
+    const std::string_view prefixes[] = {"TYPE:", "FEATURE:"};
+    for (const std::string_view prefix : prefixes) {
+        if (comment.size() < prefix.size() || comment.substr(0, prefix.size()) != prefix)
+            continue;
+        comment.remove_prefix(prefix.size());
+        while (!comment.empty() && (comment.front() == ' ' || comment.front() == '\t'))
+            comment.remove_prefix(1);
+        while (!comment.empty() && (comment.back() == ' ' || comment.back() == '\t' || comment.back() == '\r'))
+            comment.remove_suffix(1);
+        return comment;
+    }
+    return {};
+}
+
+static std::set<int> tools_for_marked_role(const std::string &gcode, const DynamicPrintConfig &config,
+                                           std::string_view role)
+{
+    std::set<int> tools;
+    int current_tool = 0;
+    std::string active_role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&tools, &current_tool, &active_role, role](GCodeReader &self,
+                                                                            const GCodeReader::GCodeLine &line) {
+        const std::string_view marker = marked_role(line.comment());
+        if (!marker.empty())
+            active_role.assign(marker.data(), marker.size());
+        const std::string command(line.cmd());
+        if (command.size() >= 2 && command[0] == 'T' && std::isdigit(static_cast<unsigned char>(command[1])))
+            current_tool = std::stoi(command.substr(1));
+        if (line.extruding(self) && std::hypot(line.dist_X(self), line.dist_Y(self)) > 0.0 && active_role == role)
+            tools.insert(current_tool);
+    });
+    return tools;
+}
+
+TEST_CASE("Mixed perimeter collections split outer and inner wall filament assignments",
+          "[MultiFilament][GCode][GCodePipeline][GCodeMixedPerimeters]")
+{
+    const DynamicPrintConfig config = multifilament_config(2, {
+        {"wall_loops", 2},
+        {"wall_generator", "classic"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"gcode_flavor", "marlin"},
+        {"enable_prime_tower", 0},
+        {"use_relative_e_distances", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"outer_wall_filament_id", 1},
+        {"inner_wall_filament_id", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"gcode_comments", 1},
+    });
+    const std::string gcode = slice({make_cube(20., 20., 1.2)}, config);
+    const std::set<int> outer_tools = tools_for_marked_role(gcode, config, "Outer wall");
+    const std::set<int> inner_tools = tools_for_marked_role(gcode, config, "Inner wall");
+
+    REQUIRE(!gcode.empty());
+    REQUIRE(!outer_tools.empty());
+    REQUIRE(!inner_tools.empty());
+    CHECK(outer_tools == std::set<int>{0});
+    CHECK(inner_tools == std::set<int>{1});
+}
+
+namespace {
+
+static DynamicPrintConfig print_object_geometric_config(const Vec2ds &extruder_zero_area,
+                                                        const Vec2ds &extruder_one_area,
+                                                        bool with_fills,
+                                                        int wall_filament,
+                                                        const std::string &printable_height)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                   "marlin2" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "line_width",                     0.45 },
+        { "enable_support",                 false },
+        { "spiral_mode",                    false },
+        { "belt_printer",                   false },
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "printer_extruder_id",            "1,2" },
+        { "printer_extruder_variant",       "Direct Drive Standard,Direct Drive Standard" },
+        { "extruder_printable_height",      printable_height },
+        { "single_extruder_multi_material", 0 },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "raft_layers",                    0 },
+        { "wall_loops",                     2 },
+        { "wall_generator",                 "classic" },
+        { "top_shell_layers",               with_fills ? 2 : 0 },
+        { "bottom_shell_layers",            with_fills ? 2 : 0 },
+        { "sparse_infill_density",          with_fills ? "20%" : "0%" },
+        { "outer_wall_filament_id",         wall_filament },
+        { "inner_wall_filament_id",         wall_filament },
+        { "sparse_infill_filament_id",      1 },
+        { "internal_solid_filament_id",     1 },
+        { "top_surface_filament_id",        1 },
+        { "bottom_surface_filament_id",     1 },
+        { "printable_area",                  "-100x-100,100x-100,100x100,-100x100" },
+        { "use_relative_e_distances",       1 },
+        { "layer_change_gcode",             "G92 E0\n" },
+        { "gcode_comments",                 1 },
+    });
+    config.set_key_value("extruder_printable_area",
+                         new ConfigOptionPointsGroups(std::vector<Vec2ds>{ extruder_zero_area, extruder_one_area }));
+    return config;
+}
+
+static const Vec2ds print_object_full_bed_area = {
+    Vec2d(-100., -100.), Vec2d(100., -100.), Vec2d(100., 100.), Vec2d(-100., 100.)
+};
+
+static const Vec2ds print_object_restricted_x_area = {
+    Vec2d(-100., -100.), Vec2d(2., -100.), Vec2d(2., 100.), Vec2d(-100., 100.)
+};
+
+static void process_print_object_geometric_fixture(Print &print, Model &model,
+                                                    const DynamicPrintConfig &config)
+{
+    // make_cube is [0,4] in XY, while arrange=false keeps this relationship deterministic.
+    init_print(std::vector<TriangleMesh>{ cube(4.) }, print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->instances.size() == 1);
+    const auto bounds = model.objects.front()->instance_bounding_box(0);
+    REQUIRE_THAT(bounds.min.x(), Catch::Matchers::WithinAbs(0., 1e-6));
+    REQUIRE_THAT(bounds.max.x(), Catch::Matchers::WithinAbs(4., 1e-6));
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE_FALSE(print.objects().front()->layers().empty());
+}
+
+} // namespace
+
+TEST_CASE("PrintObject marks filaments blocked by restricted printable area",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    const bool restricted = GENERATE(false, true);
+    DYNAMIC_SECTION("restricted per-extruder area " << (restricted ? "on" : "off")) {
+        const Vec2ds &extruder_zero_area = restricted ? print_object_restricted_x_area : print_object_full_bed_area;
+        DynamicPrintConfig config = print_object_geometric_config(
+            extruder_zero_area, print_object_full_bed_area, true, 2, "100,100");
+        Print print;
+        Model model;
+        process_print_object_geometric_fixture(print, model, config);
+
+        const auto unprintable = print.get_extruder_unprintable_polygons();
+        const auto blocked = print.get_geometric_unprintable_filaments();
+        REQUIRE(unprintable.size() == 2);
+        REQUIRE(blocked.size() == 2);
+        if (restricted) {
+            REQUIRE_FALSE(unprintable[0].empty());
+            CHECK(unprintable[1].empty());
+            const BoundingBox bbox = get_extents(unprintable[0]);
+            REQUIRE(bbox.defined);
+            CHECK_THAT(unscaled<double>(bbox.min.x()), Catch::Matchers::WithinAbs(2., 1e-6));
+            CHECK_THAT(unscaled<double>(bbox.max.x()), Catch::Matchers::WithinAbs(100., 1e-6));
+            // Infill (filament 1) and walls (filament 2) both intersect the blocked right-hand strip.
+            CHECK(blocked[0] == std::set<int>{ 0, 1 });
+            CHECK(blocked[1].empty());
+        } else {
+            CHECK(unprintable[0].empty());
+            CHECK(unprintable[1].empty());
+            CHECK(blocked[0].empty());
+            CHECK(blocked[1].empty());
+        }
+    }
+}
+
+TEST_CASE("PrintObject marks wall filaments when only perimeters meet restricted area",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    DynamicPrintConfig config = print_object_geometric_config(
+        print_object_restricted_x_area, print_object_full_bed_area, false, 2, "100,100");
+    Print print;
+    Model model;
+    process_print_object_geometric_fixture(print, model, config);
+
+    const auto blocked = print.get_geometric_unprintable_filaments();
+    REQUIRE(blocked.size() == 2);
+    // Zero sparse density and zero top/bottom shells leave perimeters as the only entities;
+    // outer/inner walls are both assigned to filament 2, hence zero-based id 1.
+    CHECK(blocked[0] == std::set<int>{ 1 });
+    CHECK(blocked[1].empty());
+}
+
+TEST_CASE("PrintObject marks filaments above each nozzle printable height",
+          "[PrintObjectGeometric][MultiFilament]")
+{
+    DynamicPrintConfig config = print_object_geometric_config(
+        print_object_full_bed_area, print_object_full_bed_area, true, 1, "0.6,100");
+    Print print;
+    Model model;
+    process_print_object_geometric_fixture(print, model, config);
+
+    const auto blocked = print.get_geometric_unprintable_filaments();
+    REQUIRE(blocked.size() == 2);
+    // The 4mm cube has layers above 0.6mm but none above 100mm. All active roles use filament 1.
+    CHECK(blocked[0] == std::set<int>{ 0 });
+    CHECK(blocked[1].empty());
 }
