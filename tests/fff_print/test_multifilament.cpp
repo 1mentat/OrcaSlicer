@@ -1198,7 +1198,7 @@ TEST_CASE("Role filament assignments honor default and available-ID endpoints",
         REQUIRE(definition != nullptr);
         REQUIRE(definition->type == coInt);
         CHECK_FALSE(definition->nullable);
-        CHECK(definition->min == 0.0f);
+        CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(0.0, 0.0));
         REQUIRE(definition->default_value.get() != nullptr);
         CHECK(definition->get_default_value<ConfigOptionInt>()->value == 0);
         CHECK_FALSE(definition->is_value_valid(-1));
