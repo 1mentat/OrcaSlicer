@@ -1347,7 +1347,8 @@ FullPrintConfig legacy_config(bool semm = false,
         {"extruder_max_nozzle_count", same_extruder ? "2" : "1,1"},
     });
     FullPrintConfig full;
-    full.apply(config);
+    // Extruder normalization adds dynamic-only metadata; copy the static print columns.
+    full.apply(config, true);
     REQUIRE(full.filament_ramming_volumetric_speed.size() == 1);
     REQUIRE(full.filament_ramming_volumetric_speed_nc.size() == 1);
     return full;
