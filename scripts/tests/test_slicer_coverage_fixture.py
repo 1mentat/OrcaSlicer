@@ -354,5 +354,80 @@ class CatchDiscoveryProfileIsolationTests(unittest.TestCase):
             self.assertIn("case", (root / "out" / "tests.cmake").read_text())
 
 
+class FilamentGroupTimingTests(unittest.TestCase):
+    """The FilamentGroup timing ceilings relax only in coverage builds."""
+
+    SUITE = REPOSITORY / "tests" / "filament_group"
+
+    def setUp(self):
+        if not (self.SUITE / "filament_group_regression_main.cpp").is_file():
+            self.skipTest("tests/filament_group sources are not checked out")
+
+    def test_diagnostic_macro_is_defined_only_when_coverage_is_enabled(self):
+        if not (shutil.which("cmake") and shutil.which("ninja")):
+            self.skipTest("cmake and ninja are required")
+        with tempfile.TemporaryDirectory(prefix="fg-timing-cmake-") as temp:
+            root = Path(temp).resolve()
+            # Stand-ins for what tests/CMakeLists.txt provides; configure only.
+            (root / "CMakeLists.txt").write_text(f"""
+cmake_minimum_required(VERSION 3.16)
+project(FilamentGroupTimingFixture LANGUAGES CXX)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+foreach(_target test_common libslic3r nlohmann_json)
+    add_library(${{_target}} INTERFACE)
+endforeach()
+add_library(Catch2::Catch2WithMain INTERFACE IMPORTED)
+function(orcaslicer_copy_test_dlls)
+endfunction()
+function(orcaslicer_discover_tests)
+endfunction()
+add_subdirectory("{self.SUITE.as_posix()}" filament_group)
+""", encoding="utf-8")
+            defines = {}
+            for state in ("ON", "OFF"):
+                build = root / f"build-{state}"
+                configured = subprocess.run(
+                    ["cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
+                     f"-DSLICER_ENABLE_LLVM_SOURCE_COVERAGE={state}"],
+                    capture_output=True, text=True, timeout=120)
+                self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+                commands = json.loads((build / "compile_commands.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(commands), 1)
+                defines[state] = commands[0]["command"]
+            self.assertIn("-DSLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1", defines["ON"])
+            self.assertNotIn("SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY", defines["OFF"])
+
+    def test_release_ceiling_is_enforced_without_the_macro_and_recorded_with_it(self):
+        compiler = shutil.which(os.environ.get("SLICER_COVERAGE_CLANG", "")) or shutil.which("c++") \
+            or shutil.which("clang++")
+        if not compiler:
+            self.skipTest("no C++ compiler")
+        source = (self.SUITE / "filament_group_regression_main.cpp").read_text(encoding="utf-8")
+        match = re.search(r"static void check_elapsed_ms\(.*?\n}\n", source, re.DOTALL)
+        self.assertIsNotNone(match, "check_elapsed_ms helper not found")
+        # Minimal Catch2 stand-ins: INFO is ignored and REQUIRE failures exit 1.
+        harness = (
+            "#include <cmath>\n#include <cstdlib>\n#include <iostream>\n#include <string>\n"
+            "#define INFO(x) do { } while (0)\n"
+            "#define REQUIRE(x) do { if (!(x)) { std::exit(1); } } while (0)\n"
+            + match.group(0)
+            + "int main(int, char** argv) { check_elapsed_ms(\"case\", std::atof(argv[1]), 100.0); return 0; }\n")
+        with tempfile.TemporaryDirectory(prefix="fg-timing-") as temp:
+            root = Path(temp)
+            (root / "harness.cpp").write_text(harness, encoding="utf-8")
+            results = {}
+            for name, defines in (("release", []), ("coverage", ["-DSLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1"])):
+                binary = root / name
+                subprocess.run([compiler, "-std=c++17", *defines, str(root / "harness.cpp"), "-o", str(binary)],
+                               check=True, capture_output=True, timeout=120)
+                results[name] = {elapsed: subprocess.run([str(binary), elapsed], capture_output=True,
+                                                         timeout=30).returncode
+                                 for elapsed in ("50", "100", "250", "nan", "-1")}
+            # Release keeps the exact strict ceiling.
+            self.assertEqual(results["release"], {"50": 0, "100": 1, "250": 1, "nan": 1, "-1": 0})
+            # Coverage records any finite, non-negative duration; nonsense still fails.
+            self.assertEqual(results["coverage"], {"50": 0, "100": 0, "250": 0, "nan": 1, "-1": 1})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

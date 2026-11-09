@@ -19,6 +19,7 @@
 #include "fg_test_evaluator.hpp"
 #include "fg_test_utils.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
@@ -52,6 +53,24 @@ static std::vector<std::string> collect_test_files(const std::string& dir) {
 static std::vector<std::string> get_golden_files() {
     static std::vector<std::string> files = collect_test_files(FG_TEST_GOLDEN_DIR);
     return files;
+}
+
+// Source-coverage instrumentation (atomic counters) makes elapsed times incomparable with the
+// Release ceilings, so coverage builds only record them. The uninstrumented Release run enforces
+// the ceilings, and CTest's per-test timeout remains the hang guard.
+static void check_elapsed_ms(const std::string& case_id, double elapsed_ms, double release_ceiling_ms) {
+    INFO("FilamentGroup timing case: " << case_id);
+#if defined(SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY)
+    std::clog << "[coverage timing diagnostic] case=" << case_id << " elapsed_ms=" << elapsed_ms
+              << " release_ceiling_ms=" << release_ceiling_ms << " (not enforced under instrumentation)" << std::endl;
+    INFO("Elapsed under source coverage instrumentation (diagnostic only): " << elapsed_ms << " ms");
+    INFO("The paired uninstrumented Release run enforces the " << release_ceiling_ms << " ms ceiling.");
+    REQUIRE(std::isfinite(elapsed_ms));
+    REQUIRE(elapsed_ms >= 0.0);
+#else
+    INFO("Elapsed: " << elapsed_ms << " ms");
+    REQUIRE(elapsed_ms < release_ceiling_ms);
+#endif
 }
 
 static bool is_constraint_feasible(const FilamentGroupContext& ctx,
@@ -269,7 +288,7 @@ TEST_CASE("FilamentGroup golden regression", "[filament_group][golden]") {
         // it would mean fewer restarts fit in the wall clock and so worse groupings. Loose on
         // purpose, so it never becomes a proxy for how loaded the runner is.
         const double throughput_ceiling_ms = 10.0 * ClusteringBudget{}.timeout_ms;
-        REQUIRE(result.elapsed_ms < throughput_ceiling_ms);
+        check_elapsed_ms(tc.metadata.id, result.elapsed_ms, throughput_ceiling_ms);
     }
 }
 
@@ -292,7 +311,7 @@ TEST_CASE("FilamentGroup returns a valid grouping under the default budget", "[f
 
         REQUIRE(result.constraints_ok);
         // A hang guard. The clock is only checked between swaps, so a sweep can overshoot.
-        REQUIRE(result.elapsed_ms < 40000.0);
+        check_elapsed_ms(tc.metadata.id, result.elapsed_ms, 40000.0);
     }
 }
 
@@ -318,7 +337,7 @@ TEST_CASE("FilamentGroup property checks", "[filament_group][property]") {
         // RelWithDebInfo runaway guard; the Release-calibrated 10 s limit is raised for the slower
         // build (config_b/config_c cases evaluate the full per-layer nozzle-aware reorder for every
         // candidate grouping; this is a guard against hangs, not a micro-perf gate).
-        REQUIRE(result.elapsed_ms < 40000.0);
+        check_elapsed_ms(spec.id, result.elapsed_ms, 40000.0);
         REQUIRE(result.flush_cost >= 0);
 
         auto used_filaments = collect_sorted_used_filaments(tc.context.model_info.layer_filaments);
