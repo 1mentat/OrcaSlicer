@@ -1,0 +1,16 @@
+{
+  "repository": "1mentat/OrcaSlicer",
+  "run_id": 42542046131,
+  "head_sha": "fadbc44d421cc01f8161e254abf17545c3a02ed8",
+  "artifact_id": 13646361232,
+  "artifact_digest": "sha256:11a85e2994e7a18cfa15dfa47991489f506b41b32e68a4254c0b5446e4608269",
+  "source_sha256": {
+    "tests/libslic3r/test_meshboolean.cpp": "26b2ca897093e05aaa2cfb82368cb12e8673fdc3ea4576167fac61bcd7d24722",
+    "src/libslic3r/MeshBoolean.cpp": "04f77db2b7f16fb07aa7a992cbb1461f33ac9a347a032c8a334c4f6fba3dd9fb",
+    "src/libslic3r/MeshBoolean.hpp": "ac9419a1fd9edb4853b65f7b940e457014bb61d313bff176ea4b3814f4f5f876",
+    "src/libslic3r/TriangleMesh.cpp": "d2436714e5cf1d034036e5a802362a2d767f3dae75021d108116f11b5d0a6f9b",
+    "src/libslic3r/TriangleMesh.hpp": "5836e5141554cc4f86d4ad29ada71e122a6ceeeda2cb888cc619acfce5963a04",
+    "deps/CGAL/CGAL.cmake": "8a4a2e3254448fec3b97d82a687373321745d53bc44176cb479189b3acb4d174"
+  },
+  "note": "Bind only to an actual available native macOS arm64 tests artifact. Original 42528472563 and optional baseline42517433982 tests artifacts were deleted after success. No app/binary substitution or rebuild."
+}

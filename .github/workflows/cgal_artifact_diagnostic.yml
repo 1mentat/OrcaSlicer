@@ -1,0 +1,52 @@
+name: CGAL macOS artifact diagnostic
+
+on:
+  push:
+    branches: [diagnostics/cgal-macos-artifact]
+    paths:
+      - .github/workflows/cgal_artifact_diagnostic.yml
+      - .github/diagnostics/cgal-artifact.json
+      - scripts/cgal_artifact_diagnostic.py
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cgal-macos-artifact-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  sample:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/diagnostics
+            scripts/cgal_artifact_diagnostic.py
+          sparse-checkout-cone-mode: false
+      - name: Verify available artifact and source identity
+        id: binding
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/cgal_artifact_diagnostic.py verify
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ steps.binding.outputs.artifact_id }}
+          run-id: ${{ steps.binding.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: diagnostic-input
+          merge-multiple: true
+      - name: Repeat unchanged test and sample slow child
+        run: python3 scripts/cgal_artifact_diagnostic.py run
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cgal-macos-diagnostic-${{ github.run_id }}
+          path: cgal-diagnostic
+          if-no-files-found: error
+          retention-days: 14
