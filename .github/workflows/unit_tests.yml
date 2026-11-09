@@ -2,6 +2,8 @@ name: Unit Tests
 
 # Download a platform's test artifact, run ctest, and upload the JUnit
 # results for aggregation. Called once per arch from build_all.yml.
+# Keep the producer artifacts for their existing five-day retention: retrying
+# one matrix build can rerun sibling unit jobs that still need those artifacts.
 on:
   workflow_call:
     inputs:
@@ -72,8 +74,3 @@ jobs:
           path: ctest_results.xml
           retention-days: 5
           if-no-files-found: warn
-      - name: Delete Test Artifact
-        if: success()
-        uses: geekyeggo/delete-artifact@v6
-        with:
-          name: ${{ inputs.artifact }}
