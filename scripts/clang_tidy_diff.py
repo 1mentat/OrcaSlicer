@@ -29,7 +29,7 @@ import tempfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 SOURCE_EXTENSIONS = {".cpp", ".cc", ".cxx"}
 HEADER_EXTENSIONS = {".hpp", ".h", ".hxx"}
@@ -304,7 +304,7 @@ def errors_alone_at(revision, clang_tidy, build_dir, path):
     if shown.returncode != 0:
         return Counter()
     # Beside the original, so its quoted includes resolve the same way.
-    p = PurePosixPath(path)
+    p = Path(path)
     copy = str(p.with_name(f".{p.stem}.clang-tidy-base{p.suffix}"))
     try:
         with open(copy, "w", encoding="utf-8") as f:
