@@ -6,7 +6,17 @@ build=${COVERAGE_BUILD_DIR:-$root/build-coverage}
 deps=${COVERAGE_DEPS_DIR:-$root/deps/build-coverage}
 out=${COVERAGE_OUTPUT_DIR:-$root/coverage-output}
 export CC=clang-18 CXX=clang++-18
-export CMAKE_BUILD_PARALLEL_LEVEL=2 CTEST_PARALLEL_LEVEL=2
+build_jobs=${COVERAGE_BUILD_JOBS:-2}
+if [[ ! $build_jobs =~ ^[1-4]$ ]]; then
+  echo 'COVERAGE_BUILD_JOBS must be between 1 and 4.' >&2
+  exit 2
+fi
+build_jobs=$(python3 - "$build_jobs" <<'PY'
+import os, sys
+print(min(int(sys.argv[1]), len(os.sched_getaffinity(0))))
+PY
+)
+export CMAKE_BUILD_PARALLEL_LEVEL=$build_jobs CTEST_PARALLEL_LEVEL=2
 # CPython's PGO configure looks for an unversioned tool unless this is explicit.
 LLVM_PROFDATA=$(command -v llvm-profdata-18)
 export LLVM_PROFDATA
@@ -31,18 +41,21 @@ for command in commands:
 print(digest.hexdigest())
 PY
 )
+deps_only=false
 if [[ ${1:-} == --deps-key && $# == 1 ]]; then
   printf '%s\n' "$deps_key"
   exit 0
+elif [[ ${1:-} == --deps-only && $# == 1 ]]; then
+  deps_only=true
 elif (( $# != 0 )); then
-  echo 'Usage: build_coverage.sh [--deps-key]' >&2
+  echo 'Usage: build_coverage.sh [--deps-key|--deps-only]' >&2
   exit 2
 fi
 
 # Some dependency recipes count CPUs themselves instead of honoring --parallel.
-# Keep the entire process tree on two available CPUs, including nested builds.
+# Bound the entire process tree, including nested builds; local default is two.
 if [[ ${ORCA_COVERAGE_AFFINITY_SET:-0} != 1 ]]; then
-  cpus=$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))')
+  cpus=$(python3 -c 'import os,sys; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:int(sys.argv[1])])))' "$build_jobs")
   export ORCA_COVERAGE_AFFINITY_SET=1
   exec taskset --cpu-list "$cpus" bash "$0" "$@"
 fi
@@ -81,12 +94,15 @@ if [[ ! -f "$marker" || $(cat "$marker") != "$deps_key" ]]; then
     dep_GLFW dep_wxWidgets
   printf '%s\n' "$deps_key" > "$marker"
 fi
+if [[ $deps_only == true ]]; then
+  exit 0
+fi
 stage configure cmake -S "$root" -B "$build" -G Ninja "${common[@]}" \
   -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_STATIC=ON -DBUILD_TESTS=ON \
   -DCMAKE_PREFIX_PATH="$deps/OrcaSlicer_dep/usr/local" -DDEP_BUILD_DIR="$deps" \
   -DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON
 cp "$build/CMakeCache.txt" "$out/CMakeCache.txt"
-stage release-build cmake --build "$build" --config Release --parallel 2 --target \
+stage release-build cmake --build "$build" --config Release --parallel "$build_jobs" --target \
   libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests
 stage collect python3 "$root/scripts/slicer_coverage.py" run \
   --root "$root" --build-dir "$build" --source-root src/libslic3r \

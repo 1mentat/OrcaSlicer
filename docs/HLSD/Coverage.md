@@ -36,12 +36,16 @@ jobs set no coverage threshold.
 
 `scripts/build_coverage.sh` is the shared Linux entry point. It builds the core
 dependency prefix and instrumented test targets, then invokes
-`scripts/slicer_coverage.py`. The entire process tree has two-CPU affinity so that
-dependency recipes that count CPUs themselves respect the same bound. A cached
+`scripts/slicer_coverage.py`. The entire process tree has bounded CPU affinity so
+that dependency recipes that count CPUs themselves respect the same bound.
+The default is two build slots; `COVERAGE_BUILD_JOBS` can select one to four,
+capped by available CPUs. CTest retains two slots. A cached
 dependency prefix is keyed by dependency inputs, build profile, architecture and
 the selected toolchain. `bash scripts/build_coverage.sh --deps-key` prints that
 identity without configuring or building. Its completed-prefix marker stores the
 same identity; a stale marker does not authorize reuse.
+`--deps-only` builds or validates this prefix separately, allowing CI to save it
+before a later instrumented build or test failure.
 
 The collector preserves source manifests, compiler and binary evidence, tool
 versions, test output, raw coverage export and profiles. These artifacts identify

@@ -24,6 +24,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || vars.COVERAGE_TRACKING == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      # Standard public runners have four CPUs. The script also caps this at
+      # available affinity; local Forgejo controllers retain the two-CPU default.
+      COVERAGE_BUILD_JOBS: 4
     outputs:
       commit: ${{ steps.source.outputs.commit }}
       valid: ${{ steps.render.outputs.valid }}
@@ -89,7 +93,17 @@ jobs:
             scripts.tests.test_coverage_history
       - name: Cache built dependency prefix
         if: steps.source.outputs.measure == 'true'
-        uses: actions/cache@v6
+        id: dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: deps/build-coverage/OrcaSlicer_dep
+          key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}
+      - name: Build or validate dependency prefix
+        if: steps.source.outputs.measure == 'true'
+        run: bash scripts/build_coverage.sh --deps-only
+      - name: Save completed dependencies before measuring
+        if: steps.source.outputs.measure == 'true' && steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
           path: deps/build-coverage/OrcaSlicer_dep
           key: core-coverage-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.key }}
