@@ -24,6 +24,31 @@ bool all_indices_valid(const indexed_triangle_set& its)
     });
 }
 
+bool every_face_has_distinct_indices(const indexed_triangle_set& mesh)
+{
+    return std::all_of(mesh.indices.begin(), mesh.indices.end(), [](const Vec3i32& face) {
+        return face[0] != face[1] && face[1] != face[2] && face[2] != face[0];
+    });
+}
+
+bool lies_inside_source_bounds(const indexed_triangle_set& result, const indexed_triangle_set& source)
+{
+    if (source.vertices.empty())
+        return false;
+    if (result.vertices.empty())
+        return result.indices.empty();
+    const BoundingBoxf3 source_bounds = bounding_box(source);
+    const BoundingBoxf3 result_bounds = bounding_box(result);
+    constexpr double tolerance = 1e-5;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (result_bounds.min[axis] < source_bounds.min[axis] - tolerance)
+            return false;
+        if (result_bounds.max[axis] > source_bounds.max[axis] + tolerance)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 TEST_CASE("Short-edge collapse preserves geometry when the face budget is already met", "[ShortEdgeCollapse]")
@@ -38,6 +63,7 @@ TEST_CASE("Short-edge collapse preserves geometry when the face budget is alread
 
     CHECK(mesh.indices.size() == original_faces);
     REQUIRE(all_indices_valid(mesh));
+    CHECK(every_face_has_distinct_indices(mesh));
     CHECK_THAT(its_volume(mesh), WithinAbs(8., 1e-5));
     const BoundingBoxf3 result_bounds = bounding_box(mesh);
     for (int axis = 0; axis < 3; ++axis) {
@@ -60,6 +86,11 @@ TEST_CASE("Short-edge collapse decimates a closed sphere to its face budget with
     CHECK(result.indices.size() <= target_faces);
     CHECK(result.vertices.size() < source.vertices.size());
     REQUIRE(all_indices_valid(result));
+    CHECK(every_face_has_distinct_indices(result));
+    CHECK(lies_inside_source_bounds(result, source));
+    CHECK(std::all_of(result.vertices.begin(), result.vertices.end(), [](const Vec3f& point) {
+        return point.array().isFinite().all();
+    }));
     // Only vertices still referenced by a face are kept.
     CHECK(its_compactify_vertices(result) == 0);
     // Collapsing short edges of a fine sphere keeps it a solid of nearly the same volume.
