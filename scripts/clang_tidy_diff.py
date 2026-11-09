@@ -19,6 +19,7 @@ missing includes.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -116,6 +117,116 @@ def changed_files(merge_base):
 def compiled_sources(build_dir):
     with open(os.path.join(build_dir, "compile_commands.json"), encoding="utf-8") as f:
         return {os.path.realpath(os.path.join(entry["directory"], entry["file"])) for entry in json.load(f)}
+
+
+def _raw_command_tokens(command):
+    """Return raw token spans without interpreting or rewriting command text."""
+    spans = []
+    start = None
+    quote = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char.isspace() and quote is None:
+            if start is not None:
+                spans.append((start, index))
+                start = None
+            index += 1
+            continue
+        if start is None:
+            start = index
+
+        if char == "\\" and quote != "'":
+            run_start = index
+            while index < len(command) and command[index] == "\\":
+                index += 1
+            slash_count = index - run_start
+            if index < len(command):
+                escaped = command[index]
+                if escaped == '"':
+                    if slash_count % 2:
+                        index += 1
+                    else:
+                        if quote is None:
+                            quote = '"'
+                        elif quote == '"':
+                            quote = None
+                        index += 1
+                    continue
+                if escaped == "'" and quote is None:
+                    if slash_count % 2:
+                        index += 1
+                    else:
+                        quote = "'"
+                        index += 1
+                    continue
+                if escaped.isspace() and quote is None and slash_count % 2:
+                    index += 1
+                    continue
+            continue
+
+        if char == '"' and quote in (None, '"'):
+            quote = None if quote == '"' else '"'
+        elif char == "'" and quote in (None, "'"):
+            quote = None if quote == "'" else "'"
+        index += 1
+
+    if start is not None:
+        spans.append((start, len(command)))
+    return spans
+
+
+def _remove_ccache_skip(command):
+    if "--ccache-skip" not in command:
+        return command
+    for start, end in reversed(_raw_command_tokens(command)):
+        if command[start:end] == "--ccache-skip":
+            command = command[:start] + command[end:]
+    return command
+
+
+@contextmanager
+def clang_tidy_build_dir(build_dir):
+    """Yield a compile database that omits ccache-only launcher markers.
+
+    CMake's compile database does not include the compiler launcher, but it
+    does include target compile options.  In gcov builds that can leave
+    ``--ccache-skip`` in a row passed to clang-tidy, where it is not a compiler
+    option.  Keep the original build tree untouched and make one temporary
+    database only when such a marker is present.
+    """
+    compile_commands = os.path.join(build_dir, "compile_commands.json")
+    with open(compile_commands, "rb") as f:
+        original = f.read()
+    entries = json.loads(original.decode("utf-8"))
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        arguments = entry.get("arguments")
+        if isinstance(arguments, list) and all(isinstance(value, str) for value in arguments):
+            filtered = [value for value in arguments if value != "--ccache-skip"]
+            if len(filtered) != len(arguments):
+                entry["arguments"] = filtered
+                changed = True
+        command = entry.get("command")
+        if isinstance(command, str):
+            # Match raw unquoted tokens only, preserving escaped/quoted text,
+            # Windows paths, and every byte of the command around the marker.
+            filtered = _remove_ccache_skip(command)
+            if filtered != command:
+                entry["command"] = filtered
+                changed = True
+
+    if not changed:
+        yield build_dir
+        return
+
+    with tempfile.TemporaryDirectory(prefix="clang-tidy-compile-db-") as temporary:
+        with open(os.path.join(temporary, "compile_commands.json"), "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False)
+            f.write("\n")
+        yield temporary
 
 
 def run_clang_tidy(clang_tidy, build_dir, path, lines, extra_args):
@@ -285,26 +396,27 @@ def main():
     root = os.getcwd() + os.sep
     failed = []
     fixed = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        jobs = {path: pool.submit(check_file, args.clang_tidy, args.build_dir, merge_base, path, change, args.extra_args)
-                for path, change in todo}
-        for path, job in jobs.items():
-            file_failed, output, diagnostics, file_fixed = job.result()
-            if file_fixed:
-                fixed.append(path)
-            if not file_failed:
-                continue
-            failed.append(path)
-            print(f"\n==== {path}")
-            if not diagnostics:
-                print(output, end="")
-            for d in diagnostics[:MAX_REPORTED]:
-                file = d.file.removeprefix(root)
-                print(f"{file}:{d.line}:{d.col}: {d.level}: {d}")
-                if annotate:
-                    print(f"::{d.level} file={file},line={d.line},col={d.col}::{d}")
-            if len(diagnostics) > MAX_REPORTED:
-                print(f"... and {len(diagnostics) - MAX_REPORTED} more")
+    with clang_tidy_build_dir(args.build_dir) as tidy_build_dir:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            jobs = {path: pool.submit(check_file, args.clang_tidy, tidy_build_dir, merge_base, path, change, args.extra_args)
+                    for path, change in todo}
+            for path, job in jobs.items():
+                file_failed, output, diagnostics, file_fixed = job.result()
+                if file_fixed:
+                    fixed.append(path)
+                if not file_failed:
+                    continue
+                failed.append(path)
+                print(f"\n==== {path}")
+                if not diagnostics:
+                    print(output, end="")
+                for d in diagnostics[:MAX_REPORTED]:
+                    file = d.file.removeprefix(root)
+                    print(f"{file}:{d.line}:{d.col}: {d.level}: {d}")
+                    if annotate:
+                        print(f"::{d.level} file={file},line={d.line},col={d.col}::{d}")
+                if len(diagnostics) > MAX_REPORTED:
+                    print(f"... and {len(diagnostics) - MAX_REPORTED} more")
 
     if fixed:
         print(f"\nAdded includes to {len(fixed)} file(s):")
