@@ -21,7 +21,7 @@ if (MSVC)
 
 else ()
     set(_gmp_ccflags "-O2 -DNDEBUG -fPIC -DPIC -Wall -Wmissing-prototypes -Wpointer-arith -pedantic -fomit-frame-pointer -fno-common")
-    if (DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+    if (DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL} AND NOT "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" STREQUAL "")
         set(_gmp_build_jobs "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
         if (NOT _gmp_build_jobs MATCHES "^[0-9]+$")
             message(FATAL_ERROR "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer for GMP/MPFR builds")
