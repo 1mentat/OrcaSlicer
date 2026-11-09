@@ -1,3 +1,4 @@
+#include <Eigen/Core>
 #include <cmath>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
