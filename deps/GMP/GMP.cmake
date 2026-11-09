@@ -21,6 +21,18 @@ if (MSVC)
 
 else ()
     set(_gmp_ccflags "-O2 -DNDEBUG -fPIC -DPIC -Wall -Wmissing-prototypes -Wpointer-arith -pedantic -fomit-frame-pointer -fno-common")
+    if (DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+        set(_gmp_build_jobs "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+        if (NOT _gmp_build_jobs MATCHES "^[0-9]+$")
+            message(FATAL_ERROR "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer for GMP/MPFR builds")
+        endif ()
+        string(REGEX REPLACE "^0+" "" _gmp_build_jobs "${_gmp_build_jobs}")
+        if (_gmp_build_jobs STREQUAL "")
+            message(FATAL_ERROR "CMAKE_BUILD_PARALLEL_LEVEL must be greater than zero for GMP/MPFR builds")
+        endif ()
+    else ()
+        set(_gmp_build_jobs "${NPROC}")
+    endif ()
     set(_gmp_build_tgt "${CMAKE_SYSTEM_PROCESSOR}")
 
     if (APPLE)
@@ -66,7 +78,7 @@ else ()
         PATCH_COMMAND git apply ${GMP_DIRECTORY_FLAG} --verbose ${CMAKE_CURRENT_LIST_DIR}/0001-GMP_GCC15.patch
         BUILD_IN_SOURCE ON
         CONFIGURE_COMMAND  env "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}" "CFLAGS=${_gmp_ccflags}" "CXXFLAGS=${_gmp_ccflags}" "LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}" ./configure ${_cross_compile_arg} --enable-shared=no --enable-cxx=yes --enable-static=yes "--prefix=${DESTDIR}" ${_gmp_build_tgt}
-        BUILD_COMMAND     make -j
+        BUILD_COMMAND     make -j${_gmp_build_jobs}
         INSTALL_COMMAND   make install
     )
 endif ()
