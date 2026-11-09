@@ -3606,8 +3606,8 @@ void WipingExtrusions::ensure_perimeters_infills_order(const Print& print)
                     if (is_infill_first
                     //BBS
                     //|| object->config().flush_into_objects  // in this case the perimeter is overridden, so we can override by the last one safely
-                    || lt.is_extruder_order(lt.wall_extruder_id(region), last_nonsoluble_extruder    // !infill_first, but perimeter is already printed when last extruder prints
-                    || ! lt.has_extruder(lt.sparse_infill_filament_id(region)))) // we have to force override - this could violate infill_first (FIXME)
+                    || lt.is_extruder_order(lt.wall_extruder_id(region), last_nonsoluble_extruder) // !infill_first, but perimeter is already printed when last extruder prints
+                    || ! lt.has_extruder(lt.sparse_infill_filament_id(region))) // we have to force override - this could violate infill_first (FIXME)
                         set_extruder_override(fill, object, copy, (is_infill_first ? first_nonsoluble_extruder : last_nonsoluble_extruder), num_of_copies);
                     else {
                         // In this case we can (and should) leave it to be printed normally.

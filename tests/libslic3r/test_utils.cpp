@@ -12,6 +12,7 @@
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 
 #include "test_utils.hpp"
 
@@ -969,6 +970,8 @@ TEST_CASE("Short time formatting drops seconds and rounds to the minute once hou
 }
 
 TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+    const CNumericLocalesSetter numeric_locale;
+    CHECK(get_time_dhms(0.f) == "0.000000s");
     CHECK(get_time_dhms(61.f) == "1m 1s");
     CHECK(get_time_dhms(3661.f) == "1h 1m 1s");
     CHECK(get_time_dhms(86400.f) == "1d 0h 0m 0s");

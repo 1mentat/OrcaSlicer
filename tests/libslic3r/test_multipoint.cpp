@@ -327,3 +327,18 @@ TEST_CASE("MultiPoint3 bounding box and rotation keep Z coordinates", "[MultiPoi
     CHECK(path.points[1] == Point3(10, 0, 7));
     CHECK(path.points[2] == Point3(0, 0, 9));
 }
+
+TEST_CASE("Visvalingam is deterministic for repeated equal input", "[MultiPoint][Visvalingam]")
+{
+    const Points input = make_polyline();
+    const Points first = MultiPoint::visivalingam(input, 20.);
+    for (int i = 0; i < 4; ++i)
+        check_exact(MultiPoint::visivalingam(input, 20.), first);
+}
+
+TEST_CASE("MultiPoint3 tolerance excludes the exact radius boundary", "[MultiPoint][MultiPointGap]")
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
+    CHECK(path.find_point(Point3(10, 1, 7), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 1.0) == -1);
+}

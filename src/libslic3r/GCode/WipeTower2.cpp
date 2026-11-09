@@ -13,6 +13,7 @@
 #include <string>
 #include <math.h>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 #include <numeric>
@@ -497,7 +498,11 @@ public:
         m_current_pos.y() = y;
 
 		// Update the elapsed time with a rough estimate.
-        m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
+        // A feedless first move inherits the printer's prior feedrate, which is
+        // unknown to this standalone writer. Do not turn that unknown duration
+        // into NaN; subsequent moves with an explicit feedrate are timed normally.
+        if (m_current_feedrate > EPSILON)
+            m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
 		return *this;
 	}
 
@@ -849,7 +854,11 @@ public:
         m_current_pos.y() = y;
 
         // Update the elapsed time with a rough estimate.
-        m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
+        // A feedless first move inherits the printer's prior feedrate, which is
+        // unknown to this standalone writer. Do not turn that unknown duration
+        // into NaN; subsequent moves with an explicit feedrate are timed normally.
+        if (m_current_feedrate > EPSILON)
+            m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
         m_gcode += "\n";
         return *this;
     }
@@ -2249,7 +2258,10 @@ static float get_wipe_depth(float volume, float layer_height, float perimeter_wi
     float length_to_extrude = (volume_to_length(volume, perimeter_width, layer_height)) / extra_flow;
     length_to_extrude = std::max(length_to_extrude,0.f);
 
-	return (int(length_to_extrude / width) + 1) * perimeter_width * extra_spacing;
+    const float rows = length_to_extrude / width;
+    if (!std::isfinite(rows) || rows < 0.f || double(rows) >= double(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("Wipe tower purge requires an unrepresentable number of rows.");
+    return (int(rows) + 1) * perimeter_width * extra_spacing;
 }
 
 // Appends a toolchange into m_plan and calculates neccessary depth of the corresponding box
@@ -2304,7 +2316,11 @@ WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(size_t old_tool
     // ORCA: and first-layer purge segments do not leave visible gaps.
     const float planning_spacing = first_layer_plan ? m_extra_flow : m_extra_spacing_wipe;
 
-    float wiping_depth = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height, m_perimeter_width, m_extra_flow, planning_spacing, width);
+    // Interface purge is emitted in addition to the ordinary purge; reserve its rows too.
+    float planned_wipe_volume = wipe_volume;
+    if (m_enable_tower_interface_features && m_filpar[new_tool].tower_interface_purge_length > 0.f)
+        planned_wipe_volume += m_filpar[new_tool].tower_interface_purge_length * m_filpar[new_tool].filament_area;
+    float wiping_depth = get_wipe_depth(planned_wipe_volume - first_wipe_volume, layer_height, m_perimeter_width, m_extra_flow, planning_spacing, width);
 
 	return WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume);
 }
@@ -2354,7 +2370,11 @@ void WipeTower2::save_on_last_wipe()
         const float width = m_wipe_tower_width - 3*m_perimeter_width; // width we draw into
         auto recompute_toolchange = [this, width](WipeTowerInfo::ToolChange& toolchange, float volume_to_save) {
             float volume_left_to_wipe = std::max(m_filpar[toolchange.new_tool].filament_minimal_purge_on_wipe_tower, toolchange.wipe_volume_total - volume_to_save);
-            float volume_we_need_depth_for = std::max(0.f, volume_left_to_wipe - length_to_volume(toolchange.first_wipe_line, m_perimeter_width*m_extra_flow, m_layer_info->height));
+            // Finish-layer savings apply to ordinary purge, not the additional interface purge.
+            float planned_wipe_volume = volume_left_to_wipe;
+            if (m_enable_tower_interface_features && m_filpar[toolchange.new_tool].tower_interface_purge_length > 0.f)
+                planned_wipe_volume += m_filpar[toolchange.new_tool].tower_interface_purge_length * m_filpar[toolchange.new_tool].filament_area;
+            float volume_we_need_depth_for = std::max(0.f, planned_wipe_volume - length_to_volume(toolchange.first_wipe_line, m_perimeter_width*m_extra_flow, m_layer_info->height));
 
             // ORCA: Keep wipe-depth planning consistent with toolchange_Wipe().
             // ORCA: On the first layer, toolchange_Wipe() advances purge rows using

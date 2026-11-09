@@ -264,6 +264,7 @@ TEST_CASE("SurfaceCollection SVG export colors surfaces and optionally labels th
     CHECK_THAT(opacity, WithinAbs(0.5, 1e-6));
     CHECK(count_text(labeled, ">0</text>") == 1);
     CHECK(count_text(labeled, ">1</text>") == 1);
+    CHECK(labeled.find("bottom bridge") != std::string::npos);
 
     ScopedTemporaryFile plain_file(".svg");
     collection.export_to_svg(plain_file.string().c_str(), false);
