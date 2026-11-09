@@ -64,6 +64,8 @@ table. Coverage changes use percentage points against an older compatible
 baseline. Configuration, measurement semantics and tool versions identify a
 series; incompatible measurements start a new series. Zero executable counts
 mean not measured. Incomplete runs appear as incomplete and do not enter history.
+Tool installation paths and host-CPU diagnostics remain in the evidence but do not
+split a series; compiler build/version and target information still do.
 
 ## Forge adapters
 

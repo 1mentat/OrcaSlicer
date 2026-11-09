@@ -71,6 +71,29 @@ class CoverageReportTests(unittest.TestCase):
         self.assertIn("incomplete", reporter.badge(result))
         self.assertNotIn("20.00%", reporter.markdown(result))
 
+    def test_tool_relocation_and_host_cpu_preserve_series_but_versions_and_targets_do_not(self):
+        raw = copy.deepcopy(self.raw)
+        raw["tool_versions"] = {
+            "compiler": {"path": "/opt/llvm/bin/clang", "version": "18.1.3",
+                         "version_text": "clang version 18.1.3\nTarget: x86_64-linux-gnu\nInstalledDir: /opt/llvm/bin"},
+            "llvm-cov": {"path": "/opt/llvm/bin/llvm-cov", "version": "18.1.3",
+                         "version_text": "LLVM version 18.1.3\n  Host CPU: skylake"}}
+        previous = self.render(raw, measured_at="2026-11-08T12:00:00Z")
+        moved = copy.deepcopy(raw)
+        moved["tool_versions"]["compiler"].update(
+            path="/usr/bin/clang", version_text="clang version 18.1.3\nTarget: x86_64-linux-gnu\nInstalledDir: /usr/bin")
+        moved["tool_versions"]["llvm-cov"].update(
+            path="/usr/bin/llvm-cov", version_text="LLVM version 18.1.3\n  Host CPU: znver4")
+        result = self.render(moved, baseline=previous, history=previous["history"])
+        self.assertEqual(result["configuration_id"], previous["configuration_id"])
+        self.assertEqual(len(result["history"]), 2)
+        self.assertEqual(result["tool_versions"], moved["tool_versions"])
+        for changes in ({"version": "19.1.0", "version_text": "clang version 19.1.0"},
+                        {"version_text": "clang version 18.1.3\nTarget: aarch64-linux-gnu"}):
+            changed = copy.deepcopy(moved)
+            changed["tool_versions"]["compiler"].update(changes)
+            self.assertIsNone(self.render(changed, baseline=previous)["baseline"])
+
     def test_empty_previous_file_is_no_comparison(self):
         previous = self.render(measured_at="2026-11-08T12:00:00Z")
         previous["files"][0]["summary"]["lines"] = {"covered": 0, "count": 0}

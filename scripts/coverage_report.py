@@ -60,6 +60,16 @@ def timestamp(value: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def tool_identity(tools: dict) -> dict:
+    # Keep full tool output in evidence, but relocation and LLVM's host-CPU
+    # diagnostic do not change the compiler or coverage format of a series.
+    return {name: {"version": value.get("version"),
+                   "version_text": "\n".join(
+                       line.strip() for line in value.get("version_text", "").splitlines()
+                       if not line.strip().startswith(("InstalledDir:", "Host CPU:")))}
+            if isinstance(value, dict) else value for name, value in tools.items()}
+
+
 def write_atomic(path: Path, value: str):
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                      prefix=".coverage-", delete=False) as output:
@@ -94,7 +104,7 @@ def render(raw: dict, *, root: Path, out: Path, commit: str, repository: str,
     backend = raw.get("backend", "llvm")
     tool_versions = raw.get("tool_versions", {})
     identity = {"configuration": configuration, "backend": backend,
-                "scope": scope, "repository": repository, "tools": tool_versions,
+                "scope": scope, "repository": repository, "tools": tool_identity(tool_versions),
                 "measurement_schema": raw.get("schema_version"),
                 "measurement_semantics": raw.get("measurement", {}).get("semantics")}
     configuration_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
