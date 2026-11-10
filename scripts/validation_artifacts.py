@@ -229,23 +229,37 @@ def _inventory(path, rootmeta):
     return records, stages
 
 
-def _size(path):
-    if not path.exists() and not path.is_symlink():
-        return 0
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
-        return info.st_size
-    _plain(path, directory=True); total = 0
-    for entry in os.scandir(path):
-        item = Path(entry.path); value = entry.stat(follow_symlinks=False)
-        if entry.is_symlink() or getattr(value, 'st_file_attributes', 0) & 0x400:
-            total += value.st_size  # Never traverse payload links.
-        elif entry.is_dir(follow_symlinks=False):
-            total += _size(item)
-        elif entry.is_file(follow_symlinks=False):
-            total += value.st_size
-        else:
-            raise ArtifactError('Unsupported payload file')
+def _size(path, *, payloads=(), _transient=False):
+    # Producers may remove build intermediates during accounting. Only descendants
+    # of validated payload roots may disappear; manager metadata remains strict.
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            return info.st_size
+        _plain(path, directory=True)
+        entries = os.scandir(path)
+    except FileNotFoundError:
+        if _transient:
+            return 0
+        raise
+    mutable_children = _transient or path in payloads
+    total = 0
+    with entries:
+        for entry in entries:
+            try:
+                value = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if mutable_children:
+                    continue
+                raise
+            if stat.S_ISLNK(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400:
+                total += value.st_size  # Never traverse payload links.
+            elif stat.S_ISDIR(value.st_mode):
+                total += _size(Path(entry.path), payloads=payloads, _transient=mutable_children)
+            elif stat.S_ISREG(value.st_mode):
+                total += value.st_size
+            else:
+                raise ArtifactError('Unsupported payload file')
     return total
 
 
@@ -281,7 +295,7 @@ def _live(directory, meta):
     if meta['state'] != 'active' or now >= min(_seconds(meta['expires_at']), _seconds(meta['lease_expires_at'])):
         raise ArtifactError('Run lease or absolute TTL expired')
     _plain(directory / 'payload', directory=True)
-    size = _size(directory / 'payload')
+    size = _size(directory / 'payload', payloads=(directory / 'payload',))
     if size > meta['size_budget_bytes']:
         raise ArtifactError('Run size budget exceeded')
     return size
@@ -312,7 +326,9 @@ def _admit(path, rootmeta, budget, new_record=True):
 
 
 def _root_size(path, rootmeta):
-    size = _size(path)
+    records, stages = _inventory(path, rootmeta)
+    payloads = tuple(d / 'payload' for d in (*stages, *(d for d, _ in records)))
+    size = _size(path, payloads=payloads)
     if size > rootmeta['total_budget_bytes']:
         raise ArtifactError('Root actual size budget exceeded')
     return size
@@ -496,7 +512,7 @@ def sweep(root, dry_run=False, *, expected_root_id=None):
             expired = now >= _seconds(run['expires_at'])
             abandoned = run['state'] == 'active' and now >= _seconds(run['lease_expires_at'])
             if expired or abandoned or run['state'] in ('completed', 'failed', 'interrupted'):
-                reclaimed += _size(directory); deleted.append(run['run_id'])
+                reclaimed += _size(directory, payloads=(directory / 'payload',)); deleted.append(run['run_id'])
                 if not dry_run:
                     _remove(directory)
         live_records = [(d, r) for d, r in records if r['run_id'] not in deleted]
@@ -508,7 +524,7 @@ def sweep(root, dry_run=False, *, expected_root_id=None):
         # Staging directories are never returned to producers; a held OS root lock
         # proves no other manager transaction is still creating/copying them.
         for stage in stages:
-            reclaimed += _size(stage); deleted.append(stage.name)
+            reclaimed += _size(stage, payloads=(stage / 'payload',)); deleted.append(stage.name)
             if not dry_run:
                 _remove(stage)
         return {'schema': 'validation-sweep-v1', 'dry_run': dry_run,

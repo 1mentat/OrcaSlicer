@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,20 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'validation_artifacts.py'
 SPEC = importlib.util.spec_from_file_location('validation_artifacts', SCRIPT)
 a = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(a)
+
+
+class ListedEntries:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def __iter__(self):
+        return iter(self.entries)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
 
 
 class Artifacts(unittest.TestCase):
@@ -34,6 +49,152 @@ class Artifacts(unittest.TestCase):
 
     def call(self, function, run, *args, **kwargs):
         return function(self.root, run['run_id'], run['token'], *args, **kwargs)
+
+    @contextlib.contextmanager
+    def disappearing_entry(self, target):
+        scandir = a.os.scandir
+        removed = []
+
+        def scan(directory):
+            if not isinstance(directory, int) and Path(directory) == target.parent and not removed:
+                with scandir(directory) as entries:
+                    listed = list(entries)
+                target.unlink()
+                removed.append(target)
+                return ListedEntries(listed)
+            return scandir(directory)
+
+        with patch.object(a.os, 'scandir', side_effect=scan):
+            yield
+        self.assertEqual(removed, [target])
+
+    def test_check_tolerates_build_file_removed_after_listing(self):
+        run = self.create()
+        payload = Path(run['payload_dir'])
+        dependency = payload / 'Time.cpp.o.d'
+        dependency.write_text('temporary dependency file')
+        (payload / 'stable.o').write_bytes(b'abc')
+        with self.disappearing_entry(dependency):
+            self.assertEqual(self.call(a.check, run)['actual_bytes'], 3)
+
+    def test_disappearing_entry_does_not_hide_surviving_run_overflow(self):
+        run = self.create(budget=4)
+        payload = Path(run['payload_dir'])
+        dependency = payload / 'Time.cpp.o.d'
+        dependency.write_text('temporary')
+        (payload / 'stable.o').write_bytes(b'12345')
+        with self.disappearing_entry(dependency):
+            with self.assertRaisesRegex(a.ArtifactError, 'Run size budget'):
+                self.call(a.check, run)
+
+    def test_root_accounting_tolerates_other_payload_churn_without_hiding_overflow(self):
+        first = self.create()
+        second = self.create()
+        payload = Path(second['payload_dir'])
+        dependency = payload / 'Time.cpp.o.d'
+        dependency.write_text('temporary')
+        (payload / 'overflow.o').write_bytes(b'x' * 50001)
+        with self.disappearing_entry(dependency):
+            with self.assertRaisesRegex(a.ArtifactError, 'Root actual size budget'):
+                self.call(a.check, first)
+
+    def test_check_tolerates_nested_directory_removed_before_lstat(self):
+        run = self.create()
+        payload = Path(run['payload_dir'])
+        nested = payload / 'temporary'
+        nested.mkdir()
+        (payload / 'stable.o').write_bytes(b'abc')
+        lstat = Path.lstat
+        removed = []
+
+        def inspect(path, *args, **kwargs):
+            if path == nested and not removed:
+                nested.rmdir()
+                removed.append(path)
+            return lstat(path, *args, **kwargs)
+
+        with patch.object(Path, 'lstat', inspect):
+            self.assertEqual(self.call(a.check, run)['actual_bytes'], 3)
+        self.assertEqual(removed, [nested])
+
+    def test_check_tolerates_nested_directory_removed_before_scandir(self):
+        run = self.create()
+        payload = Path(run['payload_dir'])
+        nested = payload / 'temporary'
+        nested.mkdir()
+        (payload / 'stable.o').write_bytes(b'abc')
+        scandir = a.os.scandir
+
+        def scan(path):
+            if Path(path) == nested:
+                nested.rmdir()
+            return scandir(path)
+
+        with patch.object(a.os, 'scandir', side_effect=scan):
+            self.assertEqual(self.call(a.check, run)['actual_bytes'], 3)
+        self.assertFalse(nested.exists())
+
+    def test_check_still_rejects_missing_payload_root_and_permission_errors(self):
+        run = self.create()
+        payload = Path(run['payload_dir'])
+        scandir = a.os.scandir
+        for error in (PermissionError, FileNotFoundError):
+            with self.subTest(error=error.__name__):
+                def scan(path):
+                    if Path(path) == payload:
+                        raise error('fixture traversal failure')
+                    return scandir(path)
+
+                with patch.object(a.os, 'scandir', side_effect=scan):
+                    self.assertRaises(error, self.call, a.check, run)
+
+    def test_check_still_rejects_missing_metadata(self):
+        run = self.create()
+        for metadata in (self.root / 'root.json', Path(run['payload_dir']).parent / 'run.json'):
+            with self.subTest(metadata=metadata.name):
+                saved = metadata.read_bytes()
+                metadata.unlink()
+                try:
+                    self.assertRaises(FileNotFoundError, self.call, a.check, run)
+                finally:
+                    metadata.write_bytes(saved)
+
+    def test_sweep_tolerates_expired_payload_file_disappearance(self):
+        run = self.create(ttl=1)
+        payload = Path(run['payload_dir'])
+        dependency = payload / 'Time.cpp.o.d'
+        dependency.write_text('temporary')
+        (payload / 'stable.o').write_bytes(b'abc')
+        with patch.object(a.time, 'time', return_value=time.time() + 2):
+            with self.disappearing_entry(dependency):
+                self.assertEqual(a.sweep(self.root)['removed_run_ids'], [run['run_id']])
+        self.assertFalse(payload.parent.exists())
+
+    def test_live_accounting_still_counts_links_without_following_them(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        keep = outside / 'keep'
+        keep.write_bytes(b'x' * 50001)
+        run = self.create()
+        link = Path(run['payload_dir']) / 'link'
+        link.symlink_to(outside, target_is_directory=True)
+        self.assertEqual(self.call(a.check, run)['actual_bytes'], link.lstat().st_size)
+        self.assertEqual(keep.stat().st_size, 50001)
+
+    def test_live_accounting_still_rejects_unsupported_file_types(self):
+        run = self.create()
+        payload = Path(run['payload_dir'])
+        value = os.stat_result((stat.S_IFIFO | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        entry = types.SimpleNamespace(path=str(payload / 'fifo'), name='fifo', stat=lambda **_: value,
+                                      is_symlink=lambda: False, is_dir=lambda **_: False,
+                                      is_file=lambda **_: False)
+        scandir = a.os.scandir
+
+        def scan(path):
+            return ListedEntries([entry]) if Path(path) == payload else scandir(path)
+
+        with patch.object(a.os, 'scandir', side_effect=scan):
+            self.assertRaises(a.ArtifactError, self.call, a.check, run)
 
     def test_create_check_renew_token_private_metadata(self):
         run = self.create()
