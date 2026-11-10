@@ -35,7 +35,7 @@ std::vector<size_t> first_indices(size_t count)
 
 } // namespace
 
-TEST_CASE("every item resolves once and commits in index order on the calling thread", "[ParallelResolve]")
+TEST_CASE("every item resolves once and commits in index order on the calling thread", "[ParallelResolve][Parallel]")
 {
     const size_t        count = 200;
     std::vector<int>    resolves(count, 0);
@@ -58,7 +58,7 @@ TEST_CASE("every item resolves once and commits in index order on the calling th
     }
 }
 
-TEST_CASE("every item resolves inside one chunk setup", "[ParallelResolve]")
+TEST_CASE("every item resolves inside one chunk setup", "[ParallelResolve][Parallel]")
 {
     const size_t     count = 200;
     std::vector<int> live(count, 0);
@@ -70,7 +70,7 @@ TEST_CASE("every item resolves inside one chunk setup", "[ParallelResolve]")
         CHECK(live[i] == 1);
 }
 
-TEST_CASE("an exception from resolve leaves the batches before it committed", "[ParallelResolve]")
+TEST_CASE("an exception from resolve leaves the batches before it committed", "[ParallelResolve][Parallel]")
 {
     const size_t        count = 200, fails_at = 150;
     REQUIRE(fails_at >= resolve_batch_size);
@@ -87,7 +87,7 @@ TEST_CASE("an exception from resolve leaves the batches before it committed", "[
     CHECK(committed == first_indices(fails_at / resolve_batch_size * resolve_batch_size));
 }
 
-TEST_CASE("an exception from commit stops at the item that threw", "[ParallelResolve]")
+TEST_CASE("an exception from commit stops at the item that threw", "[ParallelResolve][Parallel]")
 {
     const size_t        count = 200, fails_at = 90;
     std::vector<size_t> committed;
@@ -103,7 +103,7 @@ TEST_CASE("an exception from commit stops at the item that threw", "[ParallelRes
     CHECK(committed == first_indices(fails_at));
 }
 
-TEST_CASE("a canceled task group stops before committing an item it did not resolve", "[ParallelResolve]")
+TEST_CASE("a canceled task group stops before committing an item it did not resolve", "[ParallelResolve][Parallel]")
 {
     std::vector<size_t>     committed;
     bool                    threw = false;

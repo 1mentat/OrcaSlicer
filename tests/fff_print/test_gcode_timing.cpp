@@ -1,3 +1,4 @@
+#include "libslic3r/Utils.hpp"
 #include <catch2/catch_all.hpp>
 
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -57,6 +58,8 @@ void run_processor(GCodeProcessor& proc, const FullPrintConfig& config, const ch
     // reserved_tag() selects between two tag tables based on this shared static, and
     // other tests in the binary mutate it -- pin it so our "; FEATURE:" role tags are
     // parsed deterministically regardless of test execution order.
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
     GCodeProcessor::s_IsBBLPrinter = true;
     ScopedTemporaryFile temp(".gcode");
     {
@@ -623,4 +626,95 @@ TEST_CASE("How fast a corner is taken does not depend on how much is extruded th
         REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, scv, 0.05, turn, 0.0, 0.029),
                      Catch::Matchers::WithinRel(marlin, 0.02));
     }
+}
+
+TEST_CASE("VG1 classic jerk planning slows an E-axis reversal at a virtual junction",
+          "[GCodeTiming][GCodeTimingVirtualJerk]")
+{
+    const auto virtual_time = [](double previous_feedrate, double current_feedrate, double current_e) {
+        FullPrintConfig config = make_junction_config(gcfMarlinLegacy, 1000.0, 0.0);
+        // Keep XYZ out of the way and make the E-axis reversal the only limited transition.
+        config.machine_max_jerk_e.values = { 10.0, 10.0 };
+
+        std::ostringstream gcode;
+        gcode << std::fixed << std::setprecision(4)
+              << "M83\nG90\n"
+              << "VG1 Z0.2 F1200\n"
+              << "VG1 X20 Y60 F6000\n"
+              << "VG1 X60 Y60 E4 F" << previous_feedrate << "\n"
+              << "VG1 X99.7818 Y64.1806 E" << current_e << " F" << current_feedrate << "\n";
+
+        GCodeProcessor processor;
+        const std::string text = gcode.str();
+        run_processor(processor, config, text.c_str());
+        return double(processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
+    };
+
+    const auto compare_order = [&](double previous_feedrate, double current_feedrate) {
+        const double same_direction = virtual_time(previous_feedrate, current_feedrate, 4.0);
+        const double reversal      = virtual_time(previous_feedrate, current_feedrate, -4.0);
+        INFO("previous=" << previous_feedrate << " current=" << current_feedrate);
+        REQUIRE(std::isfinite(same_direction));
+        REQUIRE(std::isfinite(reversal));
+        REQUIRE(same_direction > 0.0);
+        REQUIRE(reversal > same_direction);
+        return reversal - same_direction;
+    };
+
+    // These orderings enter both sides of prev_speed_larger while keeping the
+    // same 40 mm XY geometry and E magnitude in each pair.
+    const double slower_previous_penalty = compare_order(9000.0, 12000.0);
+    const double faster_previous_penalty = compare_order(12000.0, 9000.0);
+    // The slower-previous case has the larger E jerk transition (20 vs 15 mm/s
+    // after the planner's nominal-speed normalization), so its time penalty is
+    // independently expected to be larger.
+    CHECK(slower_previous_penalty > faster_previous_penalty + 0.001);
+}
+
+TEST_CASE("Shallow virtual turns are capped by centripetal acceleration",
+          "[GCodeTiming][GCodeTimingCentripetal]")
+{
+    // The incoming 160 mm move establishes a high-speed, nonzero XY direction. The outgoing
+    // 40 mm move is tested at angles inside and outside the processor's 28.96-degree window.
+    // All compared moves have the same XY length and feed command.
+    FullPrintConfig config = make_junction_config(gcfMarlinLegacy, 1000.0, 0.0);
+    const double turn = 20.0 * M_PI / 180.0;
+    const auto run = [&](double angle, double feedrate) {
+        const double dx = 40.0 * std::cos(angle);
+        const double dy = 40.0 * std::sin(angle);
+        std::ostringstream gcode;
+        gcode << std::fixed << std::setprecision(6)
+              << "M83\nG90\n"
+              << "VG1 Z0.2 F1200\n"
+              << "VG1 X0 Y0 F" << feedrate << "\n"
+              << "VG1 X160 Y0 F" << feedrate << "\n"
+              << "VG1 X" << 160.0 + dx << " Y" << dy << " E1 F" << feedrate << "\n";
+
+        GCodeProcessor processor;
+        const std::string text = gcode.str();
+        run_processor(processor, config, text.c_str());
+        return double(processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
+    };
+
+    constexpr double high_feed = 30000.0;
+    constexpr double low_feed  = 12000.0;
+    const double high_straight = run(0.0, high_feed);
+    const double high_shallow  = run(turn, high_feed);
+    const double high_reverse  = run(-turn, high_feed);
+    const double high_outside  = run(40.0 * M_PI / 180.0, high_feed);
+    const double low_straight  = run(0.0, low_feed);
+    const double low_shallow   = run(turn, low_feed);
+
+    for (double time : {high_straight, high_shallow, high_reverse, high_outside, low_straight, low_shallow}) {
+        REQUIRE(std::isfinite(time));
+        REQUIRE(time > 0.0);
+    }
+
+    // At 500 mm/s, the 20-degree cap is about 339 mm/s for a 40 mm segment and 1000 mm/s^2
+    // acceleration, while the 40-degree route is outside the source gate. Equal signed angles
+    // and the outside/low-feed controls distinguish the cap from ordinary direction handling.
+    CHECK(high_shallow > high_straight + 0.01);
+    CHECK_THAT(high_shallow, Catch::Matchers::WithinAbs(high_reverse, 0.002));
+    CHECK_THAT(high_outside, Catch::Matchers::WithinAbs(high_straight, 0.002));
+    CHECK_THAT(low_shallow, Catch::Matchers::WithinAbs(low_straight, 0.002));
 }

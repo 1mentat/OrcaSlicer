@@ -1,0 +1,377 @@
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/libslic3r.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <utility>
+#include <vector>
+
+using namespace Slic3r;
+
+static ExtrusionPaths straight_path(const std::vector<double> &xs)
+{
+    ExtrusionPath path{erExternalPerimeter, 1.0, 0.45f, 0.2f};
+    for (double x : xs)
+        path.polyline.append(Point3::new_scale(x, 0., 0.));
+    return {path};
+}
+
+TEST_CASE("Multipath footprints follow each path width and keep the minimum flow", "[ExtrusionEntity]")
+{
+    using Catch::Matchers::WithinAbs;
+    ExtrusionPath first{erExternalPerimeter, 0.07, 0.4f, 0.2f};
+    first.polyline.append(Point3::new_scale(0., 0., 0.));
+    first.polyline.append(Point3::new_scale(10., 0., 0.));
+    ExtrusionPath second{erExternalPerimeter, 0.04, 0.8f, 0.2f};
+    second.polyline.append(Point3::new_scale(10., 0., 0.));
+    second.polyline.append(Point3::new_scale(20., 0., 0.));
+
+    ExtrusionMultiPath multipath(ExtrusionPaths{first, second});
+    CHECK_THAT(multipath.min_mm3_per_mm(), WithinAbs(0.04, 1e-9));
+
+    const Polygons by_width = multipath.polygons_covered_by_width();
+    const Polygons by_spacing = multipath.polygons_covered_by_spacing();
+    REQUIRE(by_width.size() == 2);
+    REQUIRE(by_spacing.size() == 2);
+
+    auto ordered_extents = [](const Polygons &polygons) {
+        std::vector<BoundingBox> extents;
+        extents.reserve(polygons.size());
+        for (const Polygon &polygon : polygons)
+            extents.emplace_back(get_extents(polygon));
+        std::sort(extents.begin(), extents.end(), [](const BoundingBox &lhs, const BoundingBox &rhs) {
+            return lhs.center().x() < rhs.center().x();
+        });
+        return extents;
+    };
+    const std::vector<BoundingBox> width_extents = ordered_extents(by_width);
+    const std::vector<BoundingBox> spacing_extents = ordered_extents(by_spacing);
+    for (size_t i = 0; i < width_extents.size(); ++i) {
+        REQUIRE(width_extents[i].defined);
+        REQUIRE(spacing_extents[i].defined);
+    }
+
+    // Open butt caps preserve the two centerline intervals; the literal widths
+    // determine their independent transverse bounds below.
+    CHECK_THAT(unscale_(width_extents[0].min.x()), WithinAbs(0., 0.001));
+    CHECK_THAT(unscale_(width_extents[0].max.x()), WithinAbs(10., 0.001));
+    CHECK_THAT(unscale_(width_extents[1].min.x()), WithinAbs(10., 0.001));
+    CHECK_THAT(unscale_(width_extents[1].max.x()), WithinAbs(20., 0.001));
+    CHECK_THAT(unscale_(width_extents[0].center().x()), WithinAbs(5., 0.01));
+    CHECK_THAT(unscale_(width_extents[1].center().x()), WithinAbs(15., 0.01));
+    CHECK_THAT(unscale_(width_extents[0].min.y()), WithinAbs(-0.2, 0.001));
+    CHECK_THAT(unscale_(width_extents[0].max.y()), WithinAbs(0.2, 0.001));
+    CHECK_THAT(unscale_(width_extents[1].min.y()), WithinAbs(-0.4, 0.001));
+    CHECK_THAT(unscale_(width_extents[1].max.y()), WithinAbs(0.4, 0.001));
+    CHECK_THAT(unscale_(spacing_extents[0].center().x()), WithinAbs(5., 0.01));
+    CHECK_THAT(unscale_(spacing_extents[1].center().x()), WithinAbs(15., 0.01));
+    for (size_t i = 0; i < width_extents.size(); ++i) {
+        CHECK(spacing_extents[i].min.y() > width_extents[i].min.y());
+        CHECK(spacing_extents[i].max.y() < width_extents[i].max.y());
+    }
+}
+
+TEST_CASE("Contoured path operations preserve vertex heights and geometry", "[ExtrusionEntity]")
+{
+    using Catch::Matchers::WithinAbs;
+    const std::vector<Point3> source_points{
+        Point3::new_scale(0., 0., 0.), Point3::new_scale(5., 1., 0.),
+        Point3::new_scale(10., 0., 0.), Point3::new_scale(15., 2., 0.)};
+    const std::vector<double> source_diffs{0.1, 0.2, 0.3, 0.4};
+    ExtrusionPath metadata{erExternalPerimeter, 0.06, 0.45f, 0.2f};
+    metadata.z_contoured = true;
+    Polyline3 polyline;
+    for (const Point3 &point : source_points)
+        polyline.append(point);
+    ExtrusionPathContoured path(std::move(polyline), metadata, std::vector<double>(source_diffs));
+
+    // The same 100 mm tolerance removes the small zigzags from a plain path.
+    ExtrusionPath plain{erExternalPerimeter, 0.06, 0.45f, 0.2f};
+    for (const Point3 &point : source_points)
+        plain.polyline.append(point);
+    plain.simplify(scale_(100.));
+    REQUIRE(plain.polyline.points.size() == 2);
+    CHECK(plain.polyline.points.front() == Point3::new_scale(0., 0., 0.));
+    CHECK(plain.polyline.points.back() == source_points.back());
+
+    path.simplify(scale_(100.));
+    path.simplify_by_fitting_arc(scale_(100.));
+    auto check_pairs = [&](const ExtrusionPathContoured &candidate,
+                           const std::vector<Point3> &expected_points,
+                           const std::vector<double> &expected_diffs) {
+        REQUIRE(candidate.polyline.points.size() == expected_points.size());
+        REQUIRE(candidate.z_diffs.size() == expected_diffs.size());
+        for (size_t i = 0; i < expected_points.size(); ++i) {
+            CHECK(candidate.polyline.points[i] == expected_points[i]);
+            CHECK_THAT(candidate.z_diffs[i], WithinAbs(expected_diffs[i], 1e-12));
+        }
+    };
+    check_pairs(path, source_points, source_diffs);
+
+    std::unique_ptr<ExtrusionEntity> cloned(path.clone());
+    const auto *cloned_contour = dynamic_cast<const ExtrusionPathContoured *>(cloned.get());
+    REQUIRE(cloned_contour != nullptr);
+    check_pairs(*cloned_contour, source_points, source_diffs);
+
+    const std::vector<Point3> reversed_points(source_points.rbegin(), source_points.rend());
+    const std::vector<double> reversed_diffs(source_diffs.rbegin(), source_diffs.rend());
+    path.reverse();
+    check_pairs(path, reversed_points, reversed_diffs);
+
+    std::unique_ptr<ExtrusionEntity> moved(path.clone_move());
+    const auto *moved_contour = dynamic_cast<const ExtrusionPathContoured *>(moved.get());
+    REQUIRE(moved_contour != nullptr);
+    check_pairs(*moved_contour, reversed_points, reversed_diffs);
+}
+
+TEST_CASE("Extrusion loop clipping removes whole trailing paths before trimming the last path", "[ExtrusionEntity]")
+{
+    using Catch::Matchers::WithinAbs;
+    auto make_path = [](Point from, Point to, double flow) {
+        ExtrusionPath path{erExternalPerimeter, flow, 0.45f, 0.2f};
+        path.polyline.append(Point3(from, coord_t(0)));
+        path.polyline.append(Point3(to, coord_t(0)));
+        return path;
+    };
+    ExtrusionPaths paths{
+        make_path(Point::new_scale(0., 0.), Point::new_scale(10., 0.), 0.07),
+        make_path(Point::new_scale(10., 0.), Point::new_scale(10., 8.), 0.04),
+        make_path(Point::new_scale(10., 8.), Point::new_scale(0., 8.), 0.06),
+        make_path(Point::new_scale(0., 8.), Point::new_scale(0., 0.), 0.05)};
+    ExtrusionLoop loop(paths);
+    ExtrusionPaths clipped;
+    loop.clip_end(scale_(12.), &clipped);
+
+    REQUIRE(clipped.size() == 3);
+    CHECK_THAT(unscale_(clipped.back().length()), WithinAbs(6., 0.001));
+    CHECK(clipped.back().first_point() == Point::new_scale(10., 8.));
+    CHECK(clipped.back().last_point() == Point::new_scale(4., 8.));
+    CHECK_THAT(unscale_(loop.length()), WithinAbs(36., 0.001));
+    CHECK_THAT(loop.min_mm3_per_mm(), WithinAbs(0.04, 1e-9));
+}
+
+TEST_CASE("Scarf endpoint clipping removes complete segments before the partial boundary segment", "[ExtrusionEntity]")
+{
+    using Catch::Matchers::WithinAbs;
+    ExtrusionPaths paths;
+    const std::vector<double> xs{0., 5., 10., 15., 20., 30.};
+    for (size_t i = 1; i < xs.size(); ++i) {
+        ExtrusionPath path{erExternalPerimeter, 0.05, 0.45f, 0.2f};
+        path.polyline.append(Point3::new_scale(xs[i - 1], 0., 0.));
+        path.polyline.append(Point3::new_scale(xs[i], 0., 0.));
+        paths.emplace_back(std::move(path));
+    }
+    ExtrusionLoopSloped scarf(paths, 0., 20., scale_(5.), 0.);
+    REQUIRE(scarf.starts.size() == 4);
+    REQUIRE(scarf.ends.size() == 4);
+    REQUIRE(scarf.paths.size() == 1);
+
+    scarf.clip_front(scale_(6.));
+    scarf.clip_end(scale_(6.));
+
+    REQUIRE(scarf.starts.size() == 3);
+    REQUIRE(scarf.ends.size() == 3);
+    CHECK(scarf.starts.front().polyline.first_point() == Point3::new_scale(6., 0., 0.));
+    CHECK(scarf.starts.front().polyline.last_point() == Point3::new_scale(10., 0., 0.));
+    CHECK(scarf.ends.back().polyline.first_point() == Point3::new_scale(10., 0., 0.));
+    CHECK(scarf.ends.back().polyline.last_point() == Point3::new_scale(14., 0., 0.));
+    CHECK_THAT(unscale_(scarf.paths.front().length()), WithinAbs(10., 0.001));
+}
+
+TEST_CASE("A scarf seam gap stops the final ramp before its non-extruding tail", "[ExtrusionEntity]")
+{
+    using Catch::Matchers::WithinAbs;
+    ExtrusionPaths paths = straight_path({0., 5., 10.});
+    ExtrusionLoopSloped scarf(paths, scale_(2.), 10., scale_(5.), 0.);
+    REQUIRE(scarf.starts.size() == 1);
+    REQUIRE(scarf.ends.size() == 1);
+    CHECK(scarf.ends.front().polyline.first_point() == Point3::new_scale(0., 0., 0.));
+    CHECK(scarf.ends.front().polyline.last_point() == Point3::new_scale(8., 0., 0.));
+    CHECK_THAT(scarf.ends.front().slope_end.e_ratio, WithinAbs(0.2, 1e-9));
+}
+
+TEST_CASE("A seam gap covering the last scarf segment removes that end segment", "[ExtrusionEntity]")
+{
+    ExtrusionPaths paths = straight_path({0., 5., 10.});
+    ExtrusionLoopSloped scarf(paths, scale_(10.), 10., scale_(5.), 0.);
+    REQUIRE(scarf.starts.size() == 1);
+    CHECK(scarf.ends.empty());
+}
+
+TEST_CASE("Loop smoothness distinguishes ordinary corners from a narrow pointed wall", "[ExtrusionEntity]")
+{
+    ExtrusionPath square_path{erExternalPerimeter, 0.05, 0.45f, 0.2f};
+    for (const Point3 &point : std::vector<Point3>{
+             Point3::new_scale(0., 0., 0.), Point3::new_scale(10., 0., 0.),
+             Point3::new_scale(10., 10., 0.), Point3::new_scale(0., 10., 0.),
+             Point3::new_scale(0., 0., 0.)})
+        square_path.polyline.append(point);
+    ExtrusionLoop square(square_path);
+
+    ExtrusionPath pointed_path{erExternalPerimeter, 0.05, 0.45f, 0.2f};
+    for (const Point3 &point : std::vector<Point3>{
+             Point3::new_scale(0., 0., 0.), Point3::new_scale(10., 0., 0.),
+             Point3::new_scale(10., 10., 0.), Point3::new_scale(5.2, 10., 0.),
+             Point3::new_scale(5., 5., 0.), Point3::new_scale(4.8, 10., 0.),
+             Point3::new_scale(0., 10., 0.), Point3::new_scale(0., 0., 0.)})
+        pointed_path.polyline.append(point);
+    ExtrusionLoop pointed(pointed_path);
+
+    CHECK(square.is_smooth(0.2, 0.025));
+    CHECK_FALSE(pointed.is_smooth(0.2, 0.025));
+}
+
+
+static ExtrusionPath collection_contract_path(ExtrusionRole role, double flow, const Points3 &points)
+{
+    ExtrusionPath path{role, flow, 0.45f, 0.2f};
+    for (const Point3 &point : points)
+        path.polyline.append(point);
+    return path;
+}
+
+TEST_CASE("Extrusion role filtering preserves borrowed entities and chains matching copies from the nearest point", "[ExtrusionEntityCollection]")
+{
+    ExtrusionPath perimeter = collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(5., 0., 0.), Point3::new_scale(15., 0., 0.)});
+    ExtrusionPath infill = collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(0., 0., 0.), Point3::new_scale(1., 0., 0.)});
+    ExtrusionEntitiesPtr borrowed{&perimeter, &infill};
+    filter_by_extrusion_role_in_place(borrowed, erPerimeter);
+    REQUIRE(borrowed.size() == 1);
+    CHECK(borrowed.front() == &perimeter);
+    CHECK(perimeter.first_point3() == Point3::new_scale(5., 0., 0.));
+    CHECK(infill.first_point3() == Point3::new_scale(0., 0., 0.));
+
+    ExtrusionEntitiesPtr all_roles{&perimeter, &infill};
+    filter_by_extrusion_role_in_place(all_roles, erMixed);
+    REQUIRE(all_roles.size() == 2);
+    CHECK(all_roles[0] == &perimeter);
+    CHECK(all_roles[1] == &infill);
+
+    ExtrusionEntityCollection source;
+    source.append(collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(100., 0., 0.), Point3::new_scale(110., 0., 0.)}));
+    source.append(infill);
+    source.append(perimeter);
+    const ExtrusionEntity *far_owner = source.entities[0];
+    const ExtrusionEntity *near_owner = source.entities[2];
+    ExtrusionEntityCollection chained = source.chained_path_from(Point::new_scale(0., 0.), erPerimeter);
+    REQUIRE(chained.entities.size() == 2);
+    CHECK(chained.entities[0] != near_owner);
+    CHECK(chained.entities[1] != far_owner);
+    const auto *first = dynamic_cast<const ExtrusionPath *>(chained.entities[0]);
+    const auto *second = dynamic_cast<const ExtrusionPath *>(chained.entities[1]);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    CHECK(first->first_point3() == Point3::new_scale(5., 0., 0.));
+    CHECK(first->last_point3() == Point3::new_scale(15., 0., 0.));
+    CHECK(second->first_point3() == Point3::new_scale(100., 0., 0.));
+    CHECK(second->last_point3() == Point3::new_scale(110., 0., 0.));
+    CHECK(first->role() == erPerimeter);
+    CHECK(second->role() == erPerimeter);
+}
+
+TEST_CASE("Extrusion collection construction and conversion preserve direct path values and order", "[ExtrusionEntityCollection]")
+{
+    const ExtrusionPaths direct{
+        collection_contract_path(erPerimeter, 0.07, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}),
+        collection_contract_path(erBridgeInfill, 0.03, {Point3::new_scale(3., 1., 0.), Point3::new_scale(4., 1., 0.)})};
+    ExtrusionEntityCollection collection(direct);
+    ExtrusionEntityCollection nested;
+    nested.append(collection_contract_path(erSolidInfill, 0.02, {Point3::new_scale(5., 2., 0.), Point3::new_scale(6., 2., 0.)}));
+    collection.append(nested);
+
+    REQUIRE(collection.entities.size() == 3);
+    CHECK(collection.entities[0] != &direct[0]);
+    CHECK(collection.entities[1] != &direct[1]);
+    const ExtrusionPaths converted = static_cast<ExtrusionPaths>(collection);
+    REQUIRE(converted.size() == 2);
+    CHECK(converted[0].polyline.points == direct[0].polyline.points);
+    CHECK(converted[0].role() == direct[0].role());
+    CHECK_THAT(converted[0].mm3_per_mm, Catch::Matchers::WithinAbs(direct[0].mm3_per_mm, 1e-12));
+    CHECK(converted[1].polyline.points == direct[1].polyline.points);
+    CHECK(converted[1].role() == direct[1].role());
+    CHECK_THAT(converted[1].mm3_per_mm, Catch::Matchers::WithinAbs(direct[1].mm3_per_mm, 1e-12));
+}
+
+TEST_CASE("Extrusion collection copy assignment deep copies paths and preserves no-sort", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection source;
+    source.no_sort = true;
+    source.append(collection_contract_path(erPerimeter, 0.07, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    source.append(collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+
+    ExtrusionEntityCollection destination;
+    destination.append(collection_contract_path(erBridgeInfill, 0.01, {Point3::new_scale(20., 0., 0.), Point3::new_scale(21., 0., 0.)}));
+    destination = source;
+    REQUIRE(destination.entities.size() == 2);
+    CHECK(destination.no_sort);
+    for (size_t i = 0; i < source.entities.size(); ++i) {
+        CHECK(destination.entities[i] != source.entities[i]);
+        const auto *source_path = dynamic_cast<const ExtrusionPath *>(source.entities[i]);
+        const auto *copied_path = dynamic_cast<const ExtrusionPath *>(destination.entities[i]);
+        REQUIRE(source_path != nullptr);
+        REQUIRE(copied_path != nullptr);
+        CHECK(copied_path->polyline.points == source_path->polyline.points);
+        CHECK(copied_path->role() == source_path->role());
+    }
+}
+
+TEST_CASE("Extrusion collection reversal reverses open paths while preserving loop winding", "[ExtrusionEntityCollection]")
+{
+    const Points3 open_points{
+        Point3::new_scale(0., 0., 0.), Point3::new_scale(2., 0., 0.), Point3::new_scale(3., 1., 0.)};
+    const Points3 loop_points{
+        Point3::new_scale(10., 10., 0.), Point3::new_scale(12., 10., 0.), Point3::new_scale(12., 12., 0.),
+        Point3::new_scale(10., 12., 0.), Point3::new_scale(10., 10., 0.)};
+    ExtrusionPath open_path = collection_contract_path(erPerimeter, 0.05, open_points);
+    ExtrusionLoop loop(ExtrusionPaths{collection_contract_path(erPerimeter, 0.06, loop_points)});
+    ExtrusionEntityCollection collection;
+    collection.append(open_path);
+    collection.append(loop);
+
+    collection.reverse();
+    REQUIRE(collection.entities.size() == 2);
+    const auto *reversed_loop = dynamic_cast<const ExtrusionLoop *>(collection.entities[0]);
+    const auto *reversed_path = dynamic_cast<const ExtrusionPath *>(collection.entities[1]);
+    REQUIRE(reversed_loop != nullptr);
+    REQUIRE(reversed_path != nullptr);
+    REQUIRE(reversed_loop->paths.size() == 1);
+    CHECK(reversed_loop->paths.front().polyline.points == loop_points);
+    CHECK(reversed_path->polyline.points == Points3(open_points.rbegin(), open_points.rend()));
+}
+
+TEST_CASE("Removing an extrusion entity preserves the remaining collection order", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection collection;
+    collection.append(collection_contract_path(erPerimeter, 0.06, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    collection.append(collection_contract_path(erInternalInfill, 0.04, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+    collection.append(collection_contract_path(erBridgeInfill, 0.03, {Point3::new_scale(5., 0., 0.), Point3::new_scale(6., 0., 0.)}));
+    const ExtrusionEntity *first_before = collection.entities[0];
+    const ExtrusionEntity *last_before = collection.entities[2];
+
+    collection.remove(1);
+    REQUIRE(collection.entities.size() == 2);
+    CHECK(collection.entities[0] == first_before);
+    CHECK(collection.entities[1] == last_before);
+    CHECK(collection.entities[0]->first_point3() == Point3::new_scale(1., 0., 0.));
+    CHECK(collection.entities[1]->first_point3() == Point3::new_scale(5., 0., 0.));
+}
+
+TEST_CASE("Extrusion collection reports the minimum positive flow among its paths", "[ExtrusionEntityCollection]")
+{
+    ExtrusionEntityCollection collection;
+    collection.append(collection_contract_path(erPerimeter, 0.08, {Point3::new_scale(1., 0., 0.), Point3::new_scale(2., 0., 0.)}));
+    collection.append(collection_contract_path(erInternalInfill, 0.03, {Point3::new_scale(3., 0., 0.), Point3::new_scale(4., 0., 0.)}));
+    collection.append(collection_contract_path(erBridgeInfill, 0.12, {Point3::new_scale(5., 0., 0.), Point3::new_scale(6., 0., 0.)}));
+    CHECK_THAT(collection.min_mm3_per_mm(), Catch::Matchers::WithinAbs(0.03, 1e-12));
+}

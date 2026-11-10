@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
 	test_perimeters.cpp
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
 	test_precise_seam.cpp
+	test_pipeline_invariants.cpp
 	test_print.cpp
 	test_print_validation_clearance.cpp
 	test_pressure_equalizer.cpp

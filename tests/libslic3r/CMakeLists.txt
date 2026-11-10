@@ -52,6 +52,10 @@ add_executable(${_TEST_NAME}_tests
     test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
+    test_gcode_class_contracts.cpp
+    test_extrusion_entity.cpp
+    test_extrusion_processor.cpp
+    test_belt_transform.cpp
     test_intersection_points_contracts.cpp
     test_fill_corner_smoothing.cpp
     test_aabb_mesh.cpp
@@ -178,3 +182,9 @@ set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls()
 
 orcaslicer_discover_tests(${_TEST_NAME}_tests)
+
+# Explicitly built by the inventory audit; it is not an extra Catch test.
+add_executable(slicer_settings_inventory EXCLUDE_FROM_ALL settings_inventory_main.cpp)
+target_link_libraries(slicer_settings_inventory libslic3r nlohmann_json)
+target_include_directories(slicer_settings_inventory PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/deps_src)
+set_property(TARGET slicer_settings_inventory PROPERTY FOLDER "tests")

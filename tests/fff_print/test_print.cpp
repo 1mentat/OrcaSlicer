@@ -1,3 +1,5 @@
+#include "libslic3r/Slicing.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
 #include <stdexcept>
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include <boost/filesystem/path.hpp>
@@ -2796,4 +2798,2610 @@ TEST_CASE("Reprocessing previous G-code preserves caller tool sequences and publ
     CHECK(result.nozzle_change_sequence == nozzle_sequence);
     REQUIRE(finished_codes.size() == 1);
     CHECK(finished_codes.front() == LifecycleEvtCode::Ok);
+}
+
+namespace {
+
+DynamicPrintConfig validation_contract_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter", "0.4" },
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "line_width", 0.45 },
+        { "wall_loops", 2 },
+        { "top_shell_layers", 2 },
+        { "bottom_shell_layers", 2 },
+        { "sparse_infill_density", "15%" },
+        { "enable_support", false },
+        { "enable_prime_tower", false },
+        { "spiral_mode", false },
+        { "belt_printer", false },
+        { "printable_height", 100.0 },
+        { "gcode_flavor", "marlin2" },
+        { "use_relative_e_distances", true },
+        { "before_layer_change_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+    });
+    return config;
+}
+
+void check_validation_option(const DynamicPrintConfig &config, const std::string &expected_key,
+                             bool valid)
+{
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(expected_key, error.string, error.opt_key);
+    if (valid) {
+        CHECK(error.string.empty());
+    } else {
+        REQUIRE_FALSE(error.string.empty());
+        CHECK(error.opt_key == expected_key);
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Print validation bounds line widths by layer height and nozzle size", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("line_width", "support_line_width", "inner_wall_line_width",
+        "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
+        "top_surface_line_width", "skin_infill_line_width", "skeleton_infill_line_width");
+    struct WidthCase { double width; bool valid; };
+    const auto part = GENERATE(WidthCase{0.0, true}, WidthCase{0.2, false},
+                              WidthCase{0.45, true}, WidthCase{4.0, false});
+    CAPTURE(key, part.width);
+    auto config = validation_contract_config();
+    // Support width is meaningful only while support or a raft is enabled.
+    config.set_deserialize_strict({ { "enable_support", true }, { "support_type", "normal(auto)" } });
+    config.set_key_value(key, new ConfigOptionFloatOrPercent(part.width, false));
+    check_validation_option(config, key, part.valid);
+}
+
+TEST_CASE("Print validation resolves relative line widths against nozzle diameter", "[Print][ValidationContracts]")
+{
+    const double percent = GENERATE(50.0, 112.5, 1000.0);
+    auto config = validation_contract_config();
+    config.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(percent, true));
+    check_validation_option(config, "outer_wall_line_width", percent > 50.0 && percent < 1000.0);
+}
+
+TEST_CASE("Print validation rejects layer heights larger than the nozzle", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("layer_height", "initial_layer_print_height");
+    const double height = GENERATE(0.2, 0.41);
+    auto config = validation_contract_config();
+    config.set_key_value(key, new ConfigOptionFloat(height));
+    check_validation_option(config, key, height < 0.4);
+}
+
+TEST_CASE("Print validation permits thin bridge widths only with both thick bridge modes", "[Print][ValidationContracts]")
+{
+    const bool external_thick = GENERATE(false, true);
+    const bool internal_thick = GENERATE(false, true);
+    const double width = GENERATE(0.15, 0.3, 0.5);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "thick_bridges", external_thick },
+        { "thick_internal_bridges", internal_thick },
+        { "bridge_line_width", width },
+    });
+    const bool valid = width <= 0.4 && (width > 0.2 || (external_thick && internal_thick));
+    check_validation_option(config, "bridge_line_width", valid);
+}
+
+TEST_CASE("Print validation identifies unsafe organic support dimensions", "[Print][ValidationContracts]")
+{
+    struct SupportCase { double tip; double branch; const char *error_key; };
+    const auto part = GENERATE(SupportCase{0.2, 2.0, "tree_support_tip_diameter"},
+        SupportCase{0.6, 0.7, "tree_support_branch_diameter_organic"},
+        SupportCase{2.0, 1.2, "tree_support_branch_diameter_organic"}, SupportCase{0.6, 2.0, ""});
+    CAPTURE(part.tip, part.branch);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "enable_support", true }, { "support_type", "tree(auto)" }, { "support_style", "organic" },
+        { "support_line_width", 0.45 }, { "tree_support_tip_diameter", part.tip },
+        { "tree_support_branch_diameter_organic", part.branch },
+    });
+    check_validation_option(config, part.error_key, std::string(part.error_key).empty());
+}
+
+TEST_CASE("Print validation reports a support pattern fallback without blocking slicing", "[Print][ValidationContracts]")
+{
+    const std::string pattern = GENERATE("hollow", "lightning");
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "enable_support", true }, { "support_type", "normal(auto)" },
+        { "support_base_pattern", pattern },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "support_base_pattern";
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->is_warning);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation checks reset commands in both layer hooks and extrusion modes", "[Print][ValidationContracts]")
+{
+    const std::string hook = GENERATE("before_layer_change_gcode", "layer_change_gcode");
+    const bool relative = GENERATE(false, true);
+    const std::string command = GENERATE("G92 E0", "  G92 E0.00 ; reset", "g92 E0", "G92 e0", "");
+    CAPTURE(hook, relative, command);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "before_layer_change_gcode", "" }, { "layer_change_gcode", "" },
+        { "use_relative_e_distances", relative },
+    });
+    config.set_key_value(hook, new ConfigOptionString(command));
+    const bool exact = command == "G92 E0" || command == "  G92 E0.00 ; reset";
+    const bool valid = relative ? exact : command.empty();
+    const std::string error_key = relative && command.empty() ? "before_layer_change_gcode" : hook;
+    check_validation_option(config, error_key, valid);
+}
+
+TEST_CASE("Print validation requires per-layer resets only for relative Marlin output", "[Print][ValidationContracts]")
+{
+    const std::string flavor = GENERATE("marlin", "marlin2", "klipper", "reprapfirmware");
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({ { "gcode_flavor", flavor }, { "layer_change_gcode", "" } });
+    const bool marlin = flavor == "marlin" || flavor == "marlin2";
+    check_validation_option(config, "before_layer_change_gcode", !marlin);
+}
+
+TEST_CASE("Print validation enforces build height after vertical shrinkage compensation", "[Print][ValidationContracts]")
+{
+    const double max_height = GENERATE(9.0, 10.0, 20.0);
+    const double compensation = GENERATE(100.0, 95.0);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "printable_height", max_height }, { "filament_shrinkage_compensation_z", std::to_string(compensation) },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(max_height, compensation, error.string);
+    const bool fits = 10.0 * 100.0 / compensation <= max_height;
+    CHECK(error.string.empty() == fits);
+    if (!fits) {
+        CHECK(error.object == print.objects().front()->model_object());
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+TEST_CASE("Print validation checks filament temperature support for every bed family", "[Print][ValidationContracts]")
+{
+    struct BedCase { BedType type; const char *temperature_key; };
+    const auto bed = GENERATE(BedCase{btPC, "cool_plate_temp"}, BedCase{btEP, "eng_plate_temp"},
+        BedCase{btPEI, "hot_plate_temp"}, BedCase{btPTE, "textured_plate_temp"},
+        BedCase{btPCT, "textured_cool_plate_temp"}, BedCase{btSuperTack, "supertack_plate_temp"});
+    const bool multiple_beds = GENERATE(false, true);
+    const int temperature = GENERATE(0, 60);
+    auto config = validation_contract_config();
+    config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed.type));
+    config.set_key_value("support_multi_bed_types", new ConfigOptionBool(multiple_beds));
+    config.set_key_value(bed.temperature_key, new ConfigOptionInts{temperature});
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const auto error = print.validate();
+    CAPTURE(bed.temperature_key, multiple_beds, temperature, error.string);
+    if (multiple_beds && temperature == 0) {
+        REQUIRE_FALSE(error.string.empty());
+        CHECK(error.type == STRING_EXCEPT_FILAMENT_NOT_MATCH_BED_TYPE);
+        REQUIRE(error.params.size() == 3);
+        CHECK(error.params[2] == "1"); // The incompatible filament is identified to the caller.
+    } else {
+        CHECK(error.string.empty());
+    }
+}
+
+TEST_CASE("Print validation identifies the jerk setting that exceeds machine limits", "[Print][ValidationContracts]")
+{
+    const std::string key = GENERATE("default_jerk", "outer_wall_jerk", "inner_wall_jerk",
+        "infill_jerk", "top_surface_jerk", "initial_layer_jerk", "travel_jerk");
+    const double jerk = GENERATE(5.0, 30.0);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "machine_max_junction_deviation", "0,0" },
+        { "machine_max_jerk_x", "20,20" }, { "machine_max_jerk_y", "20,20" },
+        { "default_jerk", "10" }, { "outer_wall_jerk", "10" }, { "inner_wall_jerk", "10" },
+        { "infill_jerk", "10" }, { "top_surface_jerk", "10" },
+        { "initial_layer_jerk", "10" }, { "travel_jerk", "10" },
+    });
+    config.set_key_value(key, new ConfigOptionFloats{jerk});
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto count = std::count_if(warnings.begin(), warnings.end(), [&key](const auto &entry) {
+        return entry.opt_key == key && entry.is_warning;
+    });
+    CAPTURE(key, jerk);
+    CHECK(count == (jerk > 20.0 ? 1 : 0));
+}
+
+TEST_CASE("Print validation gates junction-deviation warnings on firmware support", "[Print][ValidationContracts]")
+{
+    const std::string flavor = GENERATE("marlin2", "klipper");
+    const double deviation = GENERATE(0.01, 0.1);
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "gcode_flavor", flavor }, { "machine_max_junction_deviation", "0.02,0.02" },
+        { "default_junction_deviation", std::to_string(deviation) },
+        { "default_acceleration", "0" },
+        { "default_jerk", "0" }, { "outer_wall_jerk", "0" }, { "inner_wall_jerk", "0" },
+    });
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    const auto count = std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "default_junction_deviation" && entry.is_warning;
+    });
+    CAPTURE(flavor, deviation);
+    CHECK(count == (flavor == "marlin2" && deviation > 0.02 ? 1 : 0));
+}
+
+namespace {
+
+struct TravelAccelerationCase {
+    const char *flavor;
+    double      travel_acceleration;
+    double      maximum_travel_acceleration;
+    bool        expects_warning;
+};
+
+struct TravelAccelerationGateCase {
+    const char *flavor;
+    double      maximum_travel_acceleration;
+    double      default_acceleration;
+    bool        expects_warning;
+};
+
+void check_travel_acceleration_validation(const char *flavor, double travel_acceleration,
+                                          double maximum_travel_acceleration,
+                                          double default_acceleration, bool expects_warning)
+{
+    auto config = validation_contract_config();
+    const std::string travel = std::to_string(travel_acceleration) + "," + std::to_string(travel_acceleration);
+    const std::string travel_limit = std::to_string(maximum_travel_acceleration) + "," +
+                                      std::to_string(maximum_travel_acceleration);
+    const std::string default_accel = std::to_string(default_acceleration);
+    config.set_deserialize_strict({
+        { "gcode_flavor", flavor },
+        { "machine_max_acceleration_extruding", "1000,1000" },
+        { "machine_max_acceleration_travel", travel_limit },
+        { "machine_max_junction_deviation", "0,0" },
+        { "default_junction_deviation", "0,0" },
+        { "default_acceleration", default_accel },
+        { "inner_wall_acceleration", "100,100" },
+        { "outer_wall_acceleration", "100,100" },
+        { "bridge_acceleration", "100,100" },
+        { "initial_layer_acceleration", "100,100" },
+        { "sparse_infill_acceleration", "100,100" },
+        { "internal_solid_infill_acceleration", "100,100" },
+        { "top_surface_acceleration", "100,100" },
+        { "travel_acceleration", travel },
+        { "default_jerk", "0,0" },
+        { "outer_wall_jerk", "0,0" },
+        { "inner_wall_jerk", "0,0" },
+        { "infill_jerk", "0,0" },
+        { "top_surface_jerk", "0,0" },
+        { "initial_layer_jerk", "0,0" },
+        { "travel_jerk", "0,0" },
+    });
+
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    CAPTURE(flavor, travel_acceleration, maximum_travel_acceleration, default_acceleration,
+            error.string, error.opt_key);
+    REQUIRE(error.string.empty());
+    CHECK_FALSE(error.is_warning);
+
+    const auto warning_count = std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "travel_acceleration";
+    });
+    CHECK(warning_count == (expects_warning ? 1 : 0));
+    if (expects_warning) {
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+            return entry.opt_key == "travel_acceleration";
+        });
+        REQUIRE(warning != warnings.end());
+        CHECK(warning->is_warning);
+        CHECK_FALSE(warning->string.empty());
+    }
+}
+
+TEST_CASE("Print validation reports travel acceleration against supported firmware limits",
+          "[Print][ValidationContracts][PrintValidationTravelAcceleration]")
+{
+    const auto part = GENERATE(
+        TravelAccelerationCase{"marlin2", 400., 500., false},
+        TravelAccelerationCase{"marlin2", 500., 500., false},
+        TravelAccelerationCase{"marlin2", 600., 500., true},
+        TravelAccelerationCase{"reprapfirmware", 600., 500., true},
+        TravelAccelerationCase{"repetier", 600., 500., true});
+    check_travel_acceleration_validation(part.flavor, part.travel_acceleration,
+                                         part.maximum_travel_acceleration, 100., part.expects_warning);
+}
+
+TEST_CASE("Print validation gates travel acceleration warnings on firmware and limits",
+          "[Print][ValidationContracts][PrintValidationTravelAcceleration]")
+{
+    const auto part = GENERATE(
+        TravelAccelerationGateCase{"klipper", 500., 100., false},
+        TravelAccelerationGateCase{"marlin2", 0., 100., false},
+        TravelAccelerationGateCase{"marlin2", 500., 0., false});
+    check_travel_acceleration_validation(part.flavor, 600., part.maximum_travel_acceleration,
+                                         part.default_acceleration, part.expects_warning);
+}
+
+struct BeltValidationCase {
+    int         raft_layers;
+    DraftShield draft_shield;
+    const char *expected_error;
+};
+
+TEST_CASE("Print validation rejects belt raft and draft shield combinations",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        BeltValidationCase{0, dsDisabled, ""},
+        BeltValidationCase{1, dsDisabled, "Raft is not compatible with belt printer mode."},
+        BeltValidationCase{0, dsEnabled, "Draft shield is not compatible with belt printer mode."});
+    CAPTURE(part.raft_layers, int(part.draft_shield));
+
+    auto config = validation_contract_config();
+    config.set_key_value("belt_printer", new ConfigOptionBool(true));
+    config.set_key_value("raft_layers", new ConfigOptionInt(part.raft_layers));
+    config.set_key_value("draft_shield", new ConfigOptionEnum<DraftShield>(part.draft_shield));
+
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    CHECK_FALSE(error.is_warning);
+    if (std::string(part.expected_error).empty()) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+    } else {
+        REQUIRE(error.string == part.expected_error);
+        CHECK(error.opt_key.empty());
+    }
+}
+
+struct SequentialValidationCase {
+    TimelapseType timelapse;
+    bool          wrapping_detection;
+    const char   *expected_error;
+    const char   *expected_opt_key;
+};
+
+TEST_CASE("Print validation rejects sequential feature combinations",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        SequentialValidationCase{tlTraditional, false, "", ""},
+        SequentialValidationCase{tlSmooth, false,
+            "Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.", ""},
+        SequentialValidationCase{tlTraditional, true,
+            "Clumping detection is not supported when \"by object\" sequence is enabled.",
+            "enable_wrapping_detection"});
+    CAPTURE(int(part.timelapse), part.wrapping_detection);
+
+    auto config = validation_contract_config();
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+    config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(part.timelapse));
+    config.set_key_value("enable_wrapping_detection", new ConfigOptionBool(part.wrapping_detection));
+
+    Print print;
+    Model model;
+    build_cubes(model, print, config, /*n=*/2, /*overlap=*/false);
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    REQUIRE(error.string == part.expected_error);
+    CHECK(error.opt_key == part.expected_opt_key);
+    CHECK_FALSE(error.is_warning);
+}
+
+struct WipeTowerValidationCase {
+    bool          ooze_prevention;
+    bool          single_extruder_multi_material;
+    const char   *expected_error;
+};
+
+void build_two_filament_wipe_print(const DynamicPrintConfig &config, Model &model, Print &print)
+{
+    // Assign both materials through the public per-object configuration.
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {},
+        { { "outer_wall_filament_id", 2 }, { "inner_wall_filament_id", 2 },
+          { "sparse_infill_filament_id", 2 }, { "internal_solid_filament_id", 2 },
+          { "top_surface_filament_id", 2 }, { "bottom_surface_filament_id", 2 } },
+    };
+    init_print(std::vector<TriangleMesh>{ cube(20), cube(20) }, print, model, config, &overrides);
+    // The first apply normalizes the tower before the new regions expose both
+    // materials. Reapply after the regions exist, as in the slicing fixtures.
+    print.apply(model, config);
+    REQUIRE(print.extruders(true).size() == 2);
+    REQUIRE(print.has_wipe_tower());
+}
+
+TEST_CASE("Print validation enforces wipe tower extrusion addressing interactions",
+          "[Print][ValidationContracts][PrintValidationInteractions]")
+{
+    const auto part = GENERATE(
+        WipeTowerValidationCase{false, false, ""},
+        WipeTowerValidationCase{false, true, ""},
+        WipeTowerValidationCase{true, false, ""},
+        WipeTowerValidationCase{true, true,
+            "Ooze prevention is only supported with the wipe tower when 'single_extruder_multi_material' is off."});
+    const bool relative_e = GENERATE(false, true);
+    CAPTURE(part.ooze_prevention, part.single_extruder_multi_material, relative_e);
+
+    const DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_prime_tower",                 true },
+        { "belt_printer",                       false },
+        { "spiral_mode",                        false },
+        { "print_sequence",                     "by layer" },
+        { "timelapse_type",                     "0" },
+        { "enable_wrapping_detection",          false },
+        { "wipe_tower_type",                    "type2" },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "printable_area",                     "0x0,200x0,200x200,0x200" },
+        { "wipe_tower_x",                       50.0 },
+        { "wipe_tower_y",                       50.0 },
+        { "use_relative_e_distances",           relative_e },
+        { "layer_change_gcode",                 "G92 E0\n" },
+        { "ooze_prevention",                    part.ooze_prevention },
+        { "single_extruder_multi_material",     part.single_extruder_multi_material },
+    });
+    Model model;
+    Print print;
+    build_two_filament_wipe_print(config, model, print);
+
+    const StringObjectException error = print.validate();
+    CAPTURE(error.string, error.opt_key);
+    const std::string expected_error = relative_e ? part.expected_error :
+        "The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).";
+    REQUIRE(error.string == expected_error);
+    CHECK(error.opt_key.empty());
+    CHECK_FALSE(error.is_warning);
+}
+
+} // namespace
+
+namespace print_workflow_contracts {
+namespace {
+
+
+
+
+
+
+
+
+
+double polygon_area_mm2(const Polygons &polygons)
+{
+    return area(polygons) * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+
+
+size_t support_polygon_count(const PrintObject &object)
+{
+    size_t count = 0;
+    for (const SupportLayer *layer : object.support_layers())
+        count += layer->support_islands.size();
+    return count;
+}
+
+class ScopedResourcesDir
+{
+public:
+    explicit ScopedResourcesDir(const boost::filesystem::path &path) : previous(resources_dir())
+    {
+        set_resources_dir(path.string());
+    }
+    ~ScopedResourcesDir() { set_resources_dir(previous); }
+private:
+    std::string previous;
+};
+
+} // namespace
+
+TEST_CASE("An empty Print has no completed workflow and clear removes applied objects", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    CHECK(print.empty());
+    CHECK_FALSE(print.finished());
+    CHECK_FALSE(print.is_step_done(posSlice));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    REQUIRE_THAT(print.max_allowed_layer_height(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+
+    Model model;
+    init_valid({cube(20.0)}, print, model, pipeline_config());
+    CHECK_FALSE(print.empty());
+    print.clear();
+    CHECK(print.empty());
+    CHECK(print.print_object_ids().empty());
+    CHECK_FALSE(print.finished());
+}
+
+TEST_CASE("Processing and exporting advance the Print lifecycle in order", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, pipeline_config());
+    CHECK_FALSE(print.is_step_done(posInfill));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+
+    print.process();
+    REQUIRE(print.is_step_done(posSlice));
+    REQUIRE(print.is_step_done(posInfill));
+    REQUIRE(print.is_step_done(psSkirtBrim));
+    CHECK_FALSE(print.finished());
+
+    const std::string output = gcode(print);
+    REQUIRE_FALSE(output.empty());
+    CHECK(print.is_step_done(psGCodeExport));
+    CHECK(print.finished());
+}
+
+TEST_CASE("A G-code-only config change preserves sliced object steps and invalidates export", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, config);
+    print.process();
+    const size_t layers_before = print.objects().front()->layer_count();
+    gcode(print);
+    REQUIRE(print.finished());
+
+    config.set_deserialize_strict({{"gcode_comments", false}, {"default_acceleration", "1200"}});
+    print.apply(model, config);
+    CHECK(print.objects().front()->layer_count() == layers_before);
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    print.process();
+    CHECK(print.is_step_done(posInfill));
+    CHECK_FALSE(gcode(print).empty());
+}
+
+TEST_CASE("A wall config change invalidates and recomputes perimeters", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print print;
+    Model model;
+    init_valid({cube(20.0)}, print, model, config);
+    print.process();
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layer_count() > 3);
+    const size_t layers_before = object->layer_count();
+    const size_t before = perimeter_items(*object, 2);
+
+    config.set_deserialize_strict({{"wall_loops", 4}});
+    print.apply(model, config);
+    CHECK_FALSE(print.is_step_done(posPerimeters));
+    CHECK_FALSE(print.is_step_done(posInfill));
+    print.process();
+    const size_t after = perimeter_items(*print.objects().front(), 2);
+    CHECK(after > before);
+    CHECK(print.objects().front()->layer_count() == layers_before);
+}
+
+TEST_CASE("Multiple overhang objects sort layers by their distinct bounding footprints", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    TriangleMesh large = mesh(TestMesh::overhang);
+    TriangleMesh small = mesh(TestMesh::overhang);
+    small.scale(0.7f);
+    // Distinct overhang footprints make the descending-area order observable.
+    init_valid({std::move(large), std::move(small)}, print, model, pipeline_config());
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.num_object_instances() == 2);
+    const std::vector<ObjectID> ids = print.print_object_ids();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] != ids[1]);
+
+    print.process();
+    std::vector<LayerPtrs> layers;
+    std::vector<BoundingBox> boxes;
+    VecOfPoints shifts;
+    const std::vector<size_t> order = print.layers_sorted_for_object(0.f, 100.f, layers, boxes, shifts);
+    REQUIRE(order.size() == 2);
+    REQUIRE(layers.size() == 2);
+    REQUIRE(boxes.size() == 2);
+    REQUIRE(shifts.size() == 2);
+    CHECK(layers[0].size() > 0);
+    CHECK(layers[1].size() > 0);
+    REQUIRE_THAT(boxes[0].area(), !Catch::Matchers::WithinAbs(boxes[1].area(), 0.0));
+    const size_t larger = boxes[0].area() > boxes[1].area() ? 0 : 1;
+    CHECK(order.front() == larger);
+    CHECK(boxes[order.front()].area() > boxes[order.back()].area());
+}
+
+TEST_CASE("Multiple instances contribute to object counts and first-layer geometry", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(15.0)}, print, model, pipeline_config(), false, 2);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->instances().size() == 2);
+    CHECK(print.num_object_instances() == 2);
+    print.process();
+    REQUIRE(print.objects().front()->layer_count() > 1);
+    CHECK(print.first_layer_convex_hull().size() >= 4);
+}
+
+TEST_CASE("Object and support filament collections report the configured extruders", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_support", true},
+        {"support_filament", 2},
+        {"support_interface_filament", 2},
+        {"nozzle_diameter", "0.4,0.8"},
+    });
+    config.set_deserialize_strict({{"layer_change_gcode", "G92 E0\n"}, {"machine_start_gcode", ""}, {"machine_end_gcode", ""}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(2));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+
+    const std::vector<unsigned int> objects = print.object_extruders();
+    const std::vector<unsigned int> supports = print.support_material_extruders();
+    REQUIRE(objects.size() == 1);
+    CHECK(objects.front() == 1);
+    REQUIRE(supports.size() == 1);
+    CHECK(supports.front() == 1);
+    const std::vector<unsigned int> all = print.extruders();
+    REQUIRE(all.size() == 1);
+    CHECK(all.front() == 1);
+    REQUIRE_THAT(print.max_allowed_layer_height(), Catch::Matchers::WithinAbs(0.8, 1e-6));
+}
+
+TEST_CASE("PrintObject layer lookup distinguishes exact, epsilon, below, and bottom queries", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(8.0)}, print, model, pipeline_config());
+    print.process();
+    PrintObject &object = *print.get_object(0);
+    REQUIRE(object.layer_count() > 3);
+    const Layer *middle = object.get_layer(2);
+    REQUIRE(middle != nullptr);
+    CHECK(object.get_layer_at_printz(middle->print_z) == middle);
+    CHECK(object.get_layer_at_printz(middle->print_z + 0.01, 0.02) == middle);
+    CHECK(object.get_layer_at_printz(middle->print_z + 0.05, 0.01) == nullptr);
+    CHECK(object.get_layer_idx_get_printz(middle->print_z, 0.001) == 3);
+    CHECK(object.get_first_layer_bellow_printz(middle->print_z + 0.05, 0.01) == middle);
+    CHECK(object.get_layer_at_bottomz(middle->bottom_z(), 0.001) == middle);
+    CHECK(object.get_layer_at_bottomz(middle->bottom_z() + 0.05, 0.001) == nullptr);
+}
+
+TEST_CASE("Layer range and instance shift queries preserve selected geometry", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(12.0)}, print, model, pipeline_config(), false, 2);
+    print.process();
+    PrintObject &object = *print.get_object(0);
+    REQUIRE(object.layer_count() > 4);
+    std::vector<LayerPtrs> selected;
+    std::vector<BoundingBox> boxes;
+    const float start_z = object.get_layer(1)->print_z;
+    const float end_z = object.get_layer(3)->print_z + 0.005;
+    INFO("start=" << start_z << " end=" << end_z << " z1=" << object.get_layer(1)->print_z << " z2=" << object.get_layer(2)->print_z << " z3=" << object.get_layer(3)->print_z);
+    object.get_certain_layers(start_z, end_z, selected, boxes);
+    REQUIRE(selected.size() == 1);
+    REQUIRE(selected.front().size() >= 2);
+    INFO("selected_count=" << selected.front().size() << " first=" << selected.front().front()->print_z << " last=" << selected.front().back()->print_z);
+    for (const Layer *layer : selected.front()) {
+        CHECK(layer->print_z >= start_z - EPSILON);
+        CHECK(layer->print_z <= end_z + EPSILON);
+    }
+    REQUIRE(boxes.size() == 1);
+    const Points first_shifts = object.get_instances_shift_without_plate_offset();
+    REQUIRE(first_shifts.size() == 2);
+
+    print.set_plate_origin(Vec3d(3.0, 4.0, 0.0));
+    const Points shifted = object.get_instances_shift_without_plate_offset();
+    REQUIRE(shifted.size() == first_shifts.size());
+    for (size_t i = 0; i < shifted.size(); ++i) {
+        CHECK(shifted[i].x() == first_shifts[i].x() - scaled(3.0));
+        CHECK(shifted[i].y() == first_shifts[i].y() - scaled(4.0));
+    }
+}
+
+TEST_CASE("The first-layer bbox reports a 20 mm cube's area, height, and identity", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "bbox-cube";
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, pipeline_config());
+    require_valid(print);
+    print.process();
+    float area = 0.f;
+    float height = 0.f;
+    std::string name;
+    const BoundingBox bbox = print.get_object(0)->get_first_layer_bbox(area, height, name);
+    REQUIRE(bbox.defined);
+    CHECK_THAT(static_cast<double>(area) * SCALING_FACTOR * SCALING_FACTOR,
+               Catch::Matchers::WithinAbs(400.0, 1e-3));
+    CHECK_THAT(height, Catch::Matchers::WithinAbs(0.2f, 1e-5f));
+    CHECK(name == "bbox-cube");
+    CHECK_THAT(unscaled<double>(bbox.size().x()), Catch::Matchers::WithinAbs(20.0, 1e-5));
+    CHECK_THAT(unscaled<double>(bbox.size().y()), Catch::Matchers::WithinAbs(20.0, 1e-5));
+}
+
+TEST_CASE("Support blocker and enforcer volumes slice into their own polygons", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({{"enable_support", true}, {"support_type", "normal"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_volume(make_cube(5.0, 5.0, 5.0), ModelVolumeType::SUPPORT_BLOCKER);
+    object->add_volume(make_cube(4.0, 4.0, 4.0), ModelVolumeType::SUPPORT_ENFORCER);
+    object->volumes[1]->set_offset(Vec3d(7.0, 7.0, 0.0));
+    object->volumes[2]->set_offset(Vec3d(-7.0, -7.0, 0.0));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    print.process();
+    const PrintObject &po = *print.objects().front();
+    const std::vector<Polygons> blockers = po.slice_support_blockers();
+    const std::vector<Polygons> enforcers = po.slice_support_enforcers();
+    REQUIRE(blockers.size() == po.layer_count());
+    REQUIRE(enforcers.size() == po.layer_count());
+    std::vector<size_t> blocker_layers;
+    std::vector<size_t> enforcer_layers;
+    for (size_t i = 0; i < blockers.size(); ++i) {
+        if (!blockers[i].empty())
+            blocker_layers.push_back(i);
+        if (!enforcers[i].empty())
+            enforcer_layers.push_back(i);
+    }
+    REQUIRE_FALSE(blocker_layers.empty());
+    REQUIRE_FALSE(enforcer_layers.empty());
+    const BoundingBoxf3 blocker_bbox = object->volumes[1]->mesh().transformed_bounding_box(po.trafo_sliced() * object->volumes[1]->get_matrix());
+    const BoundingBoxf3 enforcer_bbox = object->volumes[2]->mesh().transformed_bounding_box(po.trafo_sliced() * object->volumes[2]->get_matrix());
+    INFO("blocker bbox z=" << blocker_bbox.min.z() << ".." << blocker_bbox.max.z()
+         << " enforcer bbox z=" << enforcer_bbox.min.z() << ".." << enforcer_bbox.max.z()
+         << " blocker last index=" << blocker_layers.back() << " enforcer last index=" << enforcer_layers.back());
+    CHECK(blocker_layers.front() == 0);
+    CHECK(enforcer_layers.front() == 0);
+    CHECK_THAT(po.get_layer(static_cast<int>(blocker_layers.front()))->print_z,
+               Catch::Matchers::WithinAbs(0.2, 1e-5));
+    const double blocker_top_z = std::max(0.0, blocker_bbox.max.z());
+    const double enforcer_top_z = std::max(0.0, enforcer_bbox.max.z());
+    CHECK(po.get_layer(static_cast<int>(blocker_layers.back()))->print_z <= blocker_top_z + 0.2f + EPSILON);
+    CHECK(po.get_layer(static_cast<int>(enforcer_layers.back()))->print_z <= enforcer_top_z + 0.2f + EPSILON);
+    REQUIRE(blocker_layers.back() + 1 < po.layer_count());
+    CHECK(po.get_layer(static_cast<int>(blocker_layers.back() + 1))->print_z > blocker_top_z - EPSILON);
+    REQUIRE(enforcer_layers.back() + 1 < po.layer_count());
+    CHECK(po.get_layer(static_cast<int>(enforcer_layers.back() + 1))->print_z > enforcer_top_z - EPSILON);
+    for (size_t i : blocker_layers)
+        CHECK_THAT(polygon_area_mm2(blockers[i]), Catch::Matchers::WithinAbs(25.0, 1e-3));
+    for (size_t i : enforcer_layers)
+        CHECK_THAT(polygon_area_mm2(enforcers[i]), Catch::Matchers::WithinAbs(16.0, 1e-3));
+}
+
+TEST_CASE("Single-volume slicing preserves a hole in every occupied layer", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({mesh(TestMesh::cube_with_hole)}, print, model, pipeline_config());
+    print.process();
+    const PrintObject &object = *print.objects().front();
+    REQUIRE_FALSE(object.model_object()->volumes.empty());
+    const std::vector<ExPolygons> slices = object.slice_single_volume_regions(object.model_object()->volumes.front());
+    REQUIRE(slices.size() == object.layer_count());
+    size_t occupied = 0;
+    for (const ExPolygons &layer : slices) {
+        for (const ExPolygon &region : layer)
+            CHECK_FALSE(region.holes.empty());
+        occupied += !layer.empty();
+    }
+    CHECK(occupied > 0);
+}
+
+TEST_CASE("Support preview generates support layers without requiring full G-code export", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"support_type", "normal(auto)"},
+        {"support_style", "default"},
+        {"support_threshold_angle", 30.0},
+        {"support_on_build_plate_only", false},
+    });
+    Print print;
+    Model model;
+    init_valid({mesh(TestMesh::overhang)}, print, model, config);
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    object->generate_support_preview();
+    REQUIRE(object->layer_count() > 0);
+    CHECK(object->support_layer_count() > 0);
+    CHECK(support_polygon_count(*object) > 0);
+}
+
+TEST_CASE("Slicing parameters reflect layer height, object height, and shrinkage", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    const SlicingParameters normal = PrintObject::slicing_parameters(config, *object, 20.f, Vec3d(1., 1., 1.));
+    REQUIRE(normal.valid);
+    CHECK_THAT(normal.layer_height, Catch::Matchers::WithinAbs(0.2, 1e-5));
+    CHECK_THAT(normal.object_print_z_height(), Catch::Matchers::WithinAbs(20.0, 1e-4));
+
+    config.set_deserialize_strict({{"layer_height", 0.4}, {"initial_layer_print_height", 0.3}});
+    const SlicingParameters changed = PrintObject::slicing_parameters(config, *object, 20.f, Vec3d(1., 1., 1.1));
+    REQUIRE(changed.valid);
+    CHECK_THAT(changed.layer_height, Catch::Matchers::WithinAbs(0.4, 1e-5));
+    CHECK_THAT(changed.first_print_layer_height, Catch::Matchers::WithinAbs(0.3, 1e-5));
+    CHECK_THAT(changed.object_print_z_height(), Catch::Matchers::WithinAbs(22.0, 1e-4));
+}
+
+TEST_CASE("A negative volume removes only its footprint from the first layer", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Print positive;
+    Model positive_model;
+    init_valid({cube(20.0)}, positive, positive_model, config);
+    positive.process();
+    const double positive_area = layer_slice_area(*positive.objects().front(), 0);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_volume(make_cube(6.0, 6.0, 20.0), ModelVolumeType::NEGATIVE_VOLUME);
+    // Place the 6 x 6 negative volume in the interior of the 20 x 20 base.
+    object->volumes[1]->set_offset(Vec3d(7., 7., 0.));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print cut;
+    cut.auto_assign_extruders(object);
+    cut.apply(model, config);
+    require_valid(cut);
+    cut.process();
+    const double cut_area = layer_slice_area(*cut.objects().front(), 0);
+    CHECK_THAT(positive_area, Catch::Matchers::WithinAbs(400.0, 1e-3));
+    CHECK_THAT(cut_area, Catch::Matchers::WithinAbs(364.0, 1e-3));
+    CHECK_THAT(positive_area - cut_area, Catch::Matchers::WithinAbs(36.0, 1e-3));
+}
+
+TEST_CASE("Overlapping model parts assign modifiers and subtract negative volumes", "[Print][VolumeRegionAssignment]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"brim_type", "no_brim"},
+        {"slice_closing_radius", 0.0},
+        {"xy_hole_compensation", 0.0},
+        {"xy_contour_compensation", 0.0},
+    });
+
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part_a = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    // The slicer orders model volumes by ObjectID, so establish the intended parent/overlap order explicitly.
+    ModelVolume *modifier = object->add_volume(make_cube(10., 10., 4.), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier->set_offset(Vec3d(15., 5., 0.));
+    modifier->config.set("wall_loops", 4);
+    ModelVolume *part_b = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    part_b->set_offset(Vec3d(10., 10., 0.));
+    ModelVolume *negative = object->add_volume(make_cube(8., 8., 4.), ModelVolumeType::NEGATIVE_VOLUME, false);
+    negative->set_offset(Vec3d(16., 16., 0.));
+    REQUIRE(part_a->is_model_part());
+    REQUIRE(modifier->is_modifier());
+    REQUIRE(part_b->is_model_part());
+    REQUIRE(negative->is_negative_volume());
+    REQUIRE(part_a->id() < modifier->id());
+    REQUIRE(modifier->id() < part_b->id());
+    REQUIRE(part_b->id() < negative->id());
+
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    PrintObject *print_object = print.get_object(0);
+    REQUIRE(print_object != nullptr);
+    print_object->slice();
+    REQUIRE(print_object->layer_count() > 4);
+    REQUIRE(print_object->num_printing_regions() == 2);
+
+    size_t layer_idx = print_object->layer_count() / 2;
+    REQUIRE(layer_idx < print_object->layer_count());
+    const Layer *layer = print_object->get_layer(static_cast<int>(layer_idx));
+    REQUIRE(layer != nullptr);
+    REQUIRE(layer->print_z > 0.0f);
+    REQUIRE(layer->print_z < 4.0f);
+    auto region_area_mm2 = [](const LayerRegion &region) {
+        double area = 0.;
+        for (const Surface &surface : region.slices.surfaces)
+            area += std::abs(static_cast<double>(surface.expolygon.area())) * SCALING_FACTOR * SCALING_FACTOR;
+        return area;
+    };
+
+    double default_area = 0.;
+    double modifier_area = 0.;
+    for (size_t region_id = 0; region_id < print_object->num_printing_regions(); ++region_id) {
+        const double area = region_area_mm2(*layer->get_region(static_cast<int>(region_id)));
+        if (print_object->printing_region(region_id).config().wall_loops.value == 4)
+            modifier_area += area;
+        else
+            default_area += area;
+    }
+
+    // A=[0,20]^2, B=[10,30]^2 => union 700. N=[16,24]^2 removes 64.
+    // M=[15,25]x[5,15] is clipped to A, then to the later B overlap, leaving 25.
+    CHECK_THAT(modifier_area, Catch::Matchers::WithinAbs(25., 0.05));
+    CHECK_THAT(default_area, Catch::Matchers::WithinAbs(611., 0.05));
+    CHECK_THAT(default_area + modifier_area, Catch::Matchers::WithinAbs(636., 0.05));
+}
+
+TEST_CASE("Same-type support volumes merge overlap and preserve separate islands", "[Print][VolumeRegionAssignment]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"slice_closing_radius", 0.0},
+        {"xy_hole_compensation", 0.0},
+        {"xy_contour_compensation", 0.0},
+    });
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(4., 4., 0.));
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(6., 4., 0.));
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::SUPPORT_BLOCKER, false)->set_offset(Vec3d(15., 4., 0.));
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    PrintObject *print_object = print.get_object(0);
+    REQUIRE(print_object != nullptr);
+    print_object->slice();
+
+    size_t layer_idx = print_object->layer_count();
+    for (size_t i = 0; i < print_object->layer_count(); ++i)
+        if (print_object->get_layer(static_cast<int>(i))->print_z > 0.3 &&
+            print_object->get_layer(static_cast<int>(i))->print_z < 3.5) {
+            layer_idx = i;
+            break;
+        }
+    REQUIRE(layer_idx < print_object->layer_count());
+    const std::vector<Polygons> blockers = print_object->slice_support_blockers();
+    REQUIRE(blockers.size() == print_object->layer_count());
+    REQUIRE(blockers[layer_idx].size() == 2);
+    CHECK_THAT(polygon_area_mm2(blockers[layer_idx]), Catch::Matchers::WithinAbs(40., 0.05));
+}
+
+TEST_CASE("A layer-range override creates an additional print region and changes wall planning", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(cube(20.0));
+    object->add_instance();
+    ModelConfig range;
+    range.set_key_value("wall_loops", new ConfigOptionInt(4));
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    object->layer_config_ranges[{1.0, 3.0}] = range;
+    object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    require_valid(print);
+    print.process();
+    const PrintObject &po = *print.objects().front();
+    REQUIRE(po.layer_count() > 10);
+    CHECK(po.num_printing_regions() >= 2);
+    auto first_layer_matching = [&po](auto predicate) -> size_t {
+        for (size_t i = 0; i < po.layer_count(); ++i)
+            if (predicate(po.get_layer(static_cast<int>(i))->print_z))
+                return i;
+        return po.layer_count();
+    };
+    const size_t below = first_layer_matching([](float z) { return z < 1.0f - EPSILON; });
+    const size_t inside = first_layer_matching([](float z) { return z > 1.0f + EPSILON && z < 3.0f - EPSILON; });
+    const size_t above = first_layer_matching([](float z) { return z > 3.0f + EPSILON; });
+    REQUIRE(below < po.layer_count());
+    REQUIRE(inside < po.layer_count());
+    REQUIRE(above < po.layer_count());
+    CHECK(perimeter_items(po, below) == 2);
+    CHECK(perimeter_items(po, inside) == 4);
+    CHECK(perimeter_items(po, above) == 2);
+}
+
+
+
+TEST_CASE("Filament temperature classification and mixed compatibility are symmetric", "[Print][PrintPipelineWorkflows]")
+{
+    CHECK(Print::get_filament_temp_type("PLA") == FilamentTempType::LowTemp);
+    CHECK(Print::get_filament_temp_type("ABS") == FilamentTempType::HighTemp);
+    CHECK(Print::get_filament_temp_type("not-a-material") == FilamentTempType::Undefine);
+    CHECK(Print::is_filaments_compatible({FilamentTempType::LowTemp, FilamentTempType::LowTemp}));
+    CHECK_FALSE(Print::is_filaments_compatible({FilamentTempType::LowTemp, FilamentTempType::HighTemp}));
+    CHECK_FALSE(Print::is_filaments_compatible({FilamentTempType::HighTemp, FilamentTempType::LowTemp}));
+    CHECK(Print::get_compatible_filament_type({FilamentTempType::HighTemp}) == FilamentTempType::HighTemp);
+    CHECK(Print::get_compatible_filament_type({FilamentTempType::LowTemp, FilamentTempType::HighTemp}) == FilamentTempType::HighLowCompatible);
+    ScopedResourcesDir resources(boost::filesystem::path(PROFILES_DIR).parent_path());
+    const std::vector<std::string> incompatible = Print::get_incompatible_filaments_by_nozzle(0.4f);
+    CHECK_FALSE(incompatible.empty());
+    const std::vector<std::string> high_flow_incompatible =
+        Print::get_incompatible_filaments_by_nozzle(0.4f, NozzleVolumeType::nvtHighFlow);
+    REQUIRE_FALSE(high_flow_incompatible.empty());
+}
+
+TEST_CASE("Print-space translation follows the configured plate origin", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    print.set_plate_origin(Vec3d(12.5, -7.25, 0.0));
+    const Vec2d point(15.0, -3.25);
+    const Vec2d translated = print.translate_to_print_space(point);
+    CHECK_THAT(translated.x(), Catch::Matchers::WithinAbs(2.5, 1e-9));
+    CHECK_THAT(translated.y(), Catch::Matchers::WithinAbs(4.0, 1e-9));
+    const Point scaled_point = Point::new_scale(15.0, -3.25);
+    const Vec2d translated_scaled = print.translate_to_print_space(scaled_point);
+    CHECK_THAT(translated_scaled.x(), Catch::Matchers::WithinAbs(2.5, 1e-9));
+    CHECK_THAT(translated_scaled.y(), Catch::Matchers::WithinAbs(4.0, 1e-9));
+}
+
+TEST_CASE("Print validates sequential collisions and reports the colliding footprint", "[Print][PrintPipelineWorkflows]")
+{
+    DynamicPrintConfig config = pipeline_config();
+    config.set_deserialize_strict({{"print_sequence", "by object"}, {"extruder_clearance_radius", 10.0}});
+    Print print;
+    Model model;
+    TriangleMesh left = cube(20.0);
+    TriangleMesh right = cube(20.0);
+    right.translate(18.0, 0.0, 0.0);
+    init_print(std::vector<TriangleMesh>{std::move(left), std::move(right)}, print, model, config, nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE_FALSE(validation.string.empty());
+    CHECK(validation.type == STRING_EXCEPT_OBJECT_COLLISION_IN_SEQ_PRINT);
+    Polygons collision;
+    const StringObjectException error = Print::sequential_print_clearance_valid(print, &collision);
+    REQUIRE_FALSE(error.string.empty());
+    CHECK_FALSE(collision.empty());
+}
+
+TEST_CASE("Print g-code export leaves a readable file result and can reload moves", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(10.0)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryFile file(".gcode");
+    GCodeProcessorResult result;
+    const std::string path = print.export_gcode(file.string(), &result, nullptr);
+    REQUIRE(path == file.string());
+    std::ifstream stream(path, std::ios::binary);
+    const std::string data((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(data.empty());
+    CHECK(result.moves.size() > 0);
+    const size_t old_moves = result.moves.size();
+    print.reload_gcode_moves(&result);
+    CHECK(result.moves.size() == old_moves);
+}
+
+
+TEST_CASE("Per-extruder printable regions expose shared and excluded bed geometry", "[Print][PrintSharedPrintableArea]")
+{
+    const auto rectangle = [](double min_x, double min_y, double max_x, double max_y) {
+        return Vec2ds{ Vec2d(min_x, min_y), Vec2d(max_x, min_y),
+                       Vec2d(max_x, max_y), Vec2d(min_x, max_y) };
+    };
+    const auto configure_areas = [&](size_t nozzle_count, const std::vector<Vec2ds> &areas) {
+        DynamicPrintConfig config = multifilament_config(static_cast<unsigned int>(nozzle_count));
+        config.set_deserialize_strict({
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
+        });
+        if (nozzle_count > 1)
+            config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+        config.set_key_value("printable_area", new ConfigOptionPoints({
+            Vec2d(0., 0.), Vec2d(100., 0.), Vec2d(100., 100.), Vec2d(0., 100.)
+        }));
+        config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(areas));
+        return config;
+    };
+    const auto require_bounds_and_area = [&](const Polygons &polygons,
+                                             double min_x, double min_y, double max_x, double max_y,
+                                             double expected_area) {
+        REQUIRE_FALSE(polygons.empty());
+        const BoundingBox bbox = get_extents(polygons);
+        REQUIRE(bbox.defined);
+        CHECK_THAT(unscaled<double>(bbox.min.x()), Catch::Matchers::WithinAbs(min_x, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.min.y()), Catch::Matchers::WithinAbs(min_y, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.max.x()), Catch::Matchers::WithinAbs(max_x, 1e-5));
+        CHECK_THAT(unscaled<double>(bbox.max.y()), Catch::Matchers::WithinAbs(max_y, 1e-5));
+        CHECK_THAT(polygon_area_mm2(polygons), Catch::Matchers::WithinAbs(expected_area, 1e-3));
+    };
+
+    SECTION("two nozzles intersect printable regions and expose their complements") {
+        const std::vector<Vec2ds> areas = { rectangle(0., 0., 80., 100.), rectangle(20., 0., 100., 100.) };
+        DynamicPrintConfig config = configure_areas(2, areas);
+        Print print;
+        Model model;
+        init_valid({ cube(5.) }, print, model, config);
+
+        const std::vector<Polygons> printable = print.get_extruder_printable_polygons();
+        REQUIRE(printable.size() == 2);
+        require_bounds_and_area(printable[0], 0., 0., 80., 100., 8000.);
+        require_bounds_and_area(printable[1], 20., 0., 100., 100., 8000.);
+
+        const std::vector<Polygons> unprintable = print.get_extruder_unprintable_polygons();
+        REQUIRE(unprintable.size() == 2);
+        require_bounds_and_area(unprintable[0], 80., 0., 100., 100., 2000.);
+        require_bounds_and_area(unprintable[1], 0., 0., 20., 100., 2000.);
+
+        require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 20., 0., 80., 100., 6000.);
+    }
+
+    SECTION("single nozzle and degenerate areas fall back to the full printable bed") {
+        {
+            DynamicPrintConfig config = configure_areas(1, { rectangle(20., 0., 80., 100.) });
+            Print print;
+            Model model;
+            init_valid({ cube(5.) }, print, model, config);
+            require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 0., 0., 100., 100., 10000.);
+        }
+        {
+            DynamicPrintConfig config = configure_areas(2, { Vec2ds{ Vec2d(0., 0.), Vec2d(20., 0.) } });
+            Print print;
+            Model model;
+            init_valid({ cube(5.) }, print, model, config);
+            require_bounds_and_area(print.get_extruder_shared_printable_polygon(), 0., 0., 100., 100., 10000.);
+        }
+    }
+}
+
+
+namespace {
+
+ExPolygon svg_rectangle_mm(double min_x, double min_y, double max_x, double max_y)
+{
+    return ExPolygon({
+        Point::new_scale(min_x, min_y), Point::new_scale(max_x, min_y),
+        Point::new_scale(max_x, max_y), Point::new_scale(min_x, max_y)
+    });
+}
+
+ExPolygon svg_rectangle_with_hole_mm(double min_x, double min_y, double max_x, double max_y,
+                                     double hole_min_x, double hole_min_y,
+                                     double hole_max_x, double hole_max_y)
+{
+    ExPolygon shape = svg_rectangle_mm(min_x, min_y, max_x, max_y);
+    Polygon hole;
+    hole.points = { Point::new_scale(hole_min_x, hole_min_y), Point::new_scale(hole_min_x, hole_max_y),
+                    Point::new_scale(hole_max_x, hole_max_y), Point::new_scale(hole_max_x, hole_min_y) };
+    shape.holes.emplace_back(std::move(hole));
+    return shape;
+}
+
+std::string svg_filled_path(const std::string &svg, const std::string &color)
+{
+    const std::string style = "style=\"fill: " + color + ";";
+    const size_t style_pos = svg.find(style);
+    if (style_pos == std::string::npos)
+        return {};
+    const size_t path_start = svg.rfind("<path d=\"", style_pos);
+    const size_t path_end = svg.find("/>", style_pos);
+    if (path_start == std::string::npos || path_end == std::string::npos)
+        return {};
+    return svg.substr(path_start, path_end + 2 - path_start);
+}
+
+struct SvgPathBounds
+{
+    bool defined = false;
+    double min_x = 0.;
+    double min_y = 0.;
+    double max_x = 0.;
+    double max_y = 0.;
+};
+
+SvgPathBounds svg_path_bounds(const std::string &path)
+{
+    SvgPathBounds bounds;
+    const size_t d_start = path.find("d=\"");
+    if (d_start == std::string::npos)
+        return bounds;
+    const size_t d_end = path.find('\"', d_start + 3);
+    if (d_end == std::string::npos)
+        return bounds;
+
+    std::istringstream input(path.substr(d_start + 3, d_end - (d_start + 3)));
+    std::string token;
+    input >> token; // M
+    std::vector<double> coordinates;
+    while (input >> token) {
+        char *end = nullptr;
+        const double value = std::strtod(token.c_str(), &end);
+        if (end != token.c_str())
+            coordinates.emplace_back(value);
+    }
+    if (coordinates.size() < 6 || coordinates.size() % 2 != 0)
+        return bounds;
+
+    bounds.min_x = bounds.max_x = coordinates[0];
+    bounds.min_y = bounds.max_y = coordinates[1];
+    for (size_t i = 2; i < coordinates.size(); i += 2) {
+        bounds.min_x = std::min(bounds.min_x, coordinates[i]);
+        bounds.max_x = std::max(bounds.max_x, coordinates[i]);
+        bounds.min_y = std::min(bounds.min_y, coordinates[i + 1]);
+        bounds.max_y = std::max(bounds.max_y, coordinates[i + 1]);
+    }
+    bounds.defined = true;
+    return bounds;
+}
+
+std::string read_svg_file(const ScopedTemporaryFile &file)
+{
+    std::ifstream input(file.string(), std::ios::binary);
+    if (!input)
+        return {};
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("Layer and region SVG exports reflect their public surface collections", "[Print][PrintPipelineWorkflows][LayerSvg]")
+{
+    Print print;
+    Model model;
+    init_valid({ cube(4.) }, print, model, pipeline_config());
+    print.process();
+
+    PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    Layer *layer = object->get_layer(0);
+    REQUIRE(layer != nullptr);
+    REQUIRE(layer->region_count() == 1);
+    LayerRegion *region = layer->get_region(0);
+
+    // The two public collections deliberately occupy disjoint footprints and carry
+    // different surface roles, so an exporter cannot pass by drawing the wrong data.
+    const ExPolygon slice = svg_rectangle_mm(0., 0., 2., 2.);
+    const ExPolygon fill = svg_rectangle_with_hole_mm(100., 0., 104., 4., 101., 1., 103., 3.);
+    region->slices.set(ExPolygons{ slice }, stTop);
+    region->fill_surfaces.set(ExPolygons{ fill }, stInternal);
+
+    ScopedTemporaryFile slices_svg(".svg");
+    layer->export_region_slices_to_svg(slices_svg.string().c_str());
+    const std::string slices_text = read_svg_file(slices_svg);
+    REQUIRE_FALSE(slices_text.empty());
+    const std::string top_path = svg_filled_path(slices_text, "rgb(255,0,0)");
+    REQUIRE_FALSE(top_path.empty());
+    CHECK(top_path.find("fill-opacity=\"0.500000\"") != std::string::npos);
+    const SvgPathBounds top_bounds = svg_path_bounds(top_path);
+    REQUIRE(top_bounds.defined);
+    CHECK_THAT(top_bounds.max_x - top_bounds.min_x, Catch::Matchers::WithinAbs(20., 1e-4));
+    CHECK_THAT(top_bounds.max_y - top_bounds.min_y, Catch::Matchers::WithinAbs(20., 1e-4));
+
+    const ExPolygon fill_boundary = svg_rectangle_mm(0.5, 0.5, 1.5, 1.5);
+    region->fill_surfaces.set(ExPolygons{ fill_boundary }, stInternal);
+    ScopedTemporaryFile region_slices_svg(".svg");
+    region->export_region_slices_to_svg(region_slices_svg.string().c_str());
+    const std::string region_slices_text = read_svg_file(region_slices_svg);
+    REQUIRE_FALSE(region_slices_text.empty());
+    const std::string region_top_path = svg_filled_path(region_slices_text, "rgb(255,0,0)");
+    REQUIRE_FALSE(region_top_path.empty());
+    const SvgPathBounds region_top_bounds = svg_path_bounds(region_top_path);
+    REQUIRE(region_top_bounds.defined);
+    CHECK_THAT(region_top_bounds.max_x - region_top_bounds.min_x, Catch::Matchers::WithinAbs(20., 1e-4));
+    CHECK(region_slices_text.find("style=\"stroke: rgb(255,255,128);") != std::string::npos);
+
+    // Move the fill surface to a remote, wider footprint before testing the Layer
+    // fill exporter so collection routing and the SVG viewport origin are distinct.
+    region->fill_surfaces.set(ExPolygons{ fill }, stInternal);
+    ScopedTemporaryFile layer_fill_svg(".svg");
+    layer->export_region_fill_surfaces_to_svg(layer_fill_svg.string().c_str());
+    const std::string layer_fill_text = read_svg_file(layer_fill_svg);
+    REQUIRE_FALSE(layer_fill_text.empty());
+    const std::string layer_fill_path = svg_filled_path(layer_fill_text, "rgb(255,255,128)");
+    // This is the defining collection-routing contract: Layer fill export must use fill_surfaces,
+    // not the disjoint top slice collection.
+    CHECK_FALSE(layer_fill_path.empty());
+    if (!layer_fill_path.empty()) {
+        CHECK(layer_fill_path.find("fill-opacity=\"0.500000\"") != std::string::npos);
+        const SvgPathBounds fill_bounds = svg_path_bounds(layer_fill_path);
+        REQUIRE(fill_bounds.defined);
+        CHECK_THAT(fill_bounds.max_x - fill_bounds.min_x, Catch::Matchers::WithinAbs(40., 1e-4));
+        CHECK_THAT(fill_bounds.max_y - fill_bounds.min_y, Catch::Matchers::WithinAbs(40., 1e-4));
+        const size_t svg_width_pos = layer_fill_text.find("width=\"");
+        REQUIRE(svg_width_pos != std::string::npos);
+        char *svg_width_end = nullptr;
+        const double svg_width = std::strtod(layer_fill_text.c_str() + svg_width_pos + 7, &svg_width_end);
+        REQUIRE(svg_width_end != layer_fill_text.c_str() + svg_width_pos + 7);
+        CHECK(fill_bounds.min_x >= 0.);
+        CHECK(fill_bounds.max_x <= svg_width); // the fill must stay inside its SVG viewport
+        CHECK(layer_fill_path.find("M ") != layer_fill_path.rfind("M ")); // outer contour and hole
+    }
+    CHECK(svg_filled_path(layer_fill_text, "rgb(255,0,0)").empty());
+
+    ScopedTemporaryFile region_fill_svg(".svg");
+    region->export_region_fill_surfaces_to_svg(region_fill_svg.string().c_str());
+    const std::string region_fill_text = read_svg_file(region_fill_svg);
+    REQUIRE_FALSE(region_fill_text.empty());
+    const std::string region_fill_path = svg_filled_path(region_fill_text, "rgb(255,255,128)");
+    REQUIRE_FALSE(region_fill_path.empty());
+    const SvgPathBounds region_bounds = svg_path_bounds(region_fill_path);
+    REQUIRE(region_bounds.defined);
+    CHECK_THAT(region_bounds.max_x - region_bounds.min_x, Catch::Matchers::WithinAbs(40., 1e-4));
+    CHECK_THAT(region_bounds.max_y - region_bounds.min_y, Catch::Matchers::WithinAbs(40., 1e-4));
+    CHECK(region_fill_text.find("style=\"fill: none; stroke: black;") != std::string::npos);
+    CHECK(region_fill_text.find("style=\"fill: none; stroke: blue;") != std::string::npos);
+}
+
+} // namespace print_workflow_contracts
+
+TEST_CASE("Compacted prime tower clearance aggregates pre-slice offenders", "[Print][WipeTower][CompactedTower]")
+{
+    const int rod_band_offenders = GENERATE(0, 1, 2);
+    const bool check_enabled     = GENERATE(false, true);
+    INFO("rod-band offenders: " << rod_band_offenders);
+    INFO("no sparse clearance check: " << check_enabled);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_prime_tower",                 true  },
+        { "wipe_tower_no_sparse_layers",        check_enabled },
+        { "wipe_tower_sparse_layers_combination", false },
+        { "timelapse_type",                     0     },
+        { "enable_wrapping_detection",           false },
+        { "belt_printer",                       false },
+        { "spiral_mode",                        false },
+        { "z_hop",                              0.0   },
+        { "print_sequence",                     "by layer" },
+        { "printable_area",                     "0x0,500x0,500x500,0x500" },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "prime_tower_width",                  35.0  },
+        { "prime_volume",                       45.0  },
+        { "prime_tower_brim_width",             0.0   },
+        { "wipe_tower_x",                       0.0   },
+        { "wipe_tower_y",                       0.0   },
+        { "wipe_tower_rotation_angle",          0.0   },
+        { "extruder_clearance_dist_to_rod",     40.0  },
+        { "extruder_clearance_height_to_rod",   25.0  },
+        { "extruder_clearance_height_to_lid",   120.0 },
+        { "extruder_clearance_radius",          40.0  },
+        { "nozzle_height",                      5.0   },
+        { "layer_height",                       0.2   },
+        { "initial_layer_print_height",         0.2   },
+    });
+
+    Model model;
+    ObjectID first_object_id;
+    // The 30 mm parts exceed the 25 mm rod limit but fit below the 120 mm lid.
+    // Their X positions clear the 35 mm tower and 40 mm head radius; only Y
+    // determines whether each part enters the rod's band across the bed.
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        if (i == 0)
+            first_object_id = object->id();
+        object->add_volume(make_cube(10.0, 10.0, 30.0));
+        object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(i + 1));
+        ModelInstance *instance = object->add_instance();
+        const bool in_rod_band = i < rod_band_offenders;
+        instance->set_offset(Vec3d(200.0 + i * 100.0, in_rod_band ? 0.0 : 300.0, 0.0));
+        object->ensure_on_bed();
+    }
+
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.extruders().size() == 2);
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE(print.wipe_tower_data(2).width > 0.0f);
+    REQUIRE(print.wipe_tower_data(2).depth > 0.0f);
+    const ModelInstance *first_instance = nullptr;
+    for (const PrintObject *object : print.objects()) {
+        REQUIRE(unscaled<double>(object->max_z()) > 25.0);
+        REQUIRE(unscaled<double>(object->max_z()) < 120.0);
+        REQUIRE(object->model_object()->instances.size() == 1);
+        if (object->model_object()->id() == first_object_id)
+            first_instance = object->model_object()->instances.front();
+    }
+    REQUIRE(first_instance != nullptr);
+
+    Polygons collision_polygons;
+    std::vector<std::pair<Polygon, float>> height_polygons;
+    const StringObjectException error = Print::compacted_wipe_tower_clearance_valid(
+        print, &collision_polygons, &height_polygons);
+    const int expected_offenders = check_enabled ? rod_band_offenders : 0;
+
+    if (expected_offenders == 0) {
+        CHECK(error.string.empty());
+        CHECK(error.object == nullptr);
+        CHECK(collision_polygons.empty());
+        CHECK(height_polygons.empty());
+        return;
+    }
+
+    REQUIRE_FALSE(error.string.empty());
+    REQUIRE(height_polygons.size() == size_t(expected_offenders));
+    CHECK(collision_polygons.size() > height_polygons.size());
+    if (expected_offenders == 1)
+        CHECK(error.object == first_instance);
+    else
+        CHECK(error.object == nullptr);
+
+    for (const auto &entry : height_polygons) {
+        CHECK_THAT(entry.second, Catch::Matchers::WithinAbs(25.0, 1e-6));
+        REQUIRE(entry.first.points.size() >= 3);
+        CHECK(std::abs(entry.first.area()) > 0);
+    }
+    for (const Polygon &polygon : collision_polygons) {
+        REQUIRE(polygon.points.size() >= 3);
+        CHECK(std::abs(polygon.area()) > 0);
+    }
+}
+
+
+TEST_CASE("Print compares filament temperatures with explicit and material ranges",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct CompatibilityCase {
+        std::vector<std::string> filament_types;
+        std::vector<int>         temperatures;
+        std::vector<int>         range_lows;
+        std::vector<int>         range_highs;
+        FilamentCompatibilityType expected;
+    };
+    const auto part = GENERATE(from_range(std::vector<CompatibilityCase>{
+        { { "PLA", "PETG" }, { 225, 250 }, { 190, 220 }, { 240, 260 }, FilamentCompatibilityType::HighLowMixed },
+        { { "PLA", "PETG" }, { 225, 250 }, { 190, 220 }, {   0, 260 }, FilamentCompatibilityType::HighLowMixed },
+        { { "PLA", "PETG" }, { 225, 225 }, {   0, 220 }, { 240, 260 }, FilamentCompatibilityType::Compatible },
+        { { "PLA", "PETG" }, { 225, 250 }, { 240, 220 }, { 240, 260 }, FilamentCompatibilityType::InvalidTemperatureRange },
+    }));
+
+    CHECK(Print::check_multi_filaments_compatibility(
+              part.filament_types, part.temperatures, part.range_lows, part.range_highs) == part.expected);
+}
+
+TEST_CASE("Print validation includes support filament temperature compatibility",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct SupportCase {
+        int  support_filament;
+        bool allow_mixed_temperatures;
+        bool warning;
+    };
+    const auto part = GENERATE(
+        SupportCase{ 1, false, false },
+        SupportCase{ 2, false, false },
+        SupportCase{ 2, true,  true });
+    CAPTURE(part.support_filament, part.allow_mixed_temperatures);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "enable_support",                 true },
+        { "support_type",                   "normal(auto)" },
+        { "support_style",                  "default" },
+        { "support_on_build_plate_only",    false },
+        { "print_sequence",                 "by object" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "nozzle_temperature",             "225,250" },
+        { "nozzle_temperature_range_low",   "190,220" },
+        { "nozzle_temperature_range_high",  "240,260" },
+        { "timelapse_type",                 "0" },
+        { "enable_wrapping_detection",      false },
+        { "use_relative_e_distances",       true },
+        { "layer_change_gcode",             "G92 E0\n" },
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
+
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{{
+        { "extruder",                  1 },
+        { "support_filament",          part.support_filament },
+        { "support_interface_filament", 1 },
+    }};
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ mesh(TestMesh::overhang) }, print, model, config, &overrides);
+
+    // These checks prove the public configuration reached the validation path: one nozzle,
+    // by-object sequencing, support enabled, and a support-bearing object using the requested
+    // support extruder.  A set_deserialize_strict call alone is not this proof.
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.config().print_sequence == PrintSequence::ByObject);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().enable_support);
+    REQUIRE(print.objects().front()->has_support_material());
+    REQUIRE(print.objects().front()->config().support_filament == part.support_filament);
+    REQUIRE(print.objects().front()->config().support_interface_filament == 1);
+    REQUIRE(print.object_extruders().size() == 1);
+    CHECK(print.object_extruders().front() == 0);
+    REQUIRE(print.extruders().size() == (part.support_filament == 1 ? 1u : 2u));
+
+    print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.is_warning);
+    if (part.support_filament == 1) {
+        CHECK(validation.string.empty());
+        CHECK_FALSE(validation.is_warning);
+        CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        }));
+        return;
+    }
+
+    if (part.allow_mixed_temperatures) {
+        CHECK(validation.string.empty());
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        });
+        REQUIRE(warning != warnings.end());
+        REQUIRE(warning->string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(warning->is_warning == part.warning);
+    } else {
+        REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+    }
+}
+
+TEST_CASE("Print validation enforces mixed filament temperature policy by sequence",
+          "[Print][PrintMultiFilamentValidation]")
+{
+    struct SequenceCase {
+        const char *range_lows;
+        const char *range_highs;
+        const char *temperatures;
+        bool        allow_mixed_temperatures;
+        bool        invalid_range;
+    };
+    const auto part = GENERATE(
+        SequenceCase{ "190,220", "240,260", "225,250", false, false },
+        SequenceCase{ "190,220", "240,260", "225,250", true,  false },
+        SequenceCase{ "240,220", "230,260", "225,250", false, true  });
+    CAPTURE(part.allow_mixed_temperatures, part.invalid_range);
+
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "print_sequence",                "by layer" },
+        { "enable_support",                false },
+        { "layer_height",                  0.2 },
+        { "initial_layer_print_height",    0.2 },
+        { "skirt_loops",                   0 },
+        { "brim_type",                     "no_brim" },
+        { "nozzle_temperature",            part.temperatures },
+        { "nozzle_temperature_range_low",  part.range_lows },
+        { "nozzle_temperature_range_high", part.range_highs },
+        { "use_relative_e_distances",      true },
+        { "layer_change_gcode",            "G92 E0\n" },
+    });
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        { { "extruder", 1 } }, { { "extruder", 2 } },
+    };
+
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{ cube(8.0), cube(8.0) }, print, model, config, &overrides);
+    REQUIRE(print.config().nozzle_diameter.size() == 1);
+    REQUIRE(print.config().print_sequence == PrintSequence::ByLayer);
+    REQUIRE(print.objects().size() == 2);
+    for (const PrintObject *object : print.objects()) {
+        REQUIRE(object != nullptr);
+        REQUIRE_FALSE(object->config().enable_support);
+    }
+    REQUIRE(print.object_extruders().size() == 2);
+    REQUIRE(print.extruders().size() == 2);
+
+    print.set_check_multi_filaments_compatibility(!part.allow_mixed_temperatures);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.is_warning);
+    if (part.invalid_range) {
+        REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Invalid recommended nozzle temperature range.", 0) == 0);
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+        return;
+    }
+
+    if (part.allow_mixed_temperatures) {
+        CHECK(validation.string.empty());
+        const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+            return entry.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
+        });
+        REQUIRE(warning != warnings.end());
+        REQUIRE(warning->string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(warning->is_warning);
+    } else {
+        REQUIRE_FALSE(validation.string.empty());
+        REQUIRE(validation.string.rfind("Selected nozzle temperatures are incompatible.", 0) == 0);
+        CHECK(validation.type == STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP);
+        CHECK_FALSE(validation.is_warning);
+    }
+}
+
+
+namespace print_object_sharing_contracts {
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+enum class ShareDifference {
+    MeshPointer,
+    VolumeTransform,
+    VolumeExtruder,
+    LayerProfile,
+    ObjectExtruder,
+    LayerConfigRange,
+    MaterialConfig,
+};
+
+DynamicPrintConfig sharing_config(ShareDifference difference)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height",                 0.2},
+        {"initial_layer_print_height",   0.2},
+        {"wall_loops",                   2},
+        {"top_shell_layers",             1},
+        {"bottom_shell_layers",          1},
+        {"sparse_infill_density",        "15%"},
+        {"skirt_loops",                  0},
+        {"brim_type",                    "no_brim"},
+        {"raft_layers",                  0},
+        {"machine_start_gcode",          ""},
+        {"machine_end_gcode",            ""},
+        {"layer_change_gcode",           "G92 E0\n"},
+        {"before_layer_change_gcode",    ""},
+        {"print_sequence",               "by layer"},
+    });
+    if (difference == ShareDifference::VolumeExtruder || difference == ShareDifference::ObjectExtruder)
+        config = Test::multifilament_config(2, {
+            {"layer_height", 0.2},
+            {"initial_layer_print_height", 0.2},
+            {"wall_loops", 2},
+            {"top_shell_layers", 1},
+            {"bottom_shell_layers", 1},
+            {"sparse_infill_density", "15%"},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"raft_layers", 0},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"print_sequence", "by layer"},
+        });
+    return config;
+}
+
+struct ShareProbeResult {
+    bool                shared = false;
+    double              first_area = 0.;
+    double              second_area = 0.;
+    std::vector<double> first_print_z;
+    std::vector<double> second_print_z;
+    std::vector<size_t> first_perimeters;
+    std::vector<size_t> second_perimeters;
+};
+
+double first_layer_area(const PrintObject &object)
+{
+    REQUIRE(object.layer_count() > 0);
+    const Layer *layer = object.get_layer(0);
+    REQUIRE(layer != nullptr);
+    double result = 0.;
+    for (const ExPolygon &slice : layer->lslices)
+        result += std::abs(static_cast<double>(slice.area())) * SCALING_FACTOR * SCALING_FACTOR;
+    return result;
+}
+
+std::vector<double> layer_print_zs(const PrintObject &object)
+{
+    REQUIRE(object.layer_count() > 0);
+    std::vector<double> result;
+    result.reserve(object.layer_count());
+    for (int index = 0; index < object.layer_count(); ++index) {
+        const Layer *layer = object.get_layer(index);
+        REQUIRE(layer != nullptr);
+        result.emplace_back(layer->print_z);
+    }
+    return result;
+}
+
+std::vector<size_t> layer_perimeter_counts(const PrintObject &object)
+{
+    std::vector<size_t> result;
+    result.reserve(object.layer_count());
+    for (size_t layer = 0; layer < object.layer_count(); ++layer)
+        result.emplace_back(print_workflow_contracts::perimeter_items(object, layer));
+    return result;
+}
+
+size_t layer_index_matching(const std::vector<double> &print_zs, const std::function<bool(double)> &matches)
+{
+    const auto iter = std::find_if(print_zs.begin(), print_zs.end(), matches);
+    REQUIRE(iter != print_zs.end());
+    return static_cast<size_t>(std::distance(print_zs.begin(), iter));
+}
+
+ShareProbeResult run_nonsharing_probe(ShareDifference difference)
+{
+    DynamicPrintConfig config = sharing_config(difference);
+    Model model;
+    Print print;
+
+    ModelObject *first = model.add_object();
+    REQUIRE(first != nullptr);
+    first->add_volume(make_cube(8., 8., 1.2));
+    REQUIRE(first->volumes.size() == 1);
+    first->add_instance();
+    REQUIRE_FALSE(first->instances.empty());
+    first->config.set_key_value("extruder", new ConfigOptionInt(1));
+
+    ModelObject *second = model.add_object(*first);
+    REQUIRE(second != nullptr);
+    REQUIRE(second->volumes.size() == 1);
+    REQUIRE_FALSE(second->instances.empty());
+    for (ModelInstance *instance : second->instances) {
+        REQUIRE(instance != nullptr);
+        instance->set_offset(instance->get_offset() + Vec3d(28., 0., 0.));
+    }
+
+    if (difference == ShareDifference::MeshPointer)
+        second->volumes.front()->set_mesh(make_cube(10., 8., 1.2));
+    else if (difference == ShareDifference::VolumeTransform)
+        second->volumes.front()->set_scaling_factor(Vec3d(1.25, 1., 1.));
+    else if (difference == ShareDifference::VolumeExtruder) {
+        first->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(1));
+        second->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(2));
+    } else if (difference == ShareDifference::LayerProfile) {
+        second->layer_height_profile.set(std::vector<coordf_t>{0., 0.2, 0.2, 0.25, 1.2, 0.25});
+    } else if (difference == ShareDifference::ObjectExtruder) {
+        first->config.set_key_value("extruder", new ConfigOptionInt(1));
+        second->config.set_key_value("extruder", new ConfigOptionInt(2));
+    }
+
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig)
+        second->volumes.front()->set_mesh(first->volumes.front()->mesh());
+
+    if (difference == ShareDifference::LayerConfigRange) {
+        ModelConfig range;
+        range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+        range.set_key_value("wall_loops", new ConfigOptionInt(4));
+        second->layer_config_ranges[{0.4, 0.8}] = range;
+        REQUIRE(first->layer_config_ranges.empty());
+        REQUIRE(second->layer_config_ranges.size() == 1);
+    } else if (difference == ShareDifference::MaterialConfig) {
+        ModelMaterial *two_wall_material = model.add_material("two-wall-loops");
+        ModelMaterial *four_wall_material = model.add_material("four-wall-loops");
+        REQUIRE(two_wall_material != nullptr);
+        REQUIRE(four_wall_material != nullptr);
+        two_wall_material->config.set_key_value("wall_loops", new ConfigOptionInt(2));
+        four_wall_material->config.set_key_value("wall_loops", new ConfigOptionInt(4));
+        first->volumes.front()->set_material_id("two-wall-loops");
+        second->volumes.front()->set_material_id("four-wall-loops");
+        REQUIRE(first->volumes.front()->material_id() != second->volumes.front()->material_id());
+        REQUIRE(first->volumes.front()->material()->config.opt_int("wall_loops") == 2);
+        REQUIRE(second->volumes.front()->material()->config.opt_int("wall_loops") == 4);
+    }
+
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig) {
+        REQUIRE(first->volumes.front()->mesh_ptr() != second->volumes.front()->mesh_ptr());
+        const auto &first_vertices = first->volumes.front()->mesh().its.vertices;
+        const auto &second_vertices = second->volumes.front()->mesh().its.vertices;
+        REQUIRE(first_vertices.size() == second_vertices.size());
+        for (size_t vertex = 0; vertex < first_vertices.size(); ++vertex)
+            for (size_t axis = 0; axis < 3; ++axis)
+                CHECK_THAT(first_vertices[vertex][axis], Catch::Matchers::WithinAbs(second_vertices[vertex][axis], 0.));
+        REQUIRE(first->volumes.front()->mesh().its.indices == second->volumes.front()->mesh().its.indices);
+        const auto &first_properties = first->volumes.front()->mesh().its.properties;
+        const auto &second_properties = second->volumes.front()->mesh().its.properties;
+        REQUIRE(first_properties.size() == second_properties.size());
+        for (size_t face = 0; face < first_properties.size(); ++face) {
+            REQUIRE(first_properties[face].type == second_properties[face].type);
+            CHECK_THAT(first_properties[face].area, Catch::Matchers::WithinAbs(second_properties[face].area, 1e-9));
+        }
+        REQUIRE(first->config.get() == second->config.get());
+        REQUIRE(first->volumes.front()->config.get() == second->volumes.front()->config.get());
+        REQUIRE(first->volumes.front()->get_transformation() == second->volumes.front()->get_transformation());
+        if (difference == ShareDifference::LayerConfigRange) {
+            REQUIRE(first->layer_height_profile.empty());
+            REQUIRE(second->layer_height_profile.empty());
+        }
+    }
+
+    for (ModelObject *object : model.objects) {
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    INFO("validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *first_print_object = print.get_object(0);
+    const PrintObject *second_print_object = print.get_object(1);
+    REQUIRE(first_print_object != nullptr);
+    REQUIRE(second_print_object != nullptr);
+    if (difference == ShareDifference::LayerConfigRange || difference == ShareDifference::MaterialConfig)
+        REQUIRE(first_print_object->trafo().matrix().isApprox(second_print_object->trafo().matrix(), 0.));
+    return {
+        second_print_object->get_shared_object() != nullptr,
+        first_layer_area(*first_print_object),
+        first_layer_area(*second_print_object),
+        layer_print_zs(*first_print_object),
+        layer_print_zs(*second_print_object),
+        layer_perimeter_counts(*first_print_object),
+        layer_perimeter_counts(*second_print_object),
+    };
+}
+
+} // namespace
+
+TEST_CASE("Distinct model meshes keep public Print objects independently sliced",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::MeshPointer);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(80., 0.05));
+}
+
+TEST_CASE("A volume transform difference prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::VolumeTransform);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(80., 0.05));
+}
+
+TEST_CASE("A volume extruder difference preserves independent public Print layers",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::VolumeExtruder);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+}
+
+TEST_CASE("A custom layer profile prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::LayerProfile);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() != result.second_print_z.size());
+    CHECK_FALSE(result.first_print_z == result.second_print_z);
+}
+
+TEST_CASE("An object extruder difference prevents public Print layer sharing",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::ObjectExtruder);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+}
+
+
+TEST_CASE("Equal separately allocated meshes preserve per-object layer-range walls",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::LayerConfigRange);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() == result.second_print_z.size());
+    for (size_t layer = 0; layer < result.first_print_z.size(); ++layer)
+        CHECK_THAT(result.first_print_z[layer], Catch::Matchers::WithinAbs(result.second_print_z[layer], 1e-6));
+    REQUIRE(result.first_perimeters.size() == result.first_print_z.size());
+    REQUIRE(result.second_perimeters.size() == result.second_print_z.size());
+
+    const size_t below = layer_index_matching(result.first_print_z, [](double z) { return z < 0.4 - 1e-4; });
+    const size_t inside = layer_index_matching(result.first_print_z, [](double z) { return z > 0.4 + 1e-4 && z < 0.8 - 1e-4; });
+    const size_t above = layer_index_matching(result.first_print_z, [](double z) { return z > 0.8 + 1e-4; });
+    CHECK(result.first_perimeters[below] == 2);
+    CHECK(result.second_perimeters[below] == 2);
+    CHECK(result.first_perimeters[inside] == 2);
+    CHECK(result.second_perimeters[inside] == 4);
+    CHECK(result.first_perimeters[above] == 2);
+    CHECK(result.second_perimeters[above] == 2);
+}
+
+TEST_CASE("Equal separately allocated meshes preserve material-specific wall paths",
+          "[Print][PrintObjectSharing]")
+{
+    const ShareProbeResult result = run_nonsharing_probe(ShareDifference::MaterialConfig);
+    CHECK_FALSE(result.shared);
+    CHECK_THAT(result.first_area, Catch::Matchers::WithinAbs(64., 0.05));
+    CHECK_THAT(result.second_area, Catch::Matchers::WithinAbs(64., 0.05));
+    REQUIRE(result.first_print_z.size() == result.second_print_z.size());
+    for (size_t layer = 0; layer < result.first_print_z.size(); ++layer)
+        CHECK_THAT(result.first_print_z[layer], Catch::Matchers::WithinAbs(result.second_print_z[layer], 1e-6));
+    REQUIRE(result.first_perimeters.size() == result.first_print_z.size());
+    REQUIRE(result.second_perimeters.size() == result.second_print_z.size());
+
+    const size_t first_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 0.2 - 1e-4; });
+    const size_t middle_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 0.6 - 1e-4; });
+    const size_t upper_layer = layer_index_matching(result.first_print_z, [](double z) { return z > 1.0 - 1e-4; });
+    for (size_t layer : {first_layer, middle_layer, upper_layer}) {
+        CHECK(result.first_perimeters[layer] == 2);
+        CHECK(result.second_perimeters[layer] == 4);
+    }
+}
+
+
+
+
+
+} // namespace print_object_sharing_contracts
+
+namespace print_validation_followup_contracts {
+
+struct TreePatternValidationCase {
+    const char *support_style;
+    int         wall_count;
+    const char *base_pattern;
+    size_t      expected_pattern_warnings;
+    bool        expect_two_wall_warning;
+    bool        expect_lightning_warning;
+};
+
+TEST_CASE("Organic support validation reports wall and base-pattern conflicts",
+          "[Print][ValidationContracts][TreeSupportValidation]")
+{
+    const auto part = GENERATE(
+        TreePatternValidationCase{"organic", 1, "rectilinear", 0, false, false},
+        TreePatternValidationCase{"organic", 2, "rectilinear", 1, true, false},
+        TreePatternValidationCase{"default", 2, "rectilinear", 1, true, false},
+        TreePatternValidationCase{"organic", 2, "lightning", 2, true, true});
+    CAPTURE(part.support_style, part.wall_count, part.base_pattern);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"sparse_infill_density", "15%"},
+        {"enable_support", true},
+        {"support_type", "tree(auto)"},
+        {"support_style", part.support_style},
+        {"support_base_pattern", part.base_pattern},
+        {"support_line_width", 0.45},
+        {"tree_support_wall_count", part.wall_count},
+        {"tree_support_tip_diameter", 0.6},
+        {"tree_support_branch_diameter_organic", 2.0},
+        {"enable_prime_tower", false},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+
+    Print print;
+    Model model;
+    init_print({mesh(TestMesh::overhang)}, print, model, config);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->has_support_material());
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    REQUIRE(validation.string.empty());
+
+    std::vector<const StringObjectException *> pattern_warnings;
+    for (const StringObjectException &warning : warnings)
+        if (warning.opt_key == "support_base_pattern")
+            pattern_warnings.push_back(&warning);
+    REQUIRE(pattern_warnings.size() == part.expected_pattern_warnings);
+
+    bool saw_two_wall_warning = false;
+    bool saw_lightning_warning = false;
+    for (const StringObjectException *warning : pattern_warnings) {
+        saw_two_wall_warning = saw_two_wall_warning ||
+            warning->string.find("two walls are supported only with the Hollow/Default base pattern") != std::string::npos;
+        saw_lightning_warning = saw_lightning_warning ||
+            warning->string.find("Lightning base pattern is not supported") != std::string::npos;
+        CHECK(warning->is_warning);
+    }
+    CHECK(saw_two_wall_warning == part.expect_two_wall_warning);
+    CHECK(saw_lightning_warning == part.expect_lightning_warning);
+}
+
+namespace {
+
+const std::vector<coordf_t> kLayerProfileA{0., 0.2, 0.6, 0.2, 1.2, 0.2};
+const std::vector<coordf_t> kLayerProfileB{0., 0.2, 0.6, 0.25, 1.2, 0.2};
+// Stay clear of rounding at the exact floating-point epsilon boundary.
+const std::vector<coordf_t> kLayerProfileInside{0., 0.2, 0.6, 0.2 + 0.4 * EPSILON, 1.2, 0.2};
+const std::vector<coordf_t> kLayerProfileOutside{0., 0.2, 0.6, 0.2 + 0.6 * EPSILON, 1.2, 0.2};
+
+DynamicPrintConfig custom_layer_validation_config(bool precise_z_height)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_prime_tower", true},
+        {"print_sequence", "by layer"},
+        // Keep the generated tower wholly inside a finite, non-belt bed so the
+        // profile-validation rows reach the layer-profile contract.
+        {"belt_printer", false},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"prime_tower_width", 35.0},
+        {"prime_tower_brim_width", 0.0},
+        {"wipe_tower_x", 50.0},
+        {"wipe_tower_y", 50.0},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"sparse_infill_density", "15%"},
+        {"precise_z_height", precise_z_height},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    return config;
+}
+
+std::vector<double> public_layer_zs(const PrintObject &object)
+{
+    std::vector<double> zs;
+    zs.reserve(object.layer_count());
+    for (int i = 0; i < object.layer_count(); ++i) {
+        const Layer *layer = object.get_layer(i);
+        REQUIRE(layer != nullptr);
+        REQUIRE(std::isfinite(layer->print_z));
+        zs.push_back(layer->print_z);
+    }
+    return zs;
+}
+
+namespace print_validate_followup_detail {
+
+DynamicPrintConfig low_jerk_config(const char *selected_key, double value, const char *machine_max_junction_deviation)
+{
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        { "machine_max_junction_deviation", machine_max_junction_deviation },
+        { "default_junction_deviation", "0" },
+        { "machine_max_jerk_x", "100,100" },
+        { "machine_max_jerk_y", "100,100" },
+        { "default_jerk", "0" },
+        { "outer_wall_jerk", "0" },
+        { "inner_wall_jerk", "0" },
+        { "default_acceleration", "0" },
+    });
+    config.set_key_value(selected_key, new ConfigOptionFloatsNullable{value});
+    return config;
+}
+
+DynamicPrintConfig adaptive_pa_validation_config(const std::string &adaptive,
+                                                 const std::string &enable,
+                                                 const std::string &model0,
+                                                 const std::string &model1,
+                                                 const std::string &model2)
+{
+    DynamicPrintConfig config = multifilament_config(2, {
+        { "gcode_flavor",                "marlin2" },
+        { "layer_height",                0.2 },
+        { "initial_layer_print_height",  0.2 },
+        { "enable_support",              false },
+        { "spiral_mode",                 false },
+        { "belt_printer",                false },
+        // One physical extruder exposes both variants. The persisted selector result below
+        // migrates filament 1 between these two nozzles, while filament 2 remains Standard.
+        { "extruder_nozzle_stats",       "Standard#1|High Flow#1" },
+        { "extruder_variant_list",       "Direct Drive Standard,Direct Drive High Flow" },
+        { "filament_extruder_variant",   "Direct Drive Standard;Direct Drive High Flow;Direct Drive Standard" },
+        { "filament_self_index",         "1,1,2" },
+        { "filament_map",                "1,1" },
+        { "filament_volume_map",         "0,0" },
+        { "sparse_infill_filament_id",   1 },
+        { "internal_solid_filament_id",  1 },
+        { "top_surface_filament_id",     1 },
+        { "bottom_surface_filament_id",  1 },
+        { "outer_wall_filament_id",      1 },
+        { "inner_wall_filament_id",      1 },
+        { "adaptive_pressure_advance",   adaptive },
+        { "enable_pressure_advance",     enable },
+        { "enable_prime_tower",          false },
+        { "skirt_loops",                 0 },
+        { "brim_type",                   "no_brim" },
+        { "layer_change_gcode",          "G92 E0\n" },
+    });
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {nvtHybrid};
+    config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values = {
+        model0,
+        model1,
+        model2,
+    };
+    return config;
+}
+
+void apply_persisted_adaptive_pa_group(Print &print, const Model &model, const DynamicPrintConfig &config)
+{
+    using MultiNozzleUtils::LayeredNozzleGroupResult;
+    using MultiNozzleUtils::NozzleInfo;
+    const std::vector<NozzleInfo> nozzles{
+        NozzleInfo{"0.4", nvtStandard, 0, 0},
+        NozzleInfo{"0.4", nvtHighFlow, 0, 1},
+    };
+    auto group = LayeredNozzleGroupResult::create(
+        std::vector<std::vector<int>>{{0, 0}, {1, 0}}, nozzles, {0}, std::vector<std::vector<unsigned int>>{{0}, {0}});
+    REQUIRE(group.has_value());
+    REQUIRE(group->is_support_dynamic_nozzle_map());
+    print.set_nozzle_group_result(std::make_shared<LayeredNozzleGroupResult>(*group));
+    print.apply(model, config);
+
+    const PrintConfig &expanded = print.config();
+    const auto *self_index = expanded.option<ConfigOptionInts>("filament_self_index");
+    const auto *variants = expanded.option<ConfigOptionStrings>("filament_extruder_variant");
+    const auto *models = expanded.option<ConfigOptionStrings>("adaptive_pressure_advance_model");
+    const auto *adaptive = expanded.option<ConfigOptionBools>("adaptive_pressure_advance");
+    const auto *enable = expanded.option<ConfigOptionBools>("enable_pressure_advance");
+    REQUIRE(self_index != nullptr);
+    REQUIRE(variants != nullptr);
+    REQUIRE(models != nullptr);
+    REQUIRE(adaptive != nullptr);
+    REQUIRE(enable != nullptr);
+    REQUIRE(self_index->values == std::vector<int>{1, 1, 2});
+    REQUIRE(variants->values == std::vector<std::string>{"Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard"});
+    REQUIRE(models->values == config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values);
+    REQUIRE(adaptive->values == config.option<ConfigOptionBools>("adaptive_pressure_advance")->values);
+    REQUIRE(enable->values == config.option<ConfigOptionBools>("enable_pressure_advance")->values);
+    REQUIRE(print.extruders() == std::vector<unsigned int>{0});
+}
+
+size_t warning_count_for(const std::vector<StringObjectException> &warnings, const std::string &key)
+{
+    return std::count_if(warnings.begin(), warnings.end(), [&key](const auto &entry) {
+        return entry.opt_key == key && entry.is_warning;
+    });
+}
+
+size_t low_jerk_warning_count(const std::vector<StringObjectException> &warnings)
+{
+    return std::count_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.is_warning && (entry.opt_key == "default_jerk" ||
+                                    entry.opt_key == "outer_wall_jerk" ||
+                                    entry.opt_key == "inner_wall_jerk");
+    });
+}
+
+} // namespace print_validate_followup_detail
+
+TEST_CASE("Print validation dispatches low-jerk warnings and honors the Marlin junction gate", "[Print][ValidationContracts][PrintValidationMotion]")
+{
+    struct LowJerkCase {
+        const char *key;
+        double value;
+        const char *machine_max_junction_deviation;
+        bool expected_warning;
+        const char *expected_key;
+    };
+    const auto part = GENERATE(
+        LowJerkCase{ "default_jerk", 0.0, "0,0", false, "" },
+        LowJerkCase{ "default_jerk", 1.0, "0,0", true,  "default_jerk" },
+        LowJerkCase{ "default_jerk", 2.0, "0,0", false, "" },
+        LowJerkCase{ "outer_wall_jerk", 1.0, "0,0", true,  "outer_wall_jerk" },
+        LowJerkCase{ "inner_wall_jerk", 1.0, "0,0", true,  "inner_wall_jerk" },
+        LowJerkCase{ "default_jerk", 1.0, "0.02,0.02", false, "" });
+    CAPTURE(part.key, part.value, part.machine_max_junction_deviation, part.expected_warning, part.expected_key);
+
+    DynamicPrintConfig config = print_validate_followup_detail::low_jerk_config(
+        part.key, part.value, part.machine_max_junction_deviation);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    CHECK(print_validate_followup_detail::low_jerk_warning_count(warnings) ==
+          (part.expected_warning ? 1u : 0u));
+    if (!part.expected_warning)
+        return;
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [&part](const auto &entry) {
+        return entry.opt_key == part.expected_key && entry.is_warning;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->object == nullptr);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation reports an invalid adaptive pressure advance model for a used column", "[Print][ValidationContracts][PrintValidationPressureAdvance]")
+{
+    const std::string invalid_model = "0.04,10";
+    const std::string valid_model = "0.04,10,1000\n0.05,20,2000";
+    DynamicPrintConfig config = print_validate_followup_detail::adaptive_pa_validation_config(
+        "1,1,1", "1,1,1", invalid_model, valid_model, valid_model);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    print_validate_followup_detail::apply_persisted_adaptive_pa_group(print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    REQUIRE(print_validate_followup_detail::warning_count_for(warnings, "adaptive_pressure_advance_model") == 1);
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const auto &entry) {
+        return entry.opt_key == "adaptive_pressure_advance_model" && entry.is_warning;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->object == nullptr);
+    CHECK_FALSE(warning->string.empty());
+}
+
+TEST_CASE("Print validation gates adaptive pressure advance by controls and used filament mapping", "[Print][ValidationContracts][PrintValidationPressureAdvance]")
+{
+    struct AdaptiveCase {
+        const char *adaptive;
+        const char *enable;
+        const char *model0;
+        const char *model1;
+        const char *model2;
+        bool expected_warning;
+    };
+    const auto part = GENERATE(
+        AdaptiveCase{ "0,1,1", "1,1,1", "0.04,10", "0.04,10,1000", "0.04,10,1000", false },
+        AdaptiveCase{ "1,1,1", "0,1,1", "0.04,10", "0.04,10,1000", "0.04,10,1000", false },
+        AdaptiveCase{ "1,1,1", "1,1,1", "0.04,10,1000", "0.04,10,1000", "0.04,10", false },
+        AdaptiveCase{ "1,1,1", "1,1,1", "0.04,10,1000", "0.04,10", "0.04,10,1000", true });
+    CAPTURE(part.adaptive, part.enable, part.model0, part.model1, part.model2, part.expected_warning);
+    DynamicPrintConfig config = print_validate_followup_detail::adaptive_pa_validation_config(
+        part.adaptive, part.enable, part.model0, part.model1, part.model2);
+    Print print;
+    Model model;
+    init_print({ cube(10.0) }, print, model, config);
+    print_validate_followup_detail::apply_persisted_adaptive_pa_group(print, model, config);
+
+    std::vector<StringObjectException> warnings;
+    const auto error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+    CHECK(print_validate_followup_detail::warning_count_for(warnings, "adaptive_pressure_advance_model") ==
+          (part.expected_warning ? 1 : 0));
+}
+
+} // namespace
+
+TEST_CASE("Print validation compares custom layer profiles across prime-tower objects",
+          "[Print][ValidationContracts][CustomLayerProfiles]")
+{
+    enum class ProfileRelation { Equal, Different, InsideTolerance, OutsideTolerance };
+    const ProfileRelation relation = GENERATE(ProfileRelation::Equal, ProfileRelation::Different, ProfileRelation::InsideTolerance, ProfileRelation::OutsideTolerance);
+    const bool precise_z_height = GENERATE(false, true);
+    CAPTURE(static_cast<int>(relation), precise_z_height);
+
+    const DynamicPrintConfig config = custom_layer_validation_config(precise_z_height);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}},
+        {{"extruder", 2}},
+    };
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{make_cube(8., 8., 1.2), make_cube(8., 8., 1.2)},
+               print, model, config, &overrides);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->layer_height_profile.set(kLayerProfileA);
+    model.objects[1]->layer_height_profile.set(
+        relation == ProfileRelation::Equal ? kLayerProfileA :
+        relation == ProfileRelation::InsideTolerance ? kLayerProfileInside :
+        relation == ProfileRelation::OutsideTolerance ? kLayerProfileOutside : kLayerProfileB);
+    print.apply(model, config);
+
+    REQUIRE(print.extruders(true).size() == 2);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    CAPTURE(validation.string, validation.opt_key);
+    const size_t precise_warnings = std::count_if(warnings.begin(), warnings.end(), [](const StringObjectException &warning) {
+        return warning.opt_key == "precise_z_height";
+    });
+    CHECK(precise_warnings == (precise_z_height ? 1u : 0u));
+    if (relation == ProfileRelation::Different || relation == ProfileRelation::OutsideTolerance) {
+        REQUIRE(validation.string == "The prime tower is only supported if all objects have the same variable layer height.");
+        CHECK(validation.opt_key.empty());
+        CHECK_FALSE(validation.is_warning);
+        return;
+    }
+    if (relation == ProfileRelation::InsideTolerance) {
+        REQUIRE(validation.string.empty());
+        return;
+    }
+
+    REQUIRE(validation.string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() >= 2);
+    const PrintObject *first = print.get_object(0);
+    const PrintObject *second = print.get_object(1);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    const std::vector<double> first_zs = public_layer_zs(*first);
+    const std::vector<double> second_zs = public_layer_zs(*second);
+    REQUIRE_FALSE(first_zs.empty());
+    REQUIRE(first_zs.size() == second_zs.size());
+    CHECK(first_zs.back() > 1.0);
+    for (size_t i = 0; i < first_zs.size(); ++i)
+        CHECK_THAT(first_zs[i], Catch::Matchers::WithinAbs(second_zs[i], 1e-6));
+}
+
+} // namespace print_validation_followup_contracts
+
+TEST_CASE("Print validation distinguishes a last-layer overrun from a fitting height boundary",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct HeightCase {
+        double printable_height;
+        bool   expects_last_layer_error;
+    };
+    const HeightCase part = GENERATE(HeightCase{9.9, true}, HeightCase{10.0, false});
+    CAPTURE(part.printable_height, part.expects_last_layer_error);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_key_value("printable_height", new ConfigOptionFloat(part.printable_height));
+    Print print;
+    Model model;
+    init_print({cube(10.0)}, print, model, config);
+    REQUIRE(print.objects().size() == 1);
+
+    const StringObjectException error = print.validate();
+    if (!part.expects_last_layer_error) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+        return;
+    }
+
+    REQUIRE_FALSE(error.string.empty());
+    CHECK(error.string.find("its last layer exceeds the maximum build volume height.") != std::string::npos);
+    CHECK(error.object == print.objects().front()->model_object());
+    CHECK(error.opt_key.empty());
+    CHECK_FALSE(error.is_warning);
+}
+
+TEST_CASE("Print validation rejects spiral vase with two by-layer copies at the copy-count boundary",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    const size_t copies = GENERATE(size_t(1), size_t(2));
+    CAPTURE(copies);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"spiral_mode", true},
+        {"print_sequence", "by layer"},
+    });
+    Print print;
+    Model model;
+    init_print(std::vector<TriangleMesh>{cube(10.0)}, print, model, config, nullptr, true, copies);
+
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->instances().size() == copies);
+    const StringObjectException error = print.validate();
+    if (copies == 1) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+    } else {
+        CHECK(error.string == "Please select \"By object\" print sequence to print multiple objects in spiral vase mode.");
+        CHECK(error.opt_key == "spiral_mode");
+        CHECK(error.object == nullptr);
+        CHECK_FALSE(error.is_warning);
+    }
+}
+
+TEST_CASE("Print validation requires prime-tower objects to share their layer-height contract",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    const bool change_second_layer_height = GENERATE(false, true);
+    CAPTURE(change_second_layer_height);
+
+    const DynamicPrintConfig config = multifilament_config(2, {
+        {"enable_prime_tower", true},
+        {"belt_printer", false},
+        {"spiral_mode", false},
+        {"print_sequence", "by layer"},
+        {"timelapse_type", "0"},
+        {"enable_wrapping_detection", false},
+        {"wipe_tower_type", "type2"},
+        {"wipe_tower_wall_type", "rectangle"},
+        {"printable_area", "0x0,200x0,200x200,0x200"},
+        {"wipe_tower_x", 50.0},
+        {"wipe_tower_y", 50.0},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Model model;
+    Print print;
+    build_two_filament_wipe_print(config, model, print);
+    REQUIRE(print.objects().size() == 2);
+
+    if (change_second_layer_height)
+        model.objects[1]->config.set_key_value("layer_height", new ConfigOptionFloat(0.3));
+    print.apply(model, config);
+    REQUIRE(print.has_wipe_tower());
+
+    const StringObjectException error = print.validate();
+    if (!change_second_layer_height) {
+        CHECK(error.string.empty());
+        CHECK(error.opt_key.empty());
+        return;
+    }
+
+    CHECK(error.string == "A prime tower requires that all objects have the same layer height.");
+    CHECK(error.opt_key == "initial_layer_print_height");
+    CHECK(error.object == print.objects()[1]);
+    CHECK_FALSE(error.is_warning);
+}
+
+TEST_CASE("Print validation warns about unused support enforcers but ignores blockers and enabled support",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct EnforcerCase {
+        ModelVolumeType volume_type;
+        bool            support_enabled;
+        bool            expects_warning;
+    };
+    const EnforcerCase part = GENERATE(
+        EnforcerCase{ModelVolumeType::SUPPORT_ENFORCER, false, true},
+        EnforcerCase{ModelVolumeType::SUPPORT_ENFORCER, true, false},
+        EnforcerCase{ModelVolumeType::SUPPORT_BLOCKER, false, false});
+    CAPTURE(static_cast<int>(part.volume_type), part.support_enabled, part.expects_warning);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"enable_support", part.support_enabled},
+        {"support_type", "normal(auto)"},
+    });
+    Print print;
+    Model model;
+    init_print({cube(10.0)}, print, model, config);
+    ModelVolume *modifier = model.objects.front()->add_volume(cube(4.0), part.volume_type);
+    REQUIRE(modifier != nullptr);
+    print.apply(model, config);
+
+    REQUIRE(print.objects().size() == 1);
+    CHECK(print.objects().front()->has_support() == part.support_enabled);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException &entry) {
+        return entry.string.find("Support enforcers are used but support is not enabled.") != std::string::npos;
+    });
+    if (!part.expects_warning) {
+        CHECK(warning == warnings.end());
+        return;
+    }
+
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->opt_key.empty());
+    CHECK(warning->is_warning);
+    CHECK(warning->object == print.objects().front());
+}
+
+TEST_CASE("Print validation reports belt-only brim settings with stable warning keys",
+          "[Print][ValidationContracts][PrintValidationPublicBoundary]")
+{
+    struct BrimCase {
+        const char *name;
+        bool        belt_printer;
+        const char *brim_type;
+        double      belt_angle;
+        double      brim_width;
+        double      leading_brim_length;
+        double      brim_object_gap;
+        int         object_count;
+        const char *expected_key;
+        const char *expected_message;
+        bool        expected_model_object;
+    };
+    const BrimCase part = GENERATE(
+        BrimCase{"flat belt with outer brim", true, "outer_only", 0.0, 5.0, 0.0, 0.0, 1,
+                 "brim_type", "A brim is only generated when the belt is tilted", true},
+        BrimCase{"steep belt with outer brim", true, "outer_only", 90.0, 5.0, 0.0, 0.0, 1,
+                 "brim_width", "The belt is too steep for a brim", true},
+        BrimCase{"tilted belt with automatic brim", true, "auto_brim", 45.0, 5.0, 0.0, 0.0, 1,
+                 "brim_type", "Belt printers support outer and inner brim only", true},
+        BrimCase{"leading brim separated from the object", true, "outer_only", 45.0, 5.0, 10.0, 2.0, 1,
+                 "brim_object_gap", "Brim-object gap separates the leading brim", true},
+        BrimCase{"multiple belt objects with leading brim", true, "outer_only", 45.0, 0.0, 10.0, 0.0, 2,
+                 "leading_brim_length", "Arrange does not reserve that space", false},
+        BrimCase{"leading-edge-only brim on a fixed bed", false, "leading_edge_only", 0.0, 0.0, 0.0, 0.0, 1,
+                 "brim_type", "applies to belt printers", true},
+        BrimCase{"ordinary brim on a properly tilted belt", true, "outer_only", 45.0, 5.0, 0.0, 0.0, 1,
+                 "", "", false});
+    CAPTURE(part.name, part.belt_printer, part.brim_type, part.belt_angle,
+            part.brim_width, part.leading_brim_length, part.brim_object_gap, part.object_count);
+
+    DynamicPrintConfig config = validation_contract_config();
+    config.set_deserialize_strict({
+        {"belt_printer", part.belt_printer},
+        {"belt_slice_rotation", "x"},
+        {"belt_slice_rotation_angle", part.belt_angle},
+        {"brim_type", part.brim_type},
+        {"brim_width", part.brim_width},
+        {"leading_brim_length", part.leading_brim_length},
+        {"brim_object_gap", part.brim_object_gap},
+    });
+
+    Print print;
+    Model model;
+    build_cubes(model, print, config, part.object_count, false);
+    REQUIRE(print.objects().size() == size_t(part.object_count));
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    REQUIRE(error.string.empty());
+
+    if (part.expected_key[0] == '\0') {
+        CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &warning) {
+            return warning.opt_key == "brim_type" || warning.opt_key == "brim_width" ||
+                   warning.opt_key == "brim_object_gap" || warning.opt_key == "leading_brim_length";
+        }));
+        return;
+    }
+
+    const auto warning = std::find_if(warnings.begin(), warnings.end(), [&part](const StringObjectException &entry) {
+        return entry.opt_key == part.expected_key;
+    });
+    REQUIRE(warning != warnings.end());
+    CHECK(warning->is_warning);
+    CHECK(warning->string.find(part.expected_message) != std::string::npos);
+    CHECK((warning->object != nullptr) == part.expected_model_object);
+    if (part.expected_model_object)
+        CHECK(warning->object == print.objects().front()->model_object());
 }
