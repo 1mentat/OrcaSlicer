@@ -19,6 +19,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 import tempfile
 import time
 import uuid
@@ -125,13 +126,18 @@ def _write(path, value, limit=METADATA_LIMIT):
 
 
 @contextlib.contextmanager
-def _locked(root):
+def _locked(root, operation='internal'):
+    if operation not in ('init', 'create', 'check', 'renew', 'finish', 'promote', 'sweep'):
+        operation = 'internal'
     path = _root(root)
     info = _plain(path / '.lock')
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != 1:
         raise ArtifactError('Unsafe root lock')
     fd = os.open(path / '.lock', os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0))
     acquired = False
+    acquired_at = None
+    completed = False
+    started = time.monotonic()
     try:
         opened = os.fstat(fd)
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
@@ -146,6 +152,7 @@ def _locked(root):
                     import fcntl
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
+                acquired_at = time.monotonic()
             except (BlockingIOError, OSError):
                 if time.monotonic() >= until:
                     raise ArtifactError('Root lock timed out') from None
@@ -159,6 +166,7 @@ def _locked(root):
             raise ArtifactError('Unmanaged root content')
         _plain(path / 'runs', directory=True)
         yield path, meta
+        completed = True
     finally:
         try:
             if acquired:
@@ -170,6 +178,19 @@ def _locked(root):
                     fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+            ended = time.monotonic()
+            waited = (acquired_at if acquired_at is not None else ended) - started
+            held = ended - acquired_at if acquired_at is not None else 0
+            if waited >= 1 or held >= 1:
+                # One bounded slow-operation record, after releasing the lock.
+                # No paths, capabilities, work-item contents or exception text.
+                diagnostic = {'schema': 'validation-lock-timing-v1', 'operation': operation,
+                              'wait_ms': round(waited * 1000), 'hold_ms': round(held * 1000),
+                              'outcome': 'ok' if completed else 'error'}
+                try:
+                    sys.stderr.write(json.dumps(diagnostic, sort_keys=True) + '\n')
+                except (OSError, ValueError):
+                    pass  # Diagnostic delivery must not change transaction results.
 
 
 def init(root, budget_bytes):
@@ -179,7 +200,7 @@ def init(root, budget_bytes):
         raise ArtifactError('Root budget cannot cover metadata')
     path = _root(root)
     if path.exists() and any(path.iterdir()):
-        with _locked(path) as (_, meta):
+        with _locked(path, 'init') as (_, meta):
             if meta['total_budget_bytes'] != budget_bytes:
                 raise ArtifactError('Existing root budget differs')
             return dict(meta)
@@ -229,7 +250,7 @@ def _inventory(path, rootmeta):
     return records, stages
 
 
-def _size(path, *, payloads=(), _transient=False):
+def _size(path, *, payloads=(), _transient=False, _observed=None):
     # Producers may remove build intermediates during accounting. Only descendants
     # of validated payload roots may disappear; manager metadata remains strict.
     try:
@@ -255,11 +276,13 @@ def _size(path, *, payloads=(), _transient=False):
             if stat.S_ISLNK(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400:
                 total += value.st_size  # Never traverse payload links.
             elif stat.S_ISDIR(value.st_mode):
-                total += _size(Path(entry.path), payloads=payloads, _transient=mutable_children)
+                total += _size(Path(entry.path), payloads=payloads, _transient=mutable_children, _observed=_observed)
             elif stat.S_ISREG(value.st_mode):
                 total += value.st_size
             else:
                 raise ArtifactError('Unsupported payload file')
+    if _observed is not None and path in payloads:
+        _observed[path] = total
     return total
 
 
@@ -290,12 +313,15 @@ def _get(path, rootmeta, run_id, token):
     return directory, meta
 
 
-def _live(directory, meta):
+def _live(directory, meta, *, size=None):
     now = time.time()
     if meta['state'] != 'active' or now >= min(_seconds(meta['expires_at']), _seconds(meta['lease_expires_at'])):
         raise ArtifactError('Run lease or absolute TTL expired')
     _plain(directory / 'payload', directory=True)
-    size = _size(directory / 'payload', payloads=(directory / 'payload',))
+    if size is None:
+        size = _size(directory / 'payload', payloads=(directory / 'payload',))
+    if size < 0:
+        raise ArtifactError('Payload absent from root accounting')
     if size > meta['size_budget_bytes']:
         raise ArtifactError('Run size budget exceeded')
     return size
@@ -312,7 +338,7 @@ def _metadata_temps(path, records):
     return result
 
 
-def _admit(path, rootmeta, budget, new_record=True):
+def _admit(path, rootmeta, budget, new_record=True, *, payload_sizes=None):
     records, stages = _inventory(path, rootmeta)
     if stages or _metadata_temps(path, records):
         raise ArtifactError('Interrupted manager transaction; sweep first')
@@ -322,13 +348,13 @@ def _admit(path, rootmeta, budget, new_record=True):
         reserved += RUN_METADATA_RESERVE
     if reserved + budget > rootmeta['total_budget_bytes']:
         raise ArtifactError('Root reservation budget exceeded')
-    _root_size(path, rootmeta)
+    _root_size(path, rootmeta, payload_sizes=payload_sizes)
 
 
-def _root_size(path, rootmeta):
+def _root_size(path, rootmeta, *, payload_sizes=None):
     records, stages = _inventory(path, rootmeta)
     payloads = tuple(d / 'payload' for d in (*stages, *(d for d, _ in records)))
-    size = _size(path, payloads=payloads)
+    size = _size(path, payloads=payloads, _observed=payload_sizes)
     if size > rootmeta['total_budget_bytes']:
         raise ArtifactError('Root actual size budget exceeded')
     return size
@@ -354,7 +380,7 @@ def create(root, work_item, source_sha, owner, ttl_seconds, budget_bytes, lease_
     if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', source_sha):
         raise ArtifactError('Source SHA must be full 40 hexadecimal characters')
     _positive(ttl_seconds, 'TTL', MAX_TTL); _positive(budget_bytes, 'run budget'); _positive(lease_seconds, 'lease', MAX_LEASE)
-    with _locked(root) as (path, meta):
+    with _locked(root, 'create') as (path, meta):
         _admit(path, meta, budget_bytes); token = secrets.token_urlsafe(32)
         stage, run = _new(path, meta, work_item, source_sha, owner, ttl_seconds, budget_bytes, lease_seconds, token, 'active')
         directory = stage.with_name(run['run_id']); stage.rename(directory)
@@ -362,17 +388,21 @@ def create(root, work_item, source_sha, owner, ttl_seconds, budget_bytes, lease_
 
 
 def check(root, run_id, token):
-    with _locked(root) as (path, meta):
+    with _locked(root, 'check') as (path, meta):
         directory, run = _get(path, meta, run_id, token)
-        size = _live(directory, run); _root_size(path, meta)
+        sizes = {}
+        _root_size(path, meta, payload_sizes=sizes)
+        size = _live(directory, run, size=sizes.get(directory / 'payload', -1))
         return _receipt(directory, run) | {'actual_bytes': size}
 
 
 def renew(root, run_id, token, lease_seconds=MAX_LEASE):
     _positive(lease_seconds, 'lease', MAX_LEASE)
-    with _locked(root) as (path, meta):
-        directory, run = _get(path, meta, run_id, token); size = _live(directory, run)
-        _admit(path, meta, 0, new_record=False)
+    with _locked(root, 'renew') as (path, meta):
+        directory, run = _get(path, meta, run_id, token)
+        sizes = {}
+        _admit(path, meta, 0, new_record=False, payload_sizes=sizes)
+        size = _live(directory, run, size=sizes.get(directory / 'payload', -1))
         run['lease_expires_at'] = _stamp(min(time.time() + lease_seconds, _seconds(run['expires_at'])))
         _write(directory / 'run.json', run)
         return _receipt(directory, run) | {'actual_bytes': size}
@@ -381,7 +411,7 @@ def renew(root, run_id, token, lease_seconds=MAX_LEASE):
 def finish(root, run_id, token, outcome):
     if outcome not in ('completed', 'failed', 'interrupted'):
         raise ArtifactError('Invalid terminal outcome')
-    with _locked(root) as (path, meta):
+    with _locked(root, 'finish') as (path, meta):
         directory, run = _get(path, meta, run_id, token)
         if run['state'] == 'retained':
             raise ArtifactError('Cannot finish a retained promotion')
@@ -469,7 +499,7 @@ def _open_selected(payload, relative, identity, canonical):
 
 def promote(root, run_id, token, owner, ttl_seconds, budget_bytes, paths):
     _text(owner, 'retention owner'); _positive(ttl_seconds, 'retention TTL', MAX_TTL); _positive(budget_bytes, 'retention budget')
-    with _locked(root) as (path, meta):
+    with _locked(root, 'promote') as (path, meta):
         directory, run = _get(path, meta, run_id, token); _live(directory, run)
         payload = directory / 'payload'
         identity = _payload_identity(payload); canonical = payload.resolve(strict=True)
@@ -504,7 +534,7 @@ def promote(root, run_id, token, owner, ttl_seconds, budget_bytes, paths):
 
 
 def sweep(root, dry_run=False, *, expected_root_id=None):
-    with _locked(root) as (path, meta):
+    with _locked(root, 'sweep') as (path, meta):
         if expected_root_id is not None and meta['root_id'] != expected_root_id:
             raise ArtifactError('Managed root identity changed')
         records, stages = _inventory(path, meta); now = time.time(); deleted = []; reclaimed = 0

@@ -527,5 +527,73 @@ class Artifacts(unittest.TestCase):
         self.assertIn('error', json.loads(output.getvalue()))
 
 
+    def test_check_and_renew_walk_each_payload_once_per_call(self):
+        first = self.create()
+        second = self.create()
+        for run, data in ((first, b'abc'), (second, b'other')):
+            Path(run['payload_dir'], 'stable').write_bytes(data)
+        scandir = a.os.scandir
+        for operation in (a.check, a.renew):
+            with self.subTest(operation=operation.__name__):
+                visits = []
+                def scan(path):
+                    if not isinstance(path, int):
+                        visits.append(Path(path))
+                    return scandir(path)
+                with patch.object(a.os, 'scandir', side_effect=scan):
+                    self.assertEqual(self.call(operation, first)['actual_bytes'], 3)
+                for run in (first, second):
+                    self.assertEqual(visits.count(Path(run['payload_dir'])), 1)
+        Path(first['payload_dir'], 'stable').write_bytes(b'changed')
+        self.assertEqual(self.call(a.check, first)['actual_bytes'], 7)
+
+    def test_expiry_during_accounting_cannot_return_or_renew(self):
+        for operation in (a.check, a.renew):
+            for expiry in ('lease', 'absolute'):
+                with self.subTest(operation=operation.__name__, expiry=expiry):
+                    run = self.create(ttl=2 if expiry == 'absolute' else 120,
+                                      lease=60 if expiry == 'absolute' else 2)
+                    payload = Path(run['payload_dir'])
+                    Path(payload, 'stable').write_bytes(b'abc')
+                    record = payload.parent / 'run.json'
+                    before = record.read_bytes()
+                    clock = [time.time()]
+                    original = a._size
+                    def size(path, **kwargs):
+                        result = original(path, **kwargs)
+                        if Path(path) == payload:
+                            clock[0] += 3
+                        return result
+                    with patch.object(a.time, 'time', side_effect=lambda: clock[0]), patch.object(a, '_size', side_effect=size):
+                        with self.assertRaisesRegex(a.ArtifactError, 'expired'):
+                            self.call(operation, run)
+                    self.assertEqual(record.read_bytes(), before)
+                    self.call(a.finish, run, 'failed')
+
+
+
+    def test_slow_lock_diagnostic_is_bounded_and_redacted(self):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), patch.object(a.time, 'monotonic', side_effect=[0, 0, 2, 4]):
+            with a._locked(self.root, 'SECRET-CAPABILITY'):
+                pass
+        value = json.loads(output.getvalue())
+        self.assertEqual(value, {'schema': 'validation-lock-timing-v1', 'operation': 'internal',
+                                 'wait_ms': 2000, 'hold_ms': 2000, 'outcome': 'ok'})
+        self.assertLess(len(output.getvalue()), 512)
+        self.assertNotIn(str(self.root), output.getvalue())
+        self.assertNotIn('SECRET', output.getvalue())
+        self.assertTrue(self.create())
+
+    def test_timing_delivery_failure_does_not_hold_lock_or_fail_transaction(self):
+        class BrokenStream:
+            def write(self, content):
+                raise OSError('fixture closed output')
+        with patch.object(a.sys, 'stderr', BrokenStream()), patch.object(a.time, 'monotonic', side_effect=[0, 0, 2, 4]):
+            with a._locked(self.root, 'check'):
+                pass
+        self.assertTrue(self.create())
+
+
 if __name__ == '__main__':
     unittest.main()
