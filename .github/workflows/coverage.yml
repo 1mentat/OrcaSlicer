@@ -136,7 +136,7 @@ jobs:
           fi
           python3 scripts/coverage_report.py --report "$raw" --root . --out coverage-output/site \
             --commit "$SOURCE_COMMIT" --repository "$SOURCE_REPOSITORY" --run-url "$RUN_URL" \
-            --branch "$SOURCE_BRANCH" --configuration 'linux-clang18-release-core-cad-v1' "${previous[@]}"
+            --branch "$SOURCE_BRANCH" --configuration 'linux-clang18-release-core-cad-v2-nopch' "${previous[@]}"
           cat coverage-output/site/summary.md >> "$GITHUB_STEP_SUMMARY"
           valid=$(python3 -c 'import json; print(str(json.load(open("coverage-output/site/summary.json"))["valid"]).lower())')
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
