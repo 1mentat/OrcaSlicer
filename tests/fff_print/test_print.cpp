@@ -4024,7 +4024,7 @@ ExPolygon svg_rectangle_with_hole_mm(double min_x, double min_y, double max_x, d
                                      double hole_max_x, double hole_max_y)
 {
     ExPolygon shape = svg_rectangle_mm(min_x, min_y, max_x, max_y);
-    Polygon hole;
+    Slic3r::Polygon hole;
     hole.points = { Point::new_scale(hole_min_x, hole_min_y), Point::new_scale(hole_min_x, hole_max_y),
                     Point::new_scale(hole_max_x, hole_max_y), Point::new_scale(hole_max_x, hole_min_y) };
     shape.holes.emplace_back(std::move(hole));
@@ -4257,7 +4257,7 @@ TEST_CASE("Compacted prime tower clearance aggregates pre-slice offenders", "[Pr
     REQUIRE(first_instance != nullptr);
 
     Polygons collision_polygons;
-    std::vector<std::pair<Polygon, float>> height_polygons;
+    std::vector<std::pair<Slic3r::Polygon, float>> height_polygons;
     const StringObjectException error = Print::compacted_wipe_tower_clearance_valid(
         print, &collision_polygons, &height_polygons);
     const int expected_offenders = check_enabled ? rod_band_offenders : 0;
@@ -4283,7 +4283,7 @@ TEST_CASE("Compacted prime tower clearance aggregates pre-slice offenders", "[Pr
         REQUIRE(entry.first.points.size() >= 3);
         CHECK(std::abs(entry.first.area()) > 0);
     }
-    for (const Polygon &polygon : collision_polygons) {
+    for (const Slic3r::Polygon &polygon : collision_polygons) {
         REQUIRE(polygon.points.size() >= 3);
         CHECK(std::abs(polygon.area()) > 0);
     }
