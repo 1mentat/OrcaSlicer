@@ -155,44 +155,154 @@ def process_info(pid):
             'birth': ' '.join(parts[3:8]), 'state': parts[8]}
 
 
-def cleanup_inferior(info, debugger_pid):
-    """Signal only a matching generation still descended from our owned group."""
-    if info is None:
-        return {'drained': False, 'reason': 'no_inferior_record_cleanup_unproved'}
-    assert info['debugger_pid'] == debugger_pid
-    pid = info['pid']
-    assert type(pid) is int and pid > 1 and pid != debugger_pid
-    current = process_info(pid)
-    if current is None or current['state'].startswith('Z'):
-        return {'drained': True, 'reason': 'absent_or_zombie'}
-    if 'identity' not in info:
-        return {'drained': False, 'reason': 'incomplete_launch_identity'}
-    if current['birth'] != info['identity']['birth']:
-        return {'drained': True, 'reason': 'original_generation_gone_no_signal'}
-    ancestor = current
-    for _ in range(8):
-        if ancestor['pgid'] == debugger_pid:
-            break
-        if ancestor['ppid'] <= 1:
-            return {'drained': False, 'reason': 'owned_ancestry_unproved_no_signal'}
-        ancestor = process_info(ancestor['ppid'])
-        if ancestor is None:
-            return {'drained': False, 'reason': 'owned_ancestry_vanished_no_signal'}
-    else:
-        return {'drained': False, 'reason': 'owned_ancestry_bound_no_signal'}
-    if current['pgid'] != pid:
-        return {'drained': False, 'reason': 'unexpected_inferior_group_no_signal'}
+def observe_children(root, known, deadline, freeze=False):
+    """Only query numeric direct children of this unreaped supervisor tree."""
+    parents = [(root, 0)]
+    for _ in range(4):
+        following = []
+        for parent, depth in parents:
+            current = process_info(parent['pid'])
+            if current is None or current['birth'] != parent['birth']:
+                continue
+            if freeze and not current['state'].startswith('Z'):
+                # Freeze top-down before discovery: a stopped parent cannot
+                # spawn/reap children during the final ownership snapshot.
+                os.kill(parent['pid'], signal.SIGSTOP)
+                stop_deadline = min(deadline, time.monotonic() + 1)
+                while True:
+                    stopped = process_info(parent['pid'])
+                    if stopped is None:
+                        break
+                    assert stopped['birth'] == parent['birth']
+                    if stopped['state'].startswith(('T', 'Z')):
+                        break
+                    if time.monotonic() >= stop_deadline:
+                        raise TimeoutError('Owned parent did not stop')
+                    time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Owned observation deadline')
+            result = subprocess.run(['/usr/bin/pgrep', '-P', str(parent['pid'])],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=runtime_env(),
+                timeout=min(2, remaining))
+            assert result.returncode in (0, 1)
+            for value in result.stdout.decode().split():
+                assert value.isdecimal()
+                child = process_info(int(value))
+                if child is None or child['ppid'] != parent['pid']:
+                    continue
+                child.update({'parent_birth': parent['birth'], 'depth': depth + 1})
+                known[str(child['pid'])] = child
+                assert len(known) <= 16, 'Owned process bound'
+                following.append((child, depth + 1))
+        parents = following
+    assert not parents, 'Owned process depth bound'
+
+
+def drain_children(root, known):
+    records = []
+    for saved in sorted(known.values(), key=lambda x: x['depth'], reverse=True):
+        result = {'pid': saved['pid'], 'drained': False}
+        try:
+            current = process_info(saved['pid'])
+            if current is None or current['state'].startswith('Z') or current['birth'] != saved['birth']:
+                result.update(drained=True, reason='original_generation_inactive_no_signal')
+            else:
+                parent = process_info(saved['ppid'])
+                if current['ppid'] != saved['ppid'] or parent is None or parent['birth'] != saved['parent_birth']:
+                    result['reason'] = 'current_owned_lineage_unproved_no_signal'
+                else:
+                    try:
+                        os.kill(saved['pid'], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    end = time.monotonic() + 5
+                    while time.monotonic() < end:
+                        state = process_info(saved['pid'])
+                        if state is None or state['state'].startswith('Z') or state['birth'] != saved['birth']:
+                            result.update(drained=True, reason='owned_child_killed_and_inactive')
+                            break
+                        time.sleep(0.1)
+                    if not result['drained']:
+                        result['reason'] = 'owned_child_not_drained'
+        except Exception as error:
+            result.update(reason='owned_child_cleanup_exception', exception_type=type(error).__name__)
+        records.append(result)
+    current_root = process_info(root['pid'])
+    # Popen has NOT been polled/waited/reaped: the root PID cannot be reused.
+    root_valid = current_root is not None and current_root['birth'] == root['birth'] and current_root['pgid'] == root['pid']
+    if root_valid:
+        try:
+            os.killpg(root['pid'], signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return {'drained': root_valid and all(x['drained'] for x in records),
+            'root_generation_verified_before_signal': root_valid, 'children': records}
+
+
+def supervise(child):
+    root = process_info(child.pid)
+    assert root is not None and root['pgid'] == child.pid
+    known = {}
+    timed_out = False
+    observation_error = None
+    deadline = time.monotonic() + DEADLINE_SECONDS
     try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        state = process_info(pid)
-        if state is None or state['state'].startswith('Z') or state['birth'] != current['birth']:
-            return {'drained': True, 'reason': 'owned_group_killed_and_drained'}
-        time.sleep(0.1)
-    return {'drained': False, 'reason': 'owned_inferior_not_drained'}
+        while True:
+            observe_children(root, known, deadline)
+            write_json(OUT / 'owned-processes.json', {'root': root, 'children': known})
+            state = process_info(child.pid)
+            assert state is not None and state['birth'] == root['birth']
+            if state['state'].startswith('Z'):
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.25)
+    except TimeoutError:
+        timed_out = True
+    except Exception as error:
+        observation_error = type(error).__name__
+    finally:
+        # Observe/drain before reaping; this includes children created while
+        # SBTarget.Launch is blocked and before inferior.json can exist.
+        discovery_error = None
+        try:
+            observe_children(root, known, time.monotonic() + 15, freeze=True)
+        except Exception as error:
+            discovery_error = type(error).__name__
+        try:
+            cleanup = drain_children(root, known)
+        except Exception as error:
+            cleanup = {'drained': False, 'reason': 'owned_cleanup_exception',
+                       'exception_type': type(error).__name__}
+        if discovery_error is not None:
+            cleanup.update(drained=False, discovery_error=discovery_error)
+        phase_path = OUT / 'debugger-phase.json'
+        phase = json.loads(phase_path.read_text()).get('phase') if phase_path.exists() else None
+        if phase == 'launch_requested' and not known and not (OUT / 'inferior.json').exists():
+            cleanup.update(drained=False, reason='launch_ownership_not_observed')
+        write_json(OUT / 'owned-cleanup.json', cleanup)
+        child.wait(timeout=10)  # First and only wait/reap; no later PID signals.
+    return timed_out, observation_error, cleanup
+
+
+def select_fault_thread(process, record, lldb):
+    rows = record['threads']
+    priority = [x for x in rows if x['reason'] == lldb.eStopReasonSignal and x['data'] and
+                x['data'][0] == process.GetUnixSignals().GetSignalNumberFromName('SIGILL')]
+    priority += [x for x in rows if x['reason'] == lldb.eStopReasonException and
+                 re.search(r'\bEXC_BAD_INSTRUCTION\b', x['description'])]
+    priority += [x for x in rows if x['reason'] not in (lldb.eStopReasonNone, lldb.eStopReasonInvalid)]
+    assert priority, 'No identified stopped thread'
+    selected = priority[0]
+    thread = process.GetThreadByID(selected['thread_id'])
+    assert thread.IsValid() and process.SetSelectedThread(thread)
+    assert process.GetSelectedThread().GetThreadID() == selected['thread_id']
+    frame = thread.GetFrameAtIndex(0)
+    assert frame.IsValid()
+    return {**selected, 'index_id': thread.GetIndexID(), 'pc': hex(frame.GetPC()),
+            'module_uuid': frame.GetModule().GetUUIDString()}
 
 
 def entry_stop(process, lldb):
@@ -207,7 +317,8 @@ def entry_stop(process, lldb):
         if reason == lldb.eStopReasonSignal:
             if thread.GetStopReasonDataCount() != 1 or thread.GetStopReasonDataAtIndex(0) not in allowed_signals:
                 return False
-        elif reason not in (lldb.eStopReasonTrace, lldb.eStopReasonPlanComplete, lldb.eStopReasonBreakpoint):
+        elif reason not in (lldb.eStopReasonTrace, lldb.eStopReasonPlanComplete,
+                            lldb.eStopReasonBreakpoint, lldb.eStopReasonExec):
             return False
     return found
 
@@ -236,18 +347,22 @@ def debug():
         assert launch.AddOpenFileAction(1, str((OUT / 'native.stdout').resolve()), False, True)
         assert launch.AddOpenFileAction(2, str((OUT / 'native.stderr').resolve()), False, True)
         error = lldb.SBError()
+        write_json(OUT / 'debugger-phase.json', {'phase': 'launch_requested'})
         process = target.Launch(launch, error)
-        assert error.Success() and process.IsValid(), 'Owned debugger launch failed'
+        assert process.IsValid(), 'No owned process from debugger launch'
         info = {'pid': process.GetProcessID(), 'debugger_pid': os.getpid()}
         write_json(OUT / 'inferior.json', info)  # Prompt ownership record, even if the next query fails.
+        launch_state = classify(process, lldb)
+        write_json(OUT / 'launch-state.json', launch_state or {'state': process.GetState()})
         info['identity'] = process_info(process.GetProcessID())
         assert info['identity'] is not None
         write_json(OUT / 'inferior.json', info)
         # Explicit separate group permits the outer timeout guard to clear only
         # this recorded inferior group if LLDB itself becomes unresponsive.
         assert os.getpgid(process.GetProcessID()) == process.GetProcessID(), 'Unexpected inferior process group'
-        assert process.GetState() == lldb.eStateStopped, 'No initial entry stop'
-        if not entry_stop(process, lldb):
+        initial_state = process.GetState()
+        assert initial_state in (lldb.eStateStopped, lldb.eStateCrashed, lldb.eStateExited), 'No initial inspectable state'
+        if initial_state != lldb.eStateStopped or not entry_stop(process, lldb):
             record = classify(process, lldb)
             assert record is not None
             record['stopped_during_launch'] = True
@@ -269,7 +384,10 @@ def debug():
             assert process.Continue().Success()
             record = classify(process, lldb, entry_stop_id)
             assert record is not None, 'Debugger returned a stale entry/running state'
+        record['launch_error_success'] = error.Success()
         if record['kind'] in ('SIGILL_stop', 'Mach_BAD_INSTRUCTION_stop', 'other_stop'):
+            write_json(OUT / 'observed-stop.json', record)  # Preserve raw stop before context APIs.
+            record['selected_fault_thread'] = select_fault_thread(process, record, lldb)
             record['context_commands'] = []
             with (OUT / 'stop-context.txt').open('w') as log:
                 for command in ('process status', 'thread backtrace all', 'register read',
@@ -282,7 +400,9 @@ def debug():
         if record['kind'] == 'native_exit':
             record['native_exit_status'] = record['exit_status']
     except Exception as error:
-        record = {'kind': 'debugger_startup_or_control_failure', 'phase': phase, 'exception_type': type(error).__name__}
+        observed = record if isinstance(record, dict) and record.get('threads') else None
+        record = {'kind': 'debugger_startup_or_control_failure', 'phase': phase,
+                  'exception_type': type(error).__name__, 'observed_stop': observed}
     finally:
         if process is not None and process.IsValid() and process.GetState() not in (lldb.eStateExited, lldb.eStateDetached):
             killed = process.Destroy()
@@ -335,37 +455,19 @@ def run():
     script = shlex.quote(str(Path(__file__).resolve()))
     command = ['/usr/bin/xcrun', 'lldb', '--batch', '--no-lldbinit', '-o', 'command script import ' + script,
                '-o', 'script cgal_artifact_diagnostic.debug()']
-    timed_out = False
     with (OUT / 'lldb.log').open('wb') as log:
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                  env=env, start_new_session=True)
-        try:
-            child.wait(timeout=DEADLINE_SECONDS)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            info_path = OUT / 'inferior.json'
-            try:
-                info = json.loads(info_path.read_text()) if info_path.exists() else None
-                cleanup = cleanup_inferior(info, child.pid)
-            except Exception as error:
-                cleanup = {'drained': False, 'reason': 'cleanup_exception',
-                           'exception_type': type(error).__name__}
-            # Clear only the supervisor's own session/group after checking inferior.
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait(timeout=10)
+        timed_out, observation_error, cleanup = supervise(child)
     result_path = OUT / 'debugger-result.json'
     result = json.loads(result_path.read_text()) if result_path.exists() else {'kind': 'debugger_failed_without_result'}
     write_json(OUT / 'result.json', {'debugger': result, 'supervisor_timeout': timed_out,
-               'debugger_rc': child.returncode, 'owned_cleanup': cleanup, 'binary_sha256_before': binary_hash,
+               'debugger_rc': child.returncode, 'observation_error': observation_error, 'owned_cleanup': cleanup, 'binary_sha256_before': binary_hash,
                'binary_sha256_after': digest(binary), 'archive_sha256': digest(archive),
                'case': CASE, 'seed': SEED, 'requested_selected_case_launches': 1, 'listing_invocations': 1,
                'fixture_or_binary_modified': False, 'diagnostic_only_not_product_acceptance': True})
     assert digest(binary) == binary_hash
-    assert cleanup['drained']
+    assert cleanup['drained'] and observation_error is None
     assert not timed_out and child.returncode == 0
     assert result['kind'] in ('native_exit', 'SIGILL_stop', 'Mach_BAD_INSTRUCTION_stop', 'other_stop')
     assert result.get('owned_inferior_kill_success', True)
