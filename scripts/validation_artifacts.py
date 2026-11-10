@@ -189,7 +189,7 @@ def _locked(root, operation='internal'):
                               'outcome': 'ok' if completed else 'error'}
                 try:
                     sys.stderr.write(json.dumps(diagnostic, sort_keys=True) + '\n')
-                except (OSError, ValueError):
+                except (AttributeError, OSError, ValueError):
                     pass  # Diagnostic delivery must not change transaction results.
 
 

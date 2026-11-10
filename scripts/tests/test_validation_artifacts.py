@@ -595,5 +595,13 @@ class Artifacts(unittest.TestCase):
         self.assertTrue(self.create())
 
 
+
+    def test_timing_without_stderr_does_not_fail_successful_transaction(self):
+        with patch.object(a.sys, 'stderr', None), patch.object(a.time, 'monotonic', side_effect=[0, 0, 2, 4]):
+            with a._locked(self.root, 'check'):
+                pass
+        self.assertTrue(self.create())
+
+
 if __name__ == '__main__':
     unittest.main()
