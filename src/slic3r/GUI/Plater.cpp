@@ -7048,7 +7048,9 @@ void Sidebar::auto_calc_flushing_volumes_internal(const int modify_id, const int
     auto& ams_multi_color_filament = preset_bundle->ams_multi_color_filment;
     size_t extruder_nums = preset_bundle->get_printer_extruder_count();
     int nozzle_flush_dataset = full_config.option<ConfigOptionIntsNullable>("nozzle_flush_dataset")->values[extruder_id];
-    std::vector<double> init_matrix = get_flush_volumes_matrix((project_config.option<ConfigOptionFloats>("flush_volumes_matrix"))->values, extruder_id, extruder_nums);
+    auto &raw_matrix = project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+    const size_t filament_count = project_config.option<ConfigOptionStrings>("filament_colour")->values.size();
+    std::vector<double> init_matrix = get_flush_volumes_matrix(raw_matrix, extruder_id, extruder_nums, filament_count);
 
     const std::vector<int>& min_flush_volumes = get_min_flush_volumes(full_config, extruder_id);
 
@@ -7135,7 +7137,21 @@ void Sidebar::auto_calc_flushing_volumes_internal(const int modify_id, const int
             }
         }
     }
-    set_flush_volumes_matrix((project_config.option<ConfigOptionFloats>("flush_volumes_matrix"))->values, matrix, extruder_id, extruder_nums);
+    // The setter writes into an expanded per-nozzle layout. Preserve every legacy
+    // block before applying the requested nozzle's edits.
+    if (extruder_nums > 1 && filament_count != 0 && raw_matrix.size() % filament_count == 0 &&
+        raw_matrix.size() / filament_count == filament_count) {
+        if (raw_matrix.size() > raw_matrix.max_size() / extruder_nums) {
+            BOOST_LOG_TRIVIAL(error) << "Cannot expand legacy flushing volumes: matrix is too large.";
+            return;
+        }
+        std::vector<double> expanded;
+        expanded.reserve(raw_matrix.size() * extruder_nums);
+        for (size_t i = 0; i < extruder_nums; ++i)
+            expanded.insert(expanded.end(), raw_matrix.begin(), raw_matrix.end());
+        raw_matrix.swap(expanded);
+    }
+    set_flush_volumes_matrix(raw_matrix, matrix, extruder_id, extruder_nums);
 }
 
 void Sidebar::jump_to_object(ObjectDataViewModelNode* item)

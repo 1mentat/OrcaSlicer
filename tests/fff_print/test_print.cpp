@@ -1,3 +1,18 @@
+#include <stdexcept>
+#include "libslic3r/GCode/ThumbnailData.hpp"
+#include <boost/filesystem/path.hpp>
+#include <nlohmann/json.hpp>
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/operations.hpp>
+#include "libslic3r/Circle.hpp"
+#include "libslic3r/ArcFitter.hpp"
+#include <functional>
+#include <initializer_list>
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Utils.hpp"
+#include <ios>
 #ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -593,7 +608,7 @@ TEST_CASE("G-code lists the resolved extrusion-width settings", "[Print]")
 
 // gcode_skip_config_block suppresses the resolved-settings block while leaving the
 // header and executable blocks intact.
-TEST_CASE("gcode_skip_config_block omits the resolved-settings comment block", "[Print]")
+TEST_CASE("gcode_skip_config_block omits the resolved-settings comment block", "[Print][ConfigBlock]")
 {
     const std::string gcode = slice({ cube(20) }, {
         { "gcode_skip_config_block", true },
@@ -1626,4 +1641,1159 @@ TEST_CASE("Prime Tower generation rejects an explicit empty shared printable reg
         CHECK(print.wipe_tower_data().tool_ordering.has_wipe_tower());
         CHECK_FALSE(print.wipe_tower_data().tool_changes.empty());
     }
+}
+
+
+namespace print_workflow_contracts {
+namespace {
+
+DynamicPrintConfig pipeline_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 2},
+        {"top_shell_layers", 2},
+        {"bottom_shell_layers", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"sparse_infill_density", "15%"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"before_layer_change_gcode", ""},
+        {"gcode_comments", true},
+    });
+    return config;
+}
+
+void require_valid(const Print &print)
+{
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+}
+
+void init_valid(std::initializer_list<TriangleMesh> meshes, Print &print, Model &model,
+                const DynamicPrintConfig &config, bool arrange = true, size_t instances = 1)
+{
+    if (instances == 1 && arrange) {
+        init_print(meshes, print, model, config);
+    } else {
+        init_print(std::vector<TriangleMesh>(meshes), print, model, config, nullptr, arrange, instances);
+    }
+    require_valid(print);
+}
+
+double layer_slice_area(const PrintObject &object, size_t index)
+{
+    double area = 0.0;
+    for (const ExPolygon &slice : object.get_layer(static_cast<int>(index))->lslices)
+        // ExPolygon::area() is in scaled-coordinate squared units.
+        area += slice.area() * SCALING_FACTOR * SCALING_FACTOR;
+    return area;
+}
+
+size_t perimeter_items(const PrintObject &object, size_t layer)
+{
+    size_t items = 0;
+    for (const LayerRegion *region : object.get_layer(static_cast<int>(layer))->regions())
+        items += region->perimeters.items_count();
+    return items;
+}
+
+} // namespace
+} // namespace print_workflow_contracts
+
+
+namespace print_workflow_contracts {
+
+TEST_CASE("Cache export persists layer geometry and rejects a missing directory", "[Print][PrintPipelineWorkflows]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(16.0)}, print, model, pipeline_config());
+    print.process();
+    const PrintObject &before_object = *print.objects().front();
+    REQUIRE(before_object.layer_count() > 2);
+    const size_t layer_count = before_object.layer_count();
+    const size_t first_perimeters = perimeter_items(before_object, 0);
+
+    ScopedTemporaryDir cache("orca-print-cache");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    std::ifstream cache_file;
+    for (const auto &entry : boost::filesystem::directory_iterator(cache.string())) {
+        cache_file.open(entry.path().string(), std::ios::binary);
+        if (cache_file.good())
+            break;
+        cache_file.clear();
+    }
+    REQUIRE(cache_file.good());
+    const nlohmann::json payload = nlohmann::json::parse(cache_file);
+    CHECK(payload.at("name").get<std::string>() == before_object.model_object()->name);
+    const auto &layers = payload.at("layers");
+    REQUIRE(layers.size() == layer_count);
+    for (size_t i = 0; i < layers.size(); ++i) {
+        CHECK_THAT(layers.at(i).at("height").get<double>(), Catch::Matchers::WithinAbs(0.2, 1e-6));
+        CHECK_THAT(layers.at(i).at("print_z").get<double>(), Catch::Matchers::WithinAbs(0.2 * (i + 1), 1e-5));
+    }
+    CHECK(print.load_cached_data(cache.string() + "/missing") == CLI_IMPORT_CACHE_NOT_FOUND);
+    CHECK(before_object.layer_count() == layer_count);
+    CHECK(layer_slice_area(before_object, 0) > 0.0);
+    CHECK(first_perimeters > 0);
+}
+
+
+namespace {
+using Json = nlohmann::json;
+
+std::vector<ExtrusionPath> cached_paths(const PrintObject &object)
+{
+    std::vector<ExtrusionPath> result;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions()) {
+            for_each_extrusion_path(region->perimeters, [&](const ExtrusionPath &p) { result.push_back(p); });
+            for_each_extrusion_path(region->fills, [&](const ExtrusionPath &p) { result.push_back(p); });
+        }
+    return result;
+}
+
+struct CachedPathSnapshot {
+    std::string geometry_key;
+    ExtrusionRole role;
+    double mm3_per_mm;
+    float width;
+    float height;
+};
+
+std::vector<CachedPathSnapshot> canonical_cached_paths(const PrintObject &object)
+{
+    std::vector<CachedPathSnapshot> result;
+    const std::vector<ExtrusionPath> paths = cached_paths(object);
+    result.reserve(paths.size());
+    for (const ExtrusionPath &path : paths) {
+        std::ostringstream key;
+        key << static_cast<int>(path.role()) << ':';
+        for (const Point3 &point : path.polyline.points)
+            key << point.x() << ',' << point.y() << ',' << point.z() << ';';
+        result.push_back({key.str(), path.role(), path.mm3_per_mm, path.width, path.height});
+    }
+    // Cache JSON traversal and regenerated extrusion collections are implementation details;
+    // compare a multiset-like sorted snapshot rather than traversal order.
+    std::sort(result.begin(), result.end(), [](const CachedPathSnapshot &lhs, const CachedPathSnapshot &rhs) {
+        return lhs.geometry_key < rhs.geometry_key;
+    });
+    return result;
+}
+
+void rewrite_cache(const std::string &directory, const std::function<void(Json &)> &edit)
+{
+    size_t edited = 0;
+    for (const auto &entry : boost::filesystem::directory_iterator(directory)) {
+        std::ifstream input(entry.path().string());
+        Json document = Json::parse(input);
+        input.close();
+        edit(document);
+        std::ofstream output(entry.path().string());
+        output << document.dump();
+        REQUIRE(output.good());
+        ++edited;
+    }
+    REQUIRE(edited == 1);
+}
+
+void visit_cached_extrusions(Json &node, const std::function<void(Json &)> &edit)
+{
+    if (node.is_object() && node.contains("polyline"))
+        edit(node);
+    if (node.is_structured())
+        for (auto &child : node)
+            visit_cached_extrusions(child, edit);
+}
+
+void inject_arc(Print &print)
+{
+    ExtrusionPath path(erPerimeter, 0.08, 0.4, 0.2);
+    path.polyline.points = {Point3::new_scale(1., 0., 0.1),
+                            Point3::new_scale(0.6, 0.8, 0.2),
+                            Point3::new_scale(0., 1., 0.3)};
+    path.z_contoured = true;
+    ArcSegment arc(Point(0, 0), scaled(1.), Point(scaled(1.), 0), Point(0, scaled(1.)), ArcDirection::Arc_Dir_CCW);
+    REQUIRE(arc.is_arc);
+    path.polyline.fitting_result.push_back({0, 2, EMovePathType::Arc_move_ccw, arc});
+    LayerRegion *region = print.get_object(0)->get_layer(0)->get_region(0);
+    region->perimeters.clear();
+    region->perimeters.entities.push_back(new ExtrusionPath(path));
+}
+}
+
+TEST_CASE("Cached planar layers preserve extrusion coordinates and material flow", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    const auto before = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-cache-planar");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.objects().front()->layer_count() == 20);
+    const auto after = cached_paths(*print.objects().front());
+    REQUIRE(after.size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+        CHECK(after[i].polyline.points == before[i].polyline.points);
+        CHECK(after[i].role() == before[i].role());
+        CHECK_THAT(after[i].mm3_per_mm, Catch::Matchers::WithinAbs(before[i].mm3_per_mm, 1e-12));
+        CHECK_THAT(after[i].width, Catch::Matchers::WithinAbs(before[i].width, 1e-6));
+        CHECK_THAT(after[i].height, Catch::Matchers::WithinAbs(0.2, 1e-6));
+    }
+}
+
+TEST_CASE("Print process selects cached paths and completes cached object steps", "[Print][PrintCacheProcess]")
+{
+    constexpr double calibrated_flow = 0.12345;
+    const bool use_cache = GENERATE(false, true);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"enable_support", false},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"gcode_comments", true},
+        {"use_relative_e_distances", true},
+        {"before_layer_change_gcode", "G92 E0\n"},
+    });
+
+    Print source;
+    Model model;
+    init_valid({make_cube(8.0, 8.0, 1.2)}, source, model, config);
+    REQUIRE(source.objects().size() == 1);
+    const PrintObject *source_object = source.objects().front();
+    REQUIRE(source_object->layer_count() == 0);
+    CHECK_FALSE(source_object->is_step_done(posSlice));
+    REQUIRE(source_object->instances().size() == 1);
+    const ModelInstance *source_instance = source_object->instances().front().model_instance;
+    REQUIRE(source_instance != nullptr);
+    const auto source_object_id = source_object->model_object()->id().id;
+    const auto source_instance_id = source_instance->id().id;
+    const auto source_loaded_id = source_instance->loaded_id;
+
+    source.process(nullptr, false);
+    REQUIRE(source.objects().front()->layer_count() == 6);
+    const std::vector<CachedPathSnapshot> original = canonical_cached_paths(*source.objects().front());
+    REQUIRE_FALSE(original.empty());
+    REQUIRE(std::any_of(original.begin(), original.end(), [](const CachedPathSnapshot &path) {
+        return std::isfinite(path.mm3_per_mm) && std::abs(path.mm3_per_mm - calibrated_flow) > 1e-6;
+    }));
+
+    ScopedTemporaryDir cache("orca-cache-process-select");
+    REQUIRE(source.export_cached_data(cache.string(), true) == 0);
+    size_t flow_edits = 0;
+    rewrite_cache(cache.string(), [&](Json &document) {
+        visit_cached_extrusions(document, [&](Json &extrusion) {
+            REQUIRE(extrusion.at("mm3_per_mm").is_number());
+            extrusion.at("mm3_per_mm") = calibrated_flow;
+            ++flow_edits;
+        });
+    });
+    REQUIRE(flow_edits > 0);
+
+    Print fresh;
+    fresh.apply(model, config);
+    require_valid(fresh);
+    fresh.set_status_silent();
+    REQUIRE(fresh.objects().size() == 1);
+    const PrintObject *fresh_object = fresh.objects().front();
+    REQUIRE(fresh_object->layer_count() == 0);
+    const PrintObjectStep cache_steps[] = {
+        posSlice, posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring,
+        posSupportMaterial, posDetectOverhangsForLift, posSimplifyPath, posSimplifyInfill,
+        posSimplifySupportPath,
+    };
+    for (const PrintObjectStep step : cache_steps)
+        CHECK_FALSE(fresh_object->is_step_done(step));
+    CHECK(fresh_object->model_object()->id().id == source_object_id);
+    REQUIRE(fresh_object->instances().size() == 1);
+    REQUIRE(fresh_object->instances().front().model_instance != nullptr);
+    CHECK(fresh_object->instances().front().model_instance->id().id == source_instance_id);
+    CHECK(fresh_object->instances().front().model_instance->loaded_id == source_loaded_id);
+
+    REQUIRE(fresh.load_cached_data(cache.string()) == 0);
+    REQUIRE(fresh_object->layer_count() == 6);
+    const std::vector<CachedPathSnapshot> loaded = canonical_cached_paths(*fresh_object);
+    REQUIRE(loaded.size() == original.size());
+    for (const CachedPathSnapshot &path : loaded) {
+        CHECK(std::isfinite(path.mm3_per_mm));
+        CHECK_THAT(path.mm3_per_mm, Catch::Matchers::WithinAbs(calibrated_flow, 1e-12));
+    }
+
+    fresh.process(nullptr, use_cache);
+    const std::vector<CachedPathSnapshot> processed = canonical_cached_paths(*fresh.objects().front());
+    REQUIRE(processed.size() == original.size());
+    for (size_t index = 0; index < original.size(); ++index) {
+        INFO("path index=" << index << " geometry=" << original[index].geometry_key);
+        CHECK(processed[index].geometry_key == original[index].geometry_key);
+        CHECK(processed[index].role == original[index].role);
+        CHECK_THAT(processed[index].width, Catch::Matchers::WithinAbs(original[index].width, 1e-6));
+        CHECK_THAT(processed[index].height, Catch::Matchers::WithinAbs(original[index].height, 1e-6));
+        const double expected_flow = use_cache ? calibrated_flow : original[index].mm3_per_mm;
+        CHECK(std::isfinite(processed[index].mm3_per_mm));
+        CHECK_THAT(processed[index].mm3_per_mm, Catch::Matchers::WithinAbs(expected_flow, use_cache ? 1e-12 : 1e-10));
+    }
+    for (const PrintObjectStep step : cache_steps)
+        CHECK(fresh.objects().front()->is_step_done(step));
+}
+
+TEST_CASE("Cached non-planar arcs preserve Z and fitting data", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    inject_arc(print);
+    const auto before_paths = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(before_paths.empty());
+    const ExtrusionPath before = before_paths.front();
+    ScopedTemporaryDir cache("orca-cache-arc");
+    REQUIRE(print.export_cached_data(cache.string(), true) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(after.empty());
+    CHECK(after.front().polyline.points == before.polyline.points);
+    CHECK(after.front().z_contoured);
+    const auto &fits = after.front().polyline.fitting_result;
+    REQUIRE(fits.size() == 1);
+    CHECK(fits.front().start_point_index == 0);
+    CHECK(fits.front().end_point_index == 2);
+    CHECK(fits.front().path_type == EMovePathType::Arc_move_ccw);
+    CHECK(fits.front().arc_data.is_arc);
+    CHECK(fits.front().arc_data.center == Point(0, 0));
+    CHECK_THAT(fits.front().arc_data.radius, Catch::Matchers::WithinAbs(scaled(1.), 1e-6));
+    CHECK_THAT(fits.front().arc_data.angle_radians, Catch::Matchers::WithinAbs(PI / 2., 1e-9));
+}
+
+TEST_CASE("Legacy cached polylines without Z restore planar coordinates and arcs", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    inject_arc(print);
+    ScopedTemporaryDir cache("orca-cache-legacy");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        visit_cached_extrusions(document, [](Json &extrusion) {
+            REQUIRE(extrusion.at("polyline").is_object());
+            extrusion.at("polyline").erase("z");
+            extrusion.erase("z_contoured");
+        });
+    });
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto paths = cached_paths(*print.objects().front());
+    REQUIRE_FALSE(paths.empty());
+    for (const auto &path : paths) {
+        CHECK_FALSE(path.z_contoured);
+        for (const auto &point : path.polyline.points)
+            CHECK(point.z() == 0);
+    }
+    REQUIRE(paths.front().polyline.fitting_result.size() == 1);
+    CHECK(paths.front().polyline.fitting_result.front().path_type == EMovePathType::Arc_move_ccw);
+    CHECK(paths.front().polyline.points.front().x() == scaled(1.));
+    CHECK(paths.front().polyline.points.back().y() == scaled(1.));
+}
+
+TEST_CASE("Cached Z vectors must match the number of polyline points", "[Print][PrintCacheRoundtrip]")
+{
+    const bool array = GENERATE(false, true);
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-invalid-z");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [array](Json &document) {
+        visit_cached_extrusions(document, [array](Json &extrusion) {
+            REQUIRE(extrusion.at("polyline").is_object());
+            extrusion.at("polyline")["z"] = array ? Json::array() : Json("invalid");
+        });
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Reloading cached first-layer groups replaces prior metadata", "[Print][PrintCacheRoundtrip]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-first-layer-groups");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    const size_t expected_groups = print.get_object(0)->firstLayerObjGroups().size() + 1;
+    print.get_object(0)->firstLayerObjGroupsMod().clear();
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE(document.contains("first_layer_groups"));
+        REQUIRE(document.at("first_layer_groups").is_array());
+        Json group = Json::object();
+        group["group_id"] = 991;
+        group["volume_ids"] = Json::array({0});
+        group["slices"] = Json::array();
+        document["first_layer_groups"].push_back(std::move(group));
+    });
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.get_object(0)->firstLayerObjGroups().size() == expected_groups);
+    const auto &last_group = print.get_object(0)->firstLayerObjGroups().back();
+    CHECK(last_group.groupId == 991);
+    REQUIRE(last_group.volume_ids.size() == 1);
+    CHECK(last_group.volume_ids.front() == model.objects.front()->volumes.front()->id());
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    CHECK(print.get_object(0)->firstLayerObjGroups().size() == expected_groups);
+}
+
+
+
+} // namespace print_workflow_contracts
+
+namespace support_cache_contracts {
+using Json = nlohmann::json;
+
+namespace {
+struct SupportState {
+    size_t id = 0;
+    size_t interface_id = 0;
+    double z = 0.;
+    double height = 0.;
+    double island_area = 0.;
+    ExPolygons islands;
+    int type = 0;
+    bool no_sort = false;
+    std::vector<ExtrusionPath> paths;
+};
+
+std::vector<SupportState> capture_support(const PrintObject &object)
+{
+    std::vector<SupportState> result;
+    for (const SupportLayer *layer : object.support_layers()) {
+        SupportState state;
+        state.id = layer->id();
+        state.interface_id = layer->interface_id();
+        state.z = layer->print_z;
+        state.height = layer->height;
+        state.type = int(layer->support_type);
+        state.islands = layer->support_islands;
+        state.no_sort = layer->support_fills.no_sort;
+        for (const ExPolygon &island : layer->support_islands)
+            state.island_area += island.area() * SCALING_FACTOR * SCALING_FACTOR;
+        for_each_extrusion_path(layer->support_fills,
+                                [&state](const ExtrusionPath &path) { state.paths.push_back(path); });
+        result.push_back(std::move(state));
+    }
+    return result;
+}
+
+DynamicPrintConfig support_config(const char *support_type, const char *support_style = "default", int raft_layers = 0)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops", 2 },
+        { "top_shell_layers", 2 },
+        { "bottom_shell_layers", 2 },
+        { "skirt_loops", 0 },
+        { "brim_type", "no_brim" },
+        { "raft_layers", raft_layers },
+        { "sparse_infill_density", "15%" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "layer_change_gcode", "G92 E0\n" },
+        { "before_layer_change_gcode", "" },
+        { "enable_support", true },
+        { "support_type", support_type },
+        { "support_style", support_style },
+        { "support_on_build_plate_only", false },
+    });
+    return config;
+}
+
+void process_support(Print &print, Model &model, const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    init_print({ mesh }, print, model, config);
+    const StringObjectException validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+}
+
+void compare_support(const std::vector<SupportState> &before, const std::vector<SupportState> &after)
+{
+    REQUIRE(after.size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+        INFO("support layer=" << i);
+        CHECK(after[i].id == before[i].id);
+        CHECK(after[i].interface_id == before[i].interface_id);
+        CHECK(after[i].type == before[i].type);
+        CHECK(after[i].no_sort == before[i].no_sort);
+        CHECK_THAT(after[i].z, Catch::Matchers::WithinAbs(before[i].z, 1e-6));
+        CHECK_THAT(after[i].height, Catch::Matchers::WithinAbs(before[i].height, 1e-6));
+        CHECK_THAT(after[i].island_area, Catch::Matchers::WithinAbs(before[i].island_area, 1e-6));
+        REQUIRE(after[i].islands.size() == before[i].islands.size());
+        for (size_t island = 0; island < before[i].islands.size(); ++island) {
+            CHECK(after[i].islands[island].contour.points == before[i].islands[island].contour.points);
+            REQUIRE(after[i].islands[island].holes.size() == before[i].islands[island].holes.size());
+            for (size_t hole = 0; hole < before[i].islands[island].holes.size(); ++hole)
+                CHECK(after[i].islands[island].holes[hole].points == before[i].islands[island].holes[hole].points);
+        }
+        REQUIRE(after[i].paths.size() == before[i].paths.size());
+        for (size_t j = 0; j < before[i].paths.size(); ++j) {
+            const ExtrusionPath &old_path = before[i].paths[j];
+            const ExtrusionPath &new_path = after[i].paths[j];
+            CHECK(new_path.role() == old_path.role());
+            CHECK(new_path.polyline.points == old_path.polyline.points);
+            CHECK_THAT(new_path.mm3_per_mm, Catch::Matchers::WithinAbs(old_path.mm3_per_mm, 1e-12));
+            CHECK_THAT(new_path.width, Catch::Matchers::WithinAbs(old_path.width, 1e-6));
+            CHECK_THAT(new_path.height, Catch::Matchers::WithinAbs(old_path.height, 1e-6));
+            CHECK(new_path.z_contoured == old_path.z_contoured);
+        }
+    }
+}
+
+void compare_links(const PrintObject &object, size_t count)
+{
+    REQUIRE(object.support_layers().size() == count);
+    for (size_t i = 0; i < count; ++i) {
+        const SupportLayer *layer = object.support_layers()[i];
+        const SupportLayer *lower = i == 0 ? nullptr : object.support_layers()[i - 1];
+        const SupportLayer *upper = i + 1 == count ? nullptr : object.support_layers()[i + 1];
+        CHECK(layer->lower_layer == lower);
+        CHECK(layer->upper_layer == upper);
+    }
+}
+
+void rewrite_cache(const std::string &directory, const std::function<void(Json &)> &edit)
+{
+    size_t edited = 0;
+    for (const auto &entry : boost::filesystem::directory_iterator(directory)) {
+        if (!boost::filesystem::is_regular_file(entry.path()))
+            continue;
+        std::ifstream input(entry.path().string());
+        Json document = Json::parse(input);
+        input.close();
+        edit(document);
+        std::ofstream output(entry.path().string());
+        output << document.dump();
+        REQUIRE(output.good());
+        ++edited;
+    }
+    REQUIRE(edited == 1);
+}
+
+size_t support_path_count(const std::vector<SupportState> &states)
+{
+    size_t count = 0;
+    for (const SupportState &state : states)
+        count += state.paths.size();
+    return count;
+}
+
+void expect_roundtrip(const TriangleMesh &mesh, const DynamicPrintConfig &config, bool pretty)
+{
+    Print print;
+    Model model;
+    process_support(print, model, mesh, config);
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    REQUIRE(support_path_count(before) > 0);
+    const size_t before_count = before.size();
+    ScopedTemporaryDir cache("orca-support-cache-contract");
+    REQUIRE(print.export_cached_data(cache.string(), pretty) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    compare_links(*print.objects().front(), before_count);
+}
+}
+
+TEST_CASE("Raft support cache preserves linked layers and compact JSON", "[Print][SupportCache]")
+{
+    expect_roundtrip(cube(6.), support_config("normal(auto)", "default", 3), false);
+}
+
+TEST_CASE("Pretty raft support cache preserves the same geometry", "[Print][SupportCache]")
+{
+    expect_roundtrip(cube(6.), support_config("normal(auto)", "default", 3), true);
+}
+
+TEST_CASE("Normal support cache preserves islands and interface paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"), false);
+}
+
+TEST_CASE("Normal snug support cache preserves nested fill paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)", "snug"), false);
+}
+
+TEST_CASE("Organic tree support cache preserves tree layer metadata", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "organic"), false);
+}
+
+TEST_CASE("Slim tree support cache preserves tree geometry", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "tree_slim"), false);
+}
+
+TEST_CASE("Strong tree support cache preserves branch extrusion paths", "[Print][SupportCache]")
+{
+    expect_roundtrip(Slic3r::Test::mesh(TestMesh::overhang), support_config("tree(auto)", "tree_strong"), false);
+}
+
+TEST_CASE("Support no-sort metadata survives cache loading", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    for (SupportLayer *layer : print.objects().front()->support_layers())
+        layer->support_fills.no_sort = true;
+    before = capture_support(*print.objects().front());
+    ScopedTemporaryDir cache("orca-support-cache-nosort");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    for (const SupportState &state : after)
+        CHECK(state.no_sort);
+}
+
+TEST_CASE("Repeated support cache loads replace support layers and links", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-support-cache-repeat");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    REQUIRE(print.load_cached_data(cache.string()) == 0);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+    compare_links(*print.objects().front(), before.size());
+}
+
+TEST_CASE("Missing support cache directory leaves the processed support state intact", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    const auto before = capture_support(*print.objects().front());
+    REQUIRE_FALSE(before.empty());
+    ScopedTemporaryDir cache("orca-support-cache-missing");
+    CHECK(print.load_cached_data(cache.string() + "/missing") == CLI_IMPORT_CACHE_NOT_FOUND);
+    const auto after = capture_support(*print.objects().front());
+    compare_support(before, after);
+}
+
+TEST_CASE("Corrupt support type metadata is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-type");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        document.at("support_layers").at(0)["support_type"] = "invalid-support-type";
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Corrupt support extrusion payload is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-fill");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        auto &entities = document.at("support_layers").at(0).at("support_fills").at("entities");
+        REQUIRE_FALSE(entities.empty());
+        entities.at(0)["entity_type"] = "not-an-extrusion-entity";
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+TEST_CASE("Corrupt support island payload is rejected", "[Print][SupportCache]")
+{
+    Print print;
+    Model model;
+    process_support(print, model, Slic3r::Test::mesh(TestMesh::overhang), support_config("normal(auto)"));
+    ScopedTemporaryDir cache("orca-support-cache-bad-island");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE_FALSE(document.at("support_layers").empty());
+        document.at("support_layers").at(0).at("support_islands") = 17;
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+}
+
+} // namespace support_cache_contracts
+
+
+namespace cache_migration_contracts {
+using Json = nlohmann::json;
+using print_workflow_contracts::init_valid;
+using print_workflow_contracts::pipeline_config;
+using print_workflow_contracts::rewrite_cache;
+using print_workflow_contracts::visit_cached_extrusions;
+
+TEST_CASE("Unknown slice cache versions reject before replacing processed geometry", "[Print][PrintCacheMigration]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    const size_t layers = print.objects().front()->layer_count();
+    ScopedTemporaryDir cache("orca-cache-unknown-version");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        REQUIRE(document.at("identify_id").is_object());
+        // The audited older loader decodes this integer header before any layers.
+        CHECK_THROWS_AS(document.at("identify_id").get<int>(), Json::type_error);
+        document.at("identify_id")["cache_format"] = 3;
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+    CHECK(print.objects().front()->layer_count() == layers);
+    CHECK(print.objects().front()->is_step_done(posSlice));
+}
+
+TEST_CASE("Observed legacy XYZ cache paths require re-slicing before decoding", "[Print][PrintCacheMigration]")
+{
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    const size_t layers = print.objects().front()->layer_count();
+    ScopedTemporaryDir cache("orca-cache-observed-old-wire");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    rewrite_cache(cache.string(), [](Json &document) {
+        document["identify_id"] = document.at("identify_id").at("value");
+        visit_cached_extrusions(document, [](Json &extrusion) {
+            // Exact finite old-writer output observed in the separately collected probe.
+            extrusion["polyline"] = Json::array({Json::array({-7, 11, 13}),
+                Json::array({17, -19, 23}), Json::array({29, 31, -37})});
+            extrusion.erase("z_contoured");
+        });
+    });
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+    CHECK(print.objects().front()->layer_count() == layers);
+    CHECK(print.objects().front()->is_step_done(posSlice));
+}
+
+TEST_CASE("Cached Z rejects noninteger and unrepresentable coordinates before conversion", "[Print][PrintCacheMigration]")
+{
+    const Json invalid = GENERATE(Json(0.5), Json(1e100), Json(true), Json("0"),
+        Json(std::numeric_limits<Json::number_unsigned_t>::max()));
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-guarded-z-types");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    size_t edits = 0;
+    rewrite_cache(cache.string(), [&](Json &document) {
+        visit_cached_extrusions(document, [&](Json &extrusion) {
+            const size_t count = extrusion.at("polyline").at("points").size() / 2;
+            Json z = Json::array();
+            for (size_t i = 0; i < count; ++i)
+                z.push_back(invalid);
+            extrusion.at("polyline")["z"] = std::move(z);
+            edits += count;
+        });
+    });
+    REQUIRE(edits > 0);
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+    CHECK(print.objects().front()->layer_count() == 0);
+    CHECK_FALSE(print.objects().front()->is_step_done(posSlice));
+}
+
+TEST_CASE("A later object cache error clears every partial object before ordinary re-slicing", "[Print][PrintCacheMigration]")
+{
+    Print print;
+    Model model;
+    init_valid({make_cube(4., 4., 0.4), make_cube(5., 5., 0.4)}, print, model, pipeline_config());
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.objects()[0]->get_shared_object() == nullptr);
+    REQUIRE(print.objects()[1]->get_shared_object() == nullptr);
+    const ModelInstance *instance = print.objects()[1]->instances().front().model_instance;
+    REQUIRE(instance != nullptr);
+    auto identify = instance->loaded_id;
+    if (identify <= 0)
+        identify = instance->id().id;
+    ScopedTemporaryDir cache("orca-cache-second-object-failure");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    const auto file = cache.path() / ("obj_" + std::to_string(identify) + ".json");
+    Json document;
+    {
+        std::ifstream input(file.string());
+        REQUIRE(input.good());
+        input >> document;
+    }
+    // This is decoded after ordinary layers, after the first object completed.
+    document["support_layers"] = 17;
+    {
+        std::ofstream output(file.string());
+        output << document.dump();
+        REQUIRE(output.good());
+    }
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+    for (const PrintObject *object : print.objects()) {
+        CHECK(object->layer_count() == 0);
+        CHECK(object->support_layer_count() == 0);
+        CHECK(object->firstLayerObjGroups().empty());
+        CHECK_FALSE(object->is_step_done(posSlice));
+    }
+    REQUIRE_NOTHROW(print.process());
+    for (const PrintObject *object : print.objects()) {
+        CHECK(object->layer_count() == 2);
+        CHECK(object->is_step_done(posPerimeters));
+    }
+}
+
+
+TEST_CASE("Incomplete cached path payloads fail cleanly before required access", "[Print][PrintCacheMigration]")
+{
+    const bool empty_paths = GENERATE(false, true);
+    Print print;
+    Model model;
+    init_valid({cube(4.)}, print, model, pipeline_config());
+    print.process();
+    ScopedTemporaryDir cache("orca-cache-required-path-fields");
+    REQUIRE(print.export_cached_data(cache.string(), false) == 0);
+    size_t edits = 0;
+    rewrite_cache(cache.string(), [&](Json &document) {
+        if (!empty_paths) {
+            visit_cached_extrusions(document, [&](Json &extrusion) {
+                REQUIRE(extrusion.at("polyline").is_object());
+                extrusion.at("polyline").erase("points");
+                ++edits;
+            });
+            return;
+        }
+        std::vector<Json*> pending{&document};
+        while (!pending.empty()) {
+            Json &node = *pending.back();
+            pending.pop_back();
+            if (node.is_object() && node.contains("paths")) {
+                // A standalone path must contain its required first path record.
+                node["entity_type"] = "path";
+                node["paths"] = Json::array();
+                ++edits;
+                continue;
+            }
+            if (node.is_structured())
+                for (Json &child : node)
+                    pending.push_back(&child);
+        }
+    });
+    REQUIRE(edits > 0);
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_LOAD_FAILED);
+    for (const PrintObject *object : print.objects()) {
+        CHECK(object->layer_count() == 0);
+        CHECK(object->support_layer_count() == 0);
+        CHECK(object->firstLayerObjGroups().empty());
+        CHECK_FALSE(object->is_step_done(posSlice));
+    }
+}
+
+} // namespace cache_migration_contracts
+
+TEST_CASE("G-code lists the resolved extrusion-width settings (original M298 variant)", "[Print][ConfigBlock]")
+{
+    const std::string gcode = slice({ cube(20) }, {
+        { "initial_layer_line_width", 0 },
+        { "gcode_skip_config_block", false },
+    });
+    CHECK(gcode.find("; external perimeters extrusion width") != std::string::npos);
+    CHECK(gcode.find("; perimeters extrusion width")          != std::string::npos);
+    CHECK(gcode.find("; infill extrusion width")              != std::string::npos);
+    CHECK(gcode.find("; solid infill extrusion width")        != std::string::npos);
+    CHECK(gcode.find("; top infill extrusion width")          != std::string::npos);
+    CHECK(gcode.find("; support material extrusion width")    == std::string::npos);
+    CHECK(gcode.find("; first layer extrusion width")         == std::string::npos);
+    CHECK(gcode.find("; layer_height")                        != std::string::npos);
+    CHECK(gcode.find("; sparse_infill_density")               != std::string::npos);
+
+    const std::string with_support = slice({ cube(20) }, {
+        { "initial_layer_line_width", 0 }, { "enable_support", true }, { "raft_layers", 3 },
+    });
+    CHECK(with_support.find("; support material extrusion width") != std::string::npos);
+
+    const std::string with_first_layer = slice({ cube(20) }, { { "initial_layer_line_width", "0.5" } });
+    CHECK(with_first_layer.find("; first layer extrusion width") != std::string::npos);
+}
+
+TEST_CASE("Print statistics defer placeholders and finalize output filenames", "[Print][PrintStatisticsFilename]")
+{
+    PrintStatistics stats;
+    stats.estimated_normal_print_time = "1h 2m 30s";
+    stats.estimated_silent_print_time = "2h 59m 30s";
+    stats.total_used_filament        = 1250.;
+    stats.total_extruded_volume      = 275.;
+    stats.total_cost                 = 4.5;
+    stats.total_weight               = 6.25;
+    stats.total_wipe_tower_cost      = 0.5;
+    stats.total_wipe_tower_filament  = 12.5;
+    stats.total_toolchanges          = 7;
+    stats.initial_tool               = 3;
+    stats.initial_no_support_tool    = 5;
+
+    const DynamicConfig placeholders = PrintStatistics::placeholders();
+    const auto* time_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("print_time"));
+    const auto* filament_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("used_filament"));
+    const auto* tool_placeholder = dynamic_cast<const ConfigOptionString*>(placeholders.option("initial_tool"));
+    REQUIRE(time_placeholder != nullptr);
+    REQUIRE(filament_placeholder != nullptr);
+    REQUIRE(tool_placeholder != nullptr);
+    CHECK(time_placeholder->value == "{print_time}");
+    CHECK(filament_placeholder->value == "{used_filament}");
+    CHECK(tool_placeholder->value == "{initial_tool}");
+
+    const boost::filesystem::path input = boost::filesystem::path("reports") /
+        "stats_{print_time}_{normal_print_time}_{silent_print_time}_{used_filament}_{extruded_volume}_{extruded_volume_total}_{total_cost}_{total_weight}_{extruded_weight_total}_{total_wipe_tower_cost}_{total_wipe_tower_filament}_{initial_tool}_{initial_extruder}_{initial_no_support_extruder}_{total_toolchanges}.gcode";
+    const boost::filesystem::path expected = boost::filesystem::path("reports") /
+        "stats_1h3m_1h3m_3h0m_1.25_275_275_4.5_6.25_6.25_0.5_12.5_3_3_5_7.gcode";
+
+    CHECK(stats.finalize_output_path(input.string()) == expected.string());
+}
+
+TEST_CASE("Print statistics preserve filenames when placeholders cannot be resolved", "[Print][PrintStatisticsFilename]")
+{
+    PrintStatistics stats;
+    const std::string filename = GENERATE(
+        std::string("plain_name.gcode"),
+        std::string("{missing_statistic}.gcode"),
+        std::string("{total_weight.gcode"));
+    const std::string input = (boost::filesystem::path("reports") / filename).string();
+    CAPTURE(input);
+
+    CHECK(stats.finalize_output_path(input) == input);
+}
+
+TEST_CASE("Failed G-code exports report their outcome and remain retryable",
+          "[Print][LifecycleEvents][GCodeExportFailures]")
+{
+    enum class Failure { TemporaryPathIsDirectory, ThumbnailCallback, DestinationCollision };
+    const Failure failure = GENERATE(Failure::TemporaryPathIsDirectory,
+                                     Failure::ThumbnailCallback,
+                                     Failure::DestinationCollision);
+    CAPTURE(static_cast<int>(failure));
+
+    ScopedTemporaryDir directory("orca-export-failure");
+    const boost::filesystem::path output = directory.path() / "output.gcode";
+    const boost::filesystem::path temporary(output.string() + ".tmp");
+    const boost::filesystem::path sentinel = output / "existing.txt";
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_support", false},
+        {"enable_prime_tower", false},
+        {"thumbnails", "32x32/PNG"},
+    });
+    Print print;
+    Model model;
+    ModelInfo info;
+    info.model_name = "Export failure fixture";
+    model.model_info = std::make_shared<ModelInfo>(std::move(info));
+    init_print({TriangleMesh(make_cube(5., 5., 0.4))}, print, model, config);
+    REQUIRE_FALSE(print.is_BBL_printer());
+    REQUIRE(print.validate().string.empty());
+    print.process();
+
+    struct Event {
+        LifecycleEvent kind;
+        LifecycleEvtCode code;
+        std::string id;
+        std::string name;
+        std::string message;
+    };
+    std::vector<Event> events;
+    bool inject_failure = true;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event != LifecycleEvent::GCodeExportStarted && event != LifecycleEvent::GCodeExportFinished)
+            return;
+        events.push_back({event, context.code, context.id, context.name, context.msg});
+        // output_filepath() has already resolved a file name. Simulate a destination
+        // appearing while the exporter works, without relying on a racing thread.
+        if (event == LifecycleEvent::GCodeExportStarted && inject_failure &&
+            failure == Failure::DestinationCollision) {
+            boost::filesystem::create_directory(output);
+            std::ofstream stream(sentinel.string());
+            stream << "preserve existing destination\n";
+        }
+    });
+    size_t thumbnail_calls = 0;
+    const ThumbnailsGeneratorCallback thumbnails = [&](const ThumbnailsParams &) -> ThumbnailsList {
+        ++thumbnail_calls;
+        if (inject_failure && failure == Failure::ThumbnailCallback)
+            throw std::runtime_error("thumbnail callback failed");
+        return {};
+    };
+    if (failure == Failure::TemporaryPathIsDirectory)
+        REQUIRE(boost::filesystem::create_directory(temporary));
+
+    REQUIRE_THROWS_AS(print.export_gcode(output.string(), nullptr, thumbnails), std::runtime_error);
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].kind == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[0].code == LifecycleEvtCode::Ok);
+    CHECK(events[1].kind == LifecycleEvent::GCodeExportFinished);
+    CHECK(events[1].code == LifecycleEvtCode::Error);
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
+    for (const Event &event : events) {
+        CHECK(event.id == std::to_string(print.model().id().id));
+        CHECK(event.name == "Export failure fixture");
+        CHECK(event.message.find(output.string()) != std::string::npos);
+    }
+
+    if (failure == Failure::ThumbnailCallback) {
+        REQUIRE(thumbnail_calls == 1);
+        CHECK_FALSE(boost::filesystem::exists(temporary));
+        CHECK_FALSE(boost::filesystem::exists(output));
+    } else if (failure == Failure::DestinationCollision) {
+        REQUIRE(thumbnail_calls == 1);
+        REQUIRE(boost::filesystem::is_regular_file(temporary));
+        REQUIRE(boost::filesystem::is_directory(output));
+        std::ifstream stream(sentinel.string());
+        std::string preserved;
+        std::getline(stream, preserved);
+        CHECK(preserved == "preserve existing destination");
+        stream.close();
+        boost::filesystem::remove_all(output);
+    } else {
+        CHECK(thumbnail_calls == 0);
+        REQUIRE(boost::filesystem::is_directory(temporary));
+        boost::filesystem::remove_all(temporary);
+    }
+
+    // A handled export error must not mark the print complete or poison the next export.
+    inject_failure = false;
+    REQUIRE_NOTHROW(print.export_gcode(output.string(), nullptr, thumbnails));
+    REQUIRE(events.size() == 4);
+    CHECK(events[2].kind == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[3].kind == LifecycleEvent::GCodeExportFinished);
+    CHECK(events[3].code == LifecycleEvtCode::Ok);
+    CHECK(print.is_step_done(psGCodeExport));
+    CHECK(boost::filesystem::is_regular_file(output));
+    CHECK_FALSE(boost::filesystem::exists(temporary));
+
+    std::ifstream stream(output.string());
+    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    size_t deposited_moves = 0;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+            ++deposited_moves;
+    });
+    CHECK(deposited_moves > 0);
+}
+
+TEST_CASE("A missing previous G-code file reports a failed public export lifecycle",
+          "[Print][PreviousGCodeWorkflow]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"machine_start_gcode", ""}, {"machine_end_gcode", ""},
+    });
+    init_print({make_cube(8., 8., 1.2)}, print, model, config);
+
+    ScopedTemporaryDir directory("orca-previous-gcode-missing");
+    const std::string missing = (directory.path() / "not-there.gcode").string();
+    std::vector<LifecycleEvent> events;
+    std::vector<LifecycleEvtCode> codes;
+    std::vector<std::string> messages;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event == LifecycleEvent::GCodeExportStarted || event == LifecycleEvent::GCodeExportFinished) {
+            events.push_back(event);
+            codes.push_back(context.code);
+            messages.push_back(context.msg);
+        }
+    });
+
+    GCodeProcessorResult result;
+    const std::vector<unsigned int> filament_sequence{4, 2};
+    const std::vector<unsigned int> nozzle_sequence{1, 0};
+    result.filament_change_sequence = filament_sequence;
+    result.nozzle_change_sequence = nozzle_sequence;
+    REQUIRE_THROWS_AS(print.export_gcode_from_previous_file(missing, &result), Slic3r::RuntimeError);
+    REQUIRE(events.size() == 2);
+    CHECK(events[0] == LifecycleEvent::GCodeExportStarted);
+    CHECK(events[1] == LifecycleEvent::GCodeExportFinished);
+    CHECK(codes[0] == LifecycleEvtCode::Ok);
+    CHECK(codes[1] == LifecycleEvtCode::Error);
+    CHECK(messages[0] == missing);
+    CHECK(messages[1].find(missing) != std::string::npos);
+    CHECK(result.filament_change_sequence == filament_sequence);
+    CHECK(result.nozzle_change_sequence == nozzle_sequence);
+}
+
+TEST_CASE("Reprocessing previous G-code preserves caller tool sequences and public moves",
+          "[Print][PreviousGCodeWorkflow]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2}, {"initial_layer_print_height", 0.2},
+        {"skirt_loops", 0}, {"brim_type", "no_brim"},
+        {"machine_start_gcode", ""}, {"machine_end_gcode", ""},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    init_print({make_cube(8., 8., 1.2)}, print, model, config);
+    print.process();
+    ScopedTemporaryFile file(".gcode");
+    REQUIRE(print.export_gcode(file.string(), nullptr, nullptr) == file.string());
+
+    GCodeProcessorResult result;
+    const std::vector<unsigned int> filament_sequence{7, 3, 7};
+    const std::vector<unsigned int> nozzle_sequence{2, 1};
+    result.filament_change_sequence = filament_sequence;
+    result.nozzle_change_sequence = nozzle_sequence;
+    std::vector<LifecycleEvtCode> finished_codes;
+    ScopedLifecycleHook hook([&](LifecycleEvent event, const LifecycleEventContext &context) {
+        if (event == LifecycleEvent::GCodeExportFinished)
+            finished_codes.push_back(context.code);
+    });
+
+    REQUIRE_NOTHROW(print.export_gcode_from_previous_file(file.string(), &result));
+    REQUIRE(result.moves.size() > 0);
+    CHECK(result.filament_change_sequence == filament_sequence);
+    CHECK(result.nozzle_change_sequence == nozzle_sequence);
+    REQUIRE(finished_codes.size() == 1);
+    CHECK(finished_codes.front() == LifecycleEvtCode::Ok);
 }

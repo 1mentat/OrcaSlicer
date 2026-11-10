@@ -359,7 +359,7 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         bool spiral_vase_mode;
         //BBS
         std::vector<SliceWarning> warnings;
-        int nozzle_hrc;
+        int nozzle_hrc{0};
         std::vector<NozzleType> nozzle_type;
         // Per-extruder physical hotend type. Fed to the pre-heat injector's TimeProcessContext
         // (mixed-type X2D workaround). Populated in apply_config; unused until the injector side-pass
@@ -422,6 +422,8 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
             custom_gcode_per_print_z = std::forward<Other>(other).custom_gcode_per_print_z;
             spiral_vase_mode = std::forward<Other>(other).spiral_vase_mode;
             warnings = std::forward<Other>(other).warnings;
+            nozzle_hrc = std::forward<Other>(other).nozzle_hrc;
+            nozzle_type = std::forward<Other>(other).nozzle_type;
             bed_type = std::forward<Other>(other).bed_type;
             gcode_check_result = std::forward<Other>(other).gcode_check_result;
             limit_filament_maps = std::forward<Other>(other).limit_filament_maps;

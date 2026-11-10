@@ -11,6 +11,8 @@ on:
       - 'scripts/*coverage*.py'
       - 'scripts/tests/test_*coverage*.py'
       - '.github/scripts/coverage_history.py'
+      - 'scripts/slicer_module_feedback.py'
+      - 'scripts/tests/test_slicer_module_feedback.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -22,6 +24,8 @@ on:
       - 'scripts/*coverage*.py'
       - 'scripts/tests/test_*coverage*.py'
       - '.github/scripts/coverage_history.py'
+      - 'scripts/slicer_module_feedback.py'
+      - 'scripts/tests/test_slicer_module_feedback.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -54,3 +58,5 @@ jobs:
           python -B -m unittest scripts.tests.test_slicer_coverage
           scripts.tests.test_coverage_report scripts.tests.test_coverage_collection_report
           scripts.tests.test_coverage_history -v
+      - name: Test module feedback handling
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_module_feedback.py -v

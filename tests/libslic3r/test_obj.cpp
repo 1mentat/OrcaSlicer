@@ -532,7 +532,7 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     ScopedTemporaryFile mtl(".mtl");
     ScopedTemporaryFile texture(".png");
     write_text(texture, "not-an-image-but-a-stable-byte-payload");
-    write_text(mtl, "newmtl painted\nKd 0.2 0.4 0.6\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(mtl, "newmtl painted\nKd 0.2 0.4 0.6\nTr 0.75\nmap_Kd " + texture.path().filename().string() + "\n");
     write_text(obj, "mtllib " + mtl.path().filename().string() + "\n"
                     "usemtl painted\n"
                     "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
@@ -552,6 +552,7 @@ TEST_CASE("OBJ textured import maps materials, texture bytes and flipped V coord
     CHECK(std::string(texture_bytes.begin(), texture_bytes.end()) == "not-an-image-but-a-stable-byte-payload");
     REQUIRE(textured.material_colors.size() == 1);
     CHECK_THAT(textured.material_colors[0][0], WithinAbs(.2, 1e-6));
+    CHECK_THAT(textured.material_colors[0][3], WithinAbs(.75, 1e-6));
     REQUIRE(textured.material_texture_map.size() == 1);
     CHECK(textured.material_texture_map[0] == 0);
     REQUIRE(textured.material_ids.size() == 1);
@@ -848,6 +849,37 @@ TEST_CASE("OBJ binary cache rejects every proper prefix of a valid cache", "[OBJ
         INFO("prefix length " << length);
         CHECK_FALSE(ObjParser::objbinload(truncated.string().c_str(), loaded));
     }
+}
+
+} // namespace obj_binary_contracts
+
+namespace obj_binary_contracts {
+
+TEST_CASE("OBJ binary loader rejects a file with an unsupported version (original M034 header-only fixture)", "[OBJParser][OBJBinary]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    boost::nowide::ofstream output(cache.string(), std::ios::binary);
+    const size_t unsupported_version = 99;
+    output.write(reinterpret_cast<const char *>(&unsupported_version), sizeof(unsupported_version));
+    output.close();
+
+    ObjParser::ObjData data;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), data));
+}
+
+TEST_CASE("OBJ binary cache rejects short and unsupported headers (original M034 four-byte header fixture)", "[OBJBinary][OBJBinarySafe][OBJParser]")
+{
+    ScopedTemporaryFile short_header(".objbin");
+    write_bytes(short_header, {1, 0, 0, 0});
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(short_header.string().c_str(), loaded));
+
+    ScopedTemporaryFile unsupported(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 99;
+    append_raw(bytes, version);
+    write_bytes(unsupported, bytes);
+    CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
 }
 
 } // namespace obj_binary_contracts
