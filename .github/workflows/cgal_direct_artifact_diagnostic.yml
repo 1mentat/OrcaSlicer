@@ -1,0 +1,43 @@
+name: CGAL exact failed Mac ARM direct diagnostic
+on:
+  push:
+    branches: [diagnostics/cgal-a256-direct]
+    paths:
+      - .github/workflows/cgal_artifact_diagnostic.yml
+      - .github/diagnostics/cgal-artifact.json
+      - scripts/cgal_artifact_diagnostic.py
+      - scripts/cgal_direct_artifact_diagnostic.py
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: cgal-a256-direct-diagnostic
+  cancel-in-progress: false
+jobs:
+  exact-artifact:
+    if: github.repository == '1mentat/OrcaSlicer' && github.event_name == 'push' && github.ref == 'refs/heads/diagnostics/cgal-a256-direct'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/diagnostics
+            scripts/cgal_artifact_diagnostic.py
+            scripts/cgal_direct_artifact_diagnostic.py
+          sparse-checkout-cone-mode: false
+      - name: Verify and hash exact failed artifact ZIP
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/cgal_artifact_diagnostic.py verify
+      - name: Map original CTest registration then launch one direct selected case
+        run: python3 scripts/cgal_direct_artifact_diagnostic.py run
+      - name: Preserve bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cgal-a256-direct-${{ github.run_id }}
+          path: cgal-diagnostic
+          if-no-files-found: error
+          retention-days: 14
