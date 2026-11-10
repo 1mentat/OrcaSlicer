@@ -41,18 +41,67 @@ jobs:
           lfs: 'false'
 
       - name: load cached deps
+        id: deps
         if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
         uses: actions/cache@v6
         with:
           path: ${{ inputs.cache-path }}
           key: ${{ inputs.cache-key }}
-          fail-on-cache-miss: true
+          fail-on-cache-miss: ${{ runner.os != 'macOS' }}
 
       - uses: lukka/get-cmake@latest
         with:
           cmakeVersion: "~4.3.0"  # use most recent 4.3.x version
           useLocalCache: true         # <--= Use the local cache (default is 'false').
           useCloudCache: true
+
+      # Recover a cache removed after the producer/check job, before compiler-cache env is enabled.
+      - name: Rebuild Mac dependencies after a cache miss
+        if: ${{ runner.os == 'macOS' && !inputs.macos-combine-only && steps.deps.outputs.cache-hit != 'true' }}
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          DEP_ARCH: ${{ inputs.arch }}
+          DEP_CACHE_PATH: ${{ inputs.cache-path }}
+          DEP_SELF_HOSTED: ${{ vars.SELF_HOSTED }}
+        run: |
+          set -euo pipefail
+          case "$DEP_ARCH" in
+            arm64|x86_64) ;;
+            *) echo "Unsupported Mac dependency architecture" >&2; exit 1 ;;
+          esac
+          if [[ "$GITHUB_WORKSPACE" != /* || "$GITHUB_WORKSPACE" == / ||
+                "$DEP_CACHE_PATH" != "$GITHUB_WORKSPACE/deps/build/$DEP_ARCH" ]]; then
+            echo "Unexpected Mac dependency cache path" >&2
+            exit 1
+          fi
+          check_dep_path() {
+            if [ "$(cd "$GITHUB_WORKSPACE" && pwd -P)" != "$GITHUB_WORKSPACE" ]; then
+              echo "Mac dependency workspace must not contain symlinks" >&2
+              return 1
+            fi
+            for directory in "$GITHUB_WORKSPACE/deps" "$GITHUB_WORKSPACE/deps/build" \
+                "$DEP_CACHE_PATH" "$DEP_CACHE_PATH/OrcaSlicer_dep" \
+                "$DEP_CACHE_PATH/OrcaSlicer_dep/usr" "$DEP_CACHE_PATH/OrcaSlicer_dep/usr/local"; do
+              if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+                echo "Unsafe Mac dependency build directory" >&2
+                return 1
+              fi
+            done
+          }
+          check_dep_path
+          if [ -z "$DEP_SELF_HOSTED" ]; then
+            brew install automake texinfo libtool pkgconf yasm nasm
+            ./build_release_macos.sh -dx -j 3 -a "$DEP_ARCH" -t 10.15
+          else
+            ./build_release_macos.sh -dx -a "$DEP_ARCH" -t 10.15
+          fi
+          check_dep_path
+          if [ ! -d "$DEP_CACHE_PATH/OrcaSlicer_dep/usr/local" ]; then
+            echo "Mac dependency build did not produce the installed prefix" >&2
+            exit 1
+          fi
+          (cd "$DEP_CACHE_PATH" && find . -mindepth 1 -maxdepth 1 ! -name 'OrcaSlicer_dep' -exec rm -rf {} +)
 
       # Compiler cache. Pushes save it, so main keeps it warm; pull requests
       # restore it and discard what they compiled. Objects are keyed on the
