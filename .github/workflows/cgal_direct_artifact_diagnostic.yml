@@ -4,6 +4,7 @@ on:
     branches: [diagnostics/cgal-a256-direct]
     paths:
       - .github/workflows/cgal_artifact_diagnostic.yml
+      - .github/workflows/cgal_direct_artifact_diagnostic.yml
       - .github/diagnostics/cgal-artifact.json
       - scripts/cgal_artifact_diagnostic.py
       - scripts/cgal_direct_artifact_diagnostic.py

@@ -138,7 +138,13 @@ def crash_reports(before, child_pid, start, end, uuid, binary):
             continue
         launched = payload.get('procLaunch', '')
         try:
-            born = datetime.datetime.fromisoformat(launched.replace('Z', '+00:00')).timestamp()
+            try:
+                parsed = datetime.datetime.strptime(launched, '%Y-%m-%d %H:%M:%S.%f %z')
+            except ValueError:
+                parsed = datetime.datetime.fromisoformat(launched.replace('Z', '+00:00'))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                continue
+            born = parsed.timestamp()
         except (ValueError, TypeError):
             continue
         if not start - 2 <= born <= end:
