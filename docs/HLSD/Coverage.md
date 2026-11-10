@@ -109,6 +109,9 @@ measurement artifact or restores a compiler cache. The current series keeps up t
 365 observations per suite; older metadata remains in Git history. The two root
 metadata documents bind all suite summaries and separate histories in one revision,
 so partial or mixed-source collections cannot replace a complete publication.
+Compatible histories must extend the current canonical observations, so a stale
+replica cannot erase an observation. Only the oldest entries leave the 365-entry
+window; a changed suite configuration starts a separate series.
 Larger HTML and diagnostic
 artifacts have short retention periods.
 

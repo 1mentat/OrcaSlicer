@@ -17,6 +17,46 @@ def configuration_id(suites):
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def require_history_extension(previous_summary, previous_history, summary, history):
+    """Reject loss or mutation of compatible observations from the current revision."""
+    previous_collection = previous_summary.get("schema") == SUMMARY_SCHEMA
+    collection = summary.get("schema") == SUMMARY_SCHEMA
+    if previous_collection and not collection:
+        raise ValueError("cannot replace suite history with a legacy global report")
+    if not previous_collection:
+        return  # A legacy global history has no compatible per-suite series to extend.
+    for name in SUITES:
+        previous_report = previous_summary["suites"][name]
+        report = summary["suites"][name]
+        if previous_report["configuration_id"] != report["configuration_id"]:
+            continue  # This suite's measurement configuration changed.
+        previous = previous_history["suites"][name]
+        current = history["suites"][name]
+        previous_by_key = {}
+        previous_time = None
+        for item in previous:
+            key = (item["commit"], item["measured_at"])
+            measured = datetime.fromisoformat(item["measured_at"].replace("Z", "+00:00"))
+            if key in previous_by_key or (previous_time is not None and measured < previous_time):
+                raise ValueError(f"current history for {name} has duplicate or unordered observations")
+            previous_by_key[key] = item
+            previous_time = measured
+
+        current_key = (report["commit"], report["measured_at"])
+        current_observations = [item for item in current
+                                if (item["commit"], item["measured_at"]) == current_key]
+        if len(current_observations) != 1:
+            raise ValueError(f"new measurement is absent or duplicated in {name} history")
+        if current_key in previous_by_key and previous_by_key[current_key] != current_observations[0]:
+            raise ValueError(f"history for {name} changed an existing observation")
+        expected_by_key = dict(previous_by_key)
+        expected_by_key[current_key] = current_observations[0]
+        expected = sorted(expected_by_key.values(), key=lambda item: datetime.fromisoformat(
+            item["measured_at"].replace("Z", "+00:00")))[-365:]
+        if current != expected:
+            raise ValueError(f"history for {name} is stale or drops compatible observations")
+
+
 def validate(summary, history, expected_commit, validate_leaf):
     """Validate every leaf with the existing measurement/history contract."""
     if not isinstance(summary, dict) or not isinstance(history, dict):

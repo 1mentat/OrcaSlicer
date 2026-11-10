@@ -134,6 +134,9 @@ def publish(api, directory, expected_commit):
             if comparison.get("status") != "ahead":
                 print("This source does not descend from the published baseline; keeping the newer source.")
                 return False
+        current_history = api.file("history.json", parent)
+        validate(current, current_history, current.get("commit", ""))
+        collection_contract.require_history_extension(current, current_history, summary, history)
     tree = []
     for name, value in (("history.json", history), ("summary.json", summary)):
         content = base64.b64encode((json.dumps(value, separators=(",", ":")) + "\n").encode()).decode()
