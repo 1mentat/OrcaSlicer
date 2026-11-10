@@ -68,6 +68,14 @@ jobs:
           python -m pip install --only-binary=:all: --no-deps ninja==1.13.0
       - name: Require Ninja for build-reuse fixtures
         run: python -c "import shutil; assert shutil.which('ninja'), 'Ninja is required for real build-reuse controls'"
+      - name: Test artifact ownership, leases and expiry
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_artifacts.py -v
+      - name: Test scheduled artifact collection and installer contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_sweeper.py -v
+      - name: Test artifact runner cleanup and budget cancellation
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_runner.py -v
+      - name: Test bounded validation uploads
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_upload.py -v
       - name: Test scoped process handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
       - name: Test clang-tidy diff handling
@@ -83,14 +91,6 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_mutation.py -v
       - name: Test settings inventory declarations and metadata
         run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
-      - name: Test artifact ownership, leases and expiry
-        run: python -B -m unittest discover -s scripts/tests -p test_validation_artifacts.py -v
-      - name: Test scheduled artifact collection and installer contracts
-        run: python -B -m unittest discover -s scripts/tests -p test_validation_sweeper.py -v
-      - name: Test artifact runner cleanup and budget cancellation
-        run: python -B -m unittest discover -s scripts/tests -p test_validation_runner.py -v
-      - name: Test bounded validation uploads
-        run: python -B -m unittest discover -s scripts/tests -p test_validation_upload.py -v
 
   validation-upload-smoke:
     name: Validation upload round trip (${{ matrix.os }})

@@ -29,9 +29,14 @@ class Sweeper(unittest.TestCase):
         for name in sweeper.FILES:
             shutil.copyfile(SCRIPTS / name, self.repo / 'scripts' / name)
         self.env = {k: v for k, v in os.environ.items() if not k.upper().startswith('GIT_')}
-        self.git('init', '-q'); self.git('add', 'scripts')
+        self.git('init', '-q')
+        self.git('config', 'core.autocrlf', 'false')
+        self.git('add', 'scripts')
         self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'source')
         self.sha = self.git('rev-parse', 'HEAD').strip().decode()
+        for name in sweeper.FILES:
+            self.assertEqual(self.git('cat-file', 'blob', self.sha + ':scripts/' + name),
+                             (SCRIPTS / name).read_bytes())
         self.calls = []
 
     def tearDown(self):
