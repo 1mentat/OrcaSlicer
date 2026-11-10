@@ -209,7 +209,8 @@ def drain_children(root, known):
                 result.update(drained=True, reason='original_generation_inactive_no_signal')
             else:
                 parent = process_info(saved['ppid'])
-                if current['ppid'] != saved['ppid'] or parent is None or parent['birth'] != saved['parent_birth']:
+                if (current['ppid'] != saved['ppid'] or parent is None or
+                        parent['birth'] != saved['parent_birth'] or not parent['state'].startswith('T')):
                     result['reason'] = 'current_owned_lineage_unproved_no_signal'
                 else:
                     try:
@@ -241,13 +242,18 @@ def drain_children(root, known):
 
 
 def supervise(child):
-    root = process_info(child.pid)
-    assert root is not None and root['pgid'] == child.pid
+    root = None
+    root_verified = False
     known = {}
     timed_out = False
     observation_error = None
     deadline = time.monotonic() + DEADLINE_SECONDS
     try:
+        # Acquisition itself can fail after Popen: it belongs inside the same
+        # lifetime guard as all subsequent observation.
+        root = process_info(child.pid)
+        assert root is not None and root['pid'] == child.pid and root['pgid'] == child.pid
+        root_verified = True
         while True:
             observe_children(root, known, deadline)
             write_json(OUT / 'owned-processes.json', {'root': root, 'children': known})
@@ -264,26 +270,36 @@ def supervise(child):
     except Exception as error:
         observation_error = type(error).__name__
     finally:
-        # Observe/drain before reaping; this includes children created while
-        # SBTarget.Launch is blocked and before inferior.json can exist.
-        discovery_error = None
+        cleanup = {'drained': False, 'reason': 'initial_root_identity_unproved'}
         try:
-            observe_children(root, known, time.monotonic() + 15, freeze=True)
-        except Exception as error:
-            discovery_error = type(error).__name__
-        try:
-            cleanup = drain_children(root, known)
-        except Exception as error:
-            cleanup = {'drained': False, 'reason': 'owned_cleanup_exception',
-                       'exception_type': type(error).__name__}
-        if discovery_error is not None:
-            cleanup.update(drained=False, discovery_error=discovery_error)
-        phase_path = OUT / 'debugger-phase.json'
-        phase = json.loads(phase_path.read_text()).get('phase') if phase_path.exists() else None
-        if phase == 'launch_requested' and not known and not (OUT / 'inferior.json').exists():
-            cleanup.update(drained=False, reason='launch_ownership_not_observed')
-        write_json(OUT / 'owned-cleanup.json', cleanup)
-        child.wait(timeout=10)  # First and only wait/reap; no later PID signals.
+            if root_verified:
+                discovery_error = None
+                try:
+                    observe_children(root, known, time.monotonic() + 15, freeze=True)
+                except Exception as error:
+                    discovery_error = type(error).__name__
+                try:
+                    cleanup = drain_children(root, known)
+                except Exception as error:
+                    cleanup = {'drained': False, 'reason': 'owned_cleanup_exception',
+                               'exception_type': type(error).__name__}
+                if discovery_error is not None:
+                    cleanup.update(drained=False, discovery_error=discovery_error)
+                phase_path = OUT / 'debugger-phase.json'
+                phase = json.loads(phase_path.read_text()).get('phase') if phase_path.exists() else None
+                if phase == 'launch_requested' and not known and not (OUT / 'inferior.json').exists():
+                    cleanup.update(drained=False, reason='launch_ownership_not_observed')
+            write_json(OUT / 'owned-cleanup.json', cleanup)
+        finally:
+            # Direct Popen PID is still unreaped and cannot have been recycled,
+            # even if the first ps/PGID observation failed. This fallback makes
+            # no group/descendant ownership claim and never signals after wait.
+            try:
+                os.kill(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                child.wait(timeout=10)  # First/only reap, after every possible signal.
     return timed_out, observation_error, cleanup
 
 
