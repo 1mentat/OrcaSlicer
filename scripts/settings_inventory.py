@@ -591,11 +591,11 @@ def apply_runtime_registry(report: dict[str, Any], audit: dict[str, Any]) -> Non
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--root", default=".")
     parser.add_argument("--source", default="src/libslic3r/PrintConfig.cpp")
     parser.add_argument("--evidence", default="tests/settings_coverage.json")
-    parser.add_argument("--out", default="build/evidence/settings-inventory.json")
+    parser.add_argument("--out", help="output inside the leased artifact payload")
     parser.add_argument("--runtime-registry",
                         help="JSON from slicer_settings_inventory; verify the static key set against the compiled registry")
     parser.add_argument("--type-header", default="src/libslic3r/Config.hpp",
@@ -710,4 +710,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from validation_runner import managed_main
+    raise SystemExit(managed_main(main, output_option='--out',
+                                  default_name='settings-inventory.json', readonly_actions=()))

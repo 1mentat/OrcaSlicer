@@ -276,7 +276,7 @@ jobs:
 
       - name: Upload comment artifact
         if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/validation-upload
         with:
           name: profile-check-results
           path: ${{ runner.temp }}/profile-check-results/

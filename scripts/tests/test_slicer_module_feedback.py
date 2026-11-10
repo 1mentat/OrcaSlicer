@@ -13,6 +13,8 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "scripts" / "slicer_module_feedback.py"
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import validation_artifacts
 
 FAKE = r'''#!{python}
 import json, os, pathlib, subprocess, sys, time
@@ -95,17 +97,26 @@ runpy.run_path(cli, run_name="__main__")
 class ModuleFeedbackTests(unittest.TestCase):
     def fixture(self, mode="ok", expected=2, bad_source=False, timeout=5):
         tmp = tempfile.TemporaryDirectory(prefix="module feedback & safe ")
-        base = Path(tmp.name)
+        base = Path(tmp.name).resolve()
         root = base / "repo"
-        build = root / "build"
-        evidence = build / "evidence"
         (root / "tests").mkdir(parents=True)
-        evidence.mkdir(parents=True)
         source = root / "tests" / "module tests.cpp"
         prod = root / "src" / "module.cpp"
         prod.parent.mkdir()
         source.write_text("// test source\n")
         prod.write_text("// production source\n")
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "tests/module tests.cpp", "src/module.cpp"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "test fixture"], check=True)
+        store = base / "artifacts"
+        validation_artifacts.init(store, 2_000_000)
+        head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        lease = validation_artifacts.create(store, "module-feedback-fixture", head, "unit-tests", 60, 1_000_000)
+        build = Path(lease["payload_dir"]) / "build"
+        evidence = build / "evidence"
+        evidence.mkdir(parents=True)
         compile_db = build / "compile_commands.json"
         object_path = "CMakeFiles/module-tests.dir/tests/module tests.cpp.o"
         compile_db.write_text(json.dumps([{
@@ -129,16 +140,14 @@ class ModuleFeedbackTests(unittest.TestCase):
                      f'<TestCase><Name>Case A</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>1</Line></SourceInfo></TestCase>'
                      f'<TestCase><Name>Case B</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>2</Line></SourceInfo></TestCase>'
                      f'</MatchingTests>')
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
-        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
-        subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
-        subprocess.run(["git", "-C", str(root), "add", "tests/module tests.cpp", "src/module.cpp"], check=True)
-        subprocess.run(["git", "-C", str(root), "commit", "-qm", "test fixture"], check=True)
         out = evidence / "run"
         marker = base / "late-child-marker"
         build_marker = evidence / "build-invoked"
         argv_log = root / "fake-argv.jsonl"
         env = os.environ.copy()
+        env.update(VALIDATION_ARTIFACT_ROOT=str(store), VALIDATION_ARTIFACT_RUN_ID=lease["run_id"],
+                   VALIDATION_ARTIFACT_TOKEN=lease["token"], VALIDATION_ARTIFACT_DIR=lease["payload_dir"],
+                   VALIDATION_SOURCE_SHA=head)
         env.update({"FAKE_MODE": mode, "FAKE_NAMES": json.dumps(["Case A", "Case B"]),
                     "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker),
                     "FAKE_BUILD_MARKER": str(build_marker),

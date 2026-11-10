@@ -82,6 +82,106 @@ class CapturedProcessTests(unittest.TestCase):
             self.assertFalse(marker.exists(), "an interrupted descendant survived process cleanup")
 
 
+class CheckedProcessTests(unittest.TestCase):
+    def test_check_polls_and_preserves_input_across_communicate_retries(self):
+        for data in ("mesh Δ", b"\x00\xff patch\n"):
+            with self.subTest(binary=isinstance(data, bytes)):
+                checks = []
+                command = ("import sys,time; data=sys.stdin.buffer.read(); time.sleep(.35); "
+                           "sys.stdout.buffer.write(data); sys.stderr.buffer.write(b'diagnostic\\n')")
+                result = run_captured(
+                    [sys.executable, "-c", command], input_data=data,
+                    timeout=None if isinstance(data, bytes) else 5,
+                    check=lambda: checks.append(time.monotonic()),
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, data)
+                self.assertEqual(result.stderr, b"diagnostic\n" if isinstance(data, bytes) else "diagnostic\n")
+                self.assertGreaterEqual(len(checks), 3)
+
+    def test_check_mode_keeps_timeout_and_partial_output(self):
+        checks = []
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            run_captured(
+                [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(10)"],
+                timeout=.5, check=lambda: checks.append(time.monotonic()),
+            )
+        self.assertEqual(caught.exception.timeout, .5)
+        self.assertIn("ready", caught.exception.output)
+        self.assertGreaterEqual(len(checks), 2)
+
+    def test_check_exception_before_communicate_keeps_identity_and_notes(self):
+        error = RuntimeError("lease expired")
+        error.add_note("owned budget check")
+
+        def check():
+            raise error
+
+        with self.assertRaises(RuntimeError) as caught:
+            run_captured([sys.executable, "-c", "import time; time.sleep(10)"],
+                         timeout=5, check=check)
+        self.assertIs(caught.exception, error)
+        self.assertIn("owned budget check", caught.exception.__notes__)
+
+    def test_callback_timeout_exception_is_not_rewritten_as_command_timeout(self):
+        error = subprocess.TimeoutExpired(["lease-check"], 17, output="lease output", stderr="lease diagnostic")
+        error.add_note("callback failure")
+
+        def check():
+            raise error
+
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            run_captured([sys.executable, "-c", "import time; time.sleep(10)"],
+                         timeout=5, check=check)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(error.cmd, ["lease-check"])
+        self.assertEqual(error.timeout, 17)
+        self.assertEqual(error.output, "lease output")
+        self.assertEqual(error.stderr, "lease diagnostic")
+        self.assertIn("callback failure", error.__notes__)
+
+    def test_check_cancellation_stops_ready_parent_and_descendant(self):
+        for to_file in (False, True):
+            with self.subTest(output_file=to_file), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                ready = root / "ready"
+                parent_marker, child_marker = root / "parent-late", root / "child-late"
+                child = ("from pathlib import Path; import sys,time; "
+                         "print('child ready', flush=True); "
+                         "Path(sys.argv[1]).write_text('ready'); time.sleep(1.2); "
+                         "Path(sys.argv[2]).write_text('survived')")
+                parent = ("import subprocess,sys,time; from pathlib import Path; "
+                          "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]]); "
+                          "deadline=time.monotonic()+5; "
+                          "exec('while not Path(sys.argv[2]).exists() and time.monotonic()<deadline: time.sleep(.01)'); "
+                          "time.sleep(1.2); Path(sys.argv[4]).write_text('survived')")
+                error = RuntimeError("storage budget exceeded")
+                checked_ready = False
+
+                def check():
+                    nonlocal checked_ready
+                    self.assertIs(threading.current_thread(), threading.main_thread())
+                    if ready.exists():
+                        checked_ready = True
+                        raise error
+
+                with (root / "output.log").open("w+b") as output:
+                    with self.assertRaises(RuntimeError) as caught:
+                        run_captured(
+                            [sys.executable, "-c", parent, child, str(ready),
+                             str(child_marker), str(parent_marker)],
+                            timeout=5, output_file=output if to_file else None, check=check,
+                        )
+                    self.assertIs(caught.exception, error)
+                    self.assertTrue(checked_ready)
+                    if to_file:
+                        output.seek(0)
+                        self.assertIn(b"child ready", output.read())
+                time.sleep(1.3)
+                self.assertFalse(parent_marker.exists(), "canceled parent wrote after cleanup")
+                self.assertFalse(child_marker.exists(), "canceled descendant wrote after cleanup")
+
+
 class RecordedProcessTests(unittest.TestCase):
     def test_receipt_precedes_later_assessment_and_keeps_exit_42_as_process_outcome(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -274,7 +374,7 @@ class PortableInterruptionTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt", "Windows Job Object ownership")
 class WindowsJobOwnershipTests(unittest.TestCase):
     def run_tree_control(self, *, output_file=False, interrupt=False, parent_exits=False,
-                         binary=False):
+                         binary=False, cancel=False):
         import ctypes
         from ctypes import wintypes
         import _slicer_windows_job as jobs
@@ -328,12 +428,26 @@ class WindowsJobOwnershipTests(unittest.TestCase):
                         raise KeyboardInterrupt("Windows owned-tree interruption")
                 return original_communicate(process, *args, **kwargs)
 
+            cancellation = RuntimeError("Windows owned-tree budget cancellation")
+
+            def check():
+                nonlocal child_handle
+                if ready.exists():
+                    if child_handle is None:
+                        child_handle = api.checked("OpenProcess", 0x100000, False,
+                                                   int(child_pid.read_text()))
+                    raise cancellation
+
             started = time.monotonic()
             try:
                 with (root / "output.log").open("w+b") as output, \
                         patch.object(jobs._Api, "assign", new=checked_assign), \
                         patch.object(subprocess.Popen, "communicate", new=observe_ready):
-                    if interrupt:
+                    if cancel:
+                        with self.assertRaises(RuntimeError) as caught:
+                            run_captured(command, timeout=5, check=check)
+                        self.assertIs(caught.exception, cancellation)
+                    elif interrupt:
                         with self.assertRaises(KeyboardInterrupt):
                             run_captured(command, timeout=5, output_file=output if output_file else None)
                         self.assertTrue(injected)
@@ -367,6 +481,9 @@ class WindowsJobOwnershipTests(unittest.TestCase):
             finally:
                 if child_handle is not None:
                     api.checked("CloseHandle", child_handle)
+
+    def test_check_cancellation_drains_real_owned_descendant(self):
+        self.run_tree_control(cancel=True)
 
     def test_timeout_closes_real_descendant_text_pipes(self):
         self.run_tree_control()

@@ -10,19 +10,22 @@ import signal
 import subprocess
 import tempfile
 import time
-from typing import IO, Sequence
+from typing import IO, Callable, Sequence
 
 
 def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                  env: dict[str, str] | None = None, timeout: float | None = None,
                  input_data: str | bytes | None = None,
-                 output_file: IO | None = None) -> subprocess.CompletedProcess:
+                 output_file: IO | None = None,
+                 check: Callable[[], None] | None = None) -> subprocess.CompletedProcess:
     """Run a build or test in its own process group, preserving partial output.
 
     Killing only CMake, Ninja, or CTest leaves compiler/test children running
     against a worktree the caller may be about to restore or remove.
     With ``output_file``, both streams go directly to that file without being
     buffered in Python; the returned stdout/stderr are then None.
+    An optional quick ``check`` runs about every 0.1 seconds while waiting.
+    If it raises, the owned command is stopped before that exception propagates.
     """
     if os.name == "nt":
         if __package__:
@@ -30,7 +33,7 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
         else:
             from _slicer_windows_job import run_captured as run_windows_captured
         return run_windows_captured(argv, cwd=cwd, env=env, timeout=timeout,
-                                    input_data=input_data, output_file=output_file)
+                                    input_data=input_data, output_file=output_file, check=check)
 
     text_mode = not isinstance(input_data, bytes)
     group_options = {"start_new_session": True}
@@ -42,8 +45,26 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
         text=text_mode, encoding="utf-8" if text_mode else None,
         errors="replace" if text_mode else None, **group_options,
     ) as process:
+        checking = False
         try:
-            stdout, stderr = process.communicate(input_data, timeout=timeout)
+            if check is None:
+                stdout, stderr = process.communicate(input_data, timeout=timeout)
+            else:
+                deadline = None if timeout is None else time.monotonic() + timeout
+                pending_input = input_data
+                while True:
+                    checking = True
+                    check()
+                    checking = False
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise subprocess.TimeoutExpired(list(argv), timeout)
+                    try:
+                        stdout, stderr = process.communicate(
+                            pending_input, timeout=min(0.1, remaining) if remaining is not None else 0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pending_input = None
         except subprocess.TimeoutExpired:
             if os.name == "posix":
                 try:
@@ -51,6 +72,8 @@ def run_captured(argv: Sequence[str], *, cwd: Path | str | None = None,
                 except ProcessLookupError:
                     pass
             stdout, stderr = process.communicate()
+            if checking:
+                raise  # Preserve a TimeoutExpired raised by the callback itself.
             error = subprocess.TimeoutExpired(list(argv), timeout, output=stdout, stderr=stderr)
             # Keep the actual post-cleanup status available to recorded callers.
             # TimeoutExpired remains the raised type and keeps its usual output.
