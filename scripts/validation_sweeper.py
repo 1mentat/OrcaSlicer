@@ -134,7 +134,10 @@ def install_macos(roots, repository, source_sha, owner, interval_seconds=300, *,
         raise manager.ArtifactError('Home must be absolute')
     tools = home / 'Library/Application Support/OrcaSlicer/validation-tools'
     agents = home / 'Library/LaunchAgents'; config_path = tools / 'config.json'
-    _directory(tools, private=True); _directory(agents, private=True)
+    _directory(tools, private=True); _directory(agents)
+    info = manager._plain(agents, directory=True)
+    if hasattr(os, 'getuid') and (info.st_uid != os.getuid() or info.st_mode & 0o022):
+        raise manager.ArtifactError('LaunchAgents must be owned and not writable by other users')
     existing = any(tools.iterdir())
     if existing:
         old = manager._read(config_path, LIMIT)

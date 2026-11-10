@@ -162,6 +162,41 @@ class Sweeper(unittest.TestCase):
             self.assertRaises(manager.ArtifactError, sweeper.sweep, [str(self.root)], config=self.config())
             call.assert_not_called()
 
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'macOS/POSIX ownership permissions')
+    def test_existing_owned_0755_launchagents_installs_without_chmod(self):
+        agents = self.home / 'Library/LaunchAgents'; agents.mkdir(parents=True)
+        agents.chmod(0o755)
+        before = agents.stat().st_mode
+        self.assertTrue(self.install()['installed'])
+        self.assertEqual(agents.stat().st_mode, before)
+        self.assertEqual(self.config().parent.stat().st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'macOS/POSIX ownership permissions')
+    def test_group_or_world_writable_launchagents_rejected_without_chmod(self):
+        agents = self.home / 'Library/LaunchAgents'; agents.mkdir(parents=True)
+        for mode in (0o775, 0o757, 0o777):
+            with self.subTest(mode=oct(mode)):
+                agents.chmod(mode)
+                self.assertRaises(manager.ArtifactError, self.install)
+                self.assertEqual(agents.stat().st_mode & 0o777, mode)
+                self.assertEqual(self.calls, [])
+                self.assertFalse(self.config().exists())
+
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'macOS/POSIX ownership permissions')
+    def test_different_launchagents_owner_rejected(self):
+        agents = self.home / 'Library/LaunchAgents'; agents.mkdir(parents=True)
+        agents.chmod(0o755)
+        plain = manager._plain
+        def wrong_owner(path, directory=False):
+            info = plain(path, directory)
+            if path == agents:
+                return types.SimpleNamespace(st_uid=os.getuid() + 1, st_mode=info.st_mode)
+            return info
+        with patch.object(manager, '_plain', side_effect=wrong_owner):
+            self.assertRaises(manager.ArtifactError, self.install)
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.config().exists())
+
     def test_cli_rejects_home_override_and_reports_bounded_failure(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertRaises(SystemExit, sweeper.main, ['install-macos', '--root', str(self.root),
