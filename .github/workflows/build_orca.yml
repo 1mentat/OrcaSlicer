@@ -343,7 +343,7 @@ jobs:
           fi
 
       - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only
+        if: (github.ref != 'refs/heads/main' || github.repository != 'OrcaSlicer/OrcaSlicer') && runner.os == 'macOS' && inputs.macos-combine-only
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` helper (retries flaky commands such as `hdiutil create`).
@@ -361,6 +361,15 @@ jobs:
             cp -R ${{ github.workspace }}/build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg/
             ln -sfn /Applications ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg/Applications
             retry hdiutil create -volname "OrcaSlicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/OrcaSlicer_profile_validator_dmg -ov -format UDZO OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          fi
+
+      - name: Verify macOS DMG artifacts
+        if: runner.os == 'macOS' && inputs.macos-combine-only
+        working-directory: ${{ github.workspace }}
+        run: |
+          test -s "OrcaSlicer_Mac_universal_${{ env.ver }}.dmg"
+          if [ -f "build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator" ]; then
+            test -s "OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
           fi
 
       # Delete the per-arch bundles only after signing/DMG creation succeeded, so a
