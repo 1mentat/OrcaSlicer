@@ -285,11 +285,45 @@ class ModeTests(unittest.TestCase):
                 self.assertIsNone(report["threshold"])
                 self.assertEqual(report["summary"]["lines"]["covered"], coverage[0])
 
-    def test_default_mode_does_not_gate(self):
+    def test_explicit_measure_only_does_not_gate(self):
         with tempfile.TemporaryDirectory() as temp:
-            status, report = Fixture(Path(temp), coverage=(1, 10)).main()
+            status, report = Fixture(Path(temp), coverage=(1, 10)).main("--measure-only")
             self.assertEqual((status, report["status"]), (0, "pass"))
             self.assertEqual(report["measurement"]["mode"], "measure_only")
+            self.assertIsNone(report["threshold"])
+
+    def test_default_mode_requires_strictly_more_than_90_percent(self):
+        for coverage, expected in (((89, 100), (1, "coverage_below_threshold")),
+                                   ((90, 100), (1, "coverage_below_threshold")),
+                                   ((91, 100), (0, "pass"))):
+            with self.subTest(coverage=coverage), tempfile.TemporaryDirectory() as temp:
+                status, report = Fixture(Path(temp), coverage=coverage).main()
+                self.assertEqual((status, report["status"]), expected)
+                self.assertEqual(report["measurement"]["mode"], "threshold")
+                self.assertEqual(report["measurement"]["threshold"], 90.0)
+                self.assertTrue(report["measurement"]["gates_on_percentage"])
+                self.assertEqual(report["metrics"], ["lines", "functions", "branches"])
+
+    def test_default_mode_rejects_empty_metric_denominator(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status, report = Fixture(Path(temp), coverage=(0, 0)).main()
+            self.assertEqual((status, report["status"]), (2, "coverage_integrity_error"))
+            self.assertEqual(report["integrity_failures"]["empty_metrics"],
+                             ["lines", "functions", "branches"])
+
+    def test_explicit_threshold_and_metric_selection_are_preserved(self):
+        for metric, expected in (("lines", (0, "pass")), ("functions", (1, "coverage_below_threshold"))):
+            with self.subTest(metric=metric), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp))
+                summary = fixture.runtime_export["data"][0]["files"][0]["summary"]
+                summary["lines"] = {"covered": 80, "count": 100}
+                summary["functions"] = {"covered": 25, "count": 100}
+                summary["branches"] = {"covered": 0, "count": 0}
+                status, report = fixture.main("--threshold", "70", "--metric", metric)
+                self.assertEqual((status, report["status"]), expected)
+                self.assertEqual(report["measurement"]["mode"], "threshold")
+                self.assertEqual(report["measurement"]["threshold"], 70.0)
+                self.assertEqual(report["metrics"], [metric])
 
     def test_per_executable_reports_bind_profiles_and_do_not_rerun_tests(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -411,6 +445,23 @@ class ModeTests(unittest.TestCase):
             slicer_coverage._parser().parse_args(
                 ["run", "--object", "a", "--manifest", "m", "--test-command", "t",
                  "--measure-only", "--threshold", "1"])
+
+    def test_invalid_threshold_arguments_are_parse_errors(self):
+        base = ["run", "--object", "a", "--manifest", "m", "--test-command", "t"]
+        for value in ("invalid", "-0.1", "100.1"):
+            with self.subTest(value=value), mock.patch("sys.stderr"), \
+                 mock.patch.object(slicer_coverage, "run_coverage") as run:
+                with self.assertRaises(SystemExit) as raised:
+                    slicer_coverage.main([*base, "--threshold", value])
+                self.assertEqual(raised.exception.code, 2)
+                run.assert_not_called()
+
+        for modes in (("--measure-only", "--threshold", "1"),
+                      ("--threshold", "1", "--measure-only")):
+            with self.subTest(modes=modes), mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit) as raised:
+                    slicer_coverage._parser().parse_args([*base, *modes])
+                self.assertEqual(raised.exception.code, 2)
 
     def test_threshold_is_strictly_greater(self):
         summary = {"lines": {"covered": 9, "count": 10, "percent": 90.0}}

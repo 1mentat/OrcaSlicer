@@ -20,12 +20,12 @@ Typical invocation, after a coverage build (-DSLICER_ENABLE_LLVM_SOURCE_COVERAGE
       --out build/slicer-coverage-report
 
 Modes:
-  --measure-only      record the percentages; any valid percentage passes.
-  --threshold N       additionally require every --metric to exceed N percent.
-Without either option the run measures only; percentages never gate by default.
+  --measure-only      record valid percentages without a percentage gate.
+  --threshold N       require every --metric to exceed N percent (default: 90).
+Without either option the run requires every default metric to be strictly above 90 percent.
 
-Exit status: 0 the evidence is valid (and above the threshold, if one was
-given); 1 the evidence is valid but below --threshold; 2 the evidence is not
+Exit status: 0 the evidence is valid and above the selected threshold (unless
+--measure-only); 1 the evidence is valid but below that threshold; 2 the evidence is not
 valid: tests failed or never ran, profiles are missing or foreign, mappings are
 missing, or a tool failed.
 
@@ -1313,9 +1313,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--filter", help="CTest label used when the command has no {filter} placeholder")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--measure-only", action="store_true",
-                      help="record coverage without a percentage gate (the default)")
-    mode.add_argument("--threshold", type=float,
-                      help="also require each --metric to exceed this percentage (exit 1 if not)")
+                      help="record coverage without a percentage gate")
+    mode.add_argument("--threshold", type=float, default=90.0,
+                      help="require each --metric to exceed this percentage (default: 90; exit 1 if not)")
     run.add_argument("--metric", dest="metrics", action="append", choices=METRICS, default=None,
                      help="metric to require for --threshold and to check for an empty "
                           "denominator; repeatable (default: lines, functions, branches)")
@@ -1334,6 +1334,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.measure_only:
+        args.threshold = None
     if args.threshold is not None and not 0.0 <= args.threshold <= 100.0:
         parser.error("--threshold must be between 0 and 100")
     args.metrics = list(dict.fromkeys(args.metrics or DEFAULT_METRICS))
