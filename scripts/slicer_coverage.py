@@ -623,12 +623,14 @@ def _compile_command_output(arguments: Sequence[str], directory: Path) -> Path |
 
 
 def _coverage_compile_flags(arguments: Sequence[str]) -> bool:
+    arguments = [value.removeprefix("/clang:") for value in arguments]
     return "-fcoverage-mapping" in arguments and "-fprofile-instr-generate" in arguments
 
 
 def _atomic_profile_updates(arguments: Sequence[str]) -> bool:
     # Clang uses the last setting; a missing or prefer-atomic setting is not
     # evidence that concurrent increments are atomic.
+    arguments = [value.removeprefix("/clang:") for value in arguments]
     if any(value.startswith("@") for value in arguments):
         return False  # An unresolved response file could override visible flags.
     updates = [value for value in arguments if value.startswith("-fprofile-update=")]

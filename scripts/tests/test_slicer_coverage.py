@@ -141,6 +141,11 @@ class TestEvidenceTests(unittest.TestCase):
         self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions in 2 test cases)"), 2)
         self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions)"), 0)
 
+    def test_catch_summary_counts_cases_instead_of_assertions(self):
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions in 2 test cases)"), 2)
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (1 assertion in 1 test case)"), 1)
+        self.assertEqual(slicer_coverage.test_evidence("All tests passed (43 assertions)"), 0)
+
     def test_all_skipped_or_not_run_is_not_evidence(self):
         self.assertEqual(slicer_coverage.test_evidence(
             "100% tests passed, 0 tests failed out of 3\nThe following tests did not run:\n"), 0)
@@ -159,6 +164,72 @@ class CompileCommandTests(unittest.TestCase):
         ):
             with self.subTest(options=options):
                 self.assertEqual(slicer_coverage._atomic_profile_updates(options), accepted)
+
+    def test_compiler_audit_requires_effective_atomic_updates_before_object_export(self):
+        for options, accepted in (
+            ([], False),
+            (["-fprofile-update=single"], False),
+            (["-fprofile-update=prefer-atomic"], False),
+            (["-fprofile-update=atomic", "-fprofile-update=single"], False),
+            (["-fprofile-update=atomic-invalid"], False),
+            (["-fprofile-update=atomic", "@hidden-options.rsp"], False),
+            (["-fprofile-update=single", "-fprofile-update=atomic"], True),
+            (["/clang:-fprofile-update=atomic"], True),
+            (["/clang:-fprofile-update=atomic", "/clang:-fprofile-update=single"], False),
+        ):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "concurrent.cpp"
+                source.write_text("int concurrent() { return 1; }\n")
+                obj = root / "concurrent.o"
+                obj.touch()
+                profile = root / "inventory.profdata"
+                profile.write_bytes(b"indexed inventory")
+                commands = root / "compile_commands.json"
+                commands.write_text(json.dumps([{
+                    "directory": str(root), "file": str(source), "arguments": [
+                        "clang-cl", "/clang:-fprofile-instr-generate",
+                        "/clang:-fcoverage-mapping", *options, "-c", str(source), "-o", str(obj),
+                    ],
+                }]))
+                export = {"data": [{"files": [{
+                    "filename": str(source), "summary": {"lines": {"count": 1, "covered": 0}},
+                }]}]}
+                with mock.patch.object(slicer_coverage, "_run", return_value=
+                                       slicer_coverage.subprocess.CompletedProcess(
+                                           [], 0, json.dumps(export), "")) as run:
+                    evidence = slicer_coverage._compiler_source_evidence(
+                        "llvm-cov", [source], commands, timeout=5, inventory_profile=profile,
+                    )
+                if accepted:
+                    self.assertEqual(evidence["status"], "ok")
+                    run.assert_called_once()
+                else:
+                    run.assert_not_called()
+                    self.assertEqual(evidence["errors"], [{
+                        "source": str(source),
+                        "reason": "compile_command_missing_atomic_profile_updates",
+                    }])
+                    self.assertEqual(evidence["sources"][0]["classification"], "unsafe_profile_counters")
+
+    def test_empty_indexed_profile_rejects_symlink_paths_without_touching_targets(self):
+        for path_kind in ("output", "profile_text"):
+            with self.subTest(path_kind=path_kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "compiler-inventory-empty.profdata"
+                target = root / f"protected-{path_kind}"
+                target.write_bytes(b"runtime profile that must remain unchanged")
+                symlink = output if path_kind == "output" else output.with_suffix(".proftext")
+                symlink.symlink_to(target)
+
+                with mock.patch.object(slicer_coverage, "_run") as run:
+                    with self.assertRaises(slicer_coverage.CoverageError):
+                        slicer_coverage._create_empty_indexed_profile(
+                            "llvm-profdata", output, timeout=5
+                        )
+                    run.assert_not_called()
+
+                self.assertEqual(target.read_bytes(), b"runtime profile that must remain unchanged")
 
     def test_unsafe_counters_are_rejected_before_any_object_export(self):
         with tempfile.TemporaryDirectory() as temp:
