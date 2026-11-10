@@ -13916,6 +13916,17 @@ TEST_CASE("Flush matrix scaling reads generic and typed prime volume modes",
                 ScopedTemporaryDir temp("preset-flush-mode-representations");
                 ScopedDataDir data(temp.path());
                 PresetBundle bundle;
+                bundle.filament_presets = {bundle.filaments.default_preset().name};
+                REQUIRE(bundle.filament_presets.size() == 1);
+                REQUIRE_FALSE(bundle.filament_presets.front().empty());
+                REQUIRE(bundle.filaments.find_preset(bundle.filament_presets.front(), false) != nullptr);
+                REQUIRE(bundle.filaments.get_edited_preset().name == bundle.filament_presets.front());
+                const auto* nozzles = bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+                REQUIRE(nozzles != nullptr);
+                REQUIRE(nozzles->values.size() == 1);
+                const auto* variants = bundle.filaments.get_edited_preset().config.option<ConfigOptionStrings>("filament_extruder_variant");
+                REQUIRE(variants != nullptr);
+                REQUIRE(variants->values.size() == 1);
                 ConfigOption* default_mode = bundle.project_config.option("prime_volume_mode");
                 REQUIRE(default_mode != nullptr);
                 REQUIRE(default_mode->type() == coEnum);
