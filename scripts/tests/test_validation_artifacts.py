@@ -60,6 +60,11 @@ class Artifacts(unittest.TestCase):
                 with scandir(directory) as entries:
                     listed = list(entries)
                 target.unlink()
+                # Windows DirEntry.stat can retain the enumeration snapshot. Force
+                # a fresh no-follow lookup for the selected vanished entry so this
+                # control exercises ENOENT on every platform.
+                listed = [types.SimpleNamespace(path=entry.path, stat=lambda **_: target.lstat())
+                          if Path(entry.path) == target else entry for entry in listed]
                 removed.append(target)
                 return ListedEntries(listed)
             return scandir(directory)
@@ -184,7 +189,7 @@ class Artifacts(unittest.TestCase):
     def test_live_accounting_still_rejects_unsupported_file_types(self):
         run = self.create()
         payload = Path(run['payload_dir'])
-        value = os.stat_result((stat.S_IFIFO | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        value = types.SimpleNamespace(st_mode=stat.S_IFIFO | 0o600, st_size=0, st_file_attributes=0)
         entry = types.SimpleNamespace(path=str(payload / 'fifo'), name='fifo', stat=lambda **_: value,
                                       is_symlink=lambda: False, is_dir=lambda **_: False,
                                       is_file=lambda **_: False)
