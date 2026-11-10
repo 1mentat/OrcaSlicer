@@ -362,3 +362,38 @@ TEST_CASE("SVG importer rejects filled coordinates outside the clipping range", 
     CHECK(message == "import svg failed: path coordinates exceed the supported integer range.");
     CHECK(model.objects.empty());
 }
+
+
+TEST_CASE("SVG importer creates a physical rectangle", "[SVGImport]")
+{
+    ScopedTemporaryFile file(".svg");
+    write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"20mm\">"
+        "<path fill=\"#112233\" d=\"M0 0 L10 0 L10 20 L0 20 Z\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const TriangleMesh &mesh = single_mesh(model);
+    check_prism(mesh, 10., 20., 10. * 20.);
+    TriangleMesh volume_probe(mesh);
+    CHECK(std::isfinite(volume_probe.volume()));
+    CHECK(volume_probe.volume() > 0.f);
+    CHECK(model.objects.front()->volumes.front()->name == "part_1");
+}
+
+TEST_CASE("SVG importer keeps distinct element names for styled paths", "[SVGImport]")
+{
+    ScopedTemporaryFile file(".svg");
+    write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<g><path fill=\"red\" d=\"M0 0 L2 0 L2 2 L0 2 Z\"/></g>"
+        "<g><path fill=\"blue\" d=\"M4 0 L7 0 L7 1 L4 1 Z\"/></g></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+    CHECK(model.objects.front()->volumes[0]->name != model.objects.front()->volumes[1]->name);
+    CHECK(model.objects.front()->volumes[0]->mesh().facets_count() > 0);
+    CHECK(model.objects.front()->volumes[1]->mesh().facets_count() > 0);
+}

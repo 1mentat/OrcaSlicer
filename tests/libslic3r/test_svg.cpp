@@ -461,8 +461,10 @@ TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[
     const std::vector<pt::ptree> circles = elements(svg, "circle");
     REQUIRE(circles.size() == 4);
     std::vector<std::pair<double, double>> centers;
-    for (const pt::ptree &circle : circles)
+    for (const pt::ptree &circle : circles) {
+        CHECK(attr(circle, "r") == "10");
         centers.emplace_back(std::stod(attr(circle, "cx")), std::stod(attr(circle, "cy")));
+    }
     // Three columns 20 mm (200 SVG units) apart on the first row.
     for (size_t i = 1; i < 3; ++i)
         CHECK_THAT(centers[i].second, WithinAbs(centers[0].second, 1e-4));
@@ -499,4 +501,52 @@ TEST_CASE("SVG filled paths suppress outlines while open paths retain visible st
     CHECK_FALSE(is_filled(paths[2]));
     CHECK(style(paths[2]).at("stroke") == "green");
     CHECK_THAT(style_number(paths[2], "stroke-width"), WithinAbs(2., 1e-6));
+}
+
+TEST_CASE("SVG preserves the same polygon reversed alongside primitive annotations", "[SVG]")
+{
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    Polygon ccw = square(1., 1., 8., 8.).contour;
+    if (!ccw.is_counter_clockwise())
+        ccw.reverse();
+    Polygon cw = ccw;
+    cw.reverse();
+
+    ScopedTemporaryFile ccw_output(".svg");
+    {
+        SVG svg(ccw_output.string(), box, scaled(1.), false);
+        svg.arrows = true;
+        svg.draw(Polygons{ccw}, "red");
+        svg.draw(Line(Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))), "orange", scaled(.1));
+        svg.draw_text(Point(scaled(2.), scaled(4.)), "text", "purple", 3);
+        svg.draw_legend(Point(scaled(2.), scaled(6.)), "legend", "teal");
+        svg.add_comment("metadata");
+        svg.Close();
+    }
+    const pt::ptree ccw_svg = read_svg(ccw_output);
+    const std::vector<pt::ptree> ccw_paths = elements(ccw_svg, "path");
+    REQUIRE(ccw_paths.size() == 1);
+    CHECK(style(ccw_paths.front()).at("fill") == "red");
+    CHECK_FALSE(style(ccw_paths.front()).at("fill") == "white");
+    const std::vector<pt::ptree> lines = elements(ccw_svg, "line");
+    REQUIRE(lines.size() == 1);
+    CHECK(attr(lines.front(), "marker-end") == "url(#endArrow)");
+    const std::vector<pt::ptree> texts = elements(ccw_svg, "text");
+    REQUIRE(texts.size() == 2);
+    CHECK(attr(texts[0], "font-size") == "30px");
+    CHECK(text(texts[1]) == "legend");
+    const std::vector<pt::ptree> comments = elements(ccw_svg, "<xmlcomment>");
+    REQUIRE(comments.size() == 1);
+    CHECK(text(comments.front()) == "metadata");
+
+    ScopedTemporaryFile cw_output(".svg");
+    {
+        SVG svg(cw_output.string(), box, scaled(1.), false);
+        svg.draw(Polygons{cw}, "red");
+        svg.Close();
+    }
+    const std::vector<pt::ptree> cw_paths = elements(read_svg(cw_output), "path");
+    REQUIRE(cw_paths.size() == 1);
+    CHECK(style(cw_paths.front()).at("fill") == "white");
+    CHECK_FALSE(style(cw_paths.front()).at("fill") == "red");
 }
