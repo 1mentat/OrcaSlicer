@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 _RESERVED_SUFFIXES = {
     ".o", ".obj", ".a", ".lib", ".pch", ".gch", ".profraw", ".profdata",
@@ -89,10 +91,10 @@ def lint_tracked_build_outputs(repo_root: Path, git_files: list[str] | None = No
         suffix = Path(name).suffix.lower()
         if suffix not in {item.lower() for item in _RESERVED_SUFFIXES}:
             continue
-        if name in _VENDORED_LINK_INPUTS:
-            continue
         path = repo_root / name
         try:
+            if path.is_symlink():
+                raise OSError("tracked output candidate is a symlink")
             resolved = path.resolve(strict=True)
             resolved.relative_to(repo_root.resolve())
             if not resolved.is_file():
@@ -101,6 +103,8 @@ def lint_tracked_build_outputs(repo_root: Path, git_files: list[str] | None = No
                 prefix = stream.read(16)
         except (OSError, ValueError) as error:
             findings.append(f"{name}: cannot safely inspect tracked output candidate: {error}")
+            continue
+        if name in _VENDORED_LINK_INPUTS:
             continue
         if suffix == ".obj":
             if _is_obj_binary(prefix):
@@ -114,108 +118,54 @@ def lint_tracked_build_outputs(repo_root: Path, git_files: list[str] | None = No
     return findings
 
 
-def _step_blocks(lines: list[str]):
-    """Yield indentation-scoped step entries from every GitHub-style steps sequence."""
-    for index, line in enumerate(lines):
-        match = re.match(r"^(\s*)steps:\s*(.*?)\s*$", line)
-        if not match:
-            continue
-        steps_indent = len(match.group(1))
-        initial_value = re.sub(r"\s+#.*$", "", match.group(2)).strip()
-        if initial_value:
-            yield index + 1, [], "unsupported inline or aliased steps syntax"
-            continue
-        item_indent = steps_indent + 2
-        start = index + 1
-        while start < len(lines):
-            if lines[start].strip() and len(lines[start]) - len(lines[start].lstrip()) <= steps_indent:
-                break
-            if not lines[start].strip() or lines[start].lstrip().startswith("#"):
-                start += 1
-                continue
-            indent = len(lines[start]) - len(lines[start].lstrip())
-            if indent != item_indent or not re.match(r"-\s+", lines[start].lstrip()):
-                # The first non-list entry means this is not a supported step sequence.
-                yield start + 1, [lines[start]], "unsupported steps sequence"
-                break
-            end = start + 1
-            while end < len(lines):
-                candidate = lines[end]
-                if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= steps_indent:
-                    break
-                if candidate.strip() and len(candidate) - len(candidate.lstrip()) == item_indent and re.match(r"-\s+", candidate.lstrip()):
-                    break
-                end += 1
-            yield start + 1, lines[start:end], None
-            start = end
-
-
-def _step_key(block: list[str], key: str) -> tuple[int, str] | None:
-    if not block:
-        return None
-    step_indent = len(block[0]) - len(block[0].lstrip())
-    direct_indent = step_indent + 2
-    for index, line in enumerate(block):
-        indent = len(line) - len(line.lstrip())
-        if index > 0 and indent != direct_indent:
-            continue
-        pattern = rf"^\s*(?:-\s+)?{re.escape(key)}:\s*(.*?)\s*(?:#.*)?$" if index == 0 else rf"^\s+{re.escape(key)}:\s*(.*?)\s*(?:#.*)?$"
-        match = re.match(pattern, line)
-        if match:
-            return index, match.group(1).strip(" '\"")
-    return None
-
-
-def _retention_value(block: list[str]) -> tuple[bool, str | None]:
-    with_entry = _step_key(block, "with")
-    if with_entry is None:
-        return False, None
-    index, inline = with_entry
-    if inline:
-        # Inline flow maps are valid YAML but cannot be safely scoped by this parser.
-        return False, None
-    with_indent = len(block[index]) - len(block[index].lstrip())
-    for line in block[index + 1:]:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip())
-        if indent <= with_indent:
-            break
-        if indent != with_indent + 2:
-            continue
-        match = re.match(r"^\s+retention-days:\s*(.*?)\s*(?:#.*)?$", line)
-        if match:
-            return True, match.group(1).strip(" '\"")
-    return True, None
-
-
 def _is_upload_action(value: str) -> bool:
-    value = value.strip(" '\"")
-    # Accept normal action references and absolute Forgejo action URLs, but not
-    # download-artifact or similarly named actions.
     return re.search(r"(?:^|/)upload-artifact@[^\s]+$", value, re.IGNORECASE) is not None
 
 
-def lint_upload_retention(workflow_paths: list[Path]) -> list[str]:
+def lint_upload_retention(workflow_paths: list[Path], repo_root: Path | None = None) -> list[str]:
+    """Read real YAML so flow maps, anchors and scalar text retain their meaning."""
     findings = []
     for workflow in workflow_paths:
         try:
-            lines = workflow.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as error:
-            findings.append(f"{workflow}: cannot read workflow: {error}")
+            if workflow.is_symlink():
+                raise ValueError("workflow is a symlink")
+            if repo_root is not None:
+                workflow.resolve(strict=True).relative_to(repo_root.resolve())
+            with workflow.open("rb") as stream:
+                raw = stream.read(2 * 1024**2 + 1)
+            if len(raw) > 2 * 1024**2:
+                raise ValueError("workflow exceeds 2 MiB parsing budget")
+            document = yaml.safe_load(raw.decode("utf-8"))
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError, RecursionError) as error:
+            findings.append(f"{workflow}: cannot safely parse workflow: {error}")
             continue
-        for start_line, block, error in _step_blocks(lines):
-            if error:
-                findings.append(f"{workflow}:{start_line}: {error}")
+        if not isinstance(document, dict) or not isinstance(document.get("jobs"), dict):
+            findings.append(f"{workflow}: expected a workflow jobs mapping")
+            continue
+        for job_id, job in document["jobs"].items():
+            if not isinstance(job, dict):
+                findings.append(f"{workflow}: job '{job_id}' must be a mapping")
                 continue
-            uses = _step_key(block, "uses")
-            if uses is None or not _is_upload_action(uses[1]):
+            steps = job.get("steps", [])
+            if not isinstance(steps, list) or len(steps) > 10000:
+                findings.append(f"{workflow}: job '{job_id}' has invalid or excessive steps")
                 continue
-            name = _step_key(block, "name")
-            label = name[1] if name and name[1] else uses[1]
-            has_with, value = _retention_value(block)
-            if not has_with or value is None or not re.fullmatch(r"[0-9]+", value) or int(value) <= 0:
-                findings.append(f"{workflow}:{start_line}: upload step '{label}' requires a finite positive literal retention-days")
+            for number, step in enumerate(steps, 1):
+                if not isinstance(step, dict):
+                    findings.append(f"{workflow}: job '{job_id}' step {number} must be a mapping")
+                    continue
+                uses = step.get("uses", "")
+                if not isinstance(uses, str) or not _is_upload_action(uses):
+                    continue
+                settings = step.get("with", {})
+                value = settings.get("retention-days") if isinstance(settings, dict) else None
+                positive_integer = (type(value) is int and value > 0) or (
+                    isinstance(value, str) and re.fullmatch(r"[0-9]+", value) and int(value) > 0)
+                if not positive_integer:
+                    label = step.get("name", uses)
+                    findings.append(
+                        f"{workflow}: job '{job_id}' upload step '{label}' "
+                        "requires a finite positive literal retention-days")
     return findings
 
 
@@ -228,7 +178,7 @@ def main() -> int:
     for directory in (repo / ".github" / "workflows", repo / ".forgejo" / "workflows"):
         workflows.extend(sorted(directory.glob("*.yml")))
         workflows.extend(sorted(directory.glob("*.yaml")))
-    findings = lint_tracked_build_outputs(repo) + lint_upload_retention(workflows)
+    findings = lint_tracked_build_outputs(repo) + lint_upload_retention(workflows, repo)
     for finding in findings:
         print(finding)
     if not findings:

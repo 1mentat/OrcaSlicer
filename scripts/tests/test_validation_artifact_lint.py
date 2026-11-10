@@ -70,7 +70,7 @@ class ValidationArtifactLintTests(unittest.TestCase):
           name: expression
           retention-days: ${{ inputs.days }}
       - name: Unrelated run text
-        run: echo retention-days: 20
+        run: 'echo retention-days: 20'
       - name: Block scalar cannot set retention
         uses: actions/upload-artifact@v7
         with:
@@ -84,7 +84,7 @@ class ValidationArtifactLintTests(unittest.TestCase):
         with:
           name: separate
   inline_steps_job:
-    steps: [{uses: actions/upload-artifact@v7}]
+    steps: &shared_steps [{uses: actions/upload-artifact@v7}]
   aliased_steps_job:
     steps: *shared_steps
 """,
@@ -99,8 +99,53 @@ class ValidationArtifactLintTests(unittest.TestCase):
             self.assertIn("Expression retention", findings[2])
             self.assertIn("Block scalar cannot set retention", findings[3])
             self.assertIn("Second job missing retention", findings[4])
-            self.assertIn("unsupported inline or aliased steps syntax", findings[5])
-            self.assertIn("unsupported inline or aliased steps syntax", findings[6])
+            self.assertIn("inline_steps_job", findings[5])
+            self.assertIn("aliased_steps_job", findings[6])
+
+    def test_valid_yaml_layouts_and_script_text_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow = Path(temporary) / "ci.yaml"
+            workflow.write_text("""jobs:
+  normal:
+    steps: &uploads # Comment on a mapping key is ordinary YAML.
+    - uses: actions/upload-artifact@v7
+      with: {name: proof, retention-days: '14'}
+    - run: |
+        echo 'steps: [{uses: actions/upload-artifact@v7}]'
+  reused:
+    steps: *uploads
+  flow:
+    steps: [{uses: 'https://code.forgejo.org/actions/upload-artifact@v4', with: {retention-days: 3}}]
+""", encoding="utf-8")
+            self.assertEqual(lint_upload_retention([workflow]), [])
+
+    def test_malformed_yaml_and_custom_objects_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow = Path(temporary) / "ci.yml"
+            for text in ("jobs: [", "!!python/name:os.system ''"):
+                with self.subTest(text=text):
+                    workflow.write_text(text, encoding="utf-8")
+                    findings = lint_upload_retention([workflow])
+                    self.assertEqual(len(findings), 1)
+                    self.assertIn("cannot safely parse workflow", findings[0])
+
+    def test_workflows_and_allowlisted_inputs_cannot_follow_outside_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "repo"
+            root.mkdir()
+            outside = base / "outside.yml"
+            outside.write_text("jobs: {}\n", encoding="utf-8")
+            workflow = root / "ci.yml"
+            library = root / "deps/GMP/gmp/lib/win-x64/libgmp-10.lib"
+            library.parent.mkdir(parents=True)
+            try:
+                workflow.symlink_to(outside)
+                library.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"symlink creation unavailable: {error}")
+            self.assertEqual(len(lint_upload_retention([workflow], root)), 1)
+            self.assertEqual(len(lint_tracked_build_outputs(root, [library.relative_to(root).as_posix()])), 1)
 
 
 if __name__ == "__main__":
