@@ -51,6 +51,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install pinned Ninja for build-reuse fixtures
+        run: python -m pip install --only-binary=:all: --no-deps ninja==1.13.0
       - name: Require Ninja for build-reuse fixtures
         run: python -c "import shutil; assert shutil.which('ninja'), 'Ninja is required for real build-reuse controls'"
       - name: Test scoped process handling
