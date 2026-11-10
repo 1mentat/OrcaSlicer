@@ -1,0 +1,26 @@
+{
+  "repository": "1mentat/OrcaSlicer",
+  "run_id": 42802549818,
+  "head_sha": "a256c35225d801346e8a930aa98e44f23ad25a5f",
+  "checkout_sha": "f271721cc90e75d983d66829ef76023f3fd85074",
+  "source_tree": "4624df208d07a0e8e7b04d2469331c1d148d74a0",
+  "checkout_parents": [
+    "ba5f5ec944b58acdf0d8b52f44d5ad0b99dc9cce",
+    "a256c35225d801346e8a930aa98e44f23ad25a5f"
+  ],
+  "artifact_id": 13761552670,
+  "artifact_name": "f271721cc90e75d983d66829ef76023f3fd85074-tests-macos-arm64",
+  "artifact_bytes": 233310429,
+  "artifact_digest": "sha256:22ab537ec56a9d39407d78d6c419c47745a7b5ae495a7cb49a044f8eb7916e1a",
+  "failed_job_id": 129809359727,
+  "rng_seed": "1410530457",
+  "source_sha256": {
+    "tests/libslic3r/test_meshboolean.cpp": "d4f2c5f0b9485ae3004c424d42e3ee95a71fa736b57f65eca842f1ee4defdcfa",
+    "src/libslic3r/MeshBoolean.cpp": "04f77db2b7f16fb07aa7a992cbb1461f33ac9a347a032c8a334c4f6fba3dd9fb",
+    "src/libslic3r/MeshBoolean.hpp": "ac9419a1fd9edb4853b65f7b940e457014bb61d313bff176ea4b3814f4f5f876",
+    "src/libslic3r/TriangleMesh.cpp": "d2436714e5cf1d034036e5a802362a2d767f3dae75021d108116f11b5d0a6f9b",
+    "src/libslic3r/TriangleMesh.hpp": "5836e5141554cc4f86d4ad29ada71e122a6ceeeda2cb888cc619acfce5963a04",
+    "deps/CGAL/CGAL.cmake": "8a4a2e3254448fec3b97d82a687373321745d53bc44176cb479189b3acb4d174"
+  },
+  "note": "Exact current failed binary, distinct SIGILL investigation; no old timeout-cause claim, no rebuild/suite/repetition or product acceptance."
+}
