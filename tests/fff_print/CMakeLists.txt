@@ -3,14 +3,21 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_helpers.cpp
 	test_helpers.hpp
+	test_adaptive_bed_mesh.cpp
+	test_boolean_settings.cpp
 	test_cooling.cpp
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
 	test_fill.cpp
 	test_flow.cpp
+	test_motion_flow_variance.cpp
 	test_gcode_processor.cpp
 	test_gcode_timing.cpp
 	test_gcode.cpp
+	test_gcode_settings_contracts.cpp
+	test_gcode_motion_settings.cpp
+	test_timelapse_pos_picker.cpp
+	test_thumbnails.cpp
 	test_gcodeprocessor.cpp
 	test_gcodewriter.cpp
 	test_interlocking.cpp
@@ -22,9 +29,12 @@ add_executable(${_TEST_NAME}_tests
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
 	test_precise_seam.cpp
 	test_print.cpp
+	test_print_validation_clearance.cpp
+	test_pressure_equalizer.cpp
 	test_printobject.cpp
 	test_mixed_filament.cpp
 	test_seam_placer.cpp
+	test_settings_variance.cpp
 	test_skirt_brim.cpp
 	test_slicing_pipeline_hook.cpp
 	test_support_material.cpp

@@ -433,3 +433,18 @@ TEST_CASE("NSVG centering makes translated inputs geometrically equivalent", "[N
     CHECK_THAT(unscale<double>(origin_box.center().x()), WithinAbs(0., 0.001));
     CHECK_THAT(unscale<double>(translated_box.center().x()), WithinAbs(0., 0.001));
 }
+
+
+TEST_CASE("NSVG bounds include every path and preserve source coordinates", "[NSVGUtils]")
+{
+    NSVGimage_ptr image = parse_svg(
+        "<path fill=\"red\" d=\"M2 3L10 3L10 7z\"/>"
+        "<path fill=\"blue\" d=\"M-4 -2L-1 -2L-1 1z\"/>");
+    Vec2f minimum(100.f, 100.f);
+    Vec2f maximum(-100.f, -100.f);
+    bounds(*image, minimum, maximum);
+    CHECK_THAT(minimum.x(), WithinAbs(-4., 0.001));
+    CHECK_THAT(minimum.y(), WithinAbs(-2., 0.001));
+    CHECK_THAT(maximum.x(), WithinAbs(10., 0.001));
+    CHECK_THAT(maximum.y(), WithinAbs(7., 0.001));
+}

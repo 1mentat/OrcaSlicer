@@ -68,17 +68,6 @@ bool load(const std::string &path, Model &model, bool *inches = nullptr)
     return load_amf(path.c_str(), &config, &substitutions, &model, inches);
 }
 
-// Malformed input may be rejected by a false result or by the archive parser's
-// typed FileIOError. Keep successful-input calls on load() so errors still fail them.
-bool load_for_rejection(const std::string &path, Model &model)
-{
-    try {
-        return load(path, model);
-    } catch (const FileIOError &) {
-        return false;
-    }
-}
-
 void replace(std::string &s, const std::string &a, const std::string &b)
 {
     const auto at = s.find(a);
@@ -187,7 +176,7 @@ TEST_CASE("AMF archives reject malformed embedded XML", "[AMF][AMFArchive]")
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"bad.amf", xml}});
     Model m;
-    CHECK_FALSE(load_for_rejection(f.string(), m));
+    CHECK_FALSE(load(f.string(), m));
 }
 
 TEST_CASE("AMF archives reject empty model entries", "[AMF][AMFArchive]")
@@ -322,8 +311,8 @@ TEST_CASE("AMF empty constellation instances still load the object geometry", "[
     write_file(f.string(), document(instance("")));
     Model m;
     REQUIRE(load(f.string(), m));
-    // Whether an empty <instance> creates a ModelInstance is intentionally not asserted.
     geometry(m, f.string());
+    CHECK(m.objects[0]->instances.empty());
 }
 
 TEST_CASE("AMF material attributes retain Unicode and entity decoding", "[AMF][AMFArchive]")
@@ -350,7 +339,7 @@ TEST_CASE("AMF archives reject triangle references outside the vertex list", "[A
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load_for_rejection(f.string(), m));
+    CHECK_FALSE(load(f.string(), m));
 }
 
 TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
@@ -364,7 +353,7 @@ TEST_CASE("AMF archives reject a volume without triangles", "[AMF][AMFArchive]")
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load_for_rejection(f.string(), m));
+    CHECK_FALSE(load(f.string(), m));
 }
 
 TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMFArchive]")
@@ -374,7 +363,7 @@ TEST_CASE("AMF archived object metadata requires its type attribute", "[AMF][AMF
     ScopedTemporaryFile f(".amf");
     archive(f.string(), {{"model.amf", xml}});
     Model m;
-    CHECK_FALSE(load_for_rejection(f.string(), m));
+    CHECK_FALSE(load(f.string(), m));
 }
 
 TEST_CASE("AMF normalizes inward triangle winding to positive volume", "[AMF][AMFArchive]")
@@ -390,5 +379,17 @@ TEST_CASE("AMF normalizes inward triangle winding to positive volume", "[AMF][AM
     archive(f.string(), {{"model.amf", xml}});
     Model m;
     REQUIRE(load(f.string(), m));
+    geometry(m, f.string());
+}
+
+TEST_CASE("AMF archives stream model XML across extraction chunks (original M033 trailing-metadata fixture)", "[AMF][AMFArchive]")
+{
+    auto xml = document();
+    replace(xml, "</amf>", "<metadata type=\"long\">" + std::string(150000, 'x') + "</metadata></amf>");
+    ScopedTemporaryFile f(".amf");
+    archive(f.string(), {{"large.amf", xml}});
+    Model m;
+    bool inches = false;
+    REQUIRE(load(f.string(), m, &inches));
     geometry(m, f.string());
 }

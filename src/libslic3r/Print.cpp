@@ -5677,11 +5677,26 @@ static void to_json(json& j, const Polyline& poly_line) {
     j[JSON_ARC_FITTING] = fittings_json;
 }
 
+static void to_json(json& j, const Polyline3& polyline) {
+    // Keep the existing XY/arc representation readable by legacy caches and
+    // store per-point Z separately for non-planar extrusion paths.
+    Polyline planar = polyline.to_polyline();
+    planar.fitting_result = polyline.fitting_result;
+    to_json(j, planar);
+    json z = json::array();
+    for (const Point3& point : polyline.points)
+        z.push_back(point.z());
+    j["z"] = std::move(z);
+}
+
 static void to_json(json& j, const ExtrusionPath& extrusion_path) {
     j[JSON_EXTRUSION_POLYLINE] = extrusion_path.polyline;
     j[JSON_EXTRUSION_MM3_PER_MM] = extrusion_path.mm3_per_mm;
     j[JSON_EXTRUSION_WIDTH] = extrusion_path.width;
     j[JSON_EXTRUSION_HEIGHT] = extrusion_path.height;
+    // A contoured path uses its per-point Z values when G-code is emitted;
+    // retaining only the coordinates would reload it as a planar path.
+    j["z_contoured"] = extrusion_path.z_contoured;
     j[JSON_EXTRUSION_ROLE] = extrusion_path.role();
     j[JSON_EXTRUSION_NO_EXTRUSION] = extrusion_path.is_force_no_extrusion();
 }
@@ -5866,23 +5881,71 @@ static void to_json(json& j, const groupedVolumeSlices& first_layer_group) {
     j[JSON_FIRSTLAYER_GROUP_SLICES] = std::move(slices_json);
 }
 
+// Cache coordinates are emitted as integers. Never let JSON arithmetic conversion
+// cast an untrusted floating-point value or a large unsigned value to coord_t.
+static coord_t cached_coordinate(const json& value)
+{
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<json::number_unsigned_t>();
+        if (number <= static_cast<json::number_unsigned_t>(std::numeric_limits<coord_t>::max()))
+            return static_cast<coord_t>(number);
+    } else if (value.is_number_integer()) {
+        const auto number = value.get<json::number_integer_t>();
+        if (number >= static_cast<json::number_integer_t>(std::numeric_limits<coord_t>::min()) &&
+            number <= static_cast<json::number_integer_t>(std::numeric_limits<coord_t>::max()))
+            return static_cast<coord_t>(number);
+    }
+    throw Slic3r::FileIOError("Invalid integer coordinate in slice cache");
+}
+
+// A consumed field carries the format tag: older loaders require an integer here
+// and reject this object before decoding paths, rather than silently losing Z.
+static int cached_identify_id(const json& root)
+{
+    const json& tagged = root.at(JSON_IDENTIFY_ID);
+    const json* value = &tagged;
+    if (tagged.is_object()) {
+        if (cached_coordinate(tagged.at("cache_format")) != 2)
+            throw Slic3r::FileIOError("Unsupported slice cache format");
+        value = &tagged.at("value");
+    }
+    const coord_t id = cached_coordinate(*value);
+    if (id < std::numeric_limits<int>::min() || id > std::numeric_limits<int>::max())
+        throw Slic3r::FileIOError("Invalid object identifier in slice cache");
+    return static_cast<int>(id);
+}
+
+static void reject_legacy_cached_polylines(const json& root)
+{
+    std::vector<const json*> pending{&root};
+    while (!pending.empty()) {
+        const json& node = *pending.back();
+        pending.pop_back();
+        if (node.is_object() && node.contains(JSON_EXTRUSION_POLYLINE) &&
+            node.at(JSON_EXTRUSION_POLYLINE).is_array())
+            throw Slic3r::FileIOError("Legacy XYZ slice cache requires re-slicing");
+        if (node.is_structured())
+            for (const auto& child : node)
+                pending.push_back(&child);
+    }
+}
+
 //load apis from json
 static void from_json(const json& j, Points& p_s) {
-    int array_size = j.size();
-    for (int index = 0; index < array_size/2; index++)
-    {
-        coord_t x = j[2*index], y = j[2*index+1];
-        Point p(x, y);
-        p_s.push_back(std::move(p));
-    }
-    return;
+    if (!j.is_array() || j.size() % 2 != 0)
+        throw Slic3r::FileIOError("Invalid XY coordinates in slice cache");
+    Points points;
+    points.reserve(j.size() / 2);
+    for (size_t index = 0; index < j.size(); index += 2)
+        points.emplace_back(cached_coordinate(j.at(index)), cached_coordinate(j.at(index + 1)));
+    p_s = std::move(points);
 }
 
 static void from_json(const json& j, BoundingBox& bbox) {
-    bbox.min[0] = j[0];
-    bbox.min[1] = j[1];
-    bbox.max[0] = j[2];
-    bbox.max[1] = j[3];
+    bbox.min[0] = cached_coordinate(j.at(0));
+    bbox.min[1] = cached_coordinate(j.at(1));
+    bbox.max[0] = cached_coordinate(j.at(2));
+    bbox.max[1] = cached_coordinate(j.at(3));
     bbox.defined = true;
 
     return;
@@ -5914,38 +5977,44 @@ static void from_json(const json& j, Surface& surf) {
 }
 
 static void from_json(const json& j, ArcSegment& arc_seg) {
-    arc_seg.is_arc = j[JSON_IS_ARC];
-    arc_seg.length = j[JSON_ARC_LENGTH];
-    arc_seg.angle_radians = j[JSON_ARC_ANGLE_RADIUS];
-    arc_seg.polar_start_theta = j[JSON_ARC_POLAY_START_THETA];
-    arc_seg.polar_end_theta = j[JSON_ARC_POLAY_END_THETA];
-    arc_seg.start_point.x() = j[JSON_ARC_START_POINT][0];
-    arc_seg.start_point.y() = j[JSON_ARC_START_POINT][1];
-    arc_seg.end_point.x() = j[JSON_ARC_END_POINT][0];
-    arc_seg.end_point.y() = j[JSON_ARC_END_POINT][1];
-    arc_seg.direction = j[JSON_ARC_DIRECTION];
-    arc_seg.radius    = j[JSON_ARC_RADIUS];
-    arc_seg.center.x() = j[JSON_ARC_CENTER][0];
-    arc_seg.center.y() = j[JSON_ARC_CENTER][1];
+    arc_seg.is_arc = j.at(JSON_IS_ARC);
+    arc_seg.length = j.at(JSON_ARC_LENGTH);
+    arc_seg.angle_radians = j.at(JSON_ARC_ANGLE_RADIUS);
+    arc_seg.polar_start_theta = j.at(JSON_ARC_POLAY_START_THETA);
+    arc_seg.polar_end_theta = j.at(JSON_ARC_POLAY_END_THETA);
+    arc_seg.start_point.x() = cached_coordinate(j.at(JSON_ARC_START_POINT).at(0));
+    arc_seg.start_point.y() = cached_coordinate(j.at(JSON_ARC_START_POINT).at(1));
+    arc_seg.end_point.x() = cached_coordinate(j.at(JSON_ARC_END_POINT).at(0));
+    arc_seg.end_point.y() = cached_coordinate(j.at(JSON_ARC_END_POINT).at(1));
+    arc_seg.direction = j.at(JSON_ARC_DIRECTION);
+    arc_seg.radius    = j.at(JSON_ARC_RADIUS);
+    arc_seg.center.x() = cached_coordinate(j.at(JSON_ARC_CENTER).at(0));
+    arc_seg.center.y() = cached_coordinate(j.at(JSON_ARC_CENTER).at(1));
 
     return;
 }
 
 
 static void from_json(const json& j, Polyline& poly_line) {
-    poly_line.points = j[JSON_POINTS];
+    if (!j.is_object() || !j.at(JSON_ARC_FITTING).is_array())
+        throw Slic3r::FileIOError("Invalid cached polyline object");
+    poly_line.points = j.at(JSON_POINTS);
 
-    int arc_fitting_count = j[JSON_ARC_FITTING].size();
+    int arc_fitting_count = j.at(JSON_ARC_FITTING).size();
     for (int arc_fitting_index = 0; arc_fitting_index < arc_fitting_count; arc_fitting_index++)
     {
-        const json& fitting_json = j[JSON_ARC_FITTING][arc_fitting_index];
+        const json& fitting_json = j.at(JSON_ARC_FITTING).at(arc_fitting_index);
         PathFittingData path_fitting;
-        path_fitting.start_point_index = fitting_json[JSON_ARC_START_INDEX];
-        path_fitting.end_point_index = fitting_json[JSON_ARC_END_INDEX];
-        path_fitting.path_type = fitting_json[JSON_ARC_PATH_TYPE];
+        const coord_t start = cached_coordinate(fitting_json.at(JSON_ARC_START_INDEX));
+        const coord_t end = cached_coordinate(fitting_json.at(JSON_ARC_END_INDEX));
+        if (start < 0 || end < start || static_cast<size_t>(end) >= poly_line.points.size())
+            throw Slic3r::FileIOError("Invalid cached arc fitting indices");
+        path_fitting.start_point_index = static_cast<size_t>(start);
+        path_fitting.end_point_index = static_cast<size_t>(end);
+        path_fitting.path_type = fitting_json.at(JSON_ARC_PATH_TYPE);
 
         if (fitting_json.contains(JSON_ARC_DATA)) {
-            path_fitting.arc_data = fitting_json[JSON_ARC_DATA];
+            path_fitting.arc_data = fitting_json.at(JSON_ARC_DATA);
         }
 
         poly_line.fitting_result.push_back(std::move(path_fitting));
@@ -5953,78 +6022,80 @@ static void from_json(const json& j, Polyline& poly_line) {
     return;
 }
 
+static void from_json(const json& j, Polyline3& polyline) {
+    Polyline planar = j;
+    polyline = Polyline3(planar);
+    polyline.fitting_result = std::move(planar.fitting_result);
+    if (j.contains("z")) {
+        const json& z = j.at("z");
+        if (!z.is_array() || z.size() != polyline.points.size())
+            throw Slic3r::FileIOError("Invalid cached extrusion Z coordinates");
+        for (size_t i = 0; i < polyline.points.size(); ++i)
+            polyline.points[i].z() = cached_coordinate(z.at(i));
+    }
+}
+
 static void from_json(const json& j, ExtrusionPath& extrusion_path) {
-    Polyline temp_polyline = j[JSON_EXTRUSION_POLYLINE];
-    extrusion_path.polyline = Polyline3(temp_polyline);
-    extrusion_path.mm3_per_mm             =    j[JSON_EXTRUSION_MM3_PER_MM];
-    extrusion_path.width                  =    j[JSON_EXTRUSION_WIDTH];
-    extrusion_path.height                 =    j[JSON_EXTRUSION_HEIGHT];
-    extrusion_path.set_extrusion_role(j[JSON_EXTRUSION_ROLE]);
-    extrusion_path.set_force_no_extrusion(j[JSON_EXTRUSION_NO_EXTRUSION]);
+    extrusion_path.polyline = j.at(JSON_EXTRUSION_POLYLINE).get<Polyline3>();
+    extrusion_path.mm3_per_mm             =    j.at(JSON_EXTRUSION_MM3_PER_MM);
+    extrusion_path.width                  =    j.at(JSON_EXTRUSION_WIDTH);
+    extrusion_path.height                 =    j.at(JSON_EXTRUSION_HEIGHT);
+    // Keep old cache files backward compatible: absent means planar.
+    extrusion_path.z_contoured             =    j.value("z_contoured", false);
+    extrusion_path.set_extrusion_role(j.at(JSON_EXTRUSION_ROLE));
+    extrusion_path.set_force_no_extrusion(j.at(JSON_EXTRUSION_NO_EXTRUSION));
 }
 
 static bool convert_extrusion_from_json(const json& entity_json, ExtrusionEntityCollection& entity_collection) {
-    std::string path_type = entity_json[JSON_EXTRUSION_ENTITY_TYPE];
+    std::string path_type = entity_json.at(JSON_EXTRUSION_ENTITY_TYPE);
     bool ret = false;
 
     if (path_type == JSON_EXTRUSION_TYPE_PATH) {
-        ExtrusionPath* path = new ExtrusionPath();
-        if (!path) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionPath");
-            return false;
-        }
-        *path = entity_json[JSON_EXTRUSION_PATHS][0];
-        entity_collection.entities.push_back(path);
+        auto path = std::make_unique<ExtrusionPath>();
+        *path = entity_json.at(JSON_EXTRUSION_PATHS).at(0);
+        entity_collection.entities.push_back(path.get());
+        path.release();
     }
     else if (path_type == JSON_EXTRUSION_TYPE_MULTIPATH) {
-        ExtrusionMultiPath* multipath = new ExtrusionMultiPath();
-        if (!multipath) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionMultiPath");
-            return false;
-        }
-        int paths_count = entity_json[JSON_EXTRUSION_PATHS].size();
+        auto multipath = std::make_unique<ExtrusionMultiPath>();
+        int paths_count = entity_json.at(JSON_EXTRUSION_PATHS).size();
         for (int path_index = 0; path_index < paths_count; path_index++)
         {
             ExtrusionPath path;
-            path = entity_json[JSON_EXTRUSION_PATHS][path_index];
+            path = entity_json.at(JSON_EXTRUSION_PATHS).at(path_index);
             multipath->paths.push_back(std::move(path));
         }
-        entity_collection.entities.push_back(multipath);
+        entity_collection.entities.push_back(multipath.get());
+        multipath.release();
     }
     else if (path_type == JSON_EXTRUSION_TYPE_LOOP) {
-        ExtrusionLoop* loop = new ExtrusionLoop();
-        if (!loop) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionLoop");
-            return false;
-        }
-        loop->set_loop_role(entity_json[JSON_EXTRUSION_LOOP_ROLE]);
-        int paths_count = entity_json[JSON_EXTRUSION_PATHS].size();
+        auto loop = std::make_unique<ExtrusionLoop>();
+        loop->set_loop_role(entity_json.at(JSON_EXTRUSION_LOOP_ROLE));
+        int paths_count = entity_json.at(JSON_EXTRUSION_PATHS).size();
         for (int path_index = 0; path_index < paths_count; path_index++)
         {
             ExtrusionPath path;
-            path = entity_json[JSON_EXTRUSION_PATHS][path_index];
+            path = entity_json.at(JSON_EXTRUSION_PATHS).at(path_index);
             loop->paths.push_back(std::move(path));
         }
-        entity_collection.entities.push_back(loop);
+        entity_collection.entities.push_back(loop.get());
+        loop.release();
     }
     else if (path_type == JSON_EXTRUSION_TYPE_COLLECTION) {
-        ExtrusionEntityCollection* collection = new ExtrusionEntityCollection();
-        if (!collection) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": oom when new ExtrusionEntityCollection");
-            return false;
-        }
-        collection->no_sort = entity_json[JSON_EXTRUSION_NO_SORT];
-        int entities_count = entity_json[JSON_EXTRUSION_ENTITIES].size();
+        auto collection = std::make_unique<ExtrusionEntityCollection>();
+        collection->no_sort = entity_json.at(JSON_EXTRUSION_NO_SORT);
+        int entities_count = entity_json.at(JSON_EXTRUSION_ENTITIES).size();
         for (int entity_index = 0; entity_index < entities_count; entity_index++)
         {
-            const json& entity_item_json = entity_json[JSON_EXTRUSION_ENTITIES][entity_index];
+            const json& entity_item_json = entity_json.at(JSON_EXTRUSION_ENTITIES).at(entity_index);
             ret = convert_extrusion_from_json(entity_item_json, *collection);
             if (!ret) {
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": convert_extrusion_from_json failed");
                 return false;
             }
         }
-        entity_collection.entities.push_back(collection);
+        entity_collection.entities.push_back(collection.get());
+        collection.release();
     }
     else {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": unknown path type %1%")%path_type;
@@ -6333,7 +6404,7 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
             json root_json, layers_json = json::array(), support_layers_json = json::array(), first_layer_groups = json::array();
 
             root_json[JSON_OBJECT_NAME] = model_obj->name;
-            root_json[JSON_IDENTIFY_ID] = identify_id;
+            root_json[JSON_IDENTIFY_ID] = {{"cache_format", 2}, {"value", identify_id}};
 
             //export the layers
             std::vector<json> layers_json_vector(obj->layer_count());
@@ -6544,9 +6615,6 @@ int Print::load_cached_data(const std::string& directory)
         const PrintInstance &print_instance = obj->instances()[0];
         const ModelInstance *model_instance = print_instance.model_instance;
 
-        obj->clear_layers();
-        obj->clear_support_layers();
-
         int identify_id = model_instance->loaded_id;
         if (identify_id <= 0) {
             //for old 3mf
@@ -6589,6 +6657,36 @@ int Print::load_cached_data(const std::string& directory)
         return ret;
     }
 
+    try {
+        for (const json& root : object_jsons) {
+            (void)cached_identify_id(root);
+            reject_legacy_cached_polylines(root);
+        }
+    } catch (const std::exception& err) {
+        BOOST_LOG_TRIVIAL(error) << "Slice cache preflight failed: " << err.what();
+        return CLI_IMPORT_CACHE_LOAD_FAILED;
+    }
+
+    // Cancel/invalidate before destructive mutation. Detach every borrower before
+    // deleting owners so a failed load cannot leave dangling shared layer vectors.
+    for (PrintObject* obj : m_objects)
+        obj->invalidate_all_steps();
+    for (PrintObject* obj : m_objects)
+        obj->clear_shared_object();
+    const auto clear_loaded_cache = [this]() noexcept {
+        for (PrintObject* obj : m_objects) {
+            obj->clear_layers();
+            obj->clear_support_layers();
+            obj->firstLayerObjGroupsMod().clear();
+        }
+    };
+    clear_loaded_cache();
+    bool cache_loaded = false;
+    const ScopeGuard discard_partial_cache([&]() noexcept {
+        if (!cache_loaded)
+            clear_loaded_cache();
+    });
+
     for (int obj_index = 0; obj_index < object_jsons.size(); obj_index++) {
         json& root_json = object_jsons[obj_index];
         PrintObject *obj = object_filenames[obj_index].second;
@@ -6598,7 +6696,7 @@ int Print::load_cached_data(const std::string& directory)
             //ifs >> root_json;
 
             std::string name = root_json.at(JSON_OBJECT_NAME);
-            int identify_id = root_json.at(JSON_IDENTIFY_ID);
+            int identify_id = cached_identify_id(root_json);
             int layer_count = 0, support_layer_count = 0, firstlayer_group_count = 0;
 
             layer_count = root_json[JSON_LAYERS].size();
@@ -6689,6 +6787,9 @@ int Print::load_cached_data(const std::string& directory)
 
             //load first group volumes
             std::vector<groupedVolumeSlices>& firstlayer_objgroups = obj->firstLayerObjGroupsMod();
+            // Loading the same cache again must replace, rather than append to,
+            // the previously loaded first-layer grouping metadata.
+            firstlayer_objgroups.clear();
             for (int index = 0; index < firstlayer_group_count; index++)
             {
                 json& firstlayer_group_json = root_json[JSON_FIRSTLAYER_GROUPS][index];
@@ -6725,6 +6826,7 @@ int Print::load_cached_data(const std::string& directory)
         }
     }
 
+    cache_loaded = ret == 0;
     object_jsons.clear();
     object_filenames.clear();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": total printobject count %1%, loaded %2%, ret=%3%")%m_objects.size() %count %ret;

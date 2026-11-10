@@ -351,7 +351,7 @@ wxString WipingDialog::BuildTableObjStr()
 
     std::vector<std::vector<double>> flush_matrixs;
     for (int idx = 0; idx < nozzle_num; ++idx) {
-        auto fm = get_flush_volumes_matrix(raw_matrix_data, idx, nozzle_num);
+        auto fm = get_flush_volumes_matrix(raw_matrix_data, idx, nozzle_num, full_n);
         flush_matrixs.emplace_back(extract_physical_sub_matrix(fm, full_n, m_physical_indices));
     }
     flush_multiplier.resize(nozzle_num, 1);
@@ -686,7 +686,7 @@ std::vector<double> WipingDialog::ExpandToFullMatrix(const std::vector<double>& 
     auto raw = project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
     int nozzle_num = (int)wxGetApp().preset_bundle->project_config.option<ConfigOptionFloats>("flush_multiplier")->values.size();
     if (nozzle_num < 1) nozzle_num = 1;
-    auto original = get_flush_volumes_matrix(raw, nozzle_idx, nozzle_num);
+    auto original = get_flush_volumes_matrix(raw, nozzle_idx, nozzle_num, full_n);
     return expand_physical_to_full_matrix(sub_matrix, m_physical_indices, full_n, original);
 }
 
