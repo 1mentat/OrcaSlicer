@@ -2591,8 +2591,13 @@ private:
 // const std::vector<double> &fv_matrix:  origin matrix from json
 // size_t extruder_id: -1 means single-nozzle for old file, 0 means the 1st extruder, 1 means the 2nd extruder
 template<class T>
-static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = -1, size_t nozzle_nums = 1)
+static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, size_t extruder_id = -1, size_t nozzle_nums = 1, size_t filament_count = 0)
 {
+    // A legacy project may store one N-by-N block after switching to a multi-nozzle printer.
+    // Known filament cardinality distinguishes that block from the expanded per-nozzle layout.
+    if (filament_count != 0 && fv_matrix.size() % filament_count == 0 &&
+        fv_matrix.size() / filament_count == filament_count)
+        return fv_matrix;
     if (extruder_id != -1 && nozzle_nums != 1) {
         return std::vector<T>(fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * extruder_id + EPSILON),
                                    fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * (extruder_id + 1) + EPSILON));

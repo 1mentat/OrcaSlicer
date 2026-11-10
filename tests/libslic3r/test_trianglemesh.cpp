@@ -127,6 +127,8 @@ TEST_CASE("TriangleMesh keeps topology and statistics for a translated solid", "
     CHECK_THAT(mesh.size().x(), WithinAbs(2., 1e-6));
     CHECK_THAT(mesh.size().y(), WithinAbs(3., 1e-6));
     CHECK_THAT(mesh.size().z(), WithinAbs(4., 1e-6));
+    const size_t before = mesh.memsize();
+    REQUIRE(before >= sizeof(TriangleMesh));
     mesh.translate(Vec3f(10.f, -2.f, 7.f));
     REQUIRE(mesh.bounding_box().min.isApprox(Vec3d(10., -2., 7.), 1e-6));
     REQUIRE(mesh.bounding_box().max.isApprox(Vec3d(12., 1., 11.), 1e-6));
@@ -693,6 +695,7 @@ TEST_CASE("Empty TriangleMesh operations keep the mesh empty", "[TriangleMesh][T
     REQUIRE(mesh.horizontal_projection().empty());
     REQUIRE(mesh.convex_hull().empty());
     REQUIRE(mesh.convex_hull_3d().empty());
+    REQUIRE(mesh.memsize() > 0);
     mesh.align_to_origin();
     mesh.translate(1.f, 2.f, 3.f);
     mesh.rotate_z(float(PI / 2.));
@@ -756,4 +759,21 @@ TEST_CASE("Pyramid signed volume is invariant under translation", "[TriangleMesh
     for (auto& vertex : mesh.vertices)
         vertex += displacement;
     CHECK_THAT(its_volume(mesh), WithinAbs(108., 1e-3));
+}
+
+TEST_CASE("Indexed mesh cleanup removes duplicate and unused vertices without invalidating faces (original M027 fixture)", "[TriangleMesh][TriangleMeshContracts]")
+{
+    indexed_triangle_set mesh = its_make_cube(1., 1., 1.);
+    mesh.vertices.push_back(mesh.vertices.front());
+    const size_t with_unused = mesh.vertices.size();
+    mesh.indices.emplace_back(0, 0, 0);
+    const int removed_faces = its_remove_degenerate_faces(mesh);
+    REQUIRE(removed_faces == 1);
+    const int removed_vertices = its_merge_vertices(mesh);
+    REQUIRE(removed_vertices >= 1);
+    REQUIRE(all_indices_valid(mesh));
+    its_shrink_to_fit(mesh);
+    REQUIRE(its_compactify_vertices(mesh) == 0);
+    REQUIRE(mesh.vertices.size() < with_unused);
+    CHECK(its_num_open_edges(mesh) == 0);
 }

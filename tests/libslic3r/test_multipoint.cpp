@@ -327,3 +327,65 @@ TEST_CASE("MultiPoint3 bounding box and rotation keep Z coordinates", "[MultiPoi
     CHECK(path.points[1] == Point3(10, 0, 7));
     CHECK(path.points[2] == Point3(0, 0, 9));
 }
+
+TEST_CASE("Visvalingam is deterministic for repeated equal input", "[MultiPoint][Visvalingam]")
+{
+    const Points input = make_polyline();
+    const Points first = MultiPoint::visivalingam(input, 20.);
+    for (int i = 0; i < 4; ++i)
+        check_exact(MultiPoint::visivalingam(input, 20.), first);
+}
+
+TEST_CASE("MultiPoint3 tolerance excludes the exact radius boundary", "[MultiPoint][MultiPointGap]")
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
+    CHECK(path.find_point(Point3(10, 1, 7), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 1.0) == -1);
+}
+
+TEST_CASE("Visvalingam is translation invariant (original M011 variant)", "[MultiPoint][Visvalingam]")
+{
+    const Points input = make_polyline();
+    const Points translated = transform(input, 123456, -765432, 1);
+    const Points expected = transform(reference_visivalingam(input, 20.), 123456, -765432, 1);
+    check_exact(MultiPoint::visivalingam(translated, 20.), expected);
+}
+
+TEST_CASE("Visvalingam scales tolerance with area (original M011 variant)", "[MultiPoint][Visvalingam]")
+{
+    const Points input = make_polyline();
+    const Points scaled = transform(input, 0, 0, 3);
+    const Points expected = transform(reference_visivalingam(input, 20.), 0, 0, 3);
+    check_exact(MultiPoint::visivalingam(scaled, 20. * 9.), expected);
+}
+
+TEST_CASE("Visvalingam reverses the retained order (original M011 variant)", "[MultiPoint][Visvalingam]")
+{
+    const Points input = make_polyline();
+    Points reversed = input;
+    std::reverse(reversed.begin(), reversed.end());
+    Points expected = reference_visivalingam(input, 20.);
+    std::reverse(expected.begin(), expected.end());
+    check_exact(MultiPoint::visivalingam(reversed, 20.), expected);
+}
+
+TEST_CASE("MultiPoint3 keeps Z coordinates while matching, rotating, and deduplicating (original M011 variant)", "[MultiPoint][MultiPointGap]")
+{
+    Polyline3 path(Points3{Point3(0, 0, 5), Point3(10, 0, 7), Point3(10, 10, 9), Point3(10, 10, 9)});
+    CHECK(path.find_point(Point3(10, 0, 7)) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 2.0) == 1);
+    CHECK(path.find_point(Point3(10, 1, 7), 1.0) == -1);
+    CHECK(path.remove_duplicate_points());
+    CHECK(path.points.size() == 3);
+    CHECK_FALSE(path.remove_duplicate_points());
+
+    const BoundingBox3 bounds = path.bounding_box();
+    CHECK(bounds.defined);
+    CHECK(bounds.min == Point3(0, 0, 5));
+    CHECK(bounds.max == Point3(10, 10, 9));
+
+    path.rotate(std::acos(-1.0) / 2.0, Point3(10, 0, 100));
+    CHECK(path.first_point() == Point3(10, -10, 5));
+    CHECK(path.points[1] == Point3(10, 0, 7));
+    CHECK(path.points[2] == Point3(0, 0, 9));
+}

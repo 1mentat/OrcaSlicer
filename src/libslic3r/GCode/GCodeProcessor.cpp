@@ -3089,8 +3089,9 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     }
 
     std::vector<int> filament_map = config.filament_map.values; // 1 based idxs
-    // if filament map has wrong length, set filament to master extruder_id
-    filament_map.resize(filament_count, config.master_extruder_id.value);
+    // Preserve explicit mappings; pad only missing entries with the master extruder.
+    if (filament_map.size() < filament_count)
+        filament_map.resize(filament_count, config.master_extruder_id.value);
 
     for (size_t i = 0; i < filament_count; ++ i) {
         m_extruder_offsets[i] = to_3d(config.extruder_offset.get_at(filament_map[i] - 1).cast<float>().eval(), 0.f);
@@ -3164,7 +3165,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
     if (filament_maps != nullptr) {
-        m_filament_maps = filament_maps->values;
+        // Use the same master-extruder fallback already resolved for filament offsets.
+        m_filament_maps = filament_map;
         std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
     }
 
@@ -3381,10 +3383,13 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     }
 
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
-    if (filament_maps != nullptr) {
+    m_filament_maps.clear();
+    if (filament_maps != nullptr)
         m_filament_maps = filament_maps->values;
-        std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
-    }
+    const auto *master_extruder = config.option<ConfigOptionInt>("master_extruder_id");
+    if (m_filament_maps.size() < m_result.filaments_count)
+        m_filament_maps.resize(m_result.filaments_count, master_extruder != nullptr ? master_extruder->value : 1);
+    std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
 
     //BBS
     const ConfigOptionFloats* filament_costs = config.option<ConfigOptionFloats>("filament_cost");
@@ -6821,7 +6826,7 @@ void GCodeProcessor::process_T(const std::string_view command, int nozzle_id)
 void GCodeProcessor::init_filament_maps_and_nozzle_type_when_import_only_gcode()
 {
     if (m_filament_maps.empty()) {
-        m_filament_maps.assign((int) EnforcerBlockerType::ExtruderMax, 1);
+        m_filament_maps.assign((int) EnforcerBlockerType::ExtruderMax, 0);
     }
     if (m_result.nozzle_type.empty()) {
         m_result.nozzle_type.assign((int) EnforcerBlockerType::ExtruderMax, NozzleType::ntUndefine);
@@ -6853,12 +6858,7 @@ void GCodeProcessor::ensure_nozzle_group_result(int min_filament_count)
         filament_map.resize(filament_count, filament_map.front());
     }
 
-    int min_value = *std::min_element(filament_map.begin(), filament_map.end());
-    if (min_value >= 1) {
-        for (int &value : filament_map) {
-            value -= 1;
-        }
-    }
+    // All internal filament maps are zero-based, including import-only defaults.
 
     for (int &value : filament_map) {
         value = std::max(0, value);
