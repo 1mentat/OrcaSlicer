@@ -26,6 +26,11 @@ if (NOT SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
     return()
 endif ()
 
+if (CMAKE_VERSION VERSION_LESS 3.16)
+    message(FATAL_ERROR
+        "SLICER_ENABLE_LLVM_SOURCE_COVERAGE requires CMake 3.16 or newer to disable precompiled headers")
+endif ()
+
 if (NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR
     CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     message(FATAL_ERROR
@@ -120,6 +125,11 @@ function(slicer_enable_llvm_source_coverage TARGET_NAME)
             "slicer_enable_llvm_source_coverage: '${TARGET_NAME}' is a ${_target_type}; "
             "only static libraries and executables are supported")
     endif ()
+
+    # CMake's PCH wrapper marks included headers as system headers. That can
+    # suppress inline coverage mappings while the instrumented code still
+    # contributes profile counts, producing mismatched coverage data.
+    set_property(TARGET ${TARGET_NAME} PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
     target_compile_options(${TARGET_NAME} PRIVATE
         -fprofile-instr-generate -fcoverage-mapping -fprofile-update=atomic

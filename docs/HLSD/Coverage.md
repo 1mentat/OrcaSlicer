@@ -25,6 +25,9 @@ when no test calls them, so untouched executable code remains uncovered. Inline
 project code contributes when LLVM emits an executable mapping. A file with no
 executable mapping is accounted for separately rather than treated as fully
 covered. The collector merges by physical source path across executables.
+Instrumented targets disable CMake precompiled headers because the generated
+system-header wrapper can suppress inline coverage mappings while profile counts
+remain. Coverage requires CMake 3.16 or newer for this control.
 
 Test discovery uses isolated profiles. Only the actual test run contributes to
 the measured profile pool. Missing profiles, failed tests, incompatible tools,

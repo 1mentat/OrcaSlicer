@@ -52,6 +52,8 @@ add_library(libslic3r STATIC
     src/libslic3r/Uncalled.cpp
     src/libslic3r/ConstantsOnly.cpp)
 target_include_directories(libslic3r PUBLIC src)
+# Exercise the generated PCH system-header wrapper with project inline code.
+target_precompile_headers(libslic3r PRIVATE src/libslic3r/Called.hpp)
 # Keyword signature on the library, plain signature on the tests, as in Orca.
 target_link_libraries(libslic3r PRIVATE fixture_dep)
 
