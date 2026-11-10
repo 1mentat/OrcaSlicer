@@ -213,7 +213,15 @@ jobs:
   publish_test_results:
     name: Publish Test Results
     needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_windows_arm64, unit_tests_macos_arm64, unit_tests_flatpak_x86_64, unit_tests_flatpak_aarch64]
-    if: ${{ !cancelled() }}
+    # Check publication needs write permission; never grant it to PR jobs.
+    if: >-
+      ${{ !cancelled() &&
+          (((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+            (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))) ||
+           (github.event_name == 'schedule' && github.repository == 'OrcaSlicer/OrcaSlicer')) }}
+    permissions:
+      actions: read
+      checks: write
     runs-on: ubuntu-latest
     steps:
       - name: Download Test Results
@@ -221,12 +229,12 @@ jobs:
         with:
           pattern: test-results-*
           path: test-results
-      # Best-effort: a read-only token (e.g. fork PRs) can't write the check, so
-      # don't let a publish failure fail the run. The test jobs gate correctness.
+      # Report publication is best-effort; the native test jobs gate correctness.
       - name: Publish Test Results
         continue-on-error: true
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@da5b7be67623cd59bbbd1a0ce4f022050a55605f # v2.26.0
         with:
+          comment_mode: "off"
           files: "test-results/**/*.xml"
       - name: Delete Test Results
         if: success()
