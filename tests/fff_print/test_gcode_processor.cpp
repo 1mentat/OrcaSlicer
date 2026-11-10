@@ -745,7 +745,7 @@ Processed process_post(const std::string& gcode, FullPrintConfig config = {})
     processor.finalize(true);
 
     // finalize(true) atomically renames the temporary postprocess file over the input path.
-    std::ifstream rewritten(file.string());
+    std::ifstream rewritten(file.string(), std::ios::binary);
     REQUIRE(rewritten.good());
     std::ostringstream contents;
     contents << rewritten.rdbuf();

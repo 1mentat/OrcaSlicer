@@ -6982,3 +6982,21 @@ TEST_CASE("belt apron runs before and after layer change hooks", "[GCode][GCodeB
 }
 
 }
+
+namespace gcode_broad_contracts {
+
+TEST_CASE("Adaptive PA falls back when a filament model cannot be parsed",
+          "[GCode][AdaptivePAMalformedFallback]")
+{
+    const std::string output = process_adaptive_pa_model_case({ "not-a-number,10,1000" }, 0);
+    check_adaptive_pa_fallback(output, "Interpolator setup failed");
+}
+
+TEST_CASE("Adaptive PA falls back when a model has no interpolatable curve",
+          "[GCode][AdaptivePANoCurveFallback]")
+{
+    const std::string output = process_adaptive_pa_model_case({ "0.1,10,1000" }, 0);
+    check_adaptive_pa_fallback(output, "Interpolation failed");
+}
+
+} // namespace gcode_broad_contracts
