@@ -1,0 +1,172 @@
+# TEMPORARY PROOF BRANCH ONLY; NEVER MERGE. Native metadata, not behavioral coverage.
+name: Three OS optional settings inventory proof
+on:
+  push:
+    branches: [diagnostics/settings-inventory-38ccd-three-os]
+    paths: [.github/workflows/settings_inventory_three_os_native_proof.yml]
+permissions:
+  contents: read
+jobs:
+  native-inventory:
+    if: github.repository == '1mentat/OrcaSlicer' && github.event_name == 'push' && github.ref == 'refs/heads/diagnostics/settings-inventory-38ccd-three-os'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x64
+            cache_leg: linux-clang
+            cache_path: deps/build/OrcaSlicer_dep
+          - os: macos-15
+            platform: mac-arm64
+            cache_leg: macos-15-arm64
+            cache_path: deps/build/arm64
+          - os: windows-latest
+            platform: windows-x64
+            cache_leg: windows-x64-clang
+            cache_path: deps/build/OrcaSlicer_dep
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      EXPECTED_PARENT: 38ccd94733b96a5c115683fda40c4a3b8665e36a
+      CMAKE_POLICY_VERSION_MINIMUM: '3.10'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind exact unchanged production and fixture epoch
+        shell: python
+        run: |
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          parent = os.environ['EXPECTED_PARENT']
+          assert git('rev-list', '--parents', '-n', '1', 'HEAD').split() == [git('rev-parse', 'HEAD'), parent]
+          assert git('diff', '--name-only', parent, 'HEAD') == '.github/workflows/settings_inventory_three_os_native_proof.yml'
+          assert not git('status', '--porcelain', '--untracked-files=no')
+          proof = Path('proof'); proof.mkdir()
+          paths = ['tests/libslic3r/settings_inventory_main.cpp', 'tests/libslic3r/CMakeLists.txt', 'tests/CMakeLists.txt', 'CMakeLists.txt', 'src/libslic3r/CMakeLists.txt', 'src/libslic3r/PrintConfig.cpp', 'src/libslic3r/PrintConfig.hpp', 'src/libslic3r/Config.hpp', 'build_win.bat', 'build_release_macos.sh', 'scripts/settings_inventory.py', 'tests/settings_coverage.json']
+          pins = {p: {'blob': git('rev-parse', 'HEAD:' + p), 'sha256': hashlib.sha256(Path(p).read_bytes()).hexdigest()} for p in paths}
+          proof.joinpath('source.json').write_text(json.dumps({'head': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}'), 'production_parent': parent, 'deps_tree': git('rev-parse', 'HEAD:deps'), 'pins': pins}, indent=2) + '\n')
+          proof.joinpath('SCOPE.txt').write_text('Optional target Release headless native metadata only. No suites, GUI launch, real mutants, strict619 auditor, behavioral coverage, actual-main or module closure claim.\n')
+      - name: Restore exact existing dependency cache without saving or building it
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}/${{ matrix.cache_path }}
+          key: ${{ matrix.cache_leg }}-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+          fail-on-cache-miss: true
+      - name: Install ordinary Linux hosted system prerequisites
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/apt-install-deps
+      - name: Install ordinary macOS hosted tool prerequisite
+        if: runner.os == 'macOS'
+        run: brew install libtool
+      - name: Configure Linux as the accepted headless inventory component
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+        run: |
+          set -euo pipefail
+          cmake --version > proof/tool-versions.txt
+          ninja --version >> proof/tool-versions.txt
+          /usr/bin/clang --version >> proof/tool-versions.txt
+          /usr/bin/clang++ --version >> proof/tool-versions.txt
+          ld.lld --version >> proof/tool-versions.txt
+          cmake -S . -B build-inventory -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_PCH=ON \
+            -DORCA_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+            -DCMAKE_LINKER="$(command -v ld.lld)" -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld \
+            -DDEP_BUILD_DIR="$GITHUB_WORKSPACE/deps/build" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps/build/OrcaSlicer_dep/usr/local" \
+            2>&1 | tee proof/configure.log
+      - name: Configure macOS with the ordinary arm64 dependency and deployment recipe
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          cmake --version > proof/tool-versions.txt
+          ninja --version >> proof/tool-versions.txt
+          xcrun clang --version >> proof/tool-versions.txt
+          xcrun clang++ --version >> proof/tool-versions.txt
+          xcrun --show-sdk-path >> proof/tool-versions.txt
+          cmake -S . -B build-inventory -G 'Ninja Multi-Config' \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+            -DCMAKE_IGNORE_PREFIX_PATH='/opt/local:/usr/local:/opt/homebrew' \
+            -DBUILD_TESTS=ON -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_PCH=ON \
+            -DORCA_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DDEP_BUILD_DIR="$GITHUB_WORKSPACE/deps/build/arm64" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps/build/arm64/OrcaSlicer_dep/usr/local" \
+            2>&1 | tee proof/configure.log
+      - name: Build only the explicit inventory target on Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-inventory --config Release --target slicer_settings_inventory --parallel 2 2>&1 | tee proof/build.log
+      - name: Configure and build only inventory through the ordinary Windows wrapper
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ORCA_SLICER_CMAKE_ARGS: -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_PCH=ON -DORCA_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        run: |
+          cmake --version | Out-File proof/tool-versions.txt
+          ninja --version | Out-File -Append proof/tool-versions.txt
+          & .\build_win.bat -s --tests -l -x --config release --arch x64 --deps-dir deps/build --build-dir build-inventory --slicer-target slicer_settings_inventory --jobs 2 --no-gettext 2>&1 | Tee-Object proof/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record actual target recipe and run native metadata only
+        shell: python
+        run: |
+          import hashlib, json, os, platform, shutil, subprocess
+          from pathlib import Path
+          root = Path('build-inventory'); proof = Path('proof')
+          cache = (root/'CMakeCache.txt').read_text()
+          shutil.copyfile(root/'CMakeCache.txt', proof/'CMakeCache.txt')
+          assert 'SLIC3R_GUI:BOOL=OFF' in cache and 'SLIC3R_PCH:BOOL=ON' in cache
+          assert 'SLIC3R_CAD:BOOL=ON' in cache and 'BUILD_TESTS:BOOL=ON' in cache
+          assert 'CMAKE_BUILD_TYPE:STRING=Release' in cache
+          db = json.loads((root/'compile_commands.json').read_text())
+          rows = [r for r in db if Path(r['file']).name == 'settings_inventory_main.cpp']
+          assert rows
+          proof.joinpath('inventory-compile-commands.json').write_text(json.dumps(rows, indent=2)+'\n')
+          windows = platform.system() == 'Windows'
+          binary = root/'tests/libslic3r'/('Release/slicer_settings_inventory.exe' if windows else ('Release/slicer_settings_inventory.app/Contents/MacOS/slicer_settings_inventory' if platform.system() == 'Darwin' else 'slicer_settings_inventory'))
+          assert binary.is_file() and binary.stat().st_size
+          proof.joinpath('binary.json').write_text(json.dumps({'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'bytes': binary.stat().st_size}, indent=2)+'\n')
+          if windows:
+              dlls = {p.name: {'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'bytes': p.stat().st_size} for p in sorted(binary.parent.glob('*.dll'))}
+              assert dlls
+              proof.joinpath('adjacent-dlls.json').write_text(json.dumps(dlls, indent=2)+'\n')
+          else:
+              command = ['otool', '-L', str(binary)] if platform.system() == 'Darwin' else ['ldd', str(binary)]
+              linkage = subprocess.run(command, capture_output=True, check=True)
+              proof.joinpath('binary-linkage.txt').write_bytes(linkage.stdout+linkage.stderr)
+              assert b'not found' not in linkage.stdout
+          result = subprocess.run([str(binary.resolve())], capture_output=True, timeout=45)
+          proof.joinpath('native-registry.json').write_bytes(result.stdout)
+          proof.joinpath('native-registry.stderr').write_bytes(result.stderr)
+          proof.joinpath('native-exit.json').write_text(json.dumps({'exit': result.returncode})+'\n')
+          assert result.returncode == 0, result.returncode
+          registry = json.loads(result.stdout); rows = registry['options']
+          assert registry['schema_version'] == 1 and registry['source'] == 'PrintConfigDef::options'
+          assert registry['settings_count'] == len(rows) == 861
+          assert len({r['key'] for r in rows}) == len(rows)
+          assert all(isinstance(r['key'],str) and r['key'] and isinstance(r['type_id'],int) and not isinstance(r['type_id'],bool) and isinstance(r['nullable'],bool) and isinstance(r['has_default'],bool) and isinstance(r['enum_values'],list) and isinstance(r['canonical_enum_values'],list) for r in rows)
+          proof.joinpath('native-output-summary.json').write_text(json.dumps({'exit':0,'unique_keys':len(rows),'sha256':hashlib.sha256(result.stdout).hexdigest(),'behavior_execution_verified':False},indent=2)+'\n')
+          assert not subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],text=True).strip()
+      - name: Retain small component proof records only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: optional-inventory-${{ matrix.platform }}
+          path: proof/
+          if-no-files-found: error
+          retention-days: 7
