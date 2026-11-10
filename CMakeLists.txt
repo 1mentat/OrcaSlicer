@@ -1307,6 +1307,21 @@ if(BUILD_TESTS)
         slicer_force_link_static_library(${_slicer_test} libslic3r)
         slicer_force_link_static_library(${_slicer_test} libslic3r_cgal)
     endforeach()
+    if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE)
+        # Whole-archive links expose FlushVolCalc's RGB2HSV dependency in every
+        # suite. Reuse the color support translation unit already built for the
+        # core suite, including its wxWidgets dependencies.
+        foreach(_slicer_test IN ITEMS
+                fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
+            set_property(TARGET ${_slicer_test} APPEND PROPERTY LINK_LIBRARIES
+                slic3r_test_color_support)
+        endforeach()
+        # These two suites do not otherwise compile a NanoSVG implementation.
+        foreach(_slicer_test IN ITEMS libnest2d_tests filament_group_tests)
+            target_sources(${_slicer_test} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/fff_print/fff_print_tests.cpp)
+        endforeach()
+    endif()
     if (NOT SLIC3R_BUNDLED_WARNINGS)
         # Catch2 is vendored under tests/ and sets its own warning flags too.
         orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")
