@@ -28,6 +28,7 @@ jobs:
       # Standard public runners have four CPUs. The script also caps this at
       # available affinity; local Forgejo controllers retain the two-CPU default.
       COVERAGE_BUILD_JOBS: 4
+      COVERAGE_CONFIGURATION: linux-clang18-release-core-cad-v3-executable-series
     outputs:
       commit: ${{ steps.source.outputs.commit }}
       valid: ${{ steps.render.outputs.valid }}
@@ -47,8 +48,17 @@ jobs:
           python3 .github/scripts/coverage_history.py fetch coverage-baseline
           measure=true
           if [[ "$FORCE" != true && -f coverage-baseline/summary.json ]]; then
-            previous=$(python3 -c 'import json; print(json.load(open("coverage-baseline/summary.json"))["commit"])')
-            if [[ "$previous" == "$commit" ]]; then measure=false; fi
+            measure=$(python3 - "$commit" <<'PY'
+          import json, os, sys
+          with open("coverage-baseline/summary.json") as source:
+              previous = json.load(source)
+          same = (previous.get("commit") == sys.argv[1]
+                  and previous.get("valid") is True
+                  and previous.get("schema") == "orca-slicer-coverage-suite-summary"
+                  and previous.get("configuration") == os.environ["COVERAGE_CONFIGURATION"])
+          print(str(not same).lower())
+          PY
+            )
           fi
           echo "measure=$measure" >> "$GITHUB_OUTPUT"
           if [[ "$measure" == false ]]; then
@@ -91,7 +101,7 @@ jobs:
         run: |
           python3 -m unittest scripts.tests.test_slicer_coverage scripts.tests.test_slicer_process \
             scripts.tests.test_slicer_coverage_fixture scripts.tests.test_coverage_report \
-            scripts.tests.test_coverage_history
+            scripts.tests.test_coverage_collection_report scripts.tests.test_coverage_history
       - name: Cache built dependency prefix
         if: steps.source.outputs.measure == 'true'
         id: dependencies
@@ -121,22 +131,19 @@ jobs:
           SOURCE_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          raw=coverage-output/measurement/coverage-report.json
+          raw=coverage-output/measurement/coverage-collection.json
           if [[ ! -f "$raw" ]]; then
             echo 'No coverage measurement was produced. Build diagnostics are attached; no baseline was published.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          mkdir -p coverage-output/site
-          if [[ -d coverage-output/measurement/html ]]; then
-            cp -a coverage-output/measurement/html coverage-output/site/source
-          fi
           previous=()
-          if [[ -f coverage-baseline/history.json ]]; then
-            previous+=(--history coverage-baseline/history.json --baseline coverage-baseline/summary.json)
+          if [[ -d coverage-baseline/suites ]]; then
+            previous+=(--previous coverage-baseline)
           fi
-          python3 scripts/coverage_report.py --report "$raw" --root . --out coverage-output/site \
+          python3 scripts/coverage_collection_report.py --collection "$raw" --root . --out coverage-output/site \
             --commit "$SOURCE_COMMIT" --repository "$SOURCE_REPOSITORY" --run-url "$RUN_URL" \
-            --branch "$SOURCE_BRANCH" --configuration 'linux-clang18-release-core-cad-v2-nopch' "${previous[@]}"
+            --branch "$SOURCE_BRANCH" --configuration "$COVERAGE_CONFIGURATION" \
+            --measured-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "${previous[@]}"
           cat coverage-output/site/summary.md >> "$GITHUB_STEP_SUMMARY"
           valid=$(python3 -c 'import json; print(str(json.load(open("coverage-output/site/summary.json"))["valid"]).lower())')
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
@@ -159,6 +166,7 @@ jobs:
             coverage-output/*.log
             coverage-output/measurement/
             !coverage-output/measurement/html/
+            !coverage-output/measurement/suites/*/html/**
           retention-days: 3
           compression-level: 9
           if-no-files-found: warn
@@ -184,7 +192,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            /.github/scripts/
+            /scripts/coverage_collection_contract.py
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           name: core-coverage-report

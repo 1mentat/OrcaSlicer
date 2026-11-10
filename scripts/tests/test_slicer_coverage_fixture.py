@@ -314,6 +314,140 @@ class SlicerCoverageFixtureTests(unittest.TestCase):
         self.assertIn("requires the Clang", configured.stdout + configured.stderr)
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "compiled profile-identity fixtures require Linux ELF")
+class PerExecutableCoveragePairFixtureTests(unittest.TestCase):
+    def setUp(self):
+        tools = _find_tools()
+        missing = [name for name, tool in tools.items() if not tool]
+        if missing:
+            self.skipTest("missing tools: " + ", ".join(missing))
+        self.tools = tools
+        self.temp = tempfile.TemporaryDirectory(prefix="coverage-pair-fixture-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def file_entry(self, report, name):
+        matches = [item for item in report["files"] if Path(item["filename"]).name == name]
+        self.assertEqual(len(matches), 1, [item["filename"] for item in report["files"]])
+        return matches[0]
+
+    def test_per_executable_pairing_isolates_cross_binary_dummy_mapping(self):
+        source = self.root / "pair-project"
+        build = self.root / "pair-build"
+        files = {
+            "CMakeLists.txt": f'''cmake_minimum_required(VERSION 3.16)
+project(CoveragePairFixture LANGUAGES C CXX)
+enable_testing()
+include("{REPOSITORY / "cmake" / "SlicerCoverage.cmake"}")
+add_library(libslic3r STATIC src/libslic3r/core.cpp src/libslic3r/uncalled.cpp)
+target_include_directories(libslic3r PUBLIC src/libslic3r)
+add_executable(suite_a tests/suite_a.cpp)
+target_link_libraries(suite_a PRIVATE libslic3r)
+add_executable(suite_b tests/suite_b.cpp)
+target_link_libraries(suite_b PRIVATE libslic3r)
+foreach(target IN ITEMS libslic3r suite_a suite_b)
+  slicer_enable_llvm_source_coverage(${{target}})
+endforeach()
+foreach(target IN ITEMS suite_a suite_b)
+  slicer_force_link_static_library(${{target}} libslic3r)
+endforeach()
+add_test(NAME suite_a COMMAND suite_a)
+add_test(NAME suite_b COMMAND suite_b)
+''',
+            "src/libslic3r/shared.hpp": """#pragma once
+inline int shared_inline(int value) { return value > 2 ? value + 1 : value - 1; }
+int core_value(int value);
+""",
+            "src/libslic3r/core.cpp": """__attribute__((noinline)) void emitted_zero() {}
+
+int core_value(int value)
+{
+    emitted_zero();
+    if (value > 0)
+        return value;
+    return -value;
+}
+""",
+            "src/libslic3r/uncalled.cpp": """int never_linked_by_reference() { return 42; }
+""",
+            "tests/suite_a.cpp": """#include "shared.hpp"
+int main(int argc, char**) { return shared_inline(core_value(argc)) >= 0 ? 0 : 1; }
+""",
+            "tests/suite_b.cpp": """#include "shared.hpp"
+int main(int argc, char**) { return core_value(argc) > 0 ? 0 : 1; }
+""",
+        }
+        for relative, contents in files.items():
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+        env = dict(os.environ, CC=self.tools["clang"], CXX=self.tools["clang++"])
+        configured = subprocess.run(
+            ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+             "-DCMAKE_BUILD_TYPE=Release", "-DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON"],
+            env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        compiled = subprocess.run(["cmake", "--build", str(build), "--", "-j1"],
+                                  capture_output=True, text=True, timeout=300)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+
+        def collect(out_name, per_executable):
+            out = self.root / out_name
+            argv = ["run", "--root", str(source), "--build-dir", str(build),
+                    "--source-root", "src/libslic3r",
+                    "--manifest", str(build / "slicer-coverage" / "libslic3r.sources.txt"),
+                    "--test-command", "ctest --test-dir {build} --no-tests=error -j1",
+                    "--out", str(out), "--measure-only"]
+            if per_executable:
+                argv.extend(["--per-executable", "--html"])
+            for name in ("suite_a", "suite_b"):
+                argv.extend(["--object", str(build / name)])
+            status = slicer_coverage.main(argv)
+            result_name = "coverage-collection.json" if per_executable else "coverage-report.json"
+            result = json.loads((out / result_name).read_text(encoding="utf-8"))
+            return status, result, out
+
+        global_status, global_report, _ = collect("pair-global", False)
+        self.assertEqual(global_status, 2, json.dumps(global_report.get("integrity_failures"), indent=1))
+        self.assertTrue(global_report["integrity_failures"]["profile_mapping"])
+
+        pair_status, collection, pair_out = collect("pair-series", True)
+        self.assertEqual(pair_status, 0, json.dumps(collection, indent=1))
+        self.assertEqual(collection["status"], "pass")
+        self.assertNotIn("summary", collection)
+        toolchain = dict(line.split("=", 1) for line in
+                         (build / "slicer-coverage" / "toolchain.txt").read_text().splitlines()
+                         if "=" in line)
+        for profile_row in collection["profile_identity"]["profiles"]:
+            raw_show = subprocess.run(
+                [toolchain["llvm_profdata"], "show", "--all-functions", "--counts",
+                 profile_row["profile"]], capture_output=True, text=True, timeout=60)
+            self.assertEqual(raw_show.returncode, 0, raw_show.stdout + raw_show.stderr)
+            zero_function = re.search(
+                r"(?:emitted_zero|_Z12emitted_zerov)[^:\n]*:\s+Hash: 0", raw_show.stdout)
+            self.assertIsNotNone(zero_function, raw_show.stdout)
+        for row in collection["suites"]:
+            report = json.loads((pair_out / row["report"]).read_text(encoding="utf-8"))
+            self.assertEqual(report["integrity_status"], "pass")
+            self.assertEqual(report["tool_versions"]["compatibility"], "major_versions_match")
+            self.assertEqual(report["annotation"]["status"], "ok")
+            suite_dir = pair_out / "suites" / row["name"]
+            self.assertTrue((suite_dir / "html" / "index.html").is_file())
+            annotation_argv = report["annotation"]["argv"]
+            profile_index = annotation_argv.index("-instr-profile")
+            self.assertEqual(annotation_argv[profile_index + 1], str(suite_dir / "merged.profdata"))
+            self.assertIn(str(build / row["executable_name"]), annotation_argv)
+            uncalled = self.file_entry(report, "uncalled.cpp")["summary"]
+            self.assertGreater(uncalled["lines"]["count"], 0)
+            self.assertEqual(uncalled["lines"]["covered"], 0)
+            core_functions = self.file_entry(report, "core.cpp")["summary"]["functions"]
+            self.assertEqual(core_functions["count"], 2)
+            self.assertEqual(core_functions["covered"], 2)
+            inline = self.file_entry(report, "shared.hpp")["summary"]["functions"]
+            self.assertGreater(inline["count"], 0)
+            if row["name"] == "suite_b":
+                self.assertEqual(inline["covered"], 0)
+
 class CatchDiscoveryProfileIsolationTests(unittest.TestCase):
     """CatchAddTests.cmake must keep discovery profiles out of the caller's profile path."""
 

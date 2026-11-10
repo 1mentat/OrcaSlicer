@@ -871,6 +871,314 @@ def _annotation_command(llvm_cov: str, merged: Path, objects: Sequence[Path],
     return argv
 
 
+def _suite_name(path: Path) -> str:
+    """Return a stable, path-safe suite name from a test executable."""
+    name = path.name
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", name):
+        raise CoverageError(f"test executable has an unsafe suite name: {path.name!r}")
+    return name
+
+
+def _collect_scoped_report(args: argparse.Namespace, *, root: Path, source_root: Path,
+                           out: Path, report_path: Path, objects: Sequence[Path],
+                           report: dict[str, Any],
+                           manifest: Sequence[Path], compile_commands: Path,
+                           llvm_cov: str, llvm_profdata: str, profiles: Sequence[Path],
+                           evidence: int, tests_failed: bool, identity: dict[str, Any],
+                           strict_diagnostics: bool,
+                           compiler_inventory: dict[str, Any] | None = None,
+                           compiler_evidence: dict[str, Any] | None = None) -> tuple[int, str]:
+    """Merge, export, audit and render one report scope (global or one suite)."""
+    def fail(status: str, **fields: Any) -> tuple[int, str]:
+        report.update({"status": status, "integrity_status": "error"}, **fields)
+        _write_json(report_path, report)
+        return 2, status
+
+    merged = out / "merged.profdata"
+    merge_argv = [llvm_profdata, "merge", "-sparse", "-failure-mode=any",
+                  "-o", str(merged), *map(str, profiles)]
+    merge = _run(merge_argv, cwd=root, timeout=args.timeout)
+    report["merge"] = {"argv": merge_argv, "returncode": merge.returncode,
+                       "stderr": merge.stderr}
+    merge_diagnostics = bool((merge.stderr or "").strip()) if strict_diagnostics else False
+    if merge.returncode != 0 or not merged.is_file() or merge_diagnostics:
+        if strict_diagnostics:
+            failures = {"profile_identity": identity["errors"],
+                        "profile_merge_diagnostics": [merge.stderr] if merge_diagnostics else []}
+            return fail("profile_merge_failed", integrity_failures=failures)
+        return fail("profile_merge_failed")
+    report["merged_profile"] = _artifact_provenance(merged)
+
+    export_path = out / "coverage-export.json"
+    export_argv = [llvm_cov, "export", "-format=text", "-summary-only",
+                   "-instr-profile", str(merged)]
+    for obj in objects:
+        export_argv.extend(["-object", str(obj)])
+    export = _run(export_argv, cwd=root, timeout=args.timeout)
+    report["export"] = {"argv": export_argv, "returncode": export.returncode,
+                        "stderr": export.stderr, "path": str(export_path)}
+    if export.returncode != 0:
+        return fail("export_failed")
+    export_diagnostics = bool((export.stderr or "").strip()) if strict_diagnostics else False
+    export_mapping = _profile_mapping_errors(export.stderr or "")
+    export_path.write_text(export.stdout, encoding="utf-8")
+    try:
+        parsed, missing, duplicates = parse_export(json.loads(export.stdout),
+                                                   source_root=source_root,
+                                                   manifest=manifest, path_base=root)
+    except (json.JSONDecodeError, CoverageError) as exc:
+        return fail("invalid_export", error=str(exc))
+    report.update(parsed)
+
+    if compiler_evidence is None or compiler_inventory is None:
+        compiler_inventory = _create_empty_indexed_profile(
+            llvm_profdata, out / "compiler-inventory-empty.profdata", timeout=args.timeout)
+        compiler_evidence = _compiler_source_evidence(
+            llvm_cov, manifest, compile_commands, timeout=args.timeout,
+            inventory_profile=Path(compiler_inventory["profile"]))
+    unmapped, mapping_free_headers, unexpected_unmapped = _reconcile_unmapped_sources(
+        parsed, compiler_evidence)
+    without_direct_mapping = {_path_key(value) for value in
+                              compiler_evidence["mapping_free_sources"]
+                              + compiler_evidence["object_mappings_without_source"]}
+    linked_missing = [value for value in missing if _path_key(value) not in without_direct_mapping]
+    exported_paths = {_path_key(item["filename"]) for item in parsed["files"]}
+    missing_object_mappings = sorted(
+        path for path in compiler_evidence["object_executable_mappings"]
+        if _under(path, source_root) and _path_key(path) not in exported_paths)
+    missing_sources = [item["filename"] for item in parsed["files"]
+                       if not Path(item["filename"]).is_file()]
+    for item in parsed["files"]:
+        item["source_sha256"] = _sha256(Path(item["filename"]))
+    empty_metrics = [key for key in args.metrics if int(parsed["summary"][key]["count"]) <= 0]
+    integrity_failures = {
+        "profile_mapping": export_mapping,
+        "profile_identity": identity["errors"],
+        "compiler_evidence": compiler_evidence["errors"],
+        "missing_compiled_source_mappings": linked_missing,
+        "missing_object_executable_mappings": missing_object_mappings,
+        "unexpected_sources_without_executable_mappings": unexpected_unmapped,
+        "duplicate_source_entries": duplicates,
+        "missing_source_files": missing_sources,
+        "empty_metrics": empty_metrics,
+    }
+    if strict_diagnostics:
+        integrity_failures["unexpected_export_diagnostics"] = (
+            [export.stderr] if export_diagnostics else [])
+
+    sources_file = out / "coverage-sources.txt"
+    sources_file.write_text("".join(item["filename"] + "\n" for item in parsed["files"]),
+                            encoding="utf-8")
+    html_dir = out / _HTML_SUBDIR
+    annotation_argv = _annotation_command(llvm_cov, merged, objects, html_dir,
+                                          [item["filename"] for item in parsed["files"]])
+    report["annotation"] = {"format": "llvm-cov-show-html", "requested": bool(args.html),
+                             "output_dir": str(html_dir), "index": str(html_dir / "index.html"),
+                             "sources_file": str(sources_file), "argv": annotation_argv,
+                             "status": "not_requested"}
+    html_failed = False
+    if args.html:
+        if html_dir.exists():
+            shutil.rmtree(html_dir)
+        show = _run(annotation_argv, cwd=root, timeout=args.timeout)
+        report["annotation"].update({"returncode": show.returncode, "stderr": show.stderr})
+        missing_pages = []
+        for item in report["files"]:
+            page = _html_page(html_dir, item["filename"])
+            if page.is_file():
+                item["html"] = page.relative_to(out).as_posix()
+            elif _has_executable_mapping(item["summary"]):
+                missing_pages.append(item["filename"])
+        show_diagnostics = bool((show.stderr or "").strip()) if strict_diagnostics else False
+        if strict_diagnostics:
+            integrity_failures["unexpected_annotation_diagnostics"] = (
+                [show.stderr] if show_diagnostics else [])
+        html_failed = (show.returncode != 0 or show_diagnostics
+                       or not (html_dir / "index.html").is_file() or bool(missing_pages))
+        report["annotation"].update({"missing_pages": missing_pages,
+                                      "status": "error" if html_failed else "ok"})
+    integrity_failed = any(integrity_failures.values())
+
+    if tests_failed:
+        status = "test_failed"
+    elif evidence <= 0:
+        status = "no_test_evidence"
+    elif integrity_failed:
+        status = "coverage_integrity_error"
+    elif html_failed:
+        status = "annotation_failed"
+    elif args.threshold is not None and not all(
+            _meets_threshold(parsed["summary"], key, args.threshold) for key in args.metrics):
+        status = "coverage_below_threshold"
+    else:
+        status = "pass"
+    report.update({
+        "status": status,
+        "integrity_status": "error" if integrity_failed else "pass",
+        "integrity_failures": integrity_failures,
+        "missing_manifest_sources": missing,
+        "missing_compiled_source_mappings": linked_missing,
+        "missing_object_executable_mappings": missing_object_mappings,
+        "mapping_free_headers": mapping_free_headers,
+        "mapping_free_sources": compiler_evidence["mapping_free_sources"],
+        "object_mappings_without_source": compiler_evidence["object_mappings_without_source"],
+        "sources_without_executable_mappings": unmapped,
+        "unexpected_sources_without_executable_mappings": unexpected_unmapped,
+        "compiler_evidence": compiler_evidence,
+        "compiler_inventory_profile": compiler_inventory,
+    })
+    _write_json(report_path, report)
+    return (0 if status == "pass" else
+            1 if status == "coverage_below_threshold" else 2, status)
+
+
+def _run_per_executable_collection(args: argparse.Namespace, *, root: Path, out: Path,
+                                   source_root: Path, build_dir: Path,
+                                   objects: Sequence[Path], manifest_files: Sequence[Path],
+                                   manifest: Sequence[Path], compile_commands: Path,
+                                   llvm_cov: str, llvm_profdata: str,
+                                   tool_versions: dict[str, Any],
+                                   profiles: Sequence[Path], evidence: int,
+                                   tests_failed: bool, run_record: dict[str, Any]) -> int:
+    """Write independent reports whose profiles belong to one executable each."""
+    index_path = out / "coverage-collection.json"
+    names = [_suite_name(obj) for obj in objects]
+    if len(set(names)) != len(names):
+        raise CoverageError("test executables have duplicate suite names")
+
+    object_ids = {str(obj): elf_build_id(obj) for obj in objects}
+    id_to_object: dict[str, Path] = {}
+    identity_errors: list[dict[str, Any]] = []
+    for obj in objects:
+        build_id = object_ids[str(obj)]
+        if not build_id:
+            identity_errors.append({"object": str(obj), "reason": "missing_elf_build_id"})
+        elif build_id in id_to_object:
+            identity_errors.append({"object": str(obj), "reason": "ambiguous_duplicate_build_id",
+                                    "binary_id": build_id,
+                                    "also_object": str(id_to_object[build_id])})
+        else:
+            id_to_object[build_id] = obj
+
+    profile_groups: dict[Path, list[Path]] = {obj: [] for obj in objects}
+    profile_rows = []
+    for profile in profiles:
+        ids = _profile_binary_ids(llvm_profdata, profile, args.timeout)
+        profile_rows.append({"profile": str(profile), "binary_ids": ids})
+        if ids is None:
+            identity_errors.append({"profile": str(profile), "reason": "unreadable_profile"})
+        elif len(ids) != 1:
+            identity_errors.append({"profile": str(profile), "reason": "profile_must_have_one_binary_id",
+                                    "binary_ids": ids})
+        elif ids[0] not in id_to_object:
+            identity_errors.append({"profile": str(profile), "reason": "foreign_profile",
+                                    "binary_id": ids[0]})
+        else:
+            profile_groups[id_to_object[ids[0]]].append(profile)
+    for obj, grouped in profile_groups.items():
+        if not grouped:
+            identity_errors.append({"object": str(obj), "reason": "object_without_profile"})
+
+    if identity_errors:
+        compiler_inventory = {"status": "not_run", "reason": "profile identity is ambiguous or incomplete"}
+        compiler_evidence = {"status": "not_run", "errors": [], "mapping_free_sources": [],
+                             "object_mappings_without_source": [], "object_executable_mappings": []}
+    else:
+        compiler_inventory = _create_empty_indexed_profile(
+            llvm_profdata, out / "compiler-inventory-empty.profdata", timeout=args.timeout)
+        compiler_evidence = _compiler_source_evidence(
+            llvm_cov, manifest, compile_commands, timeout=args.timeout,
+            inventory_profile=Path(compiler_inventory["profile"]))
+    provenance = _coverage_provenance(root, objects, manifest_files, build_dir, compile_commands)
+    suite_rows: list[dict[str, Any]] = []
+    suite_statuses: list[str] = []
+    for obj, name in zip(objects, names):
+        suite_dir = out / "suites" / name
+        suite_dir.mkdir(parents=True, exist_ok=True)
+        report = _base_report(args)
+        report.update({
+            "source_root": str(source_root),
+            "provenance": {**provenance,
+                           "test_object_binaries": [record for record in provenance["test_object_binaries"]
+                                                     if record["path"] == str(obj)]},
+            "objects": [str(obj)],
+            "manifest": [str(value) for value in manifest_files],
+            "suite": {"name": name, "executable": str(obj)},
+            "tool_versions": tool_versions,
+            "tests_failed": tests_failed,
+            "run": run_record,
+            "profiles": [str(value) for value in profile_groups[obj]],
+            "profile_identity": {"status": "error" if identity_errors else "ok",
+                                 "object_build_id": object_ids[str(obj)],
+                                 "profiles": [row for row in profile_rows
+                                              if row["profile"] in {str(p) for p in profile_groups[obj]}],
+                                 "errors": identity_errors},
+            "compiler_inventory_profile": compiler_inventory,
+            "compiler_evidence": compiler_evidence,
+        })
+        report_path = suite_dir / "coverage-report.json"
+        failures: dict[str, Any] = {
+            "profile_identity": identity_errors,
+            "compiler_evidence": compiler_evidence["errors"],
+        }
+        parsed: dict[str, Any] | None = None
+        if identity_errors or not profile_groups[obj]:
+            if tests_failed:
+                status = "test_failed"
+            elif evidence <= 0:
+                status = "no_test_evidence"
+            else:
+                status = "coverage_integrity_error"
+            report.update({"status": status, "integrity_status": "error",
+                           "integrity_failures": failures})
+            _write_json(report_path, report)
+            suite_statuses.append(status)
+            suite_rows.append({"name": name, "executable_name": obj.name,
+                               "report": report_path.relative_to(out).as_posix(),
+                               "status": status, "integrity_status": "error"})
+            continue
+
+        _, status = _collect_scoped_report(
+            args, root=root, source_root=source_root, out=suite_dir, report_path=report_path,
+            objects=[obj], report=report, manifest=manifest, compile_commands=compile_commands,
+            llvm_cov=llvm_cov, llvm_profdata=llvm_profdata, profiles=profile_groups[obj],
+            evidence=evidence, tests_failed=tests_failed,
+            identity={"errors": identity_errors}, strict_diagnostics=True,
+            compiler_inventory=compiler_inventory, compiler_evidence=compiler_evidence)
+        suite_statuses.append(status)
+        suite_rows.append({"name": name, "executable_name": obj.name,
+                           "report": report_path.relative_to(out).as_posix(),
+                           "status": status, "integrity_status": report["integrity_status"]})
+
+    all_pass = bool(suite_statuses) and all(status == "pass" for status in suite_statuses)
+    all_integrity_pass = bool(suite_rows) and all(
+        row["integrity_status"] == "pass" for row in suite_rows)
+    if all_pass:
+        collection_status = "pass"
+    elif suite_statuses and all(status in {"pass", "coverage_below_threshold"}
+                                for status in suite_statuses):
+        collection_status = "coverage_below_threshold"
+    else:
+        collection_status = "error"
+    collection = {
+        "schema": "orca-slicer-coverage-collection",
+        "schema_version": 1,
+        "measurement_mode": "per-executable",
+        "status": collection_status,
+        "integrity_status": "pass" if all_integrity_pass else "error",
+        "run": run_record,
+        "profile_identity": {"object_build_ids": object_ids, "profiles": profile_rows,
+                             "errors": identity_errors},
+        "suites": suite_rows,
+    }
+    _write_json(index_path, collection)
+    if all_pass:
+        return 0
+    if collection_status == "coverage_below_threshold":
+        return 1
+    return 2
+
+
 # ------------------------------------------------------------------------ run
 
 def run_coverage(args: argparse.Namespace) -> int:
@@ -894,6 +1202,10 @@ def run_coverage(args: argparse.Namespace) -> int:
 
     if len({_path_key(path) for path in objects}) != len(objects):
         raise CoverageError("the same coverage object was given more than once")
+    if args.per_executable:
+        suite_names = [_suite_name(path) for path in objects]
+        if len(set(suite_names)) != len(suite_names):
+            raise CoverageError("test executables have duplicate suite names")
     missing_objects = [str(value) for value in objects if not value.is_file()]
     if missing_objects:
         raise CoverageError("coverage object does not exist: " + ", ".join(missing_objects))
@@ -954,6 +1266,14 @@ def run_coverage(args: argparse.Namespace) -> int:
     }
     profiles = sorted(profile_dir.glob("*.profraw"))
     report["profiles"] = [str(value) for value in profiles]
+    if args.per_executable:
+        return _run_per_executable_collection(
+            args, root=root, out=out, source_root=source_root, build_dir=build_dir,
+            objects=objects, manifest_files=manifest_files, manifest=manifest,
+            compile_commands=compile_commands, llvm_cov=llvm_cov, llvm_profdata=llvm_profdata,
+            tool_versions=report["tool_versions"],
+            profiles=profiles, evidence=evidence, tests_failed=tests_failed,
+            run_record=report["run"])
     if evidence <= 0 and not profiles:
         return fail("test_failed_no_evidence" if tests_failed else "no_test_evidence")
     if not profiles:
@@ -962,130 +1282,13 @@ def run_coverage(args: argparse.Namespace) -> int:
     identity = _profile_identity_evidence(llvm_profdata, profiles, objects, args.timeout)
     report["profile_identity"] = identity
 
-    merged = out / "merged.profdata"
-    merge_argv = [llvm_profdata, "merge", "-sparse", "-failure-mode=any",
-                  "-o", str(merged), *map(str, profiles)]
-    merge = _run(merge_argv, cwd=root, timeout=args.timeout)
-    report["merge"] = {"argv": merge_argv, "returncode": merge.returncode, "stderr": merge.stderr}
-    if merge.returncode != 0 or not merged.is_file():
-        return fail("profile_merge_failed")
-    report["merged_profile"] = _artifact_provenance(merged)
-
-    # File summaries are all the report and integrity checks need; full
-    # line/segment detail comes from the annotated HTML instead.
-    export_argv = [llvm_cov, "export", "-format=text", "-summary-only", "-instr-profile", str(merged)]
-    for obj in objects:
-        export_argv.extend(["-object", str(obj)])
-    export = _run(export_argv, cwd=root, timeout=args.timeout)
-    report["export"] = {"argv": export_argv, "returncode": export.returncode,
-                        "stderr": export.stderr, "path": str(out / "coverage-export.json")}
-    if export.returncode != 0:
-        return fail("export_failed")
-    (out / "coverage-export.json").write_text(export.stdout, encoding="utf-8")
-    try:
-        exported = json.loads(export.stdout)
-        parsed, missing, duplicates = parse_export(exported, source_root=source_root,
-                                                   manifest=manifest, path_base=root)
-    except (json.JSONDecodeError, CoverageError) as exc:
-        return fail("invalid_export", error=str(exc))
-    report.update(parsed)
-
-    inventory = _create_empty_indexed_profile(
-        llvm_profdata, out / "compiler-inventory-empty.profdata", timeout=args.timeout)
-    compiler_evidence = _compiler_source_evidence(
-        llvm_cov, manifest, compile_commands, timeout=args.timeout,
-        inventory_profile=Path(inventory["profile"]))
-    unmapped, mapping_free_headers, unexpected_unmapped = _reconcile_unmapped_sources(
-        parsed, compiler_evidence)
-    without_direct_mapping = {_path_key(value) for value in
-                              compiler_evidence["mapping_free_sources"]
-                              + compiler_evidence["object_mappings_without_source"]}
-    linked_missing = [value for value in missing if _path_key(value) not in without_direct_mapping]
-    exported_paths = {_path_key(item["filename"]) for item in parsed["files"]}
-    missing_object_mappings = sorted(
-        path for path in compiler_evidence["object_executable_mappings"]
-        if _under(path, source_root) and _path_key(path) not in exported_paths)
-    missing_sources = [item["filename"] for item in parsed["files"]
-                       if not Path(item["filename"]).is_file()]
-    for item in parsed["files"]:
-        item["source_sha256"] = _sha256(Path(item["filename"]))
-    empty_metrics = [key for key in args.metrics if int(parsed["summary"][key]["count"]) <= 0]
-    integrity_failures = {
-        "profile_mapping": _profile_mapping_errors(export.stderr or ""),
-        "profile_identity": identity["errors"],
-        "compiler_evidence": compiler_evidence["errors"],
-        "missing_compiled_source_mappings": linked_missing,
-        "missing_object_executable_mappings": missing_object_mappings,
-        "unexpected_sources_without_executable_mappings": unexpected_unmapped,
-        "duplicate_source_entries": duplicates,
-        "missing_source_files": missing_sources,
-        "empty_metrics": empty_metrics,
-    }
-    integrity_failed = any(integrity_failures.values())
-
-    sources_file = out / "coverage-sources.txt"
-    sources_file.write_text("".join(item["filename"] + "\n" for item in parsed["files"]), encoding="utf-8")
-    html_dir = out / _HTML_SUBDIR
-    annotation_argv = _annotation_command(llvm_cov, merged, objects, html_dir,
-                                          [item["filename"] for item in parsed["files"]])
-    report["annotation"] = {
-        "format": "llvm-cov-show-html",
-        "requested": bool(args.html),
-        "output_dir": str(html_dir),
-        "index": str(html_dir / "index.html"),
-        "sources_file": str(sources_file),
-        "argv": annotation_argv,
-        "status": "not_requested",
-    }
-    html_failed = False
-    if args.html:
-        if html_dir.exists():
-            shutil.rmtree(html_dir)
-        show = _run(annotation_argv, cwd=root, timeout=args.timeout)
-        report["annotation"].update({"returncode": show.returncode, "stderr": show.stderr})
-        missing_pages = []
-        for item in report["files"]:
-            page = _html_page(html_dir, item["filename"])
-            if page.is_file():
-                item["html"] = page.relative_to(out).as_posix()
-            elif _has_executable_mapping(item["summary"]):
-                missing_pages.append(item["filename"])
-        html_failed = show.returncode != 0 or not (html_dir / "index.html").is_file() or bool(missing_pages)
-        report["annotation"]["missing_pages"] = missing_pages
-        report["annotation"]["status"] = "error" if html_failed else "ok"
-
-    if tests_failed:
-        status = "test_failed"
-    elif evidence <= 0:
-        status = "no_test_evidence"
-    elif integrity_failed:
-        status = "coverage_integrity_error"
-    elif html_failed:
-        status = "annotation_failed"
-    elif args.threshold is not None and not all(
-            _meets_threshold(parsed["summary"], key, args.threshold) for key in args.metrics):
-        status = "coverage_below_threshold"
-    else:
-        status = "pass"
-    report.update({
-        "status": status,
-        "integrity_status": "error" if integrity_failed else "pass",
-        "integrity_failures": integrity_failures,
-        "missing_manifest_sources": missing,
-        "missing_compiled_source_mappings": linked_missing,
-        "missing_object_executable_mappings": missing_object_mappings,
-        "mapping_free_headers": mapping_free_headers,
-        "mapping_free_sources": compiler_evidence["mapping_free_sources"],
-        "object_mappings_without_source": compiler_evidence["object_mappings_without_source"],
-        "sources_without_executable_mappings": unmapped,
-        "unexpected_sources_without_executable_mappings": unexpected_unmapped,
-        "compiler_evidence": compiler_evidence,
-        "compiler_inventory_profile": inventory,
-    })
-    _write_json(report_path, report)
-    if status == "pass":
-        return 0
-    return 1 if status == "coverage_below_threshold" else 2
+    result_code, _ = _collect_scoped_report(
+        args, root=root, source_root=source_root, out=out, report_path=report_path,
+        objects=objects, report=report, manifest=manifest, compile_commands=compile_commands,
+        llvm_cov=llvm_cov, llvm_profdata=llvm_profdata, profiles=profiles,
+        evidence=evidence, tests_failed=tests_failed, identity=identity,
+        strict_diagnostics=False)
+    return result_code
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1116,6 +1319,9 @@ def _parser() -> argparse.ArgumentParser:
                           "denominator; repeatable (default: lines, functions, branches)")
     run.add_argument("--html", action="store_true",
                      help="write llvm-cov annotated HTML for the reported files to OUT/html")
+    run.add_argument("--per-executable", action="store_true",
+                     help="write independent reports under OUT/suites, binding each raw profile "
+                          "to exactly one listed executable by ELF build ID")
     run.add_argument("--timeout", type=float, default=7200.0, help="per-command timeout in seconds")
     run.add_argument("--llvm-cov", help="llvm-cov (default: CMake's SLICER_LLVM_COV, then PATH)")
     run.add_argument("--llvm-profdata",
@@ -1146,6 +1352,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _resolve(root, args.compile_commands or build_dir / "compile_commands.json")),
             })
             _write_json(_resolve(root, args.out) / "coverage-report.json", report)
+            if args.per_executable:
+                _write_json(_resolve(root, args.out) / "coverage-collection.json", {
+                    "schema": "orca-slicer-coverage-collection",
+                    "schema_version": 1,
+                    "measurement_mode": "per-executable",
+                    "status": "error",
+                    "integrity_status": "error",
+                    "error": str(exc),
+                    "suites": [],
+                })
         except OSError:
             pass
         print(f"slicer_coverage: error: {exc}", file=sys.stderr)

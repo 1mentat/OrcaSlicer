@@ -24,7 +24,9 @@ mappings under `src/libslic3r`. Static production objects remain in the link eve
 when no test calls them, so untouched executable code remains uncovered. Inline
 project code contributes when LLVM emits an executable mapping. A file with no
 executable mapping is accounted for separately rather than treated as fully
-covered. The collector merges by physical source path across executables.
+covered. Both production archives are force-linked into every tracked test
+executable. Each suite therefore retains the full declared production-source
+denominator, including code that suite never calls.
 Instrumented targets disable CMake precompiled headers because the generated
 system-header wrapper can suppress inline coverage mappings while profile counts
 remain. Coverage requires CMake 3.16 or newer for this control.
@@ -34,6 +36,19 @@ the measured profile pool. Missing profiles, failed tests, incompatible tools,
 missing executable mappings and invalid compiler evidence prevent a valid
 baseline. A valid low percentage succeeds in `--measure-only` mode; the tracking
 jobs set no coverage threshold.
+
+Tracking keeps an independent series for each executable. Raw profiles are
+partitioned by verified singleton ELF build IDs, then each group is merged and
+exported against only its matching executable. Unknown, ambiguous or missing
+profile identities invalidate the collection. Every suite independently checks
+its exported mappings against the same production manifests and compiler-object
+evidence. Unexpected merge, export or annotation diagnostics are fatal.
+
+This separation avoids LLVM's cross-executable unused-mapping hash collisions.
+It also makes the interpretation explicit: a percentage describes one suite's
+execution of the declared core code. Source files overlap across suites; their
+counts and percentages are never added to produce a combined score. The original
+global collector CLI remains available without `--per-executable`.
 
 ## Portable collection and presentation
 
@@ -62,11 +77,17 @@ the inputs and observed execution; recording a Git SHA alone does not prove that
 an arbitrary pre-existing binary was built from that source. CI therefore builds
 the binaries in the identified checkout before collection.
 
-`scripts/coverage_report.py` turns the measurement into a standalone HTML report,
+`scripts/coverage_report.py` turns one measurement into a standalone HTML report,
 JSON, Markdown summary and SVG badge. It verifies matching commit provenance and
 unchanged tracked sources before accepting a baseline. Links identify the exact
 source commit. Annotated source uses the same binaries and merged profile as the
 summary. The HTML works offline and loads no external assets.
+
+`scripts/coverage_collection_report.py` renders the executable series and their
+history-first index. Its collection summary contains the independent leaf
+summaries and a configuration hash over their series identities, without an
+aggregate coverage metric. A collection is valid only when every required suite
+is valid. Native annotations remain under each suite's report directory.
 
 The report leads with line coverage over time, then a searchable and sortable file
 table. Coverage changes use percentage points against an older compatible
@@ -80,11 +101,15 @@ split a series; compiler build/version and target information still do.
 
 The GitHub workflow is independent of PR and release workflows. Manual dispatch
 is available; `COVERAGE_TRACKING=true` enables its daily schedule. It skips an
-already recorded source commit unless a manual run requests a refresh. Collection
+already recorded source commit only for the same valid collection configuration,
+unless a manual run requests a refresh. Collection
 uses read access. A separate job records validated JSON metadata on the
 `coverage-data` branch using a non-force update. It never executes files from a
 measurement artifact or restores a compiler cache. The current series keeps up to
-365 observations; older metadata remains in Git history. Larger HTML and diagnostic
+365 observations per suite; older metadata remains in Git history. The two root
+metadata documents bind all suite summaries and separate histories in one revision,
+so partial or mixed-source collections cannot replace a complete publication.
+Larger HTML and diagnostic
 artifacts have short retention periods.
 
 `COVERAGE_PAGES=true` enables the optional Pages adapter after the repository's

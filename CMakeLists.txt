@@ -1299,13 +1299,14 @@ endif()
 
 if(BUILD_TESTS)
     add_subdirectory(tests)
-    foreach(_slicer_test IN ITEMS libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
+    # Each suite image carries the same production objects so every per-suite
+    # report has the complete libslic3r denominator, including zero-hit files.
+    foreach(_slicer_test IN ITEMS
+            libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
         slicer_enable_llvm_source_coverage(${_slicer_test})
+        slicer_force_link_static_library(${_slicer_test} libslic3r)
+        slicer_force_link_static_library(${_slicer_test} libslic3r_cgal)
     endforeach()
-    # One test image carrying every production object keeps zero-hit files in
-    # the denominator; the other suites contribute hits through their own images.
-    slicer_force_link_static_library(libslic3r_tests libslic3r)
-    slicer_force_link_static_library(libslic3r_tests libslic3r_cgal)
     if (NOT SLIC3R_BUNDLED_WARNINGS)
         # Catch2 is vendored under tests/ and sets its own warning flags too.
         orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")

@@ -136,4 +136,4 @@ stage collect python3 "$root/scripts/slicer_coverage.py" run \
   --compile-commands "$build/compile_commands.json" \
   --test-command 'ctest --test-dir {build}/tests -C Release --parallel 2 --timeout 3600 -LE "NotWorking|RequiresApp" --no-tests=error --output-on-failure' \
   --llvm-cov llvm-cov-18 --llvm-profdata llvm-profdata-18 \
-  --measure-only --html --timeout 18000 --out "$out/measurement"
+  --measure-only --per-executable --html --timeout 18000 --out "$out/measurement"

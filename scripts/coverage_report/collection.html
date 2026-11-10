@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>OrcaSlicer · Coverage by suite</title>
+  <style>
+__COLLECTION_STYLE__
+    .collection { max-width: 1180px; margin: auto; padding: 28px 32px; }
+    .collection-top, .collection-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+    .collection-top { justify-content: space-between; }
+    .collection h1 { margin: 40px 0 8px; }
+    .collection-intro { max-width: 72ch; margin-bottom: 28px; }
+    .collection-meta { color: var(--muted); font-size: .9rem; }
+    .collection-status { max-width: none; padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .series-row { display: grid; grid-template-columns: 220px minmax(0, 1fr) 170px; gap: 24px; align-items: center; padding: 26px 0; border-bottom: 1px solid var(--line); }
+    .series-row h2 { font-size: 1.15rem; margin: 0 0 5px; }
+    .series-row p { margin: 8px 0 0; }
+    .series-row strong { font-size: 1.4rem; font-weight: 650; }
+    .series-caption, .series-empty { color: var(--muted); font-size: .85rem; }
+    .series-caption code { overflow-wrap: anywhere; }
+    .series-observations { margin-top: 8px; font-size: .85rem; }
+    .collection-configuration { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+    .series-plot { width: 100%; height: auto; display: block; }
+    .series-grid { fill: none; stroke: var(--line); }
+    .series-axis { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .series-data { color: var(--accent); fill: currentColor; }
+    .series-data polyline { fill: none; stroke: currentColor; stroke-width: 2; }
+    .collection-footer { padding-top: 24px; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      .collection { padding: 20px; }
+      .collection h1 { margin-top: 28px; }
+      .series-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+      .series-detail { justify-self: start; }
+      .series-axis { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+<main class="collection">
+  <header>
+    <div class="collection-top"><a href="summary.json">Measurement JSON</a><button id="theme" type="button">Change theme</button></div>
+    <h1>Coverage history</h1>
+    <p class="collection-intro">__SUITE_COUNT__ test suites, measured independently. Each report includes the declared core production libraries. Files overlap across suites; percentages describe each suite's execution and are not added together.</p>
+    <div class="collection-meta"><span>Source <code>__COMMIT__</code></span><time datetime="__MEASURED__">__MEASURED_LABEL__</time>__RUN_LINK__</div>
+    <p class="collection-configuration">Configuration: <code>__CONFIGURATION__</code></p>
+    <p class="collection-status" role="status">__NOTICE__</p>
+  </header>
+  <div aria-label="Line coverage over time by suite">__COLLECTION_ROWS__</div>
+  <footer class="collection-footer"><p>__CONFIGURATION__</p><p>Works offline · <a href="history.json">History JSON</a> · <a href="summary.md">Markdown summary</a></p></footer>
+</main>
+<script>
+  "use strict";
+  const button = document.getElementById("theme");
+  try { const value = localStorage.getItem("orca-coverage-theme"); if (value === "light" || value === "dark") document.documentElement.dataset.theme = value; } catch (error) {}
+  function dark() { return document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; }
+  function label() { button.textContent = dark() ? "Light theme" : "Dark theme"; }
+  button.addEventListener("click", () => { const value = dark() ? "light" : "dark"; document.documentElement.dataset.theme = value; try { localStorage.setItem("orca-coverage-theme", value); } catch (error) {} label(); });
+  label();
+</script>
+</body>
+</html>

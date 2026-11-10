@@ -8,8 +8,12 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+import coverage_collection_contract as collection_contract
 
 
 BRANCH = "coverage-data"
@@ -55,7 +59,7 @@ class GitHub:
         return json.loads(base64.b64decode(value["content"], validate=False))
 
 
-def validate(summary, history, expected_commit):
+def validate_leaf(summary, history, expected_commit):
     if summary.get("schema_version") != 1 or summary.get("valid") is not True:
         raise ValueError("only valid versioned coverage measurements may be published")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_commit) or summary.get("commit") != expected_commit:
@@ -89,6 +93,26 @@ def validate(summary, history, expected_commit):
     if measured.tzinfo is None:
         raise ValueError("measurement time must include a timezone")
     return measured
+
+
+def validate(summary, history, expected_commit):
+    if summary.get("schema") == collection_contract.SUMMARY_SCHEMA:
+        return collection_contract.validate(summary, history, expected_commit, validate_leaf)
+    return validate_leaf(summary, history, expected_commit)
+
+
+def restore(directory, summary, history):
+    """Restore one verified revision, including independent suite baselines."""
+    validate(summary, history, summary.get("commit", ""))
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, value in (("summary.json", summary), ("history.json", history)):
+        (directory / name).write_text(json.dumps(value), encoding="utf-8")
+    if summary.get("schema") == collection_contract.SUMMARY_SCHEMA:
+        for name, report in summary["suites"].items():
+            target = directory / "suites" / name
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "summary.json").write_text(json.dumps(report), encoding="utf-8")
+            (target / "history.json").write_text(json.dumps(history["suites"][name]), encoding="utf-8")
 
 
 def publish(api, directory, expected_commit):
@@ -144,8 +168,8 @@ def main():
         head = api.head()
         args.directory.mkdir(parents=True, exist_ok=True)
         if head:
-            for name in ("history.json", "summary.json"):
-                (args.directory / name).write_text(json.dumps(api.file(name, head)))
+            summary, history = (api.file(name, head) for name in ("summary.json", "history.json"))
+            restore(args.directory, summary, history)
         else:
             print("No coverage data branch exists yet; this run can establish the first baseline.")
 

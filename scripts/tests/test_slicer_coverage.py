@@ -29,7 +29,8 @@ def _completed(argv, returncode=0, stdout="", stderr=""):
 class Fixture:
     """A production source, its compile command, a fake test binary and fake LLVM tools."""
 
-    def __init__(self, root: Path, *, export_stderr="", tests_output="100% tests passed, 0 tests failed out of 1\n",
+    def __init__(self, root: Path, *, export_stderr="", merge_stderr="", show_stderr="",
+                 tests_output="100% tests passed, 0 tests failed out of 1\n",
                  tests_returncode=0, write_profile=True, coverage=(1, 1), versions=("18.1.3", "18.1.3", "18.1.3")):
         self.root = root
         self.source = root / "src" / "libslic3r" / "fixture.cpp"
@@ -39,6 +40,8 @@ class Fixture:
         self.obj.touch()
         self.binary = root / "fixture-tests"
         self.binary.touch()
+        self.second_binary = root / "fixture-tests-second"
+        self.second_binary.touch()
         self.build = root / "build"
         self.build.mkdir()
         self.manifest = self.build / "sources.txt"
@@ -53,11 +56,15 @@ class Fixture:
         self.runtime_export = {"data": [{"files": [{"filename": str(self.source), "summary": {
             key: dict(metric) for key in slicer_coverage.METRICS}}]}]}
         self.export_stderr = export_stderr
+        self.merge_stderr = merge_stderr
+        self.show_stderr = show_stderr
         self.tests_output = tests_output
         self.tests_returncode = tests_returncode
         self.write_profile = write_profile
         self.versions = versions
         self.calls = []
+        self.per_executable_profiles = False
+        self.profile_id_mode = "valid"
 
     def args(self, *extra):
         return ["run", "--root", str(self.root), "--build-dir", str(self.build),
@@ -72,6 +79,8 @@ class Fixture:
         if argv[0] == "fixture-tests":
             if self.write_profile:
                 Path(kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "runtime")).write_bytes(b"raw")
+                if self.per_executable_profiles:
+                    Path(kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "runtime-second")).write_bytes(b"raw")
             return _completed(argv, self.tests_returncode, self.tests_output)
         if argv[1:] == ["--version"]:
             tools = (str(Path("/usr/bin/clang++").resolve()), "llvm-cov", "llvm-profdata")
@@ -81,15 +90,37 @@ class Fixture:
         if argv[0] == "llvm-profdata" and argv[1] == "merge":
             output = Path(argv[argv.index("-o") + 1])
             output.write_bytes(b"inventory" if output.name.startswith("compiler-") else b"runtime counts")
-            return _completed(argv)
+            return _completed(argv, stderr=self.merge_stderr)
+        if argv[0] == "llvm-profdata" and argv[1:] and argv[1] == "show":
+            profile = Path(argv[-1])
+            if self.profile_id_mode == "foreign":
+                binary_ids = ["ffffffff"]
+            elif self.profile_id_mode == "multi":
+                binary_ids = ["aabbccdd", "11223344"]
+            elif profile.name == "runtime.profraw":
+                binary_ids = ["aabbccdd"]
+            elif profile.name == "runtime-second.profraw":
+                binary_ids = ["11223344"]
+            else:
+                binary_ids = ["aabbccdd"]
+            return _completed(argv, 0, "Binary IDs:\n" + "\n".join(binary_ids) + "\n")
         if argv[0] == "llvm-cov" and argv[1] == "export":
             profile = Path(argv[argv.index("-instr-profile") + 1])
-            exported = Path(argv[argv.index("-object") + 1])
+            exported = Path(argv[argv.index("-object") + 1]) if "-object" in argv else Path(argv[-1])
             if exported == self.obj.resolve():
                 assert profile.name == "compiler-inventory-empty.profdata"
                 return _completed(argv, 0, json.dumps(self.runtime_export))
             assert profile.name == "merged.profdata"
             return _completed(argv, 0, json.dumps(self.runtime_export), self.export_stderr)
+        if argv[0] == "llvm-cov" and argv[1] == "show":
+            output = Path(next(value.split("=", 1)[1] for value in argv if value.startswith("-output-dir=")))
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "index.html").write_text("fixture", encoding="utf-8")
+            for item in self.runtime_export["data"][0]["files"]:
+                page = slicer_coverage._html_page(output, item["filename"])
+                page.parent.mkdir(parents=True, exist_ok=True)
+                page.write_text("fixture", encoding="utf-8")
+            return _completed(argv, 0, stderr=self.show_stderr)
         raise AssertionError(f"unexpected command {argv}")
 
     def main(self, *extra):
@@ -188,6 +219,113 @@ class ModeTests(unittest.TestCase):
             status, report = Fixture(Path(temp), coverage=(1, 10)).main()
             self.assertEqual((status, report["status"]), (0, "pass"))
             self.assertEqual(report["measurement"]["mode"], "measure_only")
+
+    def test_per_executable_reports_bind_profiles_and_do_not_rerun_tests(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp))
+            fixture.per_executable_profiles = True
+            with mock.patch.object(slicer_coverage, "elf_build_id", side_effect=lambda path: {
+                    fixture.binary.resolve(): "aabbccdd", fixture.second_binary.resolve(): "11223344"}[path.resolve()]), \
+                 mock.patch.object(slicer_coverage, "_run", side_effect=fixture.run), \
+                 mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, *_: name):
+                status = slicer_coverage.main(fixture.args(
+                    "--per-executable", "--object", str(fixture.second_binary)))
+            self.assertEqual(status, 0)
+            index = json.loads((fixture.root / "report" / "coverage-collection.json").read_text())
+            self.assertEqual(index["schema_version"], 1)
+            self.assertEqual(index["measurement_mode"], "per-executable")
+            self.assertEqual(index["status"], "pass")
+            self.assertEqual([row["name"] for row in index["suites"]],
+                             [fixture.binary.stem, fixture.second_binary.stem])
+            self.assertEqual(sum(argv[0] == "fixture-tests" for argv in fixture.calls), 1)
+            for row in index["suites"]:
+                report = json.loads((fixture.root / "report" / row["report"]).read_text())
+                self.assertEqual(report["status"], "pass")
+                self.assertEqual(report["tool_versions"]["compatibility"], "major_versions_match")
+                self.assertEqual(len(report["profiles"]), 1)
+                self.assertTrue((fixture.root / "report" / "suites" / row["name"] /
+                                 "merged.profdata").is_file())
+
+    def test_per_executable_rejects_foreign_and_multi_id_profiles(self):
+        for mode in ("foreign", "multi"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp))
+                fixture.profile_id_mode = mode
+                with mock.patch.object(slicer_coverage, "elf_build_id", return_value="aabbccdd"), \
+                     mock.patch.object(slicer_coverage, "_run", side_effect=fixture.run), \
+                     mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, *_: name):
+                    status = slicer_coverage.main(fixture.args("--per-executable"))
+                self.assertEqual(status, 2)
+                index = json.loads((fixture.root / "report" / "coverage-collection.json").read_text())
+                self.assertEqual(index["status"], "error")
+                self.assertEqual(index["integrity_status"], "error")
+                report = json.loads((fixture.root / "report" / index["suites"][0]["report"]).read_text())
+                self.assertEqual(report["integrity_status"], "error")
+                self.assertFalse(any(argv[0] == "llvm-profdata" and argv[1] == "merge"
+                                     and "compiler-inventory" not in argv[-1]
+                                     for argv in fixture.calls))
+
+    def test_per_executable_partial_profile_set_invalidates_collection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp))
+            fixture.per_executable_profiles = True
+            fixture.write_second_profile = False
+            original_run = fixture.run
+
+            def run(argv, **kwargs):
+                if argv[0] == "fixture-tests" and fixture.write_profile:
+                    Path(kwargs["env"]["LLVM_PROFILE_FILE"].replace("%4m", "runtime")).write_bytes(b"raw")
+                    return _completed(argv, fixture.tests_returncode, fixture.tests_output)
+                return original_run(argv, **kwargs)
+
+            with mock.patch.object(slicer_coverage, "elf_build_id", side_effect=lambda path: {
+                    fixture.binary.resolve(): "aabbccdd", fixture.second_binary.resolve(): "11223344"}[path.resolve()]), \
+                 mock.patch.object(slicer_coverage, "_run", side_effect=run), \
+                 mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, *_: name):
+                status = slicer_coverage.main(fixture.args(
+                    "--per-executable", "--object", str(fixture.second_binary)))
+            self.assertEqual(status, 2)
+            index = json.loads((fixture.root / "report" / "coverage-collection.json").read_text())
+            self.assertEqual(index["status"], "error")
+            self.assertEqual({row["status"] for row in index["suites"]}, {"coverage_integrity_error"})
+            self.assertIn("object_without_profile", {
+                item["reason"] for item in index["profile_identity"]["errors"]})
+
+    def test_per_executable_hash_mismatch_stays_fatal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Fixture(Path(temp), export_stderr="warning: 1 functions have mismatched data\n")
+            with mock.patch.object(slicer_coverage, "elf_build_id", return_value="aabbccdd"), \
+                 mock.patch.object(slicer_coverage, "_run", side_effect=fixture.run), \
+                 mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, *_: name):
+                status = slicer_coverage.main(fixture.args("--per-executable"))
+            self.assertEqual(status, 2)
+            index = json.loads((fixture.root / "report" / "coverage-collection.json").read_text())
+            report = json.loads((fixture.root / "report" / index["suites"][0]["report"]).read_text())
+            self.assertEqual(report["status"], "coverage_integrity_error")
+            self.assertTrue(report["integrity_failures"]["profile_mapping"])
+
+    def test_per_executable_successful_tool_warnings_are_fatal(self):
+        cases = (
+            ("merge", {"merge_stderr": "warning: merge diagnostic\n"}, False,
+             "profile_merge_failed", "profile_merge_diagnostics"),
+            ("export", {"export_stderr": "warning: export diagnostic\n"}, False,
+             "coverage_integrity_error", "unexpected_export_diagnostics"),
+            ("show", {"show_stderr": "warning: annotation diagnostic\n"}, True,
+             "coverage_integrity_error", "unexpected_annotation_diagnostics"),
+        )
+        for stage, options, html, expected_status, diagnostic_key in cases:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temp:
+                fixture = Fixture(Path(temp), **options)
+                with mock.patch.object(slicer_coverage, "elf_build_id", return_value="aabbccdd"), \
+                     mock.patch.object(slicer_coverage, "_run", side_effect=fixture.run), \
+                     mock.patch.object(slicer_coverage, "_which", side_effect=lambda name, *_: name):
+                    extra = ["--per-executable"] + (["--html"] if html else [])
+                    status = slicer_coverage.main(fixture.args(*extra))
+                self.assertEqual(status, 2)
+                index = json.loads((fixture.root / "report" / "coverage-collection.json").read_text())
+                report = json.loads((fixture.root / "report" / index["suites"][0]["report"]).read_text())
+                self.assertEqual(report["status"], expected_status)
+                self.assertTrue(report["integrity_failures"][diagnostic_key])
 
     def test_threshold_mode_is_strict_and_opt_in(self):
         for coverage, expected in (((9, 10), (1, "coverage_below_threshold")), ((10, 10), (0, "pass"))):

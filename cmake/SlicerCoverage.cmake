@@ -174,8 +174,8 @@ endfunction()
 # Link every object of LIBRARY_TARGET into TEST_TARGET. A static archive
 # otherwise contributes only the objects the tests reference, so production
 # files no test reaches would vanish from the denominator instead of being
-# reported with zero hits. One such image is enough: llvm-cov unions the
-# mappings of all objects passed to it.
+# reported with zero hits. Per-executable reports need the complete denominator
+# in each test image.
 function(slicer_force_link_static_library TEST_TARGET LIBRARY_TARGET)
     if (NOT TARGET ${TEST_TARGET} OR NOT TARGET ${LIBRARY_TARGET})
         message(FATAL_ERROR "slicer_force_link_static_library: both targets must exist")
