@@ -1,0 +1,27 @@
+name: Validation artifact guardrails
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint tracked validation artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test validation artifact lint
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_artifact_lint.py -v
+      - name: Lint tracked build outputs and upload retention
+        run: python -B scripts/validation_artifact_lint.py
