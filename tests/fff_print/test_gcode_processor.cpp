@@ -40,6 +40,7 @@
 
 #include <cstddef>
 #include <fstream>
+#include <ios>
 #include <string>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -726,7 +727,7 @@ Processed process_post(const std::string& gcode, FullPrintConfig config = {})
 {
     ScopedTemporaryFile file(".gcode");
     {
-        std::ofstream out(file.string());
+        std::ofstream out(file.string(), std::ios::binary);
         REQUIRE(out.good());
         out << gcode;
     }
