@@ -470,7 +470,8 @@ jobs:
         # Keep the measured colour recipes and directional flush datasets too.
         find "$d" -mindepth 1 -maxdepth 1 -type d \
           ! -name tests ! -name build_flatpak ! -name scripts ! -name resources -exec rm -rf {} +
-        find "$d/resources" -mindepth 1 -maxdepth 1 ! -name profiles ! -name printers ! -name images ! -name fonts ! -name filament_mixing ! -name flush -exec rm -rf {} +
+        find "$d/resources" -mindepth 1 -maxdepth 1 ! -name profiles ! -name printers ! -name images ! -name fonts ! -name filament_mixing ! -name flush ! -name info -exec rm -rf {} +
+        test -s "$d/resources/info/nozzle_incompatibles.json"
         test -s "$d/resources/filament_mixing/standard_color_recipes.json"
         for dataset in flush_data_standard.txt flush_data_dual_standard.txt flush_data_dual_highflow.txt; do
           test -s "$d/resources/flush/$dataset"
