@@ -6704,6 +6704,10 @@ void GCodeProcessor::process_M402(const GCodeReader::GCodeLine& line)
 
     if (p != FLT_MAX)
         m_feedrate = p;
+
+    // The next command starts from m_end_position. Preserve the position restored
+    // by M402 rather than replacing it with the position from before the restore.
+    m_end_position = m_start_position;
 }
 
 void GCodeProcessor::process_M566(const GCodeReader::GCodeLine& line)
