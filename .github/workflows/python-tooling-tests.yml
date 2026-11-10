@@ -10,6 +10,10 @@ on:
       - 'scripts/tests/test_clang_tidy_diff.py'
       - 'scripts/slicer_module_feedback.py'
       - 'scripts/tests/test_slicer_module_feedback.py'
+      - 'scripts/settings_inventory.py'
+      - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/slicer_pr_validation.py'
+      - 'scripts/tests/test_slicer_pr_validation.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -20,6 +24,10 @@ on:
       - 'scripts/tests/test_clang_tidy_diff.py'
       - 'scripts/slicer_module_feedback.py'
       - 'scripts/tests/test_slicer_module_feedback.py'
+      - 'scripts/settings_inventory.py'
+      - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/slicer_pr_validation.py'
+      - 'scripts/tests/test_slicer_pr_validation.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -43,9 +51,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Require Ninja for build-reuse fixtures
+        run: python -c "import shutil; assert shutil.which('ninja'), 'Ninja is required for real build-reuse controls'"
       - name: Test scoped process handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
       - name: Test clang-tidy diff handling
         run: python -B -m unittest discover -s scripts/tests -p test_clang_tidy_diff.py -v
       - name: Test module feedback handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_module_feedback.py -v
+      - name: Test settings inventory contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
+      - name: Test validation runner contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_pr_validation.py -v
