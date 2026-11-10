@@ -1,0 +1,32 @@
+# Temporary integration evidence only. Never merge this proof workflow.
+name: Coverage Python integration proof
+on:
+  push:
+    branches: [ci/coverage-python-integration-proof]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    name: Coverage Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run integrated process, collector, report and history contracts
+        run: >-
+          python -B -m unittest -v
+          scripts.tests.test_slicer_process
+          scripts.tests.test_slicer_coverage
+          scripts.tests.test_coverage_report
+          scripts.tests.test_coverage_history
