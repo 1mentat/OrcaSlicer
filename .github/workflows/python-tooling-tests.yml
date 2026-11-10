@@ -16,6 +16,10 @@ on:
       - 'scripts/tests/test_settings_inventory.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/validation_*.py'
+      - 'scripts/tests/test_validation_*.py'
+      - '.github/validation-producers.json'
+      - '.github/actions/validation-upload/**'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -32,6 +36,10 @@ on:
       - 'scripts/tests/test_settings_inventory.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/validation_*.py'
+      - 'scripts/tests/test_validation_*.py'
+      - '.github/validation-producers.json'
+      - '.github/actions/validation-upload/**'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -75,3 +83,9 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_mutation.py -v
       - name: Test settings inventory declarations and metadata
         run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
+      - name: Test artifact ownership, leases and expiry
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_artifacts.py -v
+      - name: Test artifact runner cleanup and budget cancellation
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_runner.py -v
+      - name: Test bounded validation uploads
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_upload.py -v

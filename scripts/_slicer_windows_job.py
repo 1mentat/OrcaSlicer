@@ -205,7 +205,8 @@ def _cleanup(process, job, original):
     return result
 
 
-def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, output_file=None):
+def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, output_file=None,
+                 check=None):
     import msvcrt
 
     command = list(argv)
@@ -221,6 +222,7 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
     control = None
     gate = None
     cleaned = False
+    checking = False
     try:
         control = _Control(api, data)
         gate = api.checked("CreateEventW", None, True, False, None)
@@ -252,6 +254,10 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
                 pending_input = input_data
                 partial = None
                 while True:
+                    if check is not None:
+                        checking = True
+                        check()
+                        checking = False
                     remaining = None if deadline is None else deadline - time.monotonic()
                     if remaining is not None and remaining <= 0:
                         raise subprocess.TimeoutExpired(command, timeout,
@@ -274,9 +280,10 @@ def run_captured(argv, *, cwd=None, env=None, timeout=None, input_data=None, out
             except subprocess.TimeoutExpired as error:
                 drained = _cleanup(process, job, error)
                 cleaned = True
-                if drained is not None:
-                    error.output, error.stderr = drained
-                error.cmd, error.timeout, error.returncode = command, timeout, process.returncode
+                if not checking:
+                    if drained is not None:
+                        error.output, error.stderr = drained
+                    error.cmd, error.timeout, error.returncode = command, timeout, process.returncode
                 raise
             except BaseException as error:
                 _cleanup(process, job, error)
