@@ -1,0 +1,103 @@
+# TEMPORARY PROOF BRANCH ONLY; NEVER MERGE. No strict catalog audit is claimed.
+name: Native settings registry proof
+on:
+  push:
+    branches: [diagnostics/settings-inventory-ca2-native]
+    paths: [.github/workflows/settings_inventory_native_proof.yml]
+permissions:
+  contents: read
+jobs:
+  native-registry:
+    if: github.repository == '1mentat/OrcaSlicer' && github.event_name == 'push' && github.ref == 'refs/heads/diagnostics/settings-inventory-ca2-native'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      EXPECTED_PARENT: ca2eaca47f89c52ede3df08f203414306f5f6d03
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind unchanged source epoch
+        run: |
+          set -euo pipefail
+          mkdir proof
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 2
+          test "$(git diff --name-only "$EXPECTED_PARENT" HEAD)" = '.github/workflows/settings_inventory_native_proof.yml'
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git rev-parse HEAD HEAD^{tree} HEAD:deps > proof/source-identities.txt
+          sha256sum tests/libslic3r/settings_inventory_main.cpp tests/libslic3r/CMakeLists.txt CMakeLists.txt src/libslic3r/CMakeLists.txt scripts/settings_inventory.py tests/settings_coverage.json > proof/source-sha256.txt
+          printf '%s\n' 'Strict 619-entry settings audit NOT RUN: known catalog/source-selector epoch hold. Native registry output is not test coverage or M351-M353 closure.' > proof/SCOPE.txt
+      - name: Restore existing Linux dependency prefix only
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+          fail-on-cache-miss: true
+      - name: Install existing hosted Linux system prerequisites
+        uses: ./.github/actions/apt-install-deps
+      - name: Configure only the existing headless target graph
+        run: |
+          set -euo pipefail
+          cmake --version > proof/tool-versions.txt
+          ninja --version >> proof/tool-versions.txt
+          /usr/bin/clang --version >> proof/tool-versions.txt
+          /usr/bin/clang++ --version >> proof/tool-versions.txt
+          ld.lld --version >> proof/tool-versions.txt
+          python3 --version >> proof/tool-versions.txt
+          cmake -S . -B build-inventory -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON -DSLIC3R_GUI=OFF -DSLIC3R_CAD=ON -DSLIC3R_PCH=ON \
+            -DORCA_TOOLS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+            -DCMAKE_LINKER="$(command -v ld.lld)" -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld \
+            -DDEP_BUILD_DIR="$GITHUB_WORKSPACE/deps/build" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps/build/OrcaSlicer_dep/usr/local" \
+            2>&1 | tee proof/configure.log
+          cp build-inventory/CMakeCache.txt proof/CMakeCache.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          db=json.loads(Path('build-inventory/compile_commands.json').read_text())
+          rows=[r for r in db if Path(r['file']).name=='settings_inventory_main.cpp']
+          assert len(rows)==1, len(rows)
+          Path('proof/inventory-compile-command.json').write_text(json.dumps(rows,indent=2)+'\n')
+          PY
+      - name: Build explicit inventory target, including its required core owners
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v cmake --build build-inventory --config Release --target slicer_settings_inventory --parallel 2 2>&1 | tee proof/build.log
+      - name: Run native dumper and record structural output only
+        run: |
+          set -euo pipefail
+          binary=build-inventory/tests/libslic3r/slicer_settings_inventory
+          test -s "$binary"
+          sha256sum "$binary" > proof/binary-sha256.txt
+          file "$binary" > proof/binary-format.txt
+          ldd "$binary" > proof/binary-linkage.txt
+          timeout 45s "$binary" > proof/native-registry.json 2> proof/native-registry.stderr
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('proof/native-registry.json'); o=json.loads(p.read_text())
+          assert o['schema_version']==1 and o['source']=='PrintConfigDef::options'
+          rows=o['options']; assert isinstance(rows,list) and rows and o['settings_count']==len(rows)
+          keys=[r['key'] for r in rows]; assert all(isinstance(k,str) and k for k in keys)
+          assert len(keys)==len(set(keys))
+          Path('proof/native-output-summary.json').write_text(json.dumps({'native_exit':0,'settings_count':len(rows),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'strict_619_catalog_audit':'NOT_RUN_SOURCE_EPOCH_HOLD','behavior_coverage_claim':False},indent=2)+'\n')
+          PY
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Retain small proof records, not executable payloads
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-settings-registry-proof
+          path: proof/
+          if-no-files-found: error
+          retention-days: 7
