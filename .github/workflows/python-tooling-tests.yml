@@ -85,6 +85,8 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
       - name: Test artifact ownership, leases and expiry
         run: python -B -m unittest discover -s scripts/tests -p test_validation_artifacts.py -v
+      - name: Test scheduled artifact collection and installer contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_sweeper.py -v
       - name: Test artifact runner cleanup and budget cancellation
         run: python -B -m unittest discover -s scripts/tests -p test_validation_runner.py -v
       - name: Test bounded validation uploads

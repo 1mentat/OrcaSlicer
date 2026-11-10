@@ -39,11 +39,15 @@ class UploadPreflightTests(unittest.TestCase):
                         "commit", "-q", "--allow-empty", "-m", "owned fixture"],
                        env=env, check=True, capture_output=True)
         self.head = upload._head(self.workspace)
-        self.env = {"GITHUB_WORKSPACE": str(self.workspace), "RUNNER_TEMP": str(self.scratch),
+        # CLI fixtures clear ambient CI/manager variables, but still invoke real
+        # Git. Preserve executable discovery and Windows process essentials.
+        self.env = {key: value for key, value in os.environ.items()
+                    if key.upper() in {"PATH", "SYSTEMROOT", "WINDIR", "PATHEXT"}}
+        self.env.update({"GITHUB_WORKSPACE": str(self.workspace), "RUNNER_TEMP": str(self.scratch),
                     "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_ACTOR": "fixture-owner",
                     "GITHUB_REPOSITORY": "owner/repository", "GITHUB_RUN_ID": "123",
                     "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": "unit-test",
-                    "VALIDATION_UPLOAD_NAME": "fixture reports", "VALIDATION_UPLOAD_PATH": "output"}
+                    "VALIDATION_UPLOAD_NAME": "fixture reports", "VALIDATION_UPLOAD_PATH": "output"})
 
     def file(self, relative, data=b"abc"):
         path = self.workspace / relative

@@ -38,6 +38,21 @@ shared dependency caches remain outside disposable payloads. A reusable cache
 requires its own bounded owner and retention policy; calling a directory a cache
 does not exempt it from storage accounting.
 
+## Scheduled collection
+
+`scripts/validation_sweeper.py` collects configured managed stores and returns
+bounded counts, bytes and errors. On macOS its installer creates a per-user
+LaunchAgent with a finite collection interval. The installer verifies its two
+source modules against an explicit Git revision, then copies them into a private
+stable tools directory. The installed configuration binds each store UUID;
+collection checks that identity while holding the manager lock before deleting
+anything. Replacing a path with a different store cannot authorize collection.
+
+The service retains only bounded configuration and latest status, without
+versioned logs. Collection continues independently of producer processes and
+run expiry. A service configuration does not grant authority over legacy data,
+source checkouts or dependency caches outside its configured managed stores.
+
 ## Command-line producers
 
 `scripts/validation_runner.py` supervises commands through the existing scoped

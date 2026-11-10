@@ -487,8 +487,10 @@ def promote(root, run_id, token, owner, ttl_seconds, budget_bytes, paths):
         return _receipt(final, retained) | {'actual_bytes': used, 'selected_paths': selected}
 
 
-def sweep(root, dry_run=False):
+def sweep(root, dry_run=False, *, expected_root_id=None):
     with _locked(root) as (path, meta):
+        if expected_root_id is not None and meta['root_id'] != expected_root_id:
+            raise ArtifactError('Managed root identity changed')
         records, stages = _inventory(path, meta); now = time.time(); deleted = []; reclaimed = 0
         for directory, run in records:
             expired = now >= _seconds(run['expires_at'])

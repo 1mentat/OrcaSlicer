@@ -343,6 +343,15 @@ class Artifacts(unittest.TestCase):
         self.call(a.finish, second, 'failed')
         self.assertEqual(self.call(a.check, first)['actual_bytes'], 0)
 
+    def test_sweep_pinned_root_identity_rejects_replacement_before_deletion(self):
+        run = self.create(ttl=1)
+        metadata = a._read(self.root / 'root.json'); original_id = metadata['root_id']
+        metadata['root_id'] = str(a.uuid.uuid4())
+        a._write(self.root / 'root.json', metadata, a.ROOT_METADATA_LIMIT)
+        with patch.object(a.time, 'time', return_value=time.time() + 2):
+            self.assertRaises(a.ArtifactError, a.sweep, self.root, expected_root_id=original_id)
+        self.assertTrue(Path(run['payload_dir']).exists())
+
     def test_cli_json_error_and_capability_not_echoed(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
