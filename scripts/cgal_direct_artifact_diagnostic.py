@@ -69,7 +69,7 @@ def mapped_path(value, tests):
 
 
 def registration(tests, binary):
-    matches = []; scanned = []
+    matches = []; scanned = []; retained = []; retained_bytes = 0
     files = sorted((tests / 'libslic3r').rglob('*_tests*.cmake'))
     if not files or len(files) > 64:
         raise ValueError('Registration inventory bound')
@@ -78,11 +78,27 @@ def registration(tests, binary):
             raise ValueError('Unsafe registration file')
         # Include wrappers can execute discovery; inspect only literal generated
         # files containing add_test, never interpret/include the wrappers.
-        text = path.read_text(encoding='utf-8')
-        if 'add_test(' not in text:
-            continue
+        if path.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError('Registration file size bound')
+        raw = path.read_bytes()
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError('Registration read size bound')
+        entry = {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
+        scanned.append(entry)
+        if CASE.encode() not in raw:
+            continue  # Unrelated metadata is hashed, never interpreted.
+        retained_bytes += len(raw)
+        if len(retained) >= 4 or retained_bytes > 8 * 1024 * 1024:
+            raise ValueError('Selected registration retention bound')
+        saved = OUT / ('selected-registration-' + str(len(retained)) + '.cmake')
+        with saved.open('xb') as destination:
+            destination.write(raw)
+        retained.append({**entry, 'retained_path': str(saved)})
+        # Persist before decode/parse: rejection must still expose the exact
+        # selected public artifact metadata without another native launch.
+        write_json(OUT / 'selected-registration-manifest.json', {'selected': retained, 'scanned': scanned})
+        text = raw.decode('utf-8')
         rows = list(commands(text)); selected = [a for n, a in rows if n == 'add_test' and a and a[0] == CASE]
-        scanned.append({'path': str(path), 'sha256': digest(path), 'bytes': path.stat().st_size})
         for args in selected:
             if len(args) < 3 or args[2] != CASE or mapped_path(args[1], tests) != binary:
                 raise ValueError('Selected command is not exact binary/case')
