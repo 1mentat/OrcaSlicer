@@ -283,6 +283,20 @@ class ValidationArtifactLintTests(unittest.TestCase):
             findings = lint_producer_registry(root, workflows)
             self.assertTrue(any("must bind output_option='--output-dir'" in item for item in findings))
 
+    def test_registry_rejects_managed_call_inside_dead_exit_expression(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflows, _, _ = self._registry_repo(root)
+            source = root / "scripts/settings_inventory.py"
+            original = source.read_text(encoding="utf-8")
+            source.write_text(original.replace(
+                "SystemExit(managed_main(", "SystemExit(False and managed_main("),
+                encoding="utf-8")
+            findings = lint_producer_registry(root, workflows)
+            self.assertTrue(any("must exit with its managed_main result" in item for item in findings))
+            source.write_text(original, encoding="utf-8")
+            self.assertEqual(lint_producer_registry(root, workflows), [])
+
     def test_registry_rejects_traversal_duplicate_and_malformed_entries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

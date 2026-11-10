@@ -294,7 +294,9 @@ def _has_managed_entrypoint(path: Path, expected_option: str) -> tuple[bool, str
         and isinstance(statement.exc, ast.Call)
         and isinstance(statement.exc.func, ast.Name)
         and statement.exc.func.id == "SystemExit"
-        and call in ast.walk(statement.exc)
+        and len(statement.exc.args) == 1
+        and not statement.exc.keywords
+        and statement.exc.args[0] is call
         for statement in guard.body
     )
     if not wrapped:
