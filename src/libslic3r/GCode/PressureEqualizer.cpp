@@ -421,6 +421,8 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
                 }
                 eatws(line);
             }
+            // A logical coordinate reset has no physical displacement or extrusion.
+            memcpy(buf.pos_start, m_current_pos, sizeof(float) * 5);
             break;
         }
         case 10:

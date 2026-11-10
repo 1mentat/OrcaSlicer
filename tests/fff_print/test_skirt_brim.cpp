@@ -132,7 +132,7 @@ TEST_CASE("Skirt is emitted once per layer it spans", "[SkirtBrim]")
 
 // Each per-object skirt prints right before its own object, so distant objects yield two
 // non-contiguous skirt passes; close objects group into a single skirt.
-TEST_CASE("Per-object skirts group when objects are close", "[SkirtBrim]")
+TEST_CASE("Per-object skirts group when objects are close", "[SkirtBrim][SkirtType]")
 {
     auto [gap, expected_skirts] = GENERATE(table<double, int>({ { 5.0, 1 }, { 60.0, 2 } }));
     DYNAMIC_SECTION("gap=" << gap) {
@@ -2034,4 +2034,75 @@ TEST_CASE("Skirt angle selects the registered start and zero speed uses layer fa
     require_same_loop_geometry(base.skirt, fallback.skirt);
     CHECK_THAT(fallback.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(23.0, 0.05));
     CHECK_THAT(base.skirt.first_feed_mm_s, Catch::Matchers::WithinAbs(37.0, 0.05));
+}
+
+TEST_CASE("Per-object skirt is generated per instance (original M189 four-row fixture)", "[SkirtBrim][SkirtType]")
+{
+    auto [skirt_type, gap, expected_groups] = GENERATE(table<std::string, double, size_t>({
+        { "combined",  5.0, 1 },
+        { "combined", 60.0, 1 },
+        { "perobject", 5.0, 1 },
+        { "perobject", 60.0, 2 },
+    }));
+    DYNAMIC_SECTION(skirt_type << " gap=" << gap) {
+        Print print;
+        Model model;
+        place_two_cube_instances_apart(gap, {
+            { "skirt_type",     skirt_type },
+            { "skirt_height",   1 },
+            { "skirt_distance", 3 },
+            { "skirt_loops",    1 },
+            { "gcode_flavor",   "marlin" },
+            { "use_relative_e_distances", true },
+            { "layer_change_gcode", "G92 E0\n" },
+            { "brim_type",      "no_brim" },
+            { "print_sequence", "by layer" },
+            { "draft_shield",   "disabled" },
+            { "min_skirt_length", 0 },
+        }, print, model);
+        const auto validation = print.validate();
+        INFO("validation: " << validation.string << " [" << validation.opt_key << "]");
+        REQUIRE(validation.string.empty());
+        print.process();
+
+        const auto &groups = print.skirt_brim_groups();
+        REQUIRE(groups.size() == expected_groups);
+        REQUIRE(print.skirt().items_count() == expected_groups);
+
+        size_t total_instances = 0;
+        std::set<size_t> instance_ids;
+        for (const Print::SkirtBrimGroup &group : groups) {
+            REQUIRE(!group.instances.empty());
+            REQUIRE(group.skirt.items_count() == 1);
+            const double volume = group.skirt.total_volume();
+            REQUIRE(std::isfinite(volume));
+            CHECK(volume > 0.);
+            total_instances += group.instances.size();
+
+            Points skirt_points;
+            group.skirt.collect_points(skirt_points);
+            REQUIRE(!skirt_points.empty());
+            coord_t min_x = skirt_points.front().x();
+            coord_t max_x = min_x;
+            for (const Point &point : skirt_points) {
+                min_x = std::min(min_x, point.x());
+                max_x = std::max(max_x, point.x());
+            }
+            CHECK(max_x > min_x);
+            if (gap > 50.) {
+                const coord_t width = max_x - min_x;
+                if (skirt_type == "combined")
+                    CHECK(width > scaled(80.));
+                else
+                    CHECK(width < scaled(30.));
+            }
+
+            for (const ObjectInstanceID &instance : group.instances) {
+                CHECK(instance.object_id == print.get_object(0)->id());
+                instance_ids.insert(instance.instance_id);
+            }
+        }
+        CHECK(total_instances == 2);
+        CHECK(instance_ids == std::set<size_t>{ 0, 1 });
+    }
 }

@@ -270,3 +270,43 @@ TEST_CASE("ObjColorUtils empty image helpers report zero colors without fabricat
     CHECK_FALSE(quant.more_than_request(pixels, 1));
     CHECK_FALSE(quant.is_in(Bgr(1, 2, 3), {}));
 }
+
+TEST_CASE("ObjColorUtils image application replaces every pixel with its cluster center (original M034 palette)", "[ObjColorUtils][ObjColorUtilsExtended]")
+{
+    RngRestore restore;
+    cv::theRNG().state = 12345;
+    QuantKMeans quant;
+    cv::Mat input(2, 2, CV_8UC3), output(2, 2, CV_8UC3, cv::Scalar(0, 0, 0));
+    input.at<Bgr>(0, 0) = Bgr(0, 0, 255);
+    input.at<Bgr>(0, 1) = Bgr(0, 0, 255);
+    input.at<Bgr>(1, 0) = Bgr(255, 0, 0);
+    input.at<Bgr>(1, 1) = Bgr(255, 0, 0);
+    quant.apply(input, output, 2, 0);
+    REQUIRE(output.rows == input.rows);
+    REQUIRE(output.cols == input.cols);
+    REQUIRE(output.type() == CV_8UC3);
+    require_vec(output.at<Bgr>(0, 0), Bgr(0, 0, 255));
+    require_vec(output.at<Bgr>(0, 1), Bgr(0, 0, 255));
+    require_vec(output.at<Bgr>(1, 0), Bgr(255, 0, 0));
+    require_vec(output.at<Bgr>(1, 1), Bgr(255, 0, 0));
+}
+
+TEST_CASE("ObjColorUtils alpha application preserves transparent pixels and alpha bytes (original M034 palette)", "[ObjColorUtils][ObjColorUtilsExtended]")
+{
+    RngRestore restore;
+    cv::theRNG().state = 54321;
+    QuantKMeans quant(10);
+    cv::Mat input(1, 3, CV_8UC4), output(1, 3, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    input.at<Rgba>(0, 0) = Rgba(5, 6, 7, 0);
+    input.at<Rgba>(0, 1) = Rgba(0, 0, 255, 255);
+    input.at<Rgba>(0, 2) = Rgba(255, 0, 0, 128);
+    quant.apply_aplha(input, output, 2, 0);
+    REQUIRE(output.rows == input.rows);
+    REQUIRE(output.cols == input.cols);
+    REQUIRE(output.type() == CV_8UC4);
+    CHECK(output.at<Rgba>(0, 0) == input.at<Rgba>(0, 0));
+    CHECK(output.at<Rgba>(0, 1)[3] == 255);
+    CHECK(output.at<Rgba>(0, 2)[3] == 128);
+    CHECK(output.at<Rgba>(0, 1)[2] == 255);
+    CHECK(output.at<Rgba>(0, 2)[0] == 255);
+}

@@ -1,0 +1,486 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CLI = REPO_ROOT / "scripts" / "slicer_module_feedback.py"
+
+FAKE = r'''#!{python}
+import json, os, pathlib, subprocess, sys, time
+a = sys.argv[1:]
+mode = os.environ.get("FAKE_MODE", "ok")
+names = json.loads(os.environ["FAKE_NAMES"])
+with pathlib.Path(os.environ["FAKE_ARGV_LOG"]).open("a") as log:
+    log.write(json.dumps(a) + "\n")
+if "--build" in a:
+    pathlib.Path(os.environ["FAKE_BUILD_MARKER"]).write_text("called")
+    pattern = os.environ.get("LLVM_PROFILE_FILE", "")
+    if pattern:
+        pathlib.Path(pattern.replace("%m", "build-fake")).write_bytes(b"build-profile")
+    if mode == "creates-binary":
+        binary = pathlib.Path(os.environ["FAKE_BINARY"])
+        binary.write_text(pathlib.Path(__file__).read_text())
+        binary.chmod(0o755)
+    elif mode in {"escaped-built-binary", "escaped-replaced-binary"}:
+        binary = pathlib.Path(os.environ["FAKE_BINARY"])
+        if binary.exists() or binary.is_symlink():
+            binary.unlink()
+        binary.symlink_to(os.environ["FAKE_ESCAPE_TARGET"])
+    if mode == "timeout-build":
+        code = "import os,time,pathlib; time.sleep(.7); pathlib.Path(os.environ['FAKE_MARKER']).write_text('survived')"
+        subprocess.Popen([sys.executable, "-c", code])
+        time.sleep(20)
+elif "--list-tests" in a:
+    print("<MatchingTests/>" if mode == "empty-filter" else os.environ["FAKE_INVENTORY"])
+    pattern = os.environ.get("LLVM_PROFILE_FILE", "")
+    if pattern:
+        pathlib.Path(pattern.replace("%m", "inventory-fake")).write_bytes(b"inventory-profile")
+elif "--reporter" in a and a[a.index("--reporter") + 1] == "junit":
+    cases = "".join(f'<testcase name="{n}/section: nested"/>' for n in names)
+    if mode == "ok":
+        cases += f'<testcase name="{names[0]}/math: repeated"/>'
+    failure = ' failures="1"' if mode == "junit-failure" else ' failures="0"'
+    skipped = ' skipped="1"' if mode == "junit-skip" else ' skipped="0"'
+    detail = '<failure message="expected fake failure"/>' if mode == "junit-failure" else ('<skipped/>' if mode == "junit-skip" else '')
+    if detail:
+        cases = cases.replace(f'<testcase name="{names[0]}/section: nested"/>',
+                              f'<testcase name="{names[0]}/section: nested">{detail}</testcase>', 1)
+    index = a.index("--out")
+    pathlib.Path(a[index + 1]).write_text(f'<testsuites><testsuite tests="{len(names)}"{failure} errors="0"{skipped}>{cases}</testsuite></testsuites>')
+    pattern = os.environ["LLVM_PROFILE_FILE"]
+    if mode != "missing-profile":
+        pathlib.Path(pattern.replace("%m", "fake-module")).write_bytes(b"fake-profile")
+elif a and a[0] == "merge":
+    pathlib.Path(a[a.index("-o") + 1]).write_bytes(b"fake-merged-profile")
+elif a and a[0] in {"report", "show"}:
+    print("fake coverage output")
+'''
+
+
+# Launch only these owned fake executables through Python. The production CLI's
+# native tool argv and its build/binary ownership checks stay unchanged.
+LAUNCHER = r'''import os
+from pathlib import Path
+import runpy
+import sys
+
+import slicer_process
+
+cli, fake, binary = sys.argv[1:4]
+sys.argv = [cli, *sys.argv[4:]]
+fake_commands = {Path(fake).resolve(strict=False), Path(binary).resolve(strict=False)}
+run_captured = slicer_process.run_captured
+
+def run_fixture_command(argv, **kwargs):
+    if Path(argv[0]) in fake_commands:
+        if "--build" in argv and os.environ.get("FAKE_INTERRUPT_BUILD") == "1":
+            raise KeyboardInterrupt
+        argv = [sys.executable, *argv]
+    return run_captured(argv, **kwargs)
+
+slicer_process.run_captured = run_fixture_command
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+class ModuleFeedbackTests(unittest.TestCase):
+    def fixture(self, mode="ok", expected=2, bad_source=False, timeout=5):
+        tmp = tempfile.TemporaryDirectory(prefix="module feedback & safe ")
+        base = Path(tmp.name)
+        root = base / "repo"
+        build = root / "build"
+        evidence = build / "evidence"
+        (root / "tests").mkdir(parents=True)
+        evidence.mkdir(parents=True)
+        source = root / "tests" / "module tests.cpp"
+        prod = root / "src" / "module.cpp"
+        prod.parent.mkdir()
+        source.write_text("// test source\n")
+        prod.write_text("// production source\n")
+        compile_db = build / "compile_commands.json"
+        object_path = "CMakeFiles/module-tests.dir/tests/module tests.cpp.o"
+        compile_db.write_text(json.dumps([{
+            "directory": str(build), "file": str(source),
+            "arguments": ["clang++", "-c", str(source), "-o", object_path],
+            "output": object_path,
+        }]) + "\n")
+        fake = build / "fake-tool"
+        fake.write_text(FAKE.replace("{python}", sys.executable))
+        fake.chmod(0o755)
+        binary = build / "module-tests"
+        fake_script = FAKE.replace("{python}", sys.executable)
+        if mode not in {"creates-binary", "missing-built-binary", "escaped-built-binary"}:
+            binary.write_text(fake_script)
+            binary.chmod(0o755)
+        escape_target = root / "outside-module-tests"
+        escape_target.write_text(fake_script)
+        escape_target.chmod(0o755)
+        xml_file = "tests/other.cpp" if bad_source else "tests/module tests.cpp"
+        inventory = (f'<MatchingTests>'
+                     f'<TestCase><Name>Case A</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>1</Line></SourceInfo></TestCase>'
+                     f'<TestCase><Name>Case B</Name><Tags>[ModuleTag]</Tags><SourceInfo><File>{xml_file}</File><Line>2</Line></SourceInfo></TestCase>'
+                     f'</MatchingTests>')
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "tests/module tests.cpp", "src/module.cpp"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "test fixture"], check=True)
+        out = evidence / "run"
+        marker = base / "late-child-marker"
+        build_marker = evidence / "build-invoked"
+        argv_log = root / "fake-argv.jsonl"
+        env = os.environ.copy()
+        env.update({"FAKE_MODE": mode, "FAKE_NAMES": json.dumps(["Case A", "Case B"]),
+                    "FAKE_INVENTORY": inventory, "FAKE_MARKER": str(marker),
+                    "FAKE_BUILD_MARKER": str(build_marker),
+                    "FAKE_BINARY": str(binary), "FAKE_ESCAPE_TARGET": str(escape_target),
+                    "FAKE_ARGV_LOG": str(argv_log)})
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH", "")) if item)
+        launcher = base / "run_feedback.py"
+        launcher.write_text(LAUNCHER, encoding="utf-8")
+        args = [sys.executable, str(launcher), str(CLI), str(fake), str(binary),
+                "--root", str(root), "--build", str(build),
+                "--binary", str(binary), "--test-source", str(source), "--production-source", str(prod),
+                "--compile-commands", str(compile_db), "--out", str(out), "--target", "module-tests",
+                "--tag", "ModuleTag", "--expected-cases", str(expected), "--cmake", str(fake),
+                "--llvm-profdata", str(fake), "--llvm-cov", str(fake), "--timeout", str(timeout)]
+        return tmp, env, args, out, marker
+
+    def invoke(self, mode="ok", expected=2, bad_source=False, cli_timeout=5, process_timeout=10):
+        tmp, env, args, out, marker = self.fixture(mode, expected, bad_source, cli_timeout)
+        completed = subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=process_timeout, check=False)
+        return tmp, completed, out, marker
+
+    def test_wrong_target_is_rejected_before_build_or_output_creation(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        args[args.index("--target") + 1] = "other-tests"
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not own test source", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_two_name_comma_filter_is_one_argv_item_for_inventory_and_tests(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        expression = "Case A,Case B"
+        tag_index = args.index("--tag")
+        args[tag_index:tag_index + 2] = ["--filter", expression]
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invocations = [json.loads(line) for line in
+                       (Path(args[args.index("--root") + 1]) / "fake-argv.jsonl").read_text().splitlines()]
+        selected = [argv for argv in invocations if argv and argv[0] == expression]
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(sum("--list-tests" in argv for argv in selected), 1)
+        self.assertEqual(sum("--reporter" in argv and "junit" in argv for argv in selected), 1)
+        self.assertTrue(all(argv.count(expression) == 1 for argv in selected))
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["inventory_names"], ["Case A", "Case B"])
+
+    def test_tag_and_explicit_filter_are_mutually_exclusive(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        args.extend(["--filter", "Case A,Case B"])
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_explicit_filter_with_zero_matches_fails_before_test_stage(self):
+        tmp, env, args, out, _ = self.fixture(mode="empty-filter")
+        self.addCleanup(tmp.cleanup)
+        expression = "No match A,No match B"
+        tag_index = args.index("--tag")
+        args[tag_index:tag_index + 2] = ["--filter", expression]
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build", "inventory"])
+        self.assertIn("inventory has 0 cases", receipt["error"])
+        invocations = [json.loads(line) for line in
+                       (Path(args[args.index("--root") + 1]) / "fake-argv.jsonl").read_text().splitlines()]
+        selected = [argv for argv in invocations if argv and argv[0] == expression]
+        self.assertEqual(len(selected), 1)
+        self.assertIn("--list-tests", selected[0])
+        self.assertFalse(any("--reporter" in argv and "junit" in argv for argv in invocations))
+
+    def test_canonical_and_thin_duplicate_records_accept_selected_owner(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        build = Path(args[args.index("--build") + 1])
+        source = Path(args[args.index("--test-source") + 1])
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        canonical_output = "CMakeFiles/fff_print_tests.dir/tests/module tests.cpp.o"
+        thin_output = r"CMakeFiles\thin-module-tests.dir\tests\module tests.cpp.o"
+        compile_db.write_text(json.dumps([
+            {"directory": str(build), "file": str(source),
+             "command": shlex.join(["clang++", "-c", str(source), "-o", canonical_output])},
+            {"directory": str(build), "file": str(source),
+             "arguments": ["clang++", "-c", str(source)], "output": thin_output},
+        ]) + "\n")
+        args[args.index("--target") + 1] = "thin-module-tests"
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        membership = json.loads((out / "run.json").read_text())["compile_target_preflight"]
+        self.assertEqual(membership["owners"], ["fff_print_tests", "thin-module-tests"])
+        self.assertEqual(len(membership["matching_records"]), 2)
+        self.assertEqual(membership["requested_target"], "thin-module-tests")
+        self.assertTrue((out.parent / "build-invoked").is_file())
+
+    def test_missing_test_source_record_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        rows = json.loads(compile_db.read_text())
+        rows[0]["file"] = str(Path(args[args.index("--root") + 1]) / "tests" / "absent.cpp")
+        compile_db.write_text(json.dumps(rows) + "\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no record for requested test source", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_malformed_compile_database_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        Path(args[args.index("--compile-commands") + 1]).write_text("{not json\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read compile database", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_unrecognized_output_ownership_is_rejected_before_build(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        compile_db = Path(args[args.index("--compile-commands") + 1])
+        rows = json.loads(compile_db.read_text())
+        rows[0]["arguments"] = ["clang++", "-c", rows[0]["file"], "-o", "objects/module_tests.cpp.o"]
+        rows[0]["output"] = "objects/module_tests.cpp.o"
+        compile_db.write_text(json.dumps(rows) + "\n")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported CMake output ownership", result.stderr)
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse(out.exists())
+
+    def test_success_records_complete_scoped_cycle_and_duplicate_junit_rows(self):
+        tmp, result, out, _ = self.invoke()
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["binary_exists_before_build"])
+        self.assertIn("elf_before_build", receipt["hashes_before"])
+        self.assertEqual([s["name"] for s in receipt["stages"]],
+                         ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
+        self.assertEqual(len(receipt["inventory_names"]), 2)
+        self.assertTrue((out / "coverage-summary.txt").is_file())
+        self.assertTrue((out / "coverage-lines.txt").is_file())
+        self.assertGreater(receipt["elapsed_seconds"], 0)
+        self.assertEqual(receipt["coverage_scope"], "production_source_only")
+        self.assertFalse(receipt["global_threshold_claim"])
+        self.assertEqual(receipt["test_status"], "passed")
+        self.assertEqual(len(receipt["merged_profile_sha256"]), 64)
+        module_profiles = list((out / "module-profiles").glob("*.profraw"))
+        self.assertEqual(len(module_profiles), 1)
+        merge_argv = next(s["argv"] for s in receipt["stages"] if s["name"] == "profile_merge")
+        self.assertTrue(all("module-profiles" in arg for arg in merge_argv[5:]))
+        self.assertTrue(list((out / "build-profiles").glob("*.profraw")))
+        self.assertTrue(list((out / "inventory-profiles").glob("*.profraw")))
+
+    def test_build_can_create_missing_test_binary_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="creates-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertNotIn("elf_before_build", receipt["hashes_before"])
+        self.assertEqual(receipt["status"], "passed")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]],
+                         ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
+
+    def test_nested_evidence_parents_are_created_for_a_fresh_run(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        nested = out.parent / "new family" / "new cycle" / "run"
+        args[args.index("--out") + 1] = str(nested)
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((nested / "run.json").read_text())["status"], "passed")
+        self.assertFalse(out.exists())
+
+    def test_missing_output_parents_cannot_escape_through_traversal_or_symlink(self):
+        for escape in ("traversal", "symlink"):
+            with self.subTest(escape=escape):
+                tmp, env, args, out, _ = self.fixture()
+                self.addCleanup(tmp.cleanup)
+                outside = out.parent.parent.parent / "outside"
+                if escape == "traversal":
+                    candidate = out.parent / ".." / ".." / "outside" / "new parent" / "run"
+                else:
+                    link = out.parent / "escape"
+                    link.symlink_to(outside, target_is_directory=True)
+                    candidate = link / "new parent" / "run"
+                args[args.index("--out") + 1] = str(candidate)
+                result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("inside the build tree", result.stderr)
+                self.assertFalse(outside.exists())
+                self.assertFalse(out.exists())
+
+    def test_existing_output_is_never_reused(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        out.mkdir()
+        sentinel = out / "retained.txt"
+        sentinel.write_text("prior evidence")
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output path must be new", result.stderr)
+        self.assertEqual(list(out.iterdir()), [sentinel])
+        self.assertEqual(sentinel.read_text(), "prior evidence")
+
+    def test_successful_build_without_binary_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="missing-built-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("build did not produce test binary", receipt["error"])
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
+
+    def test_built_binary_symlink_escape_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="escaped-built-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertFalse(receipt["binary_exists_before_build"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("outside the build tree", receipt["error"])
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
+
+    def test_preexisting_binary_replaced_with_symlink_escape_fails_before_inventory(self):
+        tmp, result, out, _ = self.invoke(mode="escaped-replaced-binary")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertTrue(receipt["binary_exists_before_build"])
+        self.assertIn("elf_before_build", receipt["hashes_before"])
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("outside the build tree", receipt["error"])
+        self.assertNotIn("elf_after_failure_sha256", receipt)
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertFalse((out / "inventory.stdout.xml").exists())
+
+    def test_wrong_inventory_count_stops_before_tests(self):
+        tmp, result, out, _ = self.invoke(expected=3)
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual([s["name"] for s in receipt["stages"]], ["build", "inventory"])
+        self.assertIn("expected 3", receipt["error"])
+        self.assertFalse((out / "coverage-summary.txt").exists())
+
+    def test_wrong_source_translation_unit_stops_before_tests(self):
+        tmp, env, args, out, _ = self.fixture(bad_source=True)
+        self.addCleanup(tmp.cleanup)
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertIn("expected", receipt["error"])
+        self.assertEqual([s["name"] for s in receipt["stages"]], ["build", "inventory"])
+        self.assertFalse((out / "coverage-summary.txt").exists())
+
+    def test_junit_failure_and_skip_keep_diagnostics_but_fail_closed(self):
+        for mode in ("junit-failure", "junit-skip"):
+            with self.subTest(mode=mode):
+                tmp, result, out, _ = self.invoke(mode=mode)
+                self.addCleanup(tmp.cleanup)
+                self.assertNotEqual(result.returncode, 0)
+                receipt = json.loads((out / "run.json").read_text())
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual([s["name"] for s in receipt["stages"]],
+                                 ["build", "inventory", "test", "profile_merge", "coverage_report", "coverage_lines"])
+                self.assertIn("coverage report", receipt["error"])
+                self.assertTrue((out / "coverage-summary.txt").is_file())
+                self.assertTrue((out / "coverage-lines.txt").is_file())
+                self.assertEqual(receipt["test_status"], "failed")
+                self.assertEqual(len(receipt["merged_profile_sha256"]), 64)
+                self.assertEqual(set(receipt["hashes_after"]),
+                                 {"test_source", "production_source", "compile_commands"})
+                self.assertEqual(len(receipt["elf_after_tests_sha256"]), 64)
+
+
+    def test_empty_profile_fails_before_merge(self):
+        tmp, result, out, _ = self.invoke(mode="missing-profile")
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertIn("no nonempty LLVM profile", receipt["error"])
+        self.assertFalse(any(stage["name"] == "profile_merge" for stage in receipt["stages"]))
+        self.assertFalse((out / "coverage-summary.txt").exists())
+
+    def test_nonfinite_timeout_is_rejected_before_output_creation(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        args.extend(["--timeout", "nan"])
+        result = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("finite and positive", result.stderr)
+        self.assertFalse(out.exists())
+
+    def test_timed_out_build_kills_descendant_and_keeps_failure_receipt(self):
+        tmp, result, out, marker = self.invoke(mode="timeout-build", cli_timeout=0.15, process_timeout=5)
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        time.sleep(0.9)
+        self.assertFalse(marker.exists(), "timed-out build descendant survived")
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertTrue(receipt["stages"][0]["timed_out"])
+        self.assertEqual(receipt["stages"][0]["returncode"], 124)
+        self.assertFalse((out / "coverage-summary.txt").exists())
+
+    def test_interrupted_build_records_cancellation_without_later_stages(self):
+        tmp, env, args, out, _ = self.fixture()
+        self.addCleanup(tmp.cleanup)
+        env["FAKE_INTERRUPT_BUILD"] = "1"
+        result = subprocess.run(args, env=env, text=True, capture_output=True,
+                                timeout=10, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "run.json").read_text())
+        self.assertEqual(receipt["status"], "interrupted")
+        self.assertEqual(receipt["error"], "KeyboardInterrupt")
+        self.assertEqual([stage["name"] for stage in receipt["stages"]], ["build"])
+        self.assertTrue(receipt["stages"][0]["interrupted"])
+        self.assertIsNone(receipt["stages"][0]["returncode"])
+        self.assertFalse((out.parent / "build-invoked").exists())
+        self.assertFalse((out / "coverage-summary.txt").exists())
+        self.assertEqual(Path(args[args.index("--test-source") + 1]).read_text(),
+                         "// test source\n")
+        self.assertEqual(Path(args[args.index("--production-source") + 1]).read_text(),
+                         "// production source\n")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

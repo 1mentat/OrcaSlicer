@@ -1,3 +1,4 @@
+#include <cmath>
 #include <algorithm>
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -148,6 +149,50 @@ TEST_CASE("Two parallel plates should be supported", "[SupGen][Hollowed]")
     sla::remove_bottom_points(pts, mesh.bounding_box().min.z() + EPSILON);
 
     REQUIRE(!pts.empty());
+}
+
+}} // namespace Slic3r::sla
+
+namespace Slic3r { namespace sla {
+
+TEST_CASE("Hollowed cube should be supported from the inside (original M316 variant)", "[SupGen][Hollowed]") {
+    constexpr float outer_size = 20.f;
+    constexpr float wall_thickness = 2.5f;
+    constexpr float cavity_size = outer_size - 2.f * wall_thickness;
+    TriangleMesh mesh = make_cube(outer_size, outer_size, outer_size);
+
+    // Use an explicit 2.5 mm wall shell for a meaningful cavity fixture.
+    // The separate hollowing contract tests cover voxel generation; this test
+    // exercises support placement on the resulting cavity ceiling.
+    TriangleMesh cavity = make_cube(cavity_size, cavity_size, cavity_size);
+    cavity.translate(wall_thickness, wall_thickness, wall_thickness);
+    sla::swap_normals(cavity.its);
+    mesh.merge(cavity);
+
+    write_debug_obj("sla_supptgen/cube_hollowed.obj", mesh);
+
+    auto bb = mesh.bounding_box();
+    auto h  = float(bb.max.z() - bb.min.z());
+    Vec3f mv = bb.center().cast<float>() - Vec3f{0.f, 0.f, 0.5f * h};
+    mesh.translate(-mv);
+
+    sla::SupportPointGenerator::Config cfg;
+    sla::SupportPoints pts = calc_support_pts(mesh, cfg);
+    sla::remove_bottom_points(pts, mesh.bounding_box().min.z() + EPSILON);
+
+    constexpr float cavity_min_xy = -cavity_size / 2.f;
+    constexpr float cavity_max_xy =  cavity_size / 2.f;
+    constexpr float cavity_ceiling_z = outer_size - wall_thickness;
+    const bool has_inside_ceiling_support = std::any_of(
+        pts.begin(), pts.end(), [](const sla::SupportPoint &pt) {
+            return pt.pos.x() > cavity_min_xy && pt.pos.x() < cavity_max_xy &&
+                   pt.pos.y() > cavity_min_xy && pt.pos.y() < cavity_max_xy &&
+                   std::abs(pt.pos.z() - cavity_ceiling_z) < 0.1f;
+        });
+
+    // The witness must be projected onto the ceiling inside the cavity, rather
+    // than merely accepting any point on the cube's exterior or bottom.
+    REQUIRE(has_inside_ceiling_support);
 }
 
 }} // namespace Slic3r::sla

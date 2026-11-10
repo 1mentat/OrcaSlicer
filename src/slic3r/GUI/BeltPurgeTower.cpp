@@ -266,7 +266,8 @@ bool ensure_belt_purge_tower(Model &model, PartPlateList &partplate_list, Object
         if (use_matrix) {
             const size_t extruder_nums = wxGetApp().preset_bundle->get_printer_extruder_count();
             const std::vector<double> matrix = get_flush_volumes_matrix(
-                project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values, 0, extruder_nums);
+                project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values, 0, extruder_nums,
+                project_config.option<ConfigOptionStrings>("filament_colour")->values.size());
             const auto * multi_opt = project_config.option<ConfigOptionFloats>("flush_multiplier");
             const double multiplier = multi_opt != nullptr && !multi_opt->values.empty() ? multi_opt->get_at(0) : 1.;
             const int    n_total    = (int) (std::sqrt(double(matrix.size())) + 0.5);
