@@ -101,3 +101,9 @@ builds share a bounded single-job queue; a shared build lock also protects again
 concurrent operator builds. Runner isolation, storage limits, cache retention and
 private ingress are deployment configuration and stay outside the portable source
 implementation.
+
+Test command strings use POSIX quoting on Unix and Windows `CommandLineToArgvW`
+quoting on Windows. Commands execute as argument lists without a shell; shell
+operators and variable references remain literal arguments. Compile database
+`arguments` arrays bypass parsing, while `command` strings use the same native
+quoting rules.

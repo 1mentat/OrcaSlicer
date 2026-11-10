@@ -29,7 +29,8 @@ given); 1 the evidence is valid but below --threshold; 2 the evidence is not
 valid: tests failed or never ran, profiles are missing or foreign, mappings are
 missing, or a tool failed.
 
-The test command is run without a shell; a string is split with shlex.
+The test command runs without a shell. Strings use POSIX quoting on Unix and
+CommandLineToArgvW quoting on Windows; argv sequences bypass parsing.
 """
 
 from __future__ import annotations
@@ -177,9 +178,36 @@ def _tool_version_evidence(compilers: Sequence[str], llvm_cov: str, llvm_profdat
 
 # ------------------------------------------------------------------- test evidence
 
+def _split_command_line(command: str) -> list[str]:
+    if "\0" in command:
+        raise CoverageError("command lines cannot contain NUL characters")
+    if os.name != "nt":
+        return shlex.split(command)
+    if not command.strip():
+        return []
+    # shlex's non-POSIX mode retains quotes and is not a Windows argv parser.
+    # Use the native parser, then pass its argv to the existing shell-free runner.
+    import ctypes
+
+    shell = ctypes.WinDLL("shell32", use_last_error=True, winmode=0x800)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True, winmode=0x800)
+    shell.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    count = ctypes.c_int()
+    argv = shell.CommandLineToArgvW(command.lstrip(), ctypes.byref(count))
+    if not argv:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return [argv[index] for index in range(count.value)]
+    finally:
+        kernel.LocalFree(argv)
+
+
 def split_command(command: str | Sequence[str]) -> list[str]:
     if isinstance(command, str):
-        argv = shlex.split(command, posix=(os.name != "nt"))
+        argv = _split_command_line(command)
     else:
         argv = [str(part) for part in command]
     if not argv:
@@ -583,7 +611,7 @@ def _compile_command_arguments(entry: dict[str, Any]) -> list[str]:
         return list(arguments)
     command = entry.get("command")
     if isinstance(command, str) and command.strip():
-        return shlex.split(command, posix=(os.name != "nt"))
+        return _split_command_line(command)
     return []
 
 
@@ -1076,7 +1104,7 @@ def _parser() -> argparse.ArgumentParser:
                      help="compile_commands.json (default: BUILD_DIR/compile_commands.json)")
     run.add_argument("--out", default="build/slicer-coverage-report", help="report directory")
     run.add_argument("--test-command", required=True,
-                     help="test argv as a string; {root}, {build} and {filter} expand")
+                     help="test argv with platform-native quoting; {root}, {build} and {filter} expand")
     run.add_argument("--filter", help="CTest label used when the command has no {filter} placeholder")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--measure-only", action="store_true",

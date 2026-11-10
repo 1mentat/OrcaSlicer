@@ -8,6 +8,7 @@ Clang output.
 from pathlib import Path
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -306,7 +307,8 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(report["backend"], "llvm-source-based")
             self.assertEqual(report["tool_versions"]["compatibility"], "major_versions_match")
             self.assertIn("git", report["provenance"])
-            self.assertEqual(report["files"][0]["filename"], str(Path(temp).resolve() / "src/libslic3r/fixture.cpp"))
+            expected = str(Path(temp).resolve() / "src/libslic3r/fixture.cpp")
+            self.assertEqual(report["files"][0]["filename"], os.path.normcase(expected))
             self.assertEqual(set(report["summary"]["lines"]), {"covered", "count", "percent"})
             self.assertEqual(report["annotation"]["status"], "not_requested")
             self.assertEqual(report["annotation"]["argv"][-1], report["files"][0]["filename"])
@@ -358,7 +360,7 @@ class ReportTests(unittest.TestCase):
                                       "summary": {"lines": {"covered": 1, "count": 1}}}]}]},
                 source_root=source_root, manifest=[source_root / "Relative.cpp"], path_base=root)
             self.assertEqual(missing, [])
-            self.assertEqual(report["files"][0]["filename"], str(source_root / "Relative.cpp"))
+            self.assertEqual(report["files"][0]["filename"], os.path.normcase(str(source_root / "Relative.cpp")))
 
     def test_metadata_only_header_needs_a_successful_object_audit(self):
         report = {"files": [
@@ -413,7 +415,8 @@ class CompilerAuditTests(unittest.TestCase):
             self.assertEqual(evidence["mapped_sources"], [str(mapped)])
             self.assertEqual(evidence["mapping_free_sources"], [str(free)])
             self.assertEqual(evidence["object_mappings_without_source"], [str(header_only)])
-            self.assertEqual(evidence["object_executable_mappings"], sorted([str(header), str(mapped)]))
+            expected = sorted(os.path.normcase(str(path)) for path in (header, mapped))
+            self.assertEqual(evidence["object_executable_mappings"], expected)
 
     def test_timeouts_mismatches_and_missing_objects_are_errors_not_mapping_free(self):
         for result, reason in (
@@ -484,8 +487,30 @@ class IdentityTests(unittest.TestCase):
 
 class MiscTests(unittest.TestCase):
     def test_command_splitting_does_not_use_a_shell(self):
-        self.assertEqual(slicer_coverage.split_command("ctest --test-dir 'build/tests'"),
+        self.assertEqual(slicer_coverage.split_command('ctest --test-dir "build/tests"'),
                          ["ctest", "--test-dir", "build/tests"])
+        self.assertEqual(slicer_coverage.split_command("ctest --test-dir 'build/tests'"),
+                         ["ctest", "--test-dir", "'build/tests'" if os.name == "nt" else "build/tests"])
+
+    def test_empty_or_nul_command_is_rejected(self):
+        for command in ("", " \t ", "ctest\0ignored"):
+            with self.subTest(command=command), self.assertRaises(slicer_coverage.CoverageError):
+                slicer_coverage.split_command(command)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows command-line parsing")
+    def test_windows_argv_roundtrip_and_compile_command(self):
+        values = ["", "a b", "C:\\work dir\\trailing\\", 'embedded"quote',
+                  "'single quotes'", "& > | $()", "mesh Δ"]
+        command = [sys.executable, "-c", "import json,sys; print(json.dumps(sys.argv[1:]))", *values]
+        text = subprocess.list2cmdline(command)
+        self.assertEqual(slicer_coverage.split_command("  " + text), command)
+        result = slicer_coverage._run(slicer_coverage.split_command(text), timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), values)
+        compiler = ["C:\\Program Files\\LLVM\\bin\\clang++.exe", "-c",
+                    "C:\\work dir\\source.cpp", "-o", "C:\\work dir\\object.o"]
+        self.assertEqual(slicer_coverage._compile_command_arguments(
+            {"command": subprocess.list2cmdline(compiler)}), compiler)
 
     def test_html_page_path_mirrors_llvm_cov_layout(self):
         self.assertEqual(slicer_coverage._html_page(Path("/o/html"), "/src/libslic3r/A.cpp"),
