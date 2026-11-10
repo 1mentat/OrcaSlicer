@@ -246,10 +246,8 @@ public:
 
 
 	// Iterates through prepared m_plan, generates ToolChangeResults and appends them to "result"
-	void generate(std::vector<std::vector<ToolChangeResult>> &result);
 
 	WipeTower::ToolChangeResult only_generate_out_wall(bool is_new_mode = false);
-    Polygon generate_support_wall(WipeTowerWriter &writer, const box_coordinates &wt_box, double feedrate, bool first_layer);
     Polygon generate_support_wall_new(WipeTowerWriter &writer, const box_coordinates &wt_box, double feedrate, bool first_layer,bool rib_wall, bool extrude_perimeter, bool skip_points);
 
     Polygon generate_rib_polygon(const box_coordinates &wt_box);
@@ -607,8 +605,6 @@ private:
     {
         return std::max(0.f, length * (layer_height * (line_width - layer_height * (1.f - float(M_PI) / 4.f))));
     }
-	// Calculates depth for all layers and propagates them downwards
-	void plan_tower();
 	// Whether the layer reaches the G-code, and so whether its extrusions count as filament used.
 	bool layer_is_printed(bool toolchanges_on_layer) const;
 
@@ -617,8 +613,6 @@ private:
 
 	Vec2f get_next_pos(const WipeTower::box_coordinates &cleaning_box, float wipe_length, bool solid_toolchange);
 
-    // Goes through m_plan, calculates border and finish_layer extrusions and subtracts them from last wipe
-    void save_on_last_wipe();
 
 	bool is_tpu_filament(int filament_id) const;
 	bool is_petg_filament(int filament_id) const;
@@ -666,11 +660,6 @@ private:
     // Stores information about used filament length per extruder:
     std::vector<float> m_used_filament_length;
 
-    // BBS: consider both soluable and support properties
-    // Return index of first toolchange that switches to non-soluble extruder
-    // ot -1 if there is no such toolchange.
-    int first_toolchange_to_nonsoluble_nonsupport(
-            const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
     WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume, float purge_volume,int layer_id);
 	void toolchange_Unload(
 		WipeTowerWriter &writer,
