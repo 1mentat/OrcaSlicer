@@ -232,8 +232,9 @@ jobs:
       # Report publication is best-effort; the native test jobs gate correctness.
       - name: Publish Test Results
         continue-on-error: true
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@da5b7be67623cd59bbbd1a0ce4f022050a55605f # v2.26.0
         with:
+          comment_mode: "off"
           files: "test-results/**/*.xml"
       - name: Delete Test Results
         if: success()
