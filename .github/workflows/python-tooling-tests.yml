@@ -1,0 +1,45 @@
+name: Python tooling tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/slicer_process.py'
+      - 'scripts/_slicer_windows_job.py'
+      - 'scripts/clang_tidy_diff.py'
+      - 'scripts/tests/test_slicer_process.py'
+      - 'scripts/tests/test_clang_tidy_diff.py'
+      - '.github/workflows/python-tooling-tests.yml'
+  push:
+    paths:
+      - 'scripts/slicer_process.py'
+      - 'scripts/_slicer_windows_job.py'
+      - 'scripts/clang_tidy_diff.py'
+      - 'scripts/tests/test_slicer_process.py'
+      - 'scripts/tests/test_clang_tidy_diff.py'
+      - '.github/workflows/python-tooling-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  python-tooling:
+    name: Python tooling (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test scoped process handling
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
+      - name: Test clang-tidy diff handling
+        run: python -B -m unittest discover -s scripts/tests -p test_clang_tidy_diff.py -v

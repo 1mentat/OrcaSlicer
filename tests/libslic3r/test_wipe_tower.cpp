@@ -1,3 +1,4 @@
+#include "libslic3r/TriangleMesh.hpp"
 #include <catch2/catch_all.hpp>
 
 #include <cmath>
@@ -390,3 +391,119 @@ TEST_CASE("Footprint padding covers the brim and the extrusion half width on eac
     // Callers whose outline already carries the brim pass zero, and a negative one cannot shrink it.
     CHECK_THAT(compacted_tower_footprint_padding(cfg, -5.), WithinAbs(2. * 0.4, 1e-9));
 }
+
+namespace legacy_tower_geometry_contracts {
+namespace {
+double polygon_area_abs(const Polygon &polygon)
+{
+    return std::abs(polygon.area()) * double(SCALING_FACTOR) * double(SCALING_FACTOR);
+}
+Polygon rectangle(double left, double bottom, double right, double top)
+{
+    return Polygon::new_scale(Pointfs{{left, bottom}, {right, bottom}, {right, top}, {left, top}});
+}
+} // namespace
+
+TEST_CASE("Legacy wipe tower estimators preserve their geometric limits", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(0.f), WithinAbs(5.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(50.f), WithinAbs(12.1052637f, 1e-5f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(250.f), WithinAbs(40.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_limit_depth_by_height(500.f), WithinAbs(60.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(50.f), WithinAbs(4.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(100.f), WithinAbs(8.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_auto_brim_by_height(500.f), WithinAbs(8.f, 1e-6f));
+    CHECK_THAT(WipeTower::get_wrapping_detection_depth(), WithinAbs(10.f, 1e-6f));
+}
+
+TEST_CASE("Legacy wipe tower nozzle and brim estimators honor nozzle geometry", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    CHECK_THAT(WipeTower::nozzle_change_perimeter_width(0.4f), WithinAbs(1.f, 1e-6f));
+    CHECK_THAT(WipeTower::nozzle_change_perimeter_width(0.5f), WithinAbs(1.25f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_brim_real_width(0.f, 0.4f, 0.2f, false), WithinAbs(0.f, 1e-6f));
+    const float type1 = WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.2f, false);
+    const float type2 = WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.2f, true);
+    CHECK(type1 > type2);
+    CHECK(type2 > 0.f);
+    CHECK(WipeTower::estimate_brim_real_width(4.f, 0.4f, 0.5f, false) > 4.f);
+}
+
+TEST_CASE("Legacy wipe tower block estimates scale purge categories and ramming", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    using P = WipeTower::PurgeEstimate;
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({}, 35.f, 0.2f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 1.f, 0.2f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    const float one_category = WipeTower::estimate_tower_blocks_depth(
+        {P{20.f, 0, 0.f, 1.75f}, P{80.f, 0, 0.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f);
+    const float two_categories = WipeTower::estimate_tower_blocks_depth(
+        {P{20.f, 0, 0.f, 1.75f}, P{80.f, 1, 10.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f);
+    CHECK_THAT(one_category, WithinAbs(20.f, 1e-5f));
+    CHECK_THAT(two_categories, WithinAbs(30.25f, 1e-5f));
+    CHECK(one_category > 0.f);
+    CHECK(two_categories > one_category);
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 35.f, 0.f, 0.4f, 1.f), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(WipeTower::estimate_tower_blocks_depth({P{20.f, 0, 0.f, 1.75f}}, 35.f, 0.2f, 0.f, 1.f), WithinAbs(0.f, 1e-6f));
+}
+
+TEST_CASE("Legacy rib footprint and mesh constructors preserve positive solids", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const float square = WipeTower::rib_footprint_side(30.f, 20.f, 2.f, 0.f, 20.f);
+    const float extended = WipeTower::rib_footprint_side(30.f, 20.f, 2.f, 10.f, 20.f);
+    CHECK(square >= 30.f);
+    CHECK(extended > square);
+    CHECK_THAT(WipeTower::rib_footprint_side(0.f, 20.f, 2.f, 0.f, 20.f), WithinAbs(0.f, 1e-6f));
+    const float bbox = WipeTower::estimate_rib_tower_bbox_side(
+        {{40.f, 0, 0.f, 1.75f}, {80.f, 1, 12.f, 1.75f}}, 35.f, 0.2f, 0.4f, 1.5f, 2.f, 3.f, 20.f);
+    CHECK(bbox > 0.f);
+    const Polygon section = WipeTower::rib_section(30.f, 20.f, 15.f, 2.f, false);
+    REQUIRE(section.points.size() >= 4);
+    CHECK(polygon_area_abs(section) > 0.0);
+    const TriangleMesh tower = WipeTower::its_make_rib_tower(30.f, 20.f, 8.f, 60.f, 2.f, false);
+    // The helper fills indexed_triangle_set directly and does not refresh TriangleMesh::m_stats.
+    REQUIRE(!tower.its.indices.empty());
+    REQUIRE(!tower.its.vertices.empty());
+    CHECK_THAT(tower.its.vertices.front().z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(tower.its.vertices.back().z(), WithinAbs(8.f, 1e-6f));
+    Polygon brim = rectangle(0., 0., 30., 20.);
+    const TriangleMesh brim_mesh = WipeTower::its_make_rib_brim(brim, 0.2f);
+    REQUIRE(!brim_mesh.its.indices.empty());
+    REQUIRE(!brim_mesh.its.vertices.empty());
+    CHECK_THAT(brim_mesh.its.vertices.front().z(), WithinAbs(0.f, 1e-6f));
+    CHECK_THAT(brim_mesh.its.vertices.back().z(), WithinAbs(0.2f, 1e-6f));
+}
+
+TEST_CASE("Legacy rounding transforms corners while retaining footprint area", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    Polygon p = rectangle(0., 0., 30., 20.);
+    const double original = polygon_area_abs(p);
+    Polygon rounded = WipeTower::rounding_polygon(p, 2.0);
+    REQUIRE(rounded.points.size() > p.points.size());
+    CHECK(polygon_area_abs(rounded) > original * 0.8);
+    CHECK(polygon_area_abs(rounded) < original * 1.01);
+    Polygon degenerate;
+    degenerate.points = {Point::new_scale(0., 0.), Point::new_scale(1., 0.)};
+    CHECK(WipeTower::rounding_polygon(degenerate, 2.).points.size() == degenerate.points.size());
+}
+
+TEST_CASE("Legacy gap construction cuts skip points without losing wall area", "[WipeTower][WipeTowerLegacy][WipeTowerBroad]")
+{
+    const Polygon wall = rectangle(0., 0., 30., 20.);
+    Polygon inserted;
+    const auto no_skips = construct_gap_for_skip_points(wall, {}, 30.f, 2.f, inserted);
+    REQUIRE(no_skips.size() == 1);
+    CHECK(inserted.points.size() == wall.points.size());
+    Polygon inserted_one;
+    const auto one_skip = construct_gap_for_skip_points(
+        wall, {Vec2f(30.f, 10.f)}, 30.f, 2.f, inserted_one);
+    REQUIRE_FALSE(one_skip.empty());
+    CHECK(one_skip.size() == 2);
+    CHECK_FALSE(inserted_one.points.empty());
+    CHECK_THAT(polygon_area_abs(inserted_one), WithinAbs(600.0, 1e-3));
+    Polygon inserted_two;
+    const auto two_skips = construct_gap_for_skip_points(
+        wall, {Vec2f(30.f, 10.f), Vec2f(0.f, 10.f)}, 30.f, 2.f, inserted_two);
+    REQUIRE_FALSE(two_skips.empty());
+    CHECK(two_skips.size() == 3);
+    CHECK_THAT(polygon_area_abs(inserted_two), WithinAbs(600.0, 1e-3));
+}
+} // namespace legacy_tower_geometry_contracts

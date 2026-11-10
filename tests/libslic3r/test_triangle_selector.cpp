@@ -953,3 +953,153 @@ TEST_CASE("Cursor round ends exclude exact radius while capsule middle includes 
 }
 
 } // namespace triangle_cursor_contracts
+
+namespace triangle_selector_painting {
+
+TEST_CASE("Seed fill follows coplanar adjacency and applies its pending state (original M029 fixture)", "[TriangleSelector][TriangleSelectorExtended]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.seed_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0, Transform3d::Identity(),
+                                        TriangleSelector::ClippingPlane(), 180.f);
+    // Both coplanar facets are selected, so there is no internal contour.
+    CHECK(selector.get_seed_fill_contour().empty());
+
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::Extruder4);
+    CHECK(selector.num_facets(EnforcerBlockerType::Extruder4) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+
+TEST_CASE("Seed fill clipping leaves the clipped neighbor untouched (original M029 fixture)", "[TriangleSelector][TriangleSelectorExtended]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    const TriangleSelector::ClippingPlane clip(std::array<float, 4>{ 0.f, 0.f, 1.f, -1.f });
+    selector.seed_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0, Transform3d::Identity(), clip, 180.f);
+    const auto contour = selector.get_seed_fill_contour();
+    REQUIRE_FALSE(contour.empty());
+
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::ENFORCER);
+    CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 1);
+}
+
+TEST_CASE("Bucket fill distinguishes local selection from propagated selection (original M029 fixture)", "[TriangleSelector][TriangleSelectorExtended]")
+{
+    SECTION("propagate marks both coplanar facets")
+    {
+        const TriangleMesh mesh = square_mesh();
+        TriangleSelector selector(mesh);
+        selector.bucket_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0,
+                                              TriangleSelector::ClippingPlane(), 180.f, true, true);
+        selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 2);
+    }
+
+    SECTION("local mode marks only the hit facet")
+    {
+        const TriangleMesh mesh = square_mesh();
+        TriangleSelector selector(mesh);
+        selector.bucket_fill_select_triangles(Vec3f(2.f, 2.f, 0.f), 0,
+                                              TriangleSelector::ClippingPlane(), 180.f, false, true);
+        selector.seed_fill_apply_on_triangles(EnforcerBlockerType::BLOCKER);
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+        CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 1);
+    }
+}
+
+} // namespace triangle_selector_painting
+
+namespace triangle_cursor_contracts {
+
+TEST_CASE("Swept brushes detect edges across the middle of the stroke (original M029 fixture)", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind);
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -4, 0), Vec3f(3, 4, 0), Vec3f(10, 4, 0)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 4, 0), Vec3f(3, 8, 0), Vec3f(10, 8, 0)}));
+}
+
+TEST_CASE("Transformed brush edge tests agree with their world-space radius (original M029 fixture)", "[TriangleSelector][TriangleCursor]")
+{
+    const auto kind = GENERATE(Selector::CIRCLE, Selector::SPHERE);
+    const auto brush = swept(kind, stretch());
+    CHECK(CursorInput::edge(*brush, {Vec3f(3, -2, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+    CHECK_FALSE(CursorInput::edge(*brush, {Vec3f(3, 1, 0), Vec3f(3, 2, 0), Vec3f(7, 2, 0)}));
+}
+
+namespace original_m029_gc_contracts {
+
+using triangle_selector_painting::square_mesh;
+using triangle_selector_painting::area;
+
+std::unique_ptr<Cursor> sphere_at_origin(float radius)
+{
+    return triangle_selector_painting::sphere_cursor(Vec3f::Zero(), radius);
+}
+
+TEST_CASE("Partial cursor painting conserves area through garbage collection (original M029 fixture)", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.select_patch(0, sphere_at_origin(2.f), EnforcerBlockerType::ENFORCER,
+                          Transform3d::Identity(), true, 0.f, Vec3f::UnitZ(), true);
+    const auto split_state = selector.serialize();
+    REQUIRE_FALSE(split_state.bitstream.empty());
+    REQUIRE_FALSE(split_state.triangles_to_split.empty());
+    const double before = area(selector.get_facets_strict(EnforcerBlockerType::ENFORCER)) +
+                          area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    REQUIRE(selector.num_facets(EnforcerBlockerType::ENFORCER) > 0);
+    CHECK_THAT(before, Catch::Matchers::WithinAbs(100., 1e-3));
+
+    // Painting each complete facet with a new state collapses all split
+    // children.  The serialized state still contains one record per painted
+    // root facet; it must not contain child split records.
+    selector.set_facet(0, EnforcerBlockerType::BLOCKER);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    const auto collapsed = selector.serialize();
+    TriangleSelector collapsed_expected(mesh);
+    collapsed_expected.set_facet(0, EnforcerBlockerType::BLOCKER);
+    collapsed_expected.set_facet(1, EnforcerBlockerType::BLOCKER);
+    CHECK(collapsed == collapsed_expected.serialize());
+    const double collapsed_area = area(selector.get_facets_strict(EnforcerBlockerType::BLOCKER)) +
+                                  area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    CHECK_THAT(collapsed_area, Catch::Matchers::WithinAbs(100., 1e-3));
+
+    selector.garbage_collect();
+    const auto compacted = selector.serialize();
+    CHECK(compacted.bitstream == collapsed.bitstream);
+    CHECK(compacted.triangles_to_split == collapsed.triangles_to_split);
+    const double after = area(selector.get_facets_strict(EnforcerBlockerType::BLOCKER)) +
+                         area(selector.get_facets_strict(EnforcerBlockerType::NONE));
+    CHECK_THAT(after, Catch::Matchers::WithinAbs(collapsed_area, 1e-3));
+    CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+
+TEST_CASE("Serialized states are stable across garbage collection (original M029 fixture)", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.set_facet(0, EnforcerBlockerType::ENFORCER);
+    selector.set_facet(1, EnforcerBlockerType::BLOCKER);
+    const auto serialized = selector.serialize();
+    selector.garbage_collect();
+    CHECK(selector.serialize() == serialized);
+    CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+}
+
+TEST_CASE("Coplanar paint selection reaches an adjacent facet through the shared edge (original M029 fixture)", "[TriangleSelector][TriangleCursor]")
+{
+    const TriangleMesh mesh = square_mesh();
+    TriangleSelector selector(mesh);
+    selector.seed_fill_select_triangles(Vec3f(2, 2, 0), 0, Transform3d::Identity(), Plane(), 180.f);
+    selector.seed_fill_apply_on_triangles(EnforcerBlockerType::Extruder3);
+    CHECK(selector.num_facets(EnforcerBlockerType::Extruder3) == 2);
+    CHECK(selector.num_facets(EnforcerBlockerType::NONE) == 0);
+}
+
+} // namespace original_m029_gc_contracts
+
+} // namespace triangle_cursor_contracts
