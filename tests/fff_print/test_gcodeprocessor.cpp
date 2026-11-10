@@ -502,3 +502,118 @@ TEST_CASE("Each extrusion weighs its filament's density", "[GCodeProcessor]")
     const Vec3d dense = center_of(masses[1]->total());
     CHECK_THAT((plate - light).dot(dense - light) / (dense - light).squaredNorm(), Catch::Matchers::WithinAbs(0.75, 0.01));
 }
+
+namespace elegoo_command_contracts {
+
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void process_gcode(const std::string &gcode, const std::string &printer_model,
+                   GCodeProcessorResult &result)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    config.printer_model.value = printer_model;
+
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.initialize("elegoo-command-contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    result = std::move(processor.extract_result());
+}
+
+void run_m6211(const std::string &printer_model, const std::string &command,
+               GCodeProcessorResult &result)
+{
+    process_gcode("M83\nG90\n"
+                  "G1 X10 Y20 Z0.2 F600\n"
+                  + command + "\n"
+                  "G1 X20 Y20 E1 F600\n",
+                  printer_model, result);
+}
+
+const GCodeProcessorResult::MoveVertex *last_extrusion(const GCodeProcessorResult &result)
+{
+    for (auto it = result.moves.rbegin(); it != result.moves.rend(); ++it)
+        if (!it->internal_only && it->type == EMoveType::Extrude)
+            return &*it;
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("Elegoo M6211 is ignored for other printer models", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult result;
+    run_m6211("Generic Marlin", "M6211 L80 T0 P20000", result);
+
+    CHECK_THAT(result.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK(result.print_statistics.total_filament_changes == 0);
+    CHECK(last_extrusion(result) != nullptr);
+}
+
+TEST_CASE("Elegoo Carbon M6211 records clamped flush timing and cooling parameter", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult short_flush, minimum_flush, maximum_flush, over_maximum, cooled;
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1 T0 P0 S210", short_flush);
+    run_m6211("elegoo centauri carbon", "M6211 L10 T0 P0 S210", minimum_flush);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1000 T0 P0 S210", maximum_flush);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L1200 T0 P0 S210", over_maximum);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L10 T0 P20000 S210", cooled);
+
+    REQUIRE(short_flush.print_statistics.total_filament_load_time > 0.0f);
+    CHECK_THAT(short_flush.print_statistics.total_filament_load_time,
+               WithinAbs(minimum_flush.print_statistics.total_filament_load_time, 1e-4));
+    CHECK_THAT(maximum_flush.print_statistics.total_filament_load_time,
+               WithinAbs(over_maximum.print_statistics.total_filament_load_time, 1e-4));
+    CHECK_THAT(cooled.print_statistics.total_filament_load_time - minimum_flush.print_statistics.total_filament_load_time,
+               WithinAbs(20.0, 1e-3));
+
+    const auto *move = last_extrusion(cooled);
+    REQUIRE(move != nullptr);
+    CHECK_THAT(move->temperature, WithinAbs(210.0, 1e-4));
+}
+
+TEST_CASE("Elegoo Centauri Carbon 2 uses its distinct flush and cooling model", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult base, alias, extra_cooling, more_flush;
+    run_m6211("Elegoo Centauri Carbon 2", "M6211 L10 T0 P0 S250 R270", base);
+    run_m6211("Elegoo Centauri 2", "M6211 L10 T0 P0 S250 R270", alias);
+    run_m6211("Elegoo Centauri 2", "M6211 L10 T0 P20000 S250 R270", extra_cooling);
+    run_m6211("Elegoo Centauri Carbon 2", "M6211 L160 T0 K20 M100 N100 P0 S250 R270", more_flush);
+
+    REQUIRE(base.print_statistics.total_filament_load_time > 0.0f);
+    CHECK_THAT(alias.print_statistics.total_filament_load_time,
+               WithinAbs(base.print_statistics.total_filament_load_time, 1e-4));
+    CHECK(extra_cooling.print_statistics.total_filament_load_time > base.print_statistics.total_filament_load_time);
+    CHECK(more_flush.print_statistics.total_filament_load_time > base.print_statistics.total_filament_load_time);
+    REQUIRE(last_extrusion(extra_cooling) != nullptr);
+    CHECK_THAT(last_extrusion(extra_cooling)->temperature, WithinAbs(250.0, 1e-4));
+}
+
+TEST_CASE("Elegoo M6211 rejects incomplete and out-of-range filament commands", "[GCodeProcessor][Elegoo]")
+{
+    GCodeProcessorResult no_length, no_filament, invalid_filament;
+    run_m6211("Elegoo Centauri Carbon", "M6211 T0 P20000", no_length);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L40", no_filament);
+    // The fixture has one filament: both a negative slot and the first slot
+    // beyond the configured count must be rejected.
+    const int invalid_slot = GENERATE(-1, 1, 99);
+    run_m6211("Elegoo Centauri Carbon", "M6211 L40 T" + std::to_string(invalid_slot), invalid_filament);
+
+    CHECK_THAT(no_length.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK_THAT(no_filament.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK_THAT(invalid_filament.print_statistics.total_filament_load_time, WithinAbs(0.0, 1e-5));
+    CHECK(no_length.print_statistics.total_filament_changes == 0);
+    CHECK(no_filament.print_statistics.total_filament_changes == 0);
+    CHECK(invalid_filament.print_statistics.total_filament_changes == 0);
+}
+
+}

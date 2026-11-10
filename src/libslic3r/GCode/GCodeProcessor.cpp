@@ -1135,7 +1135,9 @@ void GCodeProcessor::run_post_process()
         return Slic3r::float_to_string_decimal_point(time, 2);
     };
 
-    auto format_line_M73_stop_float = [format_time_float](const std::string& mask, float time) {
+    auto format_line_M73_stop_float = [this, format_time_float](const std::string& mask, float time) {
+        if (this->m_disable_m73)
+            return std::string("");
         char line_M73[64];
         sprintf(line_M73, mask.c_str(), format_time_float(time).c_str());
         return std::string(line_M73);
@@ -6728,8 +6730,10 @@ void GCodeProcessor::process_M702(const GCodeReader::GCodeLine& line)
         // MK3 MMU2 specific M code:
         // M702 C is expected to be sent by the custom end G-code when finalizing a print.
         // The MK3 unit shall unload and park the active filament into the MMU2 unit.
+        const float unload_time = get_filament_unload_time(filament_id);
         m_time_processor.extruder_unloaded = true;
-        simulate_st_synchronize(get_filament_unload_time(filament_id));
+        m_result.print_statistics.total_filament_unload_time += unload_time;
+        simulate_st_synchronize(unload_time);
     }
 }
 

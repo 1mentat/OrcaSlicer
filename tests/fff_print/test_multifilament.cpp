@@ -1671,3 +1671,53 @@ TEST_CASE("PrintObject marks filaments above each nozzle printable height",
     CHECK(blocked[0] == std::set<int>{ 0 });
     CHECK(blocked[1].empty());
 }
+
+TEST_CASE("Each filament cools with the fan speeds of its extruder variant (original M191 auxiliary-fan matrix)", "[MultiFilament][AuxiliaryFanVariance]")
+{
+    auto [nozzle_volume_type, filament, fan_min_speed, fan_max_speed, additional_fan_speed, range_high] = GENERATE(table<NozzleVolumeType, int, int, int, int, int>({
+        { nvtStandard, 1, 15, 25, 10, 240 },
+        { nvtHighFlow, 1, 35, 45, 20, 260 },
+        { nvtHighFlow, 2, 55, 65, 40, 280 }, // filament 2 defines no High Flow variant
+    }));
+    // Layers printed faster than slow_down_layer_time run the fan at its maximum speed, layers slower than
+    // fan_cooling_layer_time at its minimum.
+    const bool fast_layers = GENERATE(false, true);
+    const bool auxiliary_fan = GENERATE(false, true);
+    DYNAMIC_SECTION(get_nozzle_volume_type_string(nozzle_volume_type) << " nozzle, filament " << filament
+                    << (fast_layers ? ", fast layers" : ", slow layers") << ", auxiliary fan " << auxiliary_fan) {
+        DynamicPrintConfig config = multifilament_config(2, {
+            { "extruder_variant_list",          "Direct Drive Standard,Direct Drive High Flow" },
+            // filament 1 defines Standard and High Flow, filament 2 Standard
+            { "filament_extruder_variant",      "Direct Drive Standard;Direct Drive High Flow;Direct Drive Standard" },
+            { "filament_self_index",            "1,1,2" },
+            { "fan_min_speed",                  "15,35,55" },
+            { "fan_max_speed",                  "25,45,65" },
+            { "additional_cooling_fan_speed",   "10,20,40" },
+            { "nozzle_temperature_range_high",  "240,260,280" },
+            { "auxiliary_fan",                  auxiliary_fan },
+            { "reduce_fan_stop_start_freq",     "1,1" },
+            { "slow_down_layer_time",           fast_layers ? "1000,1000" : "0,0" },
+            { "fan_cooling_layer_time",         fast_layers ? "1000,1000" : "0,0" },
+            { "slow_down_for_layer_cooling",    "0,0" },
+            { "enable_overhang_bridge_fan",     "0,0" },
+            { "sparse_infill_filament_id",      filament },
+            { "internal_solid_filament_id",     filament },
+            { "top_surface_filament_id",        filament },
+            { "bottom_surface_filament_id",     filament },
+            { "outer_wall_filament_id",         filament },
+            { "inner_wall_filament_id",         filament },
+            { "enable_prime_tower",             0 },
+            { "skirt_loops",                    0 },
+            { "brim_type",                      "no_brim" },
+            // custom G-code indexes the per-filament arrays by filament
+            { "machine_start_gcode",            "; start range high {nozzle_temperature_range_high[initial_extruder]}" },
+        });
+        config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nozzle_volume_type };
+        const std::string gcode = slice({ cube(20) }, config);
+
+        CHECK(fan_speeds(gcode, "M106 S") == std::set<int>{ fast_layers ? fan_max_speed : fan_min_speed });
+        const std::set<int> expected_auxiliary_speeds = auxiliary_fan ? std::set<int>{ additional_fan_speed } : std::set<int>{};
+        CHECK(fan_speeds(gcode, "M106 P2 S") == expected_auxiliary_speeds);
+        CHECK(gcode.find("; start range high " + std::to_string(range_high) + "\n") != std::string::npos);
+    }
+}

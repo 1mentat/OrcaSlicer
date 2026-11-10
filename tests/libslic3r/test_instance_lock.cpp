@@ -127,7 +127,7 @@ TEST_CASE("InstanceLock reopens a lock file that was replaced on disk", "[Instan
     REQUIRE(boost::filesystem::exists(path));
 }
 
-TEST_CASE("InstanceLock serialises the threads of one process", "[InstanceLock]")
+TEST_CASE("InstanceLock serialises the threads of one process", "[InstanceLock][Parallel]")
 {
     ScopedTemporaryFile lock_file(".lock");
     const std::string   path = lock_file.string();

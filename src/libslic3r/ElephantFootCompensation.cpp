@@ -475,7 +475,6 @@ static inline void smooth_compensation_banded(const Points &contour, float band,
 	assert(contour.size() > 2);
 	std::vector<float> out(compensation);
 	float dist_min2 = band * band;
-	static constexpr bool use_min = false;
 	for (size_t iter = 0; iter < num_iterations; ++ iter) {
 		for (int i = 0; i < int(compensation.size()); ++ i) {
 			const Vec2f  pthis = contour[i].cast<float>();
@@ -493,12 +492,10 @@ static inline void smooth_compensation_banded(const Points &contour, float band,
 					const float lnext = l + lthis;
 					if (lnext > band) {
 						// Interpolate the compensation value.
-						prev = use_min ?
-							std::min(prev, lerp(compensation[jprev], compensation[j], (band - l) / lthis)) :
-							lerp(compensation[jprev], compensation[j], (band - l) / lthis);
+						prev = lerp(compensation[jprev], compensation[j], (band - l) / lthis);
 						break;
 					}
-					prev  = use_min ? std::min(prev, compensation[j]) : compensation[j];
+					prev  = compensation[j];
 					pprev = pp;
 					l     = lnext;
 					jprev = std::exchange(j, prev_idx_modulo(j, contour));
@@ -518,12 +515,10 @@ static inline void smooth_compensation_banded(const Points &contour, float band,
 					const float lnext = l + lthis;
 					if (lnext > band) {
 						// Interpolate the compensation value.
-						next = use_min ?
-							std::min(next, lerp(compensation[jprev], compensation[j], (band - l) / lthis)) :
-							lerp(compensation[jprev], compensation[j], (band - l) / lthis);
+						next = lerp(compensation[jprev], compensation[j], (band - l) / lthis);
 						break;
 					}
-					next  = use_min ? std::min(next, compensation[j]) : compensation[j];
+					next  = compensation[j];
 					pprev = pp;
 					l     = lnext;
 					jprev = std::exchange(j, next_idx_modulo(j, contour));

@@ -233,3 +233,20 @@ TEST_CASE("dirty option reports preserve optional compatibility keys and filter 
     CHECK(PresetCollection::dirty_options_without_option_list(
               &edited, &reference, exact_ignored_key, true).empty());
 }
+
+TEST_CASE("deep_diff flags a nullable vector entry added by growth (original M087 explicit-first fixture)",
+          "[Preset][PresetDiff][PresetDeepDiff]")
+{
+    using NullableFloats = ConfigOptionFloatsNullable;
+    Preset reference(Preset::TYPE_FILAMENT, "reference");
+    reference.config.set_key_value("filament_retraction_length",
+                                   new NullableFloats({1.0, 1.0}));
+    Preset grown = reference;
+    grown.config.option<NullableFloats>("filament_retraction_length")->values.push_back(
+        NullableFloats::nil_value());
+
+    const auto deep_diff = PresetCollection::dirty_options(&grown, &reference, true);
+    CHECK(std::find(deep_diff.begin(), deep_diff.end(), "filament_retraction_length#2") != deep_diff.end());
+    const auto shallow_diff = PresetCollection::dirty_options(&grown, &reference, false);
+    CHECK(shallow_diff == std::vector<std::string>{"filament_retraction_length"});
+}
