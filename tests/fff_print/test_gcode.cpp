@@ -3278,7 +3278,7 @@ TEST_CASE("Extrusion role hooks publish ordered role transitions and placeholder
     DynamicPrintConfig control = base_config();
     control.set_deserialize_strict({
         { "change_extrusion_role_gcode",          "" },
-        { "filament_change_extrusion_role_gcode", "" },
+        { "filament_change_extrusion_role_gcode", "\"\"" },
         { "process_change_extrusion_role_gcode",  "" },
     });
     DynamicPrintConfig enabled = control;
@@ -3420,8 +3420,8 @@ DynamicPrintConfig air_filtration_config(bool capability, bool master, bool duri
         {"use_relative_e_distances", true},
         {"machine_start_gcode", ""},
         {"machine_end_gcode", ""},
-        {"filament_start_gcode", ""},
-        {"filament_end_gcode", ""},
+        {"filament_start_gcode", "\"\""},
+        {"filament_end_gcode", "\"\""},
     });
     return config;
 }
