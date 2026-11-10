@@ -309,15 +309,13 @@ DynamicPrintConfig PresetBundle::construct_full_config(
             }
         }
 
-        if (!apply_extruder) {
-            // append filament_self_index
-            std::vector<int> &filament_self_indice = out.option<ConfigOptionInts>("filament_self_index", true)->values;
-            int               index_size           = out.option<ConfigOptionStrings>("filament_extruder_variant")->size();
-            filament_self_indice.resize(index_size, 1);
-            int k = 0;
-            for (size_t i = 0; i < num_filaments; i++) {
-                for (size_t j = 0; j < filament_variant_count[i]; j++) { filament_self_indice[k++] = i + 1; }
-            }
+        // Selected values emit one column per filament; unresolved values retain all variants.
+        std::vector<int> &filament_self_indice = out.option<ConfigOptionInts>("filament_self_index", true)->values;
+        int               index_size           = out.option<ConfigOptionStrings>("filament_extruder_variant")->size();
+        filament_self_indice.resize(index_size, 1);
+        int k = 0;
+        for (size_t i = 0; i < num_filaments; i++) {
+            for (size_t j = 0; j < filament_variant_count[i]; j++) { filament_self_indice[k++] = i + 1; }
         }
     }
 
@@ -4731,8 +4729,8 @@ std::vector<std::vector<std::vector<float>>> PresetBundle::get_full_flush_matrix
     if (with_multiplier) {
         // Fast purge mode uses flush_multiplier_fast; the default prime_volume_mode==Default
         // (or the key absent) reads flush_multiplier, so this is inert.
-        auto* mode_opt = project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode");
-        const bool use_fast = mode_opt && mode_opt->value == PrimeVolumeMode::pvmFast;
+        const ConfigOption* mode_opt = project_config.option("prime_volume_mode");
+        const bool use_fast = mode_opt && mode_opt->type() == coEnum && mode_opt->getInt() == int(PrimeVolumeMode::pvmFast);
         auto* mult_opt = project_config.option<ConfigOptionFloats>(use_fast ? "flush_multiplier_fast" : "flush_multiplier");
         auto flush_multiplies = mult_opt ? mult_opt->values : project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
         flush_multiplies.resize(extruder_nums, 1);
@@ -4990,16 +4988,14 @@ DynamicPrintConfig PresetBundle::full_fff_config(bool apply_extruder, std::optio
             }
         }
 
-        if (!apply_extruder) {
-            //append filament_self_index
-            std::vector<int>& filament_self_indice = out.option<ConfigOptionInts>("filament_self_index", true)->values;
-            int index_size = out.option<ConfigOptionStrings>("filament_extruder_variant")->size();
-            filament_self_indice.resize(index_size, 1);
-            int k = 0;
-            for (size_t i = 0; i < num_filaments; i++) {
-                for (size_t j = 0; j < filament_variant_count[i]; j++) {
-                    filament_self_indice[k++] = i + 1;
-                }
+        // Selected values emit one column per filament; unresolved values retain all variants.
+        std::vector<int>& filament_self_indice = out.option<ConfigOptionInts>("filament_self_index", true)->values;
+        int index_size = out.option<ConfigOptionStrings>("filament_extruder_variant")->size();
+        filament_self_indice.resize(index_size, 1);
+        int k = 0;
+        for (size_t i = 0; i < num_filaments; i++) {
+            for (size_t j = 0; j < filament_variant_count[i]; j++) {
+                filament_self_indice[k++] = i + 1;
             }
         }
     }
