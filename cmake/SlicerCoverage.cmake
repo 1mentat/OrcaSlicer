@@ -184,9 +184,10 @@ function(slicer_force_link_static_library TEST_TARGET LIBRARY_TARGET)
     if (NOT _library_type STREQUAL "STATIC_LIBRARY")
         message(FATAL_ERROR "slicer_force_link_static_library: '${LIBRARY_TARGET}' is not a static library")
     endif ()
-    # The test target already links the library (directly or transitively);
-    # only build ordering and the whole-archive flag are added here, so the
-    # target's existing target_link_libraries() signature is left alone.
+    # Some suites do not otherwise link production code. Keep the target in
+    # LINK_LIBRARIES so CMake also supplies its transitive dependencies. Use the
+    # property to preserve the caller's target_link_libraries() signature.
+    set_property(TARGET ${TEST_TARGET} APPEND PROPERTY LINK_LIBRARIES ${LIBRARY_TARGET})
     add_dependencies(${TEST_TARGET} ${LIBRARY_TARGET})
     if (APPLE)
         target_link_options(${TEST_TARGET} PRIVATE

@@ -331,6 +331,41 @@ class PerExecutableCoveragePairFixtureTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, [item["filename"] for item in report["files"]])
         return matches[0]
 
+    def test_force_link_inherits_dependencies_without_an_existing_library_link(self):
+        source = self.root / "dependency-project"
+        build = self.root / "dependency-build"
+        source.mkdir()
+        (source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.16)
+project(CoverageDependencyFixture LANGUAGES C CXX)
+include("{REPOSITORY / "cmake" / "SlicerCoverage.cmake"}")
+add_library(fixture_leaf STATIC leaf.cpp)
+add_library(production STATIC production.cpp)
+target_link_libraries(production PRIVATE fixture_leaf)
+add_library(fixture_interface INTERFACE)
+add_executable(orphan_tests main.cpp)
+target_link_libraries(orphan_tests PRIVATE fixture_interface)
+slicer_enable_llvm_source_coverage(production)
+slicer_enable_llvm_source_coverage(orphan_tests)
+slicer_force_link_static_library(orphan_tests production)
+''', encoding="utf-8")
+        (source / "leaf.cpp").write_text("int leaf_value() { return 42; }\n", encoding="utf-8")
+        (source / "production.cpp").write_text(
+            "extern int leaf_value();\nint uncalled_production() { return leaf_value(); }\n",
+            encoding="utf-8")
+        (source / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        env = dict(os.environ, CC=self.tools["clang"], CXX=self.tools["clang++"])
+        configured = subprocess.run(
+            ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
+             "-DCMAKE_BUILD_TYPE=Release", "-DSLICER_ENABLE_LLVM_SOURCE_COVERAGE=ON"],
+            env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        compiled = subprocess.run(["cmake", "--build", str(build), "--", "-j1"],
+                                  capture_output=True, text=True, timeout=300)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        executed = subprocess.run([str(build / "orphan_tests")], cwd=build,
+                                  capture_output=True, text=True, timeout=30)
+        self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+
     def test_per_executable_pairing_isolates_cross_binary_dummy_mapping(self):
         source = self.root / "pair-project"
         build = self.root / "pair-build"
