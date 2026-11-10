@@ -39,13 +39,16 @@ dependency prefix and instrumented test targets, then invokes
 `scripts/slicer_coverage.py`. The entire process tree has bounded CPU affinity so
 that dependency recipes that count CPUs themselves respect the same bound.
 The default is two build slots; `COVERAGE_BUILD_JOBS` can select one to four,
-capped by available CPUs. CTest retains two slots. A cached
-dependency prefix is keyed by dependency inputs, build profile, architecture and
-the selected toolchain. `bash scripts/build_coverage.sh --deps-key` prints that
+capped by available CPUs. CTest retains two slots. Instrumented tests have a
+one-hour per-test limit and a five-hour collection limit within the six-hour CI
+job. A cached dependency prefix is keyed by dependency inputs, build profile,
+architecture and the selected toolchain. `bash scripts/build_coverage.sh --deps-key` prints that
 identity without configuring or building. Its completed-prefix marker stores the
 same identity; a stale marker does not authorize reuse.
 `--deps-only` builds or validates this prefix separately, allowing CI to save it
 before a later instrumented build or test failure.
+`--build-only` also configures and builds the instrumented targets without running
+tests, allowing a local adapter to separate cold compilation from long collection.
 The runtime needs the generated `de_DE.UTF-8` locale for the canonical
 comma-decimal tests. Full collection checks it before building; CI adapters
 install the locale data and generate it so those cases cannot silently skip.

@@ -725,7 +725,7 @@
         totals.className = "count numeric";
         totals.textContent = value
           ? count(value.covered) + " / " + count(value.count) + " executable"
-          : "Outside this measurement";
+          : report.valid ? "Outside this measurement" : "Measurement incomplete";
         item.append(totals);
         node("measures").append(item);
       }

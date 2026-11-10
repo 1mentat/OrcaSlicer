@@ -42,13 +42,16 @@ print(digest.hexdigest())
 PY
 )
 deps_only=false
+build_only=false
 if [[ ${1:-} == --deps-key && $# == 1 ]]; then
   printf '%s\n' "$deps_key"
   exit 0
 elif [[ ${1:-} == --deps-only && $# == 1 ]]; then
   deps_only=true
+elif [[ ${1:-} == --build-only && $# == 1 ]]; then
+  build_only=true
 elif (( $# != 0 )); then
-  echo 'Usage: build_coverage.sh [--deps-key|--deps-only]' >&2
+  echo 'Usage: build_coverage.sh [--deps-key|--deps-only|--build-only]' >&2
   exit 2
 fi
 
@@ -59,7 +62,7 @@ if [[ ${ORCA_COVERAGE_AFFINITY_SET:-0} != 1 ]]; then
   export ORCA_COVERAGE_AFFINITY_SET=1
   exec taskset --cpu-list "$cpus" bash "$0" "$@"
 fi
-if [[ $deps_only != true ]]; then
+if [[ $deps_only != true && $build_only != true ]]; then
   # These canonical tests otherwise skip their comma-decimal locale cases.
   python3 - <<'PY'
 import locale
@@ -117,6 +120,10 @@ stage configure cmake -S "$root" -B "$build" -G Ninja "${common[@]}" \
 cp "$build/CMakeCache.txt" "$out/CMakeCache.txt"
 stage release-build cmake --build "$build" --config Release --parallel "$build_jobs" --target \
   libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests
+if [[ $build_only == true ]]; then
+  exit 0
+fi
+# Atomic instrumentation needs larger test budgets within the six-hour CI job.
 stage collect python3 "$root/scripts/slicer_coverage.py" run \
   --root "$root" --build-dir "$build" --source-root src/libslic3r \
   --object "$build/tests/libslic3r/libslic3r_tests" \
@@ -127,6 +134,6 @@ stage collect python3 "$root/scripts/slicer_coverage.py" run \
   --manifest "$build/slicer-coverage/libslic3r.sources.txt" \
   --manifest "$build/slicer-coverage/libslic3r_cgal.sources.txt" \
   --compile-commands "$build/compile_commands.json" \
-  --test-command 'ctest --test-dir {build}/tests -C Release --parallel 2 --timeout 1200 -LE "NotWorking|RequiresApp" --no-tests=error --output-on-failure' \
+  --test-command 'ctest --test-dir {build}/tests -C Release --parallel 2 --timeout 3600 -LE "NotWorking|RequiresApp" --no-tests=error --output-on-failure' \
   --llvm-cov llvm-cov-18 --llvm-profdata llvm-profdata-18 \
-  --measure-only --html --timeout 7200 --out "$out/measurement"
+  --measure-only --html --timeout 18000 --out "$out/measurement"

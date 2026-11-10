@@ -212,6 +212,35 @@ class ModeTests(unittest.TestCase):
 
 
 class FailureTests(unittest.TestCase):
+    def test_incomplete_process_cleanup_survives_timeout_conversion(self):
+        cases = (
+            ("process cleanup", ["Windows command cleanup incomplete: process tree remains"]),
+            ("handle cleanup", ["Windows command handle cleanup incomplete: pipe drain timed out"]),
+            ("no notes", []),
+        )
+        for label, notes in cases:
+            with self.subTest(label=label):
+                timeout = slicer_coverage.subprocess.TimeoutExpired(
+                    ["tests"], 1, output=b"partial test output\n", stderr=b"partial diagnostic\n"
+                )
+                timeout.cleanup_incomplete = True
+                # Assign directly so this test works on Python 3.10, before add_note().
+                timeout.__notes__ = notes
+                with mock.patch.object(slicer_coverage, "run_captured", side_effect=timeout):
+                    result = slicer_coverage._run(["tests"], timeout=1)
+
+                self.assertEqual(result.returncode, 124)
+                self.assertEqual(result.stdout, "partial test output\n")
+                self.assertIn("partial diagnostic", result.stderr)
+                self.assertIn("[command timed out after 1s]", result.stderr)
+                if notes:
+                    self.assertIn(notes[0], result.stderr)
+                else:
+                    self.assertIn("process helper reported incomplete cleanup", result.stderr)
+                self.assertLessEqual(
+                    len(result.stderr), len("partial diagnostic\n\n[command timed out after 1s]\n") + 512 + 3
+                )
+
     def test_measure_only_still_fails_on_test_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             status, report = Fixture(

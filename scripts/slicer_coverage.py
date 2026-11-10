@@ -102,8 +102,16 @@ def _run(argv: Sequence[str], *, cwd: Path | None = None, env: dict[str, str] | 
             stdout = stdout.decode("utf-8", "replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "replace")
+        cleanup_note = ""
+        if getattr(exc, "cleanup_incomplete", False):
+            notes = getattr(exc, "__notes__", ())
+            detail = "; ".join(str(note) for note in notes)
+            if not detail:
+                detail = "process helper reported incomplete cleanup"
+            cleanup_note = "\n[" + detail[:512] + "]"
         return subprocess.CompletedProcess(
-            list(argv), 124, stdout, stderr + f"\n[command timed out after {timeout}s]\n",
+            list(argv), 124, stdout,
+            stderr + f"\n[command timed out after {timeout}s]\n" + cleanup_note,
         )
 
 
