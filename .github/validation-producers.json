@@ -40,6 +40,14 @@
         "--out"
       ],
       "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "public-validation-upload",
+      "path": ".github/actions/validation-upload/action.yml",
+      "kind": "github-upload",
+      "lifecycle": "ephemeral-runner",
+      "retention_days": 14,
+      "max_bytes": 4294967296
     }
   ]
 }

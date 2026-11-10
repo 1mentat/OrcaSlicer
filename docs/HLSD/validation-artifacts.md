@@ -14,6 +14,12 @@ reservations cannot exceed the store budget. A lease expires after at most sixty
 seconds and cannot extend the run's absolute expiry. Retention is bounded to
 thirty days.
 
+Budgets include logical metadata bytes: admission reserves 1 KiB for the store
+and 8 KiB per live or retained record, in addition to its payload budget. Finish
+returns its terminal receipt and removes the entire record, so tiny completed
+runs cannot accumulate uncharged history. Filesystem allocation overhead and
+bytes written between guard polls are distinct from the logical reservation.
+
 Metadata updates and reservation/deletion decisions hold an operating-system
 file lock. Process termination releases the lock. Metadata is published
 atomically. Capability tokens authenticate run operations; metadata stores their

@@ -4,6 +4,8 @@
 Producers write inside payload_dir, call renew/check at least every 20 seconds,
 stop their owned work on failure, and call finish in finally on every outcome.
 This module never starts or kills processes. Metadata is not a published receipt.
+Root budgets include logical file bytes: payload reservations plus bounded metadata
+(including atomic-write overlap). Filesystem allocation/inode overhead is not a quota.
 """
 import argparse
 import contextlib
@@ -25,6 +27,10 @@ MAX_TTL = 30 * 24 * 3600
 MAX_LEASE = 60
 RENEW_INTERVAL = 20
 LOCK_TIMEOUT = 5
+METADATA_LIMIT = 4096
+ROOT_METADATA_LIMIT = 511
+ROOT_METADATA_RESERVE = 1024  # Root JSON plus atomic replacement and one-byte lock.
+RUN_METADATA_RESERVE = 8192  # One bounded JSON record plus its atomic replacement.
 
 
 class ArtifactError(RuntimeError):
@@ -86,9 +92,9 @@ def _root(root):
     return path
 
 
-def _read(path):
+def _read(path, limit=METADATA_LIMIT):
     info = _plain(path)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
         raise ArtifactError('Unsafe metadata file')
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(fd, 'r', encoding='utf-8') as stream:
@@ -104,12 +110,14 @@ def _read(path):
     return value
 
 
-def _write(path, value):
+def _write(path, value, limit=METADATA_LIMIT):
+    encoded = (json.dumps(value, sort_keys=True) + '\n').encode('utf-8')
+    if len(encoded) > limit:
+        raise ArtifactError('Metadata size limit exceeded')
     fd, temporary = tempfile.mkstemp(prefix='.metadata-', dir=path.parent)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(value, stream, sort_keys=True)
-            stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -120,7 +128,7 @@ def _write(path, value):
 def _locked(root):
     path = _root(root)
     info = _plain(path / '.lock')
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != 1:
         raise ArtifactError('Unsafe root lock')
     fd = os.open(path / '.lock', os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0))
     acquired = False
@@ -142,7 +150,7 @@ def _locked(root):
                 if time.monotonic() >= until:
                     raise ArtifactError('Root lock timed out') from None
                 time.sleep(0.02)
-        meta = _read(path / 'root.json')
+        meta = _read(path / 'root.json', ROOT_METADATA_LIMIT)
         if meta.get('schema') != 'validation-root-v1':
             raise ArtifactError('Unmanaged root')
         _id(meta.get('root_id')); _positive(meta.get('total_budget_bytes'), 'root budget')
@@ -166,7 +174,10 @@ def _locked(root):
 
 def init(root, budget_bytes):
     """Initialize a new/empty private root, or verify its identical budget."""
-    _positive(budget_bytes, 'root budget'); path = _root(root)
+    _positive(budget_bytes, 'root budget')
+    if budget_bytes < ROOT_METADATA_RESERVE:
+        raise ArtifactError('Root budget cannot cover metadata')
+    path = _root(root)
     if path.exists() and any(path.iterdir()):
         with _locked(path) as (_, meta):
             if meta['total_budget_bytes'] != budget_bytes:
@@ -179,7 +190,7 @@ def init(root, budget_bytes):
     (path / 'runs').mkdir(mode=0o700)
     meta = {'schema': 'validation-root-v1', 'root_id': str(uuid.uuid4()),
             'created_at': _stamp(time.time()), 'total_budget_bytes': budget_bytes}
-    _write(path / 'root.json', meta)
+    _write(path / 'root.json', meta, ROOT_METADATA_LIMIT)
     return dict(meta)
 
 
@@ -276,13 +287,35 @@ def _live(directory, meta):
     return size
 
 
-def _admit(path, rootmeta, budget):
+def _metadata_temps(path, records):
+    result = []
+    for directory in (path, *(d for d, _ in records)):
+        for item in directory.glob('.metadata-*'):
+            info = _plain(item)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > METADATA_LIMIT:
+                raise ArtifactError('Unsafe interrupted metadata file')
+            result.append(item)
+    return result
+
+
+def _admit(path, rootmeta, budget, new_record=True):
     records, stages = _inventory(path, rootmeta)
-    if stages:
+    if stages or _metadata_temps(path, records):
         raise ArtifactError('Interrupted manager transaction; sweep first')
-    reserved = sum(m['size_budget_bytes'] for _, m in records if m['state'] in ('active', 'retained'))
+    reserved = ROOT_METADATA_RESERVE + len(records) * RUN_METADATA_RESERVE
+    reserved += sum(m['size_budget_bytes'] for _, m in records if m['state'] in ('active', 'retained'))
+    if new_record:
+        reserved += RUN_METADATA_RESERVE
     if reserved + budget > rootmeta['total_budget_bytes']:
         raise ArtifactError('Root reservation budget exceeded')
+    _root_size(path, rootmeta)
+
+
+def _root_size(path, rootmeta):
+    size = _size(path)
+    if size > rootmeta['total_budget_bytes']:
+        raise ArtifactError('Root actual size budget exceeded')
+    return size
 
 
 def _new(path, rootmeta, work_item, source_sha, owner, ttl, budget, lease, token, state):
@@ -293,7 +326,10 @@ def _new(path, rootmeta, work_item, source_sha, owner, ttl, budget, lease, token
             'state': state, 'lease_expires_at': _stamp(now + min(ttl, lease)),
             'token_hash': hashlib.sha256(token.encode()).hexdigest()}
     directory = path / 'runs' / ('.new-' + run_id); directory.mkdir(mode=0o700)
-    _write(directory / 'run.json', meta); (directory / 'payload').mkdir(mode=0o700)
+    try:
+        _write(directory / 'run.json', meta); (directory / 'payload').mkdir(mode=0o700)
+    except BaseException:
+        _remove(directory); raise
     return directory, meta
 
 
@@ -312,13 +348,15 @@ def create(root, work_item, source_sha, owner, ttl_seconds, budget_bytes, lease_
 def check(root, run_id, token):
     with _locked(root) as (path, meta):
         directory, run = _get(path, meta, run_id, token)
-        return _receipt(directory, run) | {'actual_bytes': _live(directory, run)}
+        size = _live(directory, run); _root_size(path, meta)
+        return _receipt(directory, run) | {'actual_bytes': size}
 
 
 def renew(root, run_id, token, lease_seconds=MAX_LEASE):
     _positive(lease_seconds, 'lease', MAX_LEASE)
     with _locked(root) as (path, meta):
         directory, run = _get(path, meta, run_id, token); size = _live(directory, run)
+        _admit(path, meta, 0, new_record=False)
         run['lease_expires_at'] = _stamp(min(time.time() + lease_seconds, _seconds(run['expires_at'])))
         _write(directory / 'run.json', run)
         return _receipt(directory, run) | {'actual_bytes': size}
@@ -331,10 +369,12 @@ def finish(root, run_id, token, outcome):
         directory, run = _get(path, meta, run_id, token)
         if run['state'] == 'retained':
             raise ArtifactError('Cannot finish a retained promotion')
-        _remove(directory / 'payload')  # Authenticate, but never require a live lease/within-budget.
         run.update(state=outcome, lease_expires_at=_stamp(min(time.time(), _seconds(run['expires_at']))))
-        _write(directory / 'run.json', run)
-        return _receipt(directory, run) | {'actual_bytes': 0}
+        receipt = _receipt(directory, run) | {'actual_bytes': 0}
+        # Authenticate even after expiry/overbudget, then discard all unpromoted
+        # bytes including the record. The caller retains the returned receipt.
+        _remove(directory)
+        return receipt
 
 
 def _selected(payload, paths):
@@ -454,9 +494,15 @@ def sweep(root, dry_run=False):
             expired = now >= _seconds(run['expires_at'])
             abandoned = run['state'] == 'active' and now >= _seconds(run['lease_expires_at'])
             if expired or abandoned or run['state'] in ('completed', 'failed', 'interrupted'):
-                reclaimed += _size(directory / 'payload'); deleted.append(run['run_id'])
+                reclaimed += _size(directory); deleted.append(run['run_id'])
                 if not dry_run:
                     _remove(directory)
+        live_records = [(d, r) for d, r in records if r['run_id'] not in deleted]
+        for temporary in _metadata_temps(path, live_records):
+            if temporary.exists():
+                reclaimed += temporary.stat().st_size
+                if not dry_run:
+                    temporary.unlink()
         # Staging directories are never returned to producers; a held OS root lock
         # proves no other manager transaction is still creating/copying them.
         for stage in stages:

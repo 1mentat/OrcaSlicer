@@ -88,7 +88,7 @@ class CheckedProcessTests(unittest.TestCase):
             with self.subTest(binary=isinstance(data, bytes)):
                 checks = []
                 command = ("import sys,time; data=sys.stdin.buffer.read(); time.sleep(.35); "
-                           "sys.stdout.buffer.write(data); sys.stderr.write('diagnostic\\n')")
+                           "sys.stdout.buffer.write(data); sys.stderr.buffer.write(b'diagnostic\\n')")
                 result = run_captured(
                     [sys.executable, "-c", command], input_data=data,
                     timeout=None if isinstance(data, bytes) else 5,

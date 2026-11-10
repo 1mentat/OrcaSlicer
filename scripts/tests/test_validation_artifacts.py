@@ -24,7 +24,7 @@ class Artifacts(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='artifact-contract-')
         self.base = Path(self.tmp.name).resolve()
         self.root = self.base / 'managed'
-        a.init(self.root, 1000)
+        a.init(self.root, 50000)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -53,7 +53,7 @@ class Artifacts(unittest.TestCase):
                 Path(run['payload_dir'], 'unpromoted').write_text('discard')
                 self.call(a.finish, run, outcome)
                 self.assertFalse(Path(run['payload_dir']).exists())
-        self.assertEqual(len(a.sweep(self.root)['removed_run_ids']), 3)
+        self.assertEqual(a.sweep(self.root)['removed_run_ids'], [])
 
     def test_finish_after_expiry_and_overbudget_still_authenticates(self):
         run = self.create(budget=1, ttl=1)
@@ -64,7 +64,7 @@ class Artifacts(unittest.TestCase):
             self.assertTrue(Path(run['payload_dir']).exists())
             self.call(a.finish, run, 'interrupted')
             self.assertFalse(Path(run['payload_dir']).exists())
-            self.assertEqual(a.sweep(self.root)['removed_run_ids'], [run['run_id']])
+            self.assertEqual(a.sweep(self.root)['removed_run_ids'], [])
 
     def test_expired_lease_not_resurrected_or_swept_while_valid(self):
         run = self.create(lease=1)
@@ -83,15 +83,18 @@ class Artifacts(unittest.TestCase):
         self.assertRaises(a.ArtifactError, a.create, self.root, '', 'bad', '', 10, 1)
 
     def test_root_budget_and_size_check(self):
+        self.root = self.base / 'tight'
+        a.init(self.root, a.ROOT_METADATA_RESERVE + a.RUN_METADATA_RESERVE + 800)
         run = self.create(budget=800)
         self.assertRaises(a.ArtifactError, self.create, budget=201)
         Path(run['payload_dir'], 'large').write_bytes(b'x' * 801)
         self.assertRaises(a.ArtifactError, self.call, a.check, run)
         self.assertRaises(a.ArtifactError, self.call, a.renew, run)
         self.call(a.finish, run, 'failed')
-        self.assertTrue(self.create(budget=1000))
+        self.assertTrue(self.create(budget=800))
 
     def test_promote_selected_files_retains_owner_expiry_and_budget(self):
+        self.root = self.base / 'retained-budget'; a.init(self.root, 20000)
         run = self.create()
         payload = Path(run['payload_dir'])
         (payload / 'summary').write_text('summary')
@@ -104,12 +107,14 @@ class Artifacts(unittest.TestCase):
         self.assertFalse(payload.exists())
         self.assertEqual(Path(retained['payload_dir'], 'summary').read_text(), 'summary')
         self.assertFalse(Path(retained['payload_dir'], 'discard').exists())
-        self.assertRaises(a.ArtifactError, self.create, budget=901)
+        self.assertRaises(a.ArtifactError, self.create, budget=3000)
         with patch.object(a.time, 'time', return_value=time.time() + 11):
             a.sweep(self.root)
         self.assertFalse(Path(retained['payload_dir']).exists())
 
     def test_promotion_budget_and_selection_rejection(self):
+        self.root = self.base / 'promotion-budget'
+        a.init(self.root, a.ROOT_METADATA_RESERVE + 2 * a.RUN_METADATA_RESERVE + 1000)
         run = self.create()
         Path(run['payload_dir'], 'file').write_text('four')
         for paths in ([], ['../outside'], ['/absolute'], ['file', 'file'], ['a\\b'], ['C:drive'], ['file:stream'], ['.']):
@@ -224,9 +229,11 @@ class Artifacts(unittest.TestCase):
         after = {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.rglob('*') if p.is_file()}
         self.assertEqual(before, after)
         self.assertEqual(result['removed_run_ids'], [run['run_id']])
-        self.assertEqual(result['reclaimed_bytes'], 4)
+        self.assertEqual(result['reclaimed_bytes'], a._size(Path(run['payload_dir']).parent))
 
     def test_concurrent_reservation_only_one_admitted(self):
+        self.root = self.base / 'parallel-budget'
+        a.init(self.root, a.ROOT_METADATA_RESERVE + a.RUN_METADATA_RESERVE + 600)
         command = [sys.executable, '-B', str(SCRIPT), 'create', '--root', str(self.root), '--work-item', 'parallel',
                    '--source-sha', 'b' * 40, '--owner', 'test', '--ttl-seconds', '30', '--budget-bytes', '600']
         children = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
@@ -271,6 +278,70 @@ class Artifacts(unittest.TestCase):
         with patch.object(a.time, 'time', return_value=time.time() + 2):
             a.sweep(self.root)
         self.assertEqual((outside / 'file').read_text(), 'keep')
+
+    def test_many_tiny_finished_runs_leave_no_metadata_history(self):
+        self.root = self.base / 'tiny-budget'; a.init(self.root, 10000)
+        baseline = a._size(self.root)
+        for i in range(40):
+            run = self.create(budget=1)
+            Path(run['payload_dir'], 'byte').write_bytes(b'x')
+            self.assertLessEqual(a._size(self.root), 10000)
+            receipt = self.call(a.finish, run, ('completed', 'failed', 'interrupted')[i % 3])
+            self.assertEqual(receipt['actual_bytes'], 0)
+            self.assertNotIn('token_hash', receipt)
+            self.assertEqual(list((self.root / 'runs').iterdir()), [])
+            self.assertEqual(a._size(self.root), baseline)
+        self.assertRaises(OSError, self.call, a.finish, run, 'failed')
+
+    def test_metadata_reservations_limit_tiny_active_and_retained_runs(self):
+        self.root = self.base / 'tiny-active'; a.init(self.root, 10000)
+        run = self.create(budget=1)
+        self.assertRaises(a.ArtifactError, self.create, budget=1)
+        Path(run['payload_dir'], 'byte').write_bytes(b'x')
+        self.assertRaises(a.ArtifactError, self.call, a.promote, run, 'owner', 10, 1, ['byte'])
+        self.call(a.finish, run, 'completed')
+        self.assertTrue(self.create(budget=1))
+
+    def test_metadata_ceiling_rejects_large_serialization_without_stage(self):
+        self.assertRaises(a.ArtifactError, a.create, self.root, '😀' * 256,
+                          'a' * 40, '😀' * 256, 30, 1)
+        self.assertEqual(list((self.root / 'runs').iterdir()), [])
+        self.assertRaises(a.ArtifactError, a.init, self.base / 'too-small', 1023)
+        self.assertFalse((self.base / 'too-small').exists())
+
+    def test_interrupted_metadata_write_requires_sweep_before_more_writes(self):
+        run = self.create(); temporary = Path(run['payload_dir']).parent / '.metadata-orphan'
+        temporary.write_bytes(b'x' * a.METADATA_LIMIT)
+        before = a._size(self.root)
+        self.assertRaises(a.ArtifactError, self.create)
+        self.assertRaises(a.ArtifactError, self.call, a.renew, run)
+        result = a.sweep(self.root, dry_run=True)
+        self.assertEqual(result['reclaimed_bytes'], a.METADATA_LIMIT)
+        self.assertEqual(a._size(self.root), before)
+        a.sweep(self.root)
+        self.assertFalse(temporary.exists())
+        self.assertTrue(self.call(a.renew, run))
+
+    def test_root_actual_overbudget_check_and_authenticated_finish(self):
+        self.root = self.base / 'actual-budget'; a.init(self.root, 10000)
+        run = self.create(budget=1)
+        # A producer can violate its own reservation; another run's check must
+        # also detect actual aggregate bytes, while finish still permits cleanup.
+        Path(run['payload_dir'], 'overflow').write_bytes(b'x' * 11000)
+        self.assertRaises(a.ArtifactError, self.call, a.check, run)
+        self.assertRaises(a.ArtifactError, self.create, budget=1)
+        self.assertRaises(a.ArtifactError, a.finish, self.root, run['run_id'], 'wrong', 'failed')
+        self.call(a.finish, run, 'failed')
+        self.assertLess(a._size(self.root), 10000)
+
+    def test_check_detects_another_run_exceeding_actual_root_budget(self):
+        self.root = self.base / 'shared-actual'; a.init(self.root, 20000)
+        first = self.create(budget=1); second = self.create(budget=1)
+        Path(second['payload_dir'], 'overflow').write_bytes(b'x' * 21000)
+        with self.assertRaisesRegex(a.ArtifactError, 'Root actual'):
+            self.call(a.check, first)
+        self.call(a.finish, second, 'failed')
+        self.assertEqual(self.call(a.check, first)['actual_bytes'], 0)
 
     def test_cli_json_error_and_capability_not_echoed(self):
         output = io.StringIO()
