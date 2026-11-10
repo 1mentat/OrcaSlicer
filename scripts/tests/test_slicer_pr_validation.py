@@ -139,7 +139,7 @@ class ParsingTests(unittest.TestCase):
                 slicer_pr_validation._validate_explicit_ccache_configpath()
 
     def test_invalid_explicit_ccache_configpath_fails_before_validation_or_uv_resolution(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             root = Path(temp)
             missing = root / "missing.conf"
             nonfile = root / "config-dir"
@@ -2163,8 +2163,9 @@ class PatchScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             repo, _, ref = self._fixture(Path(temp))
             (repo / "docs").mkdir()
-            selected = "docs/special [x]*☃.txt"
-            sibling = "docs/special ax☃.txt"
+            # Windows forbids '*'; brackets still require a literal pathspec there.
+            selected = "docs/special [x]☃.txt" if os.name == "nt" else "docs/special [x]*☃.txt"
+            sibling = "docs/special x☃.txt" if os.name == "nt" else "docs/special ax☃.txt"
             (repo / selected).write_text("selected\n", encoding="utf-8")
             (repo / sibling).write_text("sibling\n", encoding="utf-8")
             self._git(repo, "add", ".")
@@ -3357,7 +3358,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                 self.assertTrue(worktree.is_dir())
                 self.assertTrue((worktree / "build/kept.txt").is_file())
                 registered = self._git(repo, "worktree", "list", "--porcelain").stdout
-                self.assertIn(str(worktree), registered)
+                self.assertIn(f"worktree {worktree.as_posix()}\n", registered)
                 self.assertNotEqual(report["status"], "cleanup_failed")
             finally:
                 if worktree is not None and worktree.exists():
@@ -3739,9 +3740,19 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     }
                     return result
 
+                marker_before = (marker.read_bytes(), marker.stat().st_mtime_ns, marker.stat().st_mode)
                 with mock.patch.object(slicer_pr_validation, "_run_tree",
                                        side_effect=verify_build_survives):
-                    self.assertEqual(slicer_pr_validation.run_validation(reuse_args), 0)
+                    if os.name == "nt":
+                        with mock.patch.object(slicer_pr_validation.os, "utime",
+                                               side_effect=AssertionError("unexpected mtime mutation")) as utime:
+                            self.assertEqual(slicer_pr_validation.run_validation(reuse_args), 0)
+                        utime.assert_not_called()
+                        self.assertEqual(
+                            (marker.read_bytes(), marker.stat().st_mtime_ns, marker.stat().st_mode),
+                            marker_before)
+                    else:
+                        self.assertEqual(slicer_pr_validation.run_validation(reuse_args), 0)
                 report = json.loads(
                     (root / "reuse-evidence/report.json").read_text(encoding="utf-8"))
                 self.assertEqual(observed, ["baseline", "reference", "pr-1", "pr-2"])
@@ -3750,8 +3761,21 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     mtime = transition["build_input_mtime_preservation"]
                     self.assertEqual(mtime["scope"],
                                      "exact_applied_paths_regular_tracked_files_only")
-                    self.assertIn(mtime["snapshot"]["status"], {"captured", "no_eligible_files"})
-                    self.assertIn("status", mtime["restore"])
+                    if os.name == "nt":
+                        self.assertEqual(mtime["snapshot"]["status"], "disabled")
+                        self.assertEqual(mtime["snapshot"]["reason"],
+                                         "safe_lock_fd_verification_unavailable")
+                        for field in ("tracked_candidate_count", "snapshot_file_count", "hashed_bytes"):
+                            self.assertEqual(mtime["snapshot"][field], 0)
+                        self.assertEqual(mtime["snapshot"]["skipped_reasons"], {})
+                        self.assertEqual(mtime["snapshot"]["git_inventory_seconds"], 0.0)
+                        self.assertEqual(mtime["restore"], {
+                            "status": "not_attempted",
+                            "reason": "safe_lock_fd_verification_unavailable",
+                        })
+                    else:
+                        self.assertIn(mtime["snapshot"]["status"], {"captured", "no_eligible_files"})
+                        self.assertIn("status", mtime["restore"])
                 self.assertTrue(marker.is_file())
                 self.assertEqual(report["worktree"]["final_state"]["untracked_count"], 0)
                 self.assertNotIn("?? build/", report["worktree"]["final_state"]["status"])
@@ -3799,20 +3823,21 @@ class OverlayResolutionTests(unittest.TestCase):
         repo = root / "repo"
         repo.mkdir()
         self._git(repo, "init", "-q")
+        self._git(repo, "config", "core.autocrlf", "false")
         self._git(repo, "config", "user.email", "test@example.invalid")
         self._git(repo, "config", "user.name", "Test")
         (repo / "tests").mkdir()
         path = repo / "tests/overlay.txt"
-        path.write_text("value=base\n", encoding="utf-8")
+        path.write_bytes(b"value=base\n")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "base")
         base = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
-        path.write_text("value=harness\n", encoding="utf-8")
+        path.write_bytes(b"value=harness\n")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "harness")
         harness = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
         self._git(repo, "checkout", "-qb", "pr", base)
-        path.write_text("value=pr\n", encoding="utf-8")
+        path.write_bytes(b"value=pr\n")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "pr")
         head = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
