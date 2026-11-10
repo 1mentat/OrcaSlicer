@@ -13143,7 +13143,11 @@ void set_two_extruder_project(PresetBundle &bundle)
     add_inmemory_preset(bundle.filaments, "PETG").config.option<ConfigOptionStrings>("filament_type", true)->values = {"PETG"};
     bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
     bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard", "HighFlow"};
-    bundle.project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode", true)->value = PrimeVolumeMode::pvmDefault;
+    ConfigOption* prime_mode = bundle.project_config.option("prime_volume_mode", true);
+    REQUIRE(prime_mode != nullptr);
+    REQUIRE(prime_mode->type() == coEnum);
+    prime_mode->setInt(int(PrimeVolumeMode::pvmDefault));
+    REQUIRE(prime_mode->getInt() == int(PrimeVolumeMode::pvmDefault));
     bundle.project_config.option<ConfigOptionStrings>("filament_type", true)->values = {"PLA", "PETG"};
     bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#AA0000", "#00AA00"};
     bundle.project_config.option<ConfigOptionStrings>("filament_colour_type", true)->values = {"1", "1"};
@@ -13194,7 +13198,11 @@ TEST_CASE("fast purge uses the fast multiplier independently of default multipli
     bundle.project_config.option<ConfigOptionFloats>("flush_multiplier", true)->values      = {2., 2.};
     bundle.project_config.option<ConfigOptionFloats>("flush_multiplier_fast", true)->values = {5., 7.};
     const auto regular                                                                         = bundle.get_full_flush_matrix(true);
-    bundle.project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode", true)->value = PrimeVolumeMode::pvmFast;
+    ConfigOption* prime_mode = bundle.project_config.option("prime_volume_mode", true);
+    REQUIRE(prime_mode != nullptr);
+    REQUIRE(prime_mode->type() == coEnum);
+    prime_mode->setInt(int(PrimeVolumeMode::pvmFast));
+    REQUIRE(prime_mode->getInt() == int(PrimeVolumeMode::pvmFast));
     const auto fast = bundle.get_full_flush_matrix(true);
     REQUIRE(regular.size() == 2);
     REQUIRE(fast.size() == 2);
@@ -13897,3 +13905,111 @@ TEST_CASE("PresetUtils handles presets without a resolved printer model",
 }
 
 } // namespace preset_asset_lookup_contracts
+
+
+TEST_CASE("Flush matrix scaling reads generic and typed prime volume modes",
+          "[PresetBundleLoading][PresetFlushMode][Regression]")
+{
+    for (bool explicitly_typed : {false, true}) {
+        for (PrimeVolumeMode mode : {PrimeVolumeMode::pvmDefault, PrimeVolumeMode::pvmFast}) {
+            DYNAMIC_SECTION("typed=" << explicitly_typed << ", mode=" << int(mode)) {
+                ScopedTemporaryDir temp("preset-flush-mode-representations");
+                ScopedDataDir data(temp.path());
+                PresetBundle bundle;
+                bundle.filament_presets = {bundle.filaments.default_preset().name};
+                REQUIRE(bundle.filament_presets.size() == 1);
+                REQUIRE_FALSE(bundle.filament_presets.front().empty());
+                REQUIRE(bundle.filaments.find_preset(bundle.filament_presets.front(), false) != nullptr);
+                REQUIRE(bundle.filaments.get_edited_preset().name == bundle.filament_presets.front());
+                const auto* nozzles = bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+                REQUIRE(nozzles != nullptr);
+                REQUIRE(nozzles->values.size() == 1);
+                const auto* variants = bundle.filaments.get_edited_preset().config.option<ConfigOptionStrings>("filament_extruder_variant");
+                REQUIRE(variants != nullptr);
+                REQUIRE(variants->values.size() == 1);
+                ConfigOption* default_mode = bundle.project_config.option("prime_volume_mode");
+                REQUIRE(default_mode != nullptr);
+                REQUIRE(default_mode->type() == coEnum);
+                REQUIRE(dynamic_cast<ConfigOptionEnumGeneric*>(default_mode) != nullptr);
+                REQUIRE(default_mode->getInt() == int(PrimeVolumeMode::pvmDefault));
+
+                if (explicitly_typed)
+                    bundle.project_config.set_key_value("prime_volume_mode", new ConfigOptionEnum<PrimeVolumeMode>(mode));
+                else
+                    default_mode->setInt(int(mode));
+                const ConfigOption* selected_mode = bundle.project_config.option("prime_volume_mode");
+                REQUIRE(selected_mode != nullptr);
+                REQUIRE(selected_mode->getInt() == int(mode));
+                if (explicitly_typed)
+                    REQUIRE(dynamic_cast<const ConfigOptionEnum<PrimeVolumeMode>*>(selected_mode) != nullptr);
+                else
+                    REQUIRE(dynamic_cast<const ConfigOptionEnumGeneric*>(selected_mode) != nullptr);
+
+                bundle.project_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values = {12.5};
+                bundle.project_config.option<ConfigOptionFloats>("flush_multiplier", true)->values = {2.0};
+                bundle.project_config.option<ConfigOptionFloats>("flush_multiplier_fast", true)->values = {3.0};
+                const auto matrix = bundle.get_full_flush_matrix();
+                REQUIRE(matrix.size() == 1);
+                REQUIRE(matrix.front().size() == 1);
+                REQUIRE(matrix.front().front().size() == 1);
+                const float expected = mode == PrimeVolumeMode::pvmFast ? 37.5f : 25.0f;
+                CHECK_THAT(matrix.front().front().front(), Catch::Matchers::WithinAbs(expected, 1e-5f));
+            }
+        }
+    }
+}
+
+TEST_CASE("Full preset configurations retain the owner of every filament variant column", "[Preset][Bundle][FilamentOwnership]")
+{
+    const bool selected_presets = GENERATE(false, true);
+    const bool resolve_variants = GENERATE(false, true);
+    const bool hybrid_printer = GENERATE(false, true);
+    CAPTURE(selected_presets, resolve_variants, hybrid_printer);
+
+    ConstructInputs in;
+    in.add_filament("Test PETG", "test-petg-id");
+    if (hybrid_printer) {
+        set_hybrid_two_extruder_printer(in.bundle);
+        in.printer.config = in.bundle.printers.get_edited_preset().config;
+    } else {
+        set_dual_printer_layout(in);
+    }
+    set_variant_speeds(in.filaments[0], 12., 22.);
+    // Unequal source spans distinguish ownership from merely repeating the first owner.
+    in.filaments[1].config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = {
+        "Direct Drive Standard"};
+    in.filaments[1].config.option<ConfigOptionFloats>("filament_max_volumetric_speed", true)->values = {13.};
+    in.bundle.project_config.option<ConfigOptionStrings>("filament_colour", true)->values = {"#AA0000", "#00AA00"};
+
+    const std::vector<int> filament_maps{1, 2};
+    const std::vector<int> volume_maps{nvtHighFlow, nvtStandard};
+    DynamicPrintConfig out;
+    if (selected_presets) {
+        in.bundle.printers.get_edited_preset().config = in.printer.config;
+        for (const Preset &filament : in.filaments) {
+            Preset &stored = add_bundle_filament(in.bundle, filament.name, filament.filament_id, "PLA");
+            stored.config = filament.config;
+        }
+        REQUIRE(in.bundle.filaments.select_preset_by_name("Test PLA", true));
+        in.bundle.filament_presets = {"Test PLA", "Test PETG"};
+        out = in.bundle.full_config(resolve_variants, filament_maps, volume_maps);
+    } else {
+        out = in.construct(resolve_variants, filament_maps, volume_maps);
+    }
+
+    const auto *owners = out.option<ConfigOptionInts>("filament_self_index");
+    const auto *variants = out.option<ConfigOptionStrings>("filament_extruder_variant");
+    REQUIRE(owners != nullptr);
+    REQUIRE(variants != nullptr);
+    REQUIRE(owners->values.size() == variants->values.size());
+    if (resolve_variants) {
+        CHECK(owners->values == std::vector<int>{1, 2});
+        CHECK(variants->values == std::vector<std::string>{"Direct Drive High Flow", "Direct Drive Standard"});
+        check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
+    } else {
+        CHECK(owners->values == std::vector<int>{1, 1, 2});
+        CHECK(variants->values == std::vector<std::string>{
+            "Direct Drive Standard", "Direct Drive High Flow", "Direct Drive Standard"});
+        check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {12., 22., 13.});
+    }
+}
