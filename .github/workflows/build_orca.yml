@@ -366,10 +366,12 @@ jobs:
       - name: Verify macOS DMG artifacts
         if: runner.os == 'macOS' && inputs.macos-combine-only
         working-directory: ${{ github.workspace }}
+        env:
+          ARTIFACT_VERSION: ${{ env.ver }}
         run: |
-          test -s "OrcaSlicer_Mac_universal_${{ env.ver }}.dmg"
+          test -s "OrcaSlicer_Mac_universal_${ARTIFACT_VERSION}.dmg"
           if [ -f "build/universal/OrcaSlicer/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator" ]; then
-            test -s "OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
+            test -s "OrcaSlicer_profile_validator_Mac_universal_${ARTIFACT_VERSION}.dmg"
           fi
 
       # Delete the per-arch bundles only after signing/DMG creation succeeded, so a
