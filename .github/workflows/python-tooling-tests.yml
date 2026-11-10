@@ -10,6 +10,10 @@ on:
       - 'scripts/tests/test_clang_tidy_diff.py'
       - 'scripts/slicer_module_feedback.py'
       - 'scripts/tests/test_slicer_module_feedback.py'
+      - 'scripts/slicer_pr_validation.py'
+      - 'scripts/tests/test_slicer_pr_validation.py'
+      - 'scripts/slicer_mutation.py'
+      - 'scripts/tests/test_slicer_mutation.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -20,6 +24,10 @@ on:
       - 'scripts/tests/test_clang_tidy_diff.py'
       - 'scripts/slicer_module_feedback.py'
       - 'scripts/tests/test_slicer_module_feedback.py'
+      - 'scripts/slicer_pr_validation.py'
+      - 'scripts/tests/test_slicer_pr_validation.py'
+      - 'scripts/slicer_mutation.py'
+      - 'scripts/tests/test_slicer_mutation.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -29,7 +37,7 @@ jobs:
   python-tooling:
     name: Python tooling (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -43,9 +51,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install pinned Ninja for build-reuse fixtures
+        run: |
+          python -m pip install --only-binary=:all: --no-deps ninja==1.13.0
+      - name: Require Ninja for build-reuse fixtures
+        run: python -c "import shutil; assert shutil.which('ninja'), 'Ninja is required for real build-reuse controls'"
       - name: Test scoped process handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
       - name: Test clang-tidy diff handling
         run: python -B -m unittest discover -s scripts/tests -p test_clang_tidy_diff.py -v
       - name: Test module feedback handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_module_feedback.py -v
+      - name: Test validation runner contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_pr_validation.py -v
+      - name: Require symlink support for mutation worktree controls
+        run: |
+          python -c "import tempfile; from pathlib import Path; scratch=tempfile.TemporaryDirectory(prefix='mutation-symlink-preflight-'); root=Path(scratch.name); target=root/'target'; target.mkdir(); link=root/'link'; link.symlink_to(target, target_is_directory=True); assert link.is_symlink(); link.unlink(); scratch.cleanup(); print('Owned directory symlink capability verified')"
+      - name: Test mutation runner contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_mutation.py -v
