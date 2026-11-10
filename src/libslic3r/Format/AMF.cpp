@@ -7,6 +7,7 @@
 #include <miniz.h>
 #include <string.h>
 #include <map>
+#include <memory>
 #include <string>
 #include <expat.h>
 
@@ -960,16 +961,16 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
     if (stat.m_uncomp_size == 0)
     {
         BOOST_LOG_TRIVIAL(error) << "Found invalid size";
-        close_zip_reader(&archive);
         return false;
     }
 
     XML_Parser parser = XML_ParserCreate(nullptr); // encoding
     if (!parser) {
         BOOST_LOG_TRIVIAL(error) << "Couldn't allocate memory for parser";
-        close_zip_reader(&archive);
         return false;
     }
+
+    const std::unique_ptr<XML_ParserStruct, decltype(&XML_ParserFree)> parser_guard(parser, XML_ParserFree);
 
     AMFParserContext ctx(parser, config, config_substitutions, model);
     XML_SetUserData(parser, (void*)&ctx);
@@ -995,9 +996,8 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
             CallbackData* data = (CallbackData*)pOpaque;
             if (!XML_Parse(data->parser, (const char*)pBuf, (int)n, (file_ofs + n == data->stat.m_uncomp_size) ? 1 : 0) || data->ctx.error())
             {
-                char error_buf[1024];
-                ::sprintf(error_buf, "Parsing file %s error at line %d: {%s}", data->stat.m_filename, (int) XML_GetCurrentLineNumber(data->parser), data->ctx.error_message());
-                throw Slic3r::FileIOError(error_buf);
+                // A short callback write makes miniz release its buffers and report failure.
+                return 0;
             }
 
             return n;
@@ -1006,14 +1006,15 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
     catch (std::exception& e)
     {
         BOOST_LOG_TRIVIAL(error) << "Error reading AMF file: " << e.what();
-        close_zip_reader(&archive);
         return false;
     }
 
     if (res == 0)
     {
+        if (XML_GetErrorCode(parser) != XML_ERROR_NONE || ctx.error())
+            BOOST_LOG_TRIVIAL(error) << "Parsing file " << stat.m_filename << " error at line "
+                                     << XML_GetCurrentLineNumber(parser) << ": {" << ctx.error_message() << "}";
         BOOST_LOG_TRIVIAL(error) << "Error while extracting model data from zip archive";
-        close_zip_reader(&archive);
         return false;
     }
 

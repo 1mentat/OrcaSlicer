@@ -1,4 +1,5 @@
 #include <miniz.h>
+#include <boost/filesystem/path.hpp>
 #include <memory>
 #include <cstdint>
 #include "test_utils.hpp"
@@ -1260,7 +1261,7 @@ TEST_CASE("SLA statistics populate placeholders and output paths", "[SLAPrint][S
     known.total_cost            = 4.;
     known.total_weight          = 8.;
     CHECK(known.finalize_output_path("results/{objects_used_material}_{support_used_material}_{total_cost}_{total_weight}.sl1") ==
-          "results/120_30_4_8.sl1");
+          (boost::filesystem::path("results") / "120_30_4_8.sl1").string());
     CHECK(known.finalize_output_path("results/{missing_statistic}.sl1") == "results/{missing_statistic}.sl1");
 
     const DynamicConfig placeholders   = SLAPrintStatistics::placeholders();

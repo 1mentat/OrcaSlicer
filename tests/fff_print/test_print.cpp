@@ -2688,6 +2688,7 @@ TEST_CASE("Failed G-code exports report their outcome and remain retryable",
         std::string preserved;
         std::getline(stream, preserved);
         CHECK(preserved == "preserve existing destination");
+        stream.close();
         boost::filesystem::remove_all(output);
     } else {
         CHECK(thumbnail_calls == 0);
