@@ -483,6 +483,181 @@ int main(int argc, char**) { return core_value(argc) > 0 ? 0 : 1; }
             if row["name"] == "suite_b":
                 self.assertEqual(inline["covered"], 0)
 
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "coverage dependency script is Linux-only")
+class CoverageDepsWorkingDirectoryTests(unittest.TestCase):
+    def test_deps_only_preserves_caller_paths_and_git_patch_context(self):
+        required = (
+            "bash", "cmake", "ninja", "clang-18", "clang++-18", "ld.lld-18",
+            "llvm-profdata-18", "llvm-cov-18", "git", "taskset",
+        )
+        missing = [name for name in required if not shutil.which(name)]
+        if missing:
+            self.skipTest("missing tools: " + ", ".join(missing))
+
+        with tempfile.TemporaryDirectory(prefix="coverage-deps-cwd-") as temp:
+            root = Path(temp).resolve()
+            source = root / "source"
+            caller = root / "caller"
+            foreign_cache = root / "foreign-cache"
+            for directory in (source, caller, foreign_cache):
+                directory.mkdir()
+
+            git_env = {
+                "PATH": os.environ.get("PATH", os.defpath),
+                "HOME": str(root),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+
+            def git(directory, *args):
+                return subprocess.run(
+                    ["git", "-C", str(directory), *args], env=git_env,
+                    capture_output=True, text=True, timeout=10, check=True)
+
+            def initialize_repo(directory, commit):
+                git(directory, "init", "--quiet")
+                git(directory, "config", "core.hooksPath", os.devnull)
+                git(directory, "config", "commit.gpgsign", "false")
+                git(directory, "config", "user.name", "Coverage fixture")
+                git(directory, "config", "user.email", "coverage-fixture@example.invalid")
+                if commit:
+                    git(directory, "add", "-A")
+                    git(directory, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", "fixture")
+
+            (source / "scripts").mkdir()
+            shutil.copy2(REPOSITORY / "scripts" / "build_coverage.sh",
+                         source / "scripts" / "build_coverage.sh")
+            (source / "cmake/modules").mkdir(parents=True)
+            (source / "cmake/modules/fixture.cmake").write_text("# tracked fixture input\n", encoding="utf-8")
+            deps_source = source / "deps"
+            (deps_source / "OCCT").mkdir(parents=True)
+            (deps_source / "OCCT/patch.diff").write_text(
+                "diff --git a/probe.txt b/probe.txt\n"
+                "--- a/probe.txt\n"
+                "+++ b/probe.txt\n"
+                "@@ -1 +1 @@\n"
+                "-before\n"
+                "+after\n",
+                encoding="utf-8")
+            (deps_source / "CMakeLists.txt").write_text(r'''cmake_minimum_required(VERSION 3.10)
+project(DepsWorkingDirectoryFixture LANGUAGES NONE)
+find_package(Git REQUIRED)
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --is-inside-work-tree
+    RESULT_VARIABLE REV_PARSE_RESULT
+    OUTPUT_VARIABLE REV_PARSE_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
+    set(IN_GIT_REPO TRUE)
+    file(RELATIVE_PATH BINARY_DIR_REL "${CMAKE_SOURCE_DIR}/.." "${CMAKE_BINARY_DIR}")
+endif()
+set(OCCT_SOURCE_DIR "${CMAKE_BINARY_DIR}/dep_OCCT-prefix/src/dep_OCCT")
+file(MAKE_DIRECTORY "${OCCT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/OrcaSlicer_dep")
+file(WRITE "${OCCT_SOURCE_DIR}/probe.txt" "before\n")
+if(IN_GIT_REPO)
+    set(OCCT_DIRECTORY_FLAG --directory "${BINARY_DIR_REL}/dep_OCCT-prefix/src/dep_OCCT")
+else()
+    set(OCCT_DIRECTORY_FLAG)
+endif()
+file(WRITE "${CMAKE_BINARY_DIR}/fixture-context.txt"
+    "IN_GIT_REPO=${IN_GIT_REPO}\nBINARY_DIR_REL=${BINARY_DIR_REL}\n")
+add_custom_target(fixture_patch
+    COMMAND "${GIT_EXECUTABLE}" apply ${OCCT_DIRECTORY_FLAG} --verbose
+        --ignore-space-change --whitespace=fix "${CMAKE_CURRENT_SOURCE_DIR}/OCCT/patch.diff"
+    WORKING_DIRECTORY "${OCCT_SOURCE_DIR}"
+    VERBATIM)
+set(SELECTED_DEP_TARGETS
+    dep_Boost dep_Eigen dep_TBB dep_Cereal dep_CGAL dep_Draco dep_NLopt
+    dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise
+    dep_Qhull dep_GLFW dep_wxWidgets)
+foreach(_target IN LISTS SELECTED_DEP_TARGETS)
+    add_custom_target(${_target})
+    add_dependencies(${_target} fixture_patch)
+endforeach()
+''', encoding="utf-8")
+            initialize_repo(source, commit=True)
+            (caller / "caller.txt").write_text("caller repo\n", encoding="utf-8")
+            initialize_repo(caller, commit=True)
+            initialize_repo(foreign_cache, commit=False)
+
+            script = source / "scripts/build_coverage.sh"
+            tools_env = {
+                "PATH": os.environ.get("PATH", os.defpath),
+                "HOME": str(root),
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "ORCA_COVERAGE_AFFINITY_SET": "1",
+                "COVERAGE_BUILD_JOBS": "1",
+            }
+
+            def run_deps(label, deps_value):
+                env = dict(tools_env)
+                env.update({
+                    "COVERAGE_BUILD_DIR": f"relative-build/{label}",
+                    "COVERAGE_DEPS_DIR": deps_value,
+                    "COVERAGE_OUTPUT_DIR": f"relative-output/{label}",
+                })
+                result = subprocess.run(
+                    ["bash", "-x", str(script), "--deps-only"], cwd=caller, env=env,
+                    capture_output=True, text=True, timeout=90)
+                return result, env
+
+            outside, outside_env = run_deps("outside", "../outside-cache")
+            self.assertEqual(outside.returncode, 0, outside.stdout + outside.stderr)
+            outside_deps = (caller / outside_env["COVERAGE_DEPS_DIR"]).resolve()
+            outside_out = (caller / outside_env["COVERAGE_OUTPUT_DIR"]).resolve()
+            outside_build = (caller / outside_env["COVERAGE_BUILD_DIR"]).resolve()
+            outside_patch = outside_deps / "dep_OCCT-prefix/src/dep_OCCT/probe.txt"
+            self.assertEqual(outside_patch.read_text(encoding="utf-8"), "after\n")
+            self.assertEqual((outside_deps / "fixture-context.txt").read_text(encoding="utf-8"),
+                             "IN_GIT_REPO=\nBINARY_DIR_REL=\n")
+            self.assertEqual((outside_deps / "OrcaSlicer_dep/.coverage-ready").read_text().strip(),
+                             subprocess.run(["bash", str(script), "--deps-key"], cwd=caller,
+                                            env=tools_env, capture_output=True, text=True,
+                                            timeout=30, check=True).stdout.strip())
+            self.assertIn(f"build={outside_build}", outside.stderr)
+            self.assertIn(f"deps={outside_deps}", outside.stderr)
+            self.assertIn(f"out={outside_out}", outside.stderr)
+            for name in ("deps-configure.log", "deps-build.log", "environment.txt"):
+                self.assertTrue((outside_out / name).is_file(), name)
+            self.assertIn("Checking patch probe.txt", (outside_out / "deps-build.log").read_text())
+
+            inside, inside_env = run_deps("inside", "../source/deps/cache-inside")
+            self.assertEqual(inside.returncode, 0, inside.stdout + inside.stderr)
+            inside_deps = (caller / inside_env["COVERAGE_DEPS_DIR"]).resolve()
+            inside_out = (caller / inside_env["COVERAGE_OUTPUT_DIR"]).resolve()
+            inside_build = (caller / inside_env["COVERAGE_BUILD_DIR"]).resolve()
+            self.assertEqual((inside_deps / "dep_OCCT-prefix/src/dep_OCCT/probe.txt").read_text(encoding="utf-8"),
+                             "after\n")
+            context = (inside_deps / "fixture-context.txt").read_text(encoding="utf-8")
+            self.assertIn("IN_GIT_REPO=TRUE", context)
+            self.assertIn(f"BINARY_DIR_REL={os.path.relpath(inside_deps, source)}", context)
+            self.assertEqual((inside_deps / "OrcaSlicer_dep/.coverage-ready").read_text().strip(),
+                             subprocess.run(["bash", str(script), "--deps-key"], cwd=caller,
+                                            env=tools_env, capture_output=True, text=True,
+                                            timeout=30, check=True).stdout.strip())
+            self.assertIn(f"build={inside_build}", inside.stderr)
+            self.assertIn(f"deps={inside_deps}", inside.stderr)
+            self.assertIn(f"out={inside_out}", inside.stderr)
+            for name in ("deps-configure.log", "deps-build.log", "environment.txt"):
+                self.assertTrue((inside_out / name).is_file(), name)
+            self.assertIn("--directory", (inside_out / "deps-build.log").read_text())
+
+            rejected, rejected_env = run_deps("foreign", "../foreign-cache")
+            self.assertEqual(rejected.returncode, 2, rejected.stdout + rejected.stderr)
+            self.assertIn("Dependency builds must be outside Git or in the source worktree.",
+                          rejected.stderr)
+            rejected_deps = (caller / rejected_env["COVERAGE_DEPS_DIR"]).resolve()
+            rejected_out = (caller / rejected_env["COVERAGE_OUTPUT_DIR"]).resolve()
+            self.assertFalse((rejected_deps / "OrcaSlicer_dep/.coverage-ready").exists())
+            self.assertFalse((rejected_out / "deps-configure.log").exists())
+            self.assertFalse((rejected_out / "deps-build.log").exists())
+
 class CatchDiscoveryProfileIsolationTests(unittest.TestCase):
     """CatchAddTests.cmake must keep discovery profiles out of the caller's profile path."""
 

@@ -55,6 +55,17 @@ elif (( $# != 0 )); then
   exit 2
 fi
 
+# Preserve caller-relative paths when dependency tools change working directory.
+mapfile -t directories < <(python3 - "$build" "$deps" "$out" <<'PY'
+from pathlib import Path
+import sys
+for value in sys.argv[1:]:
+    print(Path(value).resolve())
+PY
+)
+[[ ${#directories[@]} == 3 ]]
+build=${directories[0]}; deps=${directories[1]}; out=${directories[2]}
+
 # Some dependency recipes count CPUs themselves instead of honoring --parallel.
 # Bound the entire process tree, including nested builds; local default is two.
 if [[ ${ORCA_COVERAGE_AFFINITY_SET:-0} != 1 ]]; then
@@ -102,12 +113,23 @@ fi
 # canonical color-support tests even with the application GUI disabled.
 marker=$deps/OrcaSlicer_dep/.coverage-ready
 if [[ ! -f "$marker" || $(cat "$marker") != "$deps_key" ]]; then
-  stage deps-configure cmake -S "$root/deps" -B "$deps" -G Ninja "${common[@]}" \
-    -DSLIC3R_CAD=ON -DDEP_WX_GTK3=ON
-  stage deps-build cmake --build "$deps" --parallel 1 --target \
-    dep_Boost dep_Eigen dep_TBB dep_Cereal dep_CGAL dep_Draco dep_NLopt \
-    dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise dep_Qhull \
-    dep_GLFW dep_wxWidgets
+  mkdir -p "$deps"
+  deps_git=$(git -C "$deps" rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -n "$deps_git" && "$deps_git" != "$(git -C "$root" rev-parse --show-toplevel)" ]]; then
+    echo 'Dependency builds must be outside Git or in the source worktree.' >&2
+    exit 2
+  fi
+  # Patch recipes detect their Git context during configure. Use the binary
+  # directory so that context matches their later extracted-source directories.
+  (
+    cd -- "$deps"
+    stage deps-configure cmake -S "$root/deps" -B "$deps" -G Ninja "${common[@]}" \
+      -DSLIC3R_CAD=ON -DDEP_WX_GTK3=ON
+    stage deps-build cmake --build "$deps" --parallel 1 --target \
+      dep_Boost dep_Eigen dep_TBB dep_Cereal dep_CGAL dep_Draco dep_NLopt \
+      dep_OpenVDB dep_SLVS dep_OCCT dep_OpenCV dep_Assimp dep_python3 dep_libnoise dep_Qhull \
+      dep_GLFW dep_wxWidgets
+  )
   printf '%s\n' "$deps_key" > "$marker"
 fi
 if [[ $deps_only == true ]]; then

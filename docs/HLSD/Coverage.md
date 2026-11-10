@@ -63,6 +63,10 @@ job. A cached dependency prefix is keyed by dependency inputs, build profile,
 architecture and the selected toolchain. `bash scripts/build_coverage.sh --deps-key` prints that
 identity without configuring or building. Its completed-prefix marker stores the
 same identity; a stale marker does not authorize reuse.
+Dependency configure and build run from their binary directory so Git-based
+patch recipes use the same repository context as their extracted sources.
+That directory may be outside Git or inside the source worktree; a different
+Git worktree is rejected. Relative output paths retain the caller's meaning.
 `--deps-only` builds or validates this prefix separately, allowing CI to save it
 before a later instrumented build or test failure.
 `--build-only` also configures and builds the instrumented targets without running
