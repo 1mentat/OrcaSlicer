@@ -486,3 +486,39 @@ TEST_CASE("MCUT difference preserves analytic hole volume for a centered tool", 
 }
 
 } // namespace meshboolean_contracts
+
+namespace meshboolean_contracts {
+
+TEST_CASE("CGAL segmentation returns valid component meshes with conserved volume (original M030 fixture)", "[MeshBoolean][MeshBooleanContracts]")
+{
+    const TriangleMesh sphere = make_sphere(5.);
+    const std::vector<TriangleMesh> pieces = MeshBoolean::cgal::segment(sphere, 0.5, 3);
+    REQUIRE_FALSE(pieces.empty());
+    float total_volume = 0.f;
+    for (const TriangleMesh &piece : pieces) {
+        check_valid_indices(piece.its);
+        CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(piece));
+        total_volume += mesh_volume(piece);
+    }
+    CHECK(total_volume > 0.f);
+    CHECK_THAT(total_volume, WithinRel(mesh_volume(sphere), 5e-2f));
+}
+
+TEST_CASE("Eigen conversion and self-union preserve a disjoint cuboid pair (original M030 fixture)", "[MeshBoolean][MeshBooleanContracts]")
+{
+    TriangleMesh source = shifted_cube(0.f);
+    TriangleMesh second = shifted_cube(12.f);
+    its_merge(source.its, second.its);
+    const MeshBoolean::EigenMesh eigen = MeshBoolean::triangle_mesh_to_eigen(source);
+    REQUIRE(eigen.first.rows() == static_cast<Eigen::Index>(source.its.vertices.size()));
+    REQUIRE(eigen.second.rows() == static_cast<Eigen::Index>(source.its.indices.size()));
+    const TriangleMesh round_trip = MeshBoolean::eigen_to_triangle_mesh(eigen);
+    CHECK_THAT(mesh_volume(round_trip), WithinRel(2000.f, 1e-5f));
+
+    MeshBoolean::EigenMesh union_input = eigen;
+    MeshBoolean::self_union(union_input);
+    const TriangleMesh union_mesh = MeshBoolean::eigen_to_triangle_mesh(union_input);
+    CHECK_THAT(mesh_volume(union_mesh), WithinRel(2000.f, 1e-3f));
+}
+
+} // namespace meshboolean_contracts

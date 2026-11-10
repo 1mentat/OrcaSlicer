@@ -1504,13 +1504,13 @@ TEST_CASE("Rotating a transformation about a fixed point updates its origin and 
 
     // A positive quarter-turn maps (x,y,z) to (-y,x,z). Applying that to the
     // scaled basis gives this explicit matrix; the translated origin is rotated
-    // around the independently specified pivot. The angle is passed as a float,
-    // hence the looser tolerance.
+    // around the independently specified pivot. The float-rounded quarter-turn
+    // is checked against the original analytic coordinates at 1e-6.
     Matrix3d expected_linear;
     expected_linear << 0., -3., 0., 2., 0., 0., 0., 0., 4.;
-    check_linear_and_offset(rotated.get_matrix(), expected_linear, Vec3d(27., 12., 4.), 1e-5);
+    check_linear_and_offset(rotated.get_matrix(), expected_linear, Vec3d(27., 12., 4.), 1e-6);
     const Vec3d transformed_x = rotated.get_matrix() * Vec3d::UnitX();
-    CHECK(transformed_x.isApprox(Vec3d(27., 14., 4.), 1e-5));
+    CHECK(transformed_x.isApprox(Vec3d(27., 14., 4.), 1e-6));
 }
 
 TEST_CASE("Transformation quaternion readback recovers the Euler angles", "[Geometry][Transformation][Rotation]")
@@ -1743,6 +1743,12 @@ TEST_CASE("Transformation rotation reset keeps scale and offset", "[Geometry][Tr
     Geometry::Transformation rotation_cleared(matrix);
     rotation_cleared.reset_rotation();
     check_linear_and_offset(rotation_cleared.get_matrix(), scale.asDiagonal(), offset);
+
+    Geometry::Transformation skew_cleared(matrix);
+    skew_cleared.reset_skew();
+    const double volume_preserving_uniform_scale = std::cbrt(scale.prod());
+    check_linear_and_offset(
+        skew_cleared.get_matrix(), rotation * (volume_preserving_uniform_scale * Matrix3d::Identity()), offset);
 
     Geometry::Transformation cleared(matrix);
     cleared.reset();

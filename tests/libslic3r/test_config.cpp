@@ -6098,3 +6098,34 @@ TEST_CASE("An explicit empty extruder region overrides the missing-bed center fa
     REQUIRE(get_bed_shape(config).size() == 1);
     CHECK(get_bed_shape(config).front() == Point(scaled(10.), scaled(20.)));
 }
+
+TEST_CASE("Flush matrix extraction preserves legacy blocks and explicit nozzle blocks", "[Config][FlushMatrix]")
+{
+    const std::size_t nozzle = GENERATE(std::size_t(0), std::size_t(1));
+    const std::vector<double> legacy{0., 280., 280., 0.};
+    const auto resolved = get_flush_volumes_matrix(legacy, nozzle, 2, 2);
+    REQUIRE(resolved.size() == legacy.size());
+    for (std::size_t i = 0; i < legacy.size(); ++i)
+        CHECK_THAT(resolved[i], Catch::Matchers::WithinAbs(legacy[i], 0.));
+
+    // Callers without known cardinality retain the existing explicit slicing API.
+    const auto unqualified = get_flush_volumes_matrix(legacy, nozzle, 2);
+    REQUIRE(unqualified.size() == 2);
+    for (std::size_t i = 0; i < unqualified.size(); ++i)
+        CHECK_THAT(unqualified[i], Catch::Matchers::WithinAbs(legacy[nozzle * 2 + i], 0.));
+
+    const std::vector<double> expanded{0., 100., 200., 0., 0., 300., 400., 0.};
+    const auto block = get_flush_volumes_matrix(expanded, nozzle, 2, 2);
+    REQUIRE(block.size() == 4);
+    for (std::size_t i = 0; i < block.size(); ++i)
+        CHECK_THAT(block[i], Catch::Matchers::WithinAbs(expanded[nozzle * 4 + i], 0.));
+
+    const auto single = get_flush_volumes_matrix(legacy);
+    const auto known_single = get_flush_volumes_matrix(legacy, 0, 1, 2);
+    REQUIRE(single.size() == legacy.size());
+    REQUIRE(known_single.size() == legacy.size());
+    for (std::size_t i = 0; i < legacy.size(); ++i) {
+        CHECK_THAT(single[i], Catch::Matchers::WithinAbs(legacy[i], 0.));
+        CHECK_THAT(known_single[i], Catch::Matchers::WithinAbs(legacy[i], 0.));
+    }
+}
