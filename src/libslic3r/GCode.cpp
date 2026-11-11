@@ -576,8 +576,10 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
                 transformed_pos = Eigen::Rotation2Df(angle) * pos + translation;
 
+                // Strip local XY words even when the transformed position is
+                // unchanged; retaining them would move back to local coordinates.
+                line = line_out.str();
                 if (transformed_pos != old_pos || never_skip) {
-                    line = line_out.str();
                     std::ostringstream oss;
                     oss << std::fixed << std::setprecision(3) << "G1 ";
                     if (transformed_pos.x() != old_pos.x() || never_skip) oss << " X" << transformed_pos.x() - extruder_offset.x();
