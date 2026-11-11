@@ -438,10 +438,11 @@ jobs:
             done
       shell: bash
     - name: Upload artifacts Flatpak
-      uses: actions/upload-artifact@v7
+      uses: ./.github/actions/validation-upload
       with:
         name: OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: '/__w/OrcaSlicer/OrcaSlicer/OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak'
+        retention-days: 14
     - name: Deploy Flatpak to nightly release
       if: github.repository == 'OrcaSlicer/OrcaSlicer' && github.ref == 'refs/heads/main'
       uses: WebFreak001/deploy-nightly@v3.2.0
@@ -479,7 +480,7 @@ jobs:
         find "$d/resources/images" -mindepth 1 -maxdepth 1 ! -name '*.svg' -exec rm -rf {} + 2>/dev/null || true
         tar -cf flatpak-test-asset.tar flatpak_app "$d"
     - name: Upload flatpak test asset
-      uses: actions/upload-artifact@v7
+      uses: ./.github/actions/validation-upload
       with:
         name: ${{ github.sha }}-flatpak-tests-${{ matrix.variant.arch }}
         path: flatpak-test-asset.tar

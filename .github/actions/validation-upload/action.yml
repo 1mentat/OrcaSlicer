@@ -1,0 +1,63 @@
+name: Validation upload with lifecycle preflight
+description: Check ownership, retention and actual byte budget before uploading original paths.
+inputs:
+  name:
+    description: Original artifact name
+    required: true
+  path:
+    description: Original upload paths and glob patterns
+    required: true
+  retention-days:
+    description: Retention from 1 to 30 days
+    default: '14'
+  max-bytes:
+    description: Maximum actual selected bytes, at most 4 GiB
+    default: '4294967296'
+  if-no-files-found:
+    description: Original empty-selection behavior
+    default: warn
+  overwrite:
+    description: Replace an existing artifact with this name
+    default: 'false'
+  compression-level:
+    description: Original upload compression level
+    default: '6'
+  include-hidden-files:
+    description: Include hidden files in selection and upload
+    default: 'false'
+outputs:
+  artifact-id:
+    description: Uploaded artifact ID
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-url:
+    description: Uploaded artifact URL
+    value: ${{ steps.upload.outputs.artifact-url }}
+  artifact-digest:
+    description: Uploaded artifact digest
+    value: ${{ steps.upload.outputs.artifact-digest }}
+runs:
+  using: composite
+  steps:
+    - name: Check lifecycle and actual upload bytes
+      shell: bash
+      env:
+        VALIDATION_UPLOAD_NAME: ${{ inputs.name }}
+        VALIDATION_UPLOAD_PATH: ${{ inputs.path }}
+        VALIDATION_UPLOAD_RETENTION_DAYS: ${{ inputs.retention-days }}
+        VALIDATION_UPLOAD_MAX_BYTES: ${{ inputs.max-bytes }}
+        VALIDATION_UPLOAD_IF_NO_FILES_FOUND: ${{ inputs.if-no-files-found }}
+        VALIDATION_UPLOAD_OVERWRITE: ${{ inputs.overwrite }}
+        VALIDATION_UPLOAD_COMPRESSION_LEVEL: ${{ inputs.compression-level }}
+        VALIDATION_UPLOAD_INCLUDE_HIDDEN_FILES: ${{ inputs.include-hidden-files }}
+      run: python "$GITHUB_ACTION_PATH/../../../scripts/validation_upload.py"
+    - name: Upload original artifact paths
+      id: upload
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        overwrite: ${{ inputs.overwrite }}
+        compression-level: ${{ inputs.compression-level }}
+        include-hidden-files: ${{ inputs.include-hidden-files }}

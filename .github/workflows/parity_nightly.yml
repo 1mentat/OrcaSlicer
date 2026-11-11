@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload the override report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/validation-upload
         with:
           name: override-report-shard${{ matrix.shard }}
           path: |
@@ -255,7 +255,7 @@ jobs:
 
       - name: Upload the scorecard and evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/validation-upload
         with:
           name: parity-scorecard
           path: parity-out/

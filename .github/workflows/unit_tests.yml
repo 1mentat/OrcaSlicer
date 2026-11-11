@@ -62,13 +62,14 @@ jobs:
           scripts/run_unit_tests.sh "${{ inputs.test-dir }}" Release
       - name: Upload Test Logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/validation-upload
         with:
           name: unit-test-logs-${{ inputs.artifact }}
           path: ${{ inputs.test-dir }}/**/*.log
+          retention-days: 14
       - name: Upload Test Results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/validation-upload
         with:
           name: test-results-${{ inputs.artifact }}
           path: ctest_results.xml
