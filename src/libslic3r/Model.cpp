@@ -2180,18 +2180,6 @@ void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPa
     remap_one(saved->fuzzy,     fuzzy_skin_facets);
 }
 
-static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
-{
-    if (!object->origin_translation.isApprox(Vec3d::Zero()) && src_instance->get_offset().isApprox(Vec3d::Zero())) {
-        object->center_around_origin();
-        object->translate_instances(-object->origin_translation);
-        object->origin_translation = Vec3d::Zero();
-    }
-    else {
-        object->invalidate_bounding_box();
-        object->center_around_origin();
-    }
-}
 
 void ModelObject::split(ModelObjectPtrs* new_objects, const bool remap_paint)
 {
