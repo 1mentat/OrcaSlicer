@@ -32,6 +32,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_helpers.hpp"
 
@@ -361,6 +362,207 @@ TEST_CASE("G-code contract rejects malformed motion words", "[SettingsVariance]"
     CHECK_FALSE(finite_bounded_gcode("G1 Xnan Y0 E1\n", config, motion_moves, extrusion_moves));
     CHECK_FALSE(finite_bounded_gcode("G1 X1e999 Y0 E1\n", config, motion_moves, extrusion_moves));
     CHECK_FALSE(finite_bounded_gcode("G1 Xoops Y0 E1\n", config, motion_moves, extrusion_moves));
+}
+
+TEST_CASE("Extra solid infill patterns select their requested internal layers",
+          "[SettingsVariance][ExtraSolidInfills]")
+{
+    struct PatternCase {
+        const char *name;
+        const char *pattern;
+        std::set<size_t> selected_layer_ids;
+        std::set<size_t> internal_bridge_layer_ids;
+        std::set<size_t> supporting_solid_layer_ids;
+    };
+    const std::array<PatternCase, 5> cases{{
+        { "empty", "", {}, {}, {} },
+        { "invalid", "not-a-pattern", {}, {}, {} },
+        { "explicit list", "3,5,7", { 3, 5, 7 }, { 3, 5, 7 }, { 2, 4, 6 } },
+        { "finite spans", "3#2,6#2", { 3, 4, 6, 7 }, { 3, 6 }, { 2, 5 } },
+        { "repeating span", "3#2", { 3, 4, 6, 7, 9, 10 }, { 3, 6, 9 }, { 2, 5, 8 } },
+    }};
+
+    for (const PatternCase &pattern_case : cases) {
+        CAPTURE(pattern_case.name, pattern_case.pattern);
+        for (size_t layer_idx = 0; layer_idx < 10; ++layer_idx) {
+            const size_t one_based_layer_id = layer_idx + 1;
+            CAPTURE(layer_idx, one_based_layer_id);
+            CHECK(check_layer_id_pattern(pattern_case.pattern, static_cast<int>(layer_idx)) ==
+                  (pattern_case.selected_layer_ids.count(one_based_layer_id) != 0));
+        }
+
+        DynamicPrintConfig config = variance_config();
+        config.set_deserialize_strict({
+            { "extra_solid_infills", pattern_case.pattern },
+            { "top_shell_layers", 0 },
+            { "bottom_shell_layers", 0 },
+            { "ensure_vertical_shell_thickness", "none" },
+            { "sparse_infill_density", "20%" },
+        });
+        REQUIRE(config.option("extra_solid_infills")->serialize() == pattern_case.pattern);
+
+        Print print;
+        Model model;
+        init_print({ make_cube(20.0, 20.0, 2.0) }, print, model, config);
+        REQUIRE(print.validate().string.empty());
+        const std::string output = gcode(print);
+        REQUIRE_FALSE(output.empty());
+        REQUIRE(print.objects().size() == 1);
+
+        const PrintObject &object = *print.objects().front();
+        const auto layers = object.layers();
+        REQUIRE(layers.size() == 10);
+        constexpr size_t sparse_role_index = 0;
+        constexpr size_t solid_role_index = 1;
+        constexpr size_t internal_bridge_role_index = 2;
+        constexpr size_t bridge_role_index = 3;
+        std::map<double, std::array<double, 4>> gcode_path_lengths_by_z;
+        GCodeReader reader;
+        reader.apply_config(print.config());
+        std::optional<size_t> active_role;
+        reader.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            const std::string_view comment = line.comment();
+            if (comment.find("Sparse infill") != std::string_view::npos)
+                active_role = sparse_role_index;
+            else if (comment.find("Internal solid infill") != std::string_view::npos)
+                active_role = solid_role_index;
+            else if (comment.find("Internal Bridge") != std::string_view::npos)
+                active_role = internal_bridge_role_index;
+            else if (comment.find("Bridge") != std::string_view::npos)
+                active_role = bridge_role_index;
+            else if (comment.find("FEATURE:") != std::string_view::npos ||
+                     comment.find("TYPE:") != std::string_view::npos)
+                active_role.reset();
+
+            if (!line.cmd_is("G0") && !line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+                return;
+            const double xy = line.dist_XY(self);
+            if (active_role.has_value() && line.extruding(self) && xy > EPSILON)
+                gcode_path_lengths_by_z[self.z()][*active_role] += xy;
+        });
+        const auto gcode_path_on_layer = [&gcode_path_lengths_by_z](double layer_z, size_t role) {
+            const auto it = std::find_if(gcode_path_lengths_by_z.begin(), gcode_path_lengths_by_z.end(),
+                [layer_z](const auto &entry) { return std::abs(entry.first - layer_z) < 1e-4; });
+            return it == gcode_path_lengths_by_z.end() ? 0.0 : it->second[role];
+        };
+
+        for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+            const Layer *layer = layers[layer_idx];
+            REQUIRE(layer != nullptr);
+            size_t internal_surfaces = 0;
+            size_t internal_solid_surfaces = 0;
+            size_t internal_bridge_surfaces = 0;
+            size_t second_internal_bridge_surfaces = 0;
+            size_t internal_void_surfaces = 0;
+            double sparse_path_length = 0.0;
+            double solid_path_length = 0.0;
+            double internal_bridge_path_length = 0.0;
+            double bridge_path_length = 0.0;
+            for (const LayerRegion *region : layer->regions()) {
+                REQUIRE(region != nullptr);
+                for (const Surface &surface : region->fill_surfaces.surfaces) {
+                    internal_surfaces += surface.surface_type == stInternal ? 1 : 0;
+                    internal_solid_surfaces += surface.surface_type == stInternalSolid ? 1 : 0;
+                    internal_bridge_surfaces += surface.surface_type == stInternalBridge ? 1 : 0;
+                    second_internal_bridge_surfaces += surface.surface_type == stSecondInternalBridge ? 1 : 0;
+                    internal_void_surfaces += surface.surface_type == stInternalVoid ? 1 : 0;
+                }
+                for_each_extrusion_path(region->fills, [&](const ExtrusionPath &path) {
+                    if (path.role() == erInternalInfill)
+                        sparse_path_length += path.length();
+                    else if (path.role() == erSolidInfill)
+                        solid_path_length += path.length();
+                    else if (path.role() == erInternalBridgeInfill)
+                        internal_bridge_path_length += path.length();
+                    else if (path.role() == erBridgeInfill)
+                        bridge_path_length += path.length();
+                });
+            }
+
+            // The first and last geometric layers are excluded. This fixture
+            // checks interior IDs 2 through 9, where normal infill is generated.
+            if (layer_idx == 0 || layer_idx + 1 == layers.size())
+                continue;
+            const size_t one_based_layer_id = layer_idx + 1;
+            const bool expected_internal_bridge =
+                pattern_case.internal_bridge_layer_ids.count(one_based_layer_id) != 0;
+            const bool expected_supporting_solid =
+                pattern_case.supporting_solid_layer_ids.count(one_based_layer_id) != 0;
+            const bool expected_solid =
+                pattern_case.selected_layer_ids.count(one_based_layer_id) != 0 && !expected_internal_bridge;
+            CAPTURE(layer_idx, layer->id(), one_based_layer_id, layer->print_z,
+                    internal_surfaces, internal_solid_surfaces,
+                    internal_bridge_surfaces, second_internal_bridge_surfaces,
+                    internal_void_surfaces, sparse_path_length, solid_path_length,
+                    internal_bridge_path_length, bridge_path_length,
+                    gcode_path_on_layer(layer->print_z, sparse_role_index),
+                    gcode_path_on_layer(layer->print_z, solid_role_index),
+                    gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                    gcode_path_on_layer(layer->print_z, bridge_role_index));
+            CHECK(second_internal_bridge_surfaces == 0);
+            CHECK(internal_void_surfaces == 0);
+            if (expected_internal_bridge) {
+                CHECK(internal_bridge_surfaces > 0);
+                CHECK(internal_solid_surfaces == 0);
+                CHECK(internal_surfaces == 0);
+                CHECK_THAT(sparse_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(solid_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(internal_bridge_path_length > 0.0);
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, internal_bridge_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, sparse_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, solid_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else if (expected_supporting_solid) {
+                CHECK(internal_surfaces > 0);
+                CHECK(internal_solid_surfaces > 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(sparse_path_length > 0.0);
+                CHECK(solid_path_length > 0.0);
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, sparse_role_index) > 0.0);
+                CHECK(gcode_path_on_layer(layer->print_z, solid_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else if (expected_solid) {
+                CHECK(internal_solid_surfaces > 0);
+                CHECK(internal_surfaces == 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(solid_path_length > 0.0);
+                CHECK_THAT(sparse_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK(gcode_path_on_layer(layer->print_z, solid_role_index) > 0.0);
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, sparse_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+            } else {
+                CHECK(internal_surfaces > 0);
+                CHECK(internal_solid_surfaces == 0);
+                CHECK(internal_bridge_surfaces == 0);
+                CHECK(sparse_path_length > 0.0);
+                CHECK_THAT(solid_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(internal_bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(bridge_path_length, Catch::Matchers::WithinAbs(0.0, 1e-9));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, solid_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, internal_bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK_THAT(gcode_path_on_layer(layer->print_z, bridge_role_index),
+                           Catch::Matchers::WithinAbs(0.0, 1e-6));
+                CHECK(gcode_path_on_layer(layer->print_z, sparse_role_index) > 0.0);
+            }
+        }
+    }
 }
 
 TEST_CASE("Every registered sparse infill pattern is accepted and emits sparse role geometry", "[SettingsVariance]")
@@ -3271,6 +3473,18 @@ TEST_CASE("Top expansion direction changes a configured top expansion", "[Settin
                      "top_surface_expansion_direction", "inward", "outward", true, 50);
 }
 
+TEST_CASE("Top expansion wall margin limits the expanded surface",
+          "[SettingsVariance][SettingsReslice][SettingsResliceActivation][TopExpansionMarginVariance]")
+{
+    check_variant_on(step_expansion_fixture(),
+                     {{"wall_generator", "arachne"}, {"wall_loops", 3}, {"top_shell_layers", 3},
+                      {"bottom_shell_layers", 3}, {"top_surface_density", "100%"},
+                      {"min_width_top_surface", 0.0}, {"only_one_wall_top", true},
+                      {"top_surface_expansion", 2.0},
+                      {"top_surface_expansion_direction", "inward_and_outward"}},
+                     "top_surface_expansion_margin", "0", "10", true, 50);
+}
+
 TEST_CASE("Honeycomb complete-top setting changes the internal solid fill", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
 {
     check_variant_on(make_cube(20., 20., 10.),
@@ -3288,6 +3502,16 @@ TEST_CASE("External overhang setting changes printable overhang treatment", "[Se
 {
     check_variant_on(overhang_fixture(), {{"make_overhang_printable_angle", 20.0}},
                      "make_overhang_printable", "0", "1");
+}
+
+TEST_CASE("Conical overhang angle limits control printable expansion",
+          "[SettingsVariance][SettingsReslice][SettingsResliceActivation][OverhangAngleVariance]")
+{
+    const TriangleMesh mesh = overhang_fixture();
+    check_variant_on(mesh, {{"make_overhang_printable", true}},
+                     "make_overhang_printable_angle", "0", "55");
+    check_variant_on(mesh, {{"make_overhang_printable_angle", 90.0}},
+                     "make_overhang_printable", "0", "1", false);
 }
 
 TEST_CASE("Extra bridge layer mode changes overhang processing", "[SettingsVariance][SettingsReslice][SettingsResliceActivation]")
@@ -4109,15 +4333,22 @@ struct LockedZagEvidence {
     double length = 0.0;
     double flow_length = 0.0;
     double perimeter_length = 0.0;
+    double min_width = std::numeric_limits<double>::infinity();
+    double max_width = 0.0;
+    double length_weighted_width = 0.0;
     bool finite = true;
 };
 
-DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth)
+DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, double lock_depth,
+                                     double skeleton_density = 10.0,
+                                     double skin_line_width = 0.4,
+                                     double skeleton_line_width = 0.4,
+                                     const std::string &nozzle_diameter = "0.4")
 {
     DynamicPrintConfig config = variance_config();
     config.set_deserialize_strict({
         {"wall_generator", "classic"},
-        {"nozzle_diameter", "0.4"},
+        {"nozzle_diameter", nozzle_diameter},
         {"resolution", 0.01},
         {"wall_loops", 2},
         {"top_shell_layers", 0},
@@ -4127,9 +4358,9 @@ DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, dou
         {"sparse_infill_density", "35%"},
         {"sparse_infill_pattern", "lockedzag"},
         {"sparse_infill_line_width", 0.4},
-        {"skin_infill_line_width", 0.4},
-        {"skeleton_infill_line_width", 0.4},
-        {"skeleton_infill_density", 10.0},
+        {"skin_infill_line_width", skin_line_width},
+        {"skeleton_infill_line_width", skeleton_line_width},
+        {"skeleton_infill_density", skeleton_density},
         {"minimum_sparse_infill_area", 0.0},
         {"skin_infill_density", skin_density},
         {"skin_infill_depth", skin_depth},
@@ -4146,9 +4377,8 @@ DynamicPrintConfig locked_zag_config(double skin_density, double skin_depth, dou
     return config;
 }
 
-LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth)
+LockedZagEvidence collect_locked_zag_evidence(const DynamicPrintConfig &config)
 {
-    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth);
     Print print;
     Model model;
     init_print({make_cube(20.0, 20.0, 1.6)}, print, model, config, nullptr, false);
@@ -4182,13 +4412,50 @@ LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double 
                 ++evidence.paths;
                 evidence.length += length;
                 evidence.flow_length += length * path.mm3_per_mm;
+                evidence.min_width = std::min(evidence.min_width, double(path.width));
+                evidence.max_width = std::max(evidence.max_width, double(path.width));
+                evidence.length_weighted_width += length * path.width;
             });
         }
     }
     evidence.finite = std::isfinite(evidence.length) &&
                        std::isfinite(evidence.flow_length) &&
-                       std::isfinite(evidence.perimeter_length);
+                       std::isfinite(evidence.perimeter_length) &&
+                       std::isfinite(evidence.length_weighted_width) &&
+                       (evidence.paths == 0 || (std::isfinite(evidence.min_width) && std::isfinite(evidence.max_width)));
     return evidence;
+}
+
+LockedZagEvidence run_locked_zag(double skin_density, double skin_depth, double lock_depth,
+                                  double skeleton_density = 10.0,
+                                  double skin_line_width = 0.4,
+                                  double skeleton_line_width = 0.4,
+                                  const std::string &nozzle_diameter = "0.4")
+{
+    const DynamicPrintConfig config = locked_zag_config(skin_density, skin_depth, lock_depth,
+                                                        skeleton_density, skin_line_width, skeleton_line_width,
+                                                        nozzle_diameter);
+    return collect_locked_zag_evidence(config);
+}
+
+DynamicPrintConfig locked_zag_width_config(const std::string &width_key,
+                                           const std::string &nozzle_diameter,
+                                           double width_value, bool percent)
+{
+    const bool skin_zone = width_key == "skin_infill_line_width";
+    DynamicPrintConfig config = locked_zag_config(25.0, skin_zone ? 100.0 : 0.0, 0.0,
+                                                  25.0, 0.4, 0.4, nozzle_diameter);
+    config.set_key_value(width_key, new ConfigOptionFloatOrPercent(width_value, percent));
+    return config;
+}
+
+LockedZagEvidence run_locked_zag_width(const std::string &width_key,
+                                       const std::string &nozzle_diameter,
+                                       double width_value, bool percent)
+{
+    const DynamicPrintConfig config = locked_zag_width_config(width_key, nozzle_diameter,
+                                                              width_value, percent);
+    return collect_locked_zag_evidence(config);
 }
 
 struct SparseComponentEvidence {
@@ -4442,6 +4709,199 @@ TEST_CASE("Locked-zag skin controls change distinct public fill properties",
     REQUIRE(max_locked.flow_length > locked.flow_length + 0.01);
     for (const auto &row : {dense, deep, default_locked, locked, max_locked})
         CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(base.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag skin density and depth exercise safe boundary points",
+          "[SettingsVariance][SolidSkinInfill][SkinInfillBoundary]")
+{
+    const auto density_low = infill_settings_contracts::run_locked_zag(1.0, 2.0, 0.0);
+    const auto density_default_depth = infill_settings_contracts::run_locked_zag(25.0, 2.0, 0.0);
+    const auto density_representative = infill_settings_contracts::run_locked_zag(70.0, 2.0, 0.0);
+    const auto density_max = infill_settings_contracts::run_locked_zag(100.0, 2.0, 0.0);
+    const auto depth_zero = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0);
+    const auto depth_max = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0);
+
+    for (const auto &row : {density_low, density_default_depth, density_representative,
+                            density_max, depth_zero, depth_max}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+    }
+
+    // The low positive sentinel keeps the generator away from its zero-density
+    // divide while exercising a skin density close to the registered minimum.
+    // Depth stays fixed so the density comparisons isolate the skin fill spacing.
+    REQUIRE(density_default_depth.length > density_low.length + 0.05);
+    REQUIRE(density_max.length > density_representative.length + 0.05);
+    REQUIRE(density_default_depth.flow_length > density_low.flow_length + 0.01);
+    REQUIRE(density_max.flow_length > density_representative.flow_length + 0.01);
+
+    // At depth zero the entire infill footprint stays in the lower-density
+    // skeleton; the maximum depth makes the same footprint skin fill.
+    REQUIRE(density_default_depth.length > depth_zero.length + 0.05);
+    REQUIRE(depth_max.length > density_default_depth.length + 0.05);
+    REQUIRE(density_default_depth.flow_length > depth_zero.flow_length + 0.01);
+    REQUIRE(depth_max.flow_length > density_default_depth.flow_length + 0.01);
+
+    for (const auto &row : {density_low, density_representative, density_max, depth_zero, depth_max})
+        CHECK_THAT(row.perimeter_length,
+                   Catch::Matchers::WithinAbs(density_default_depth.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag zero skin density emits no skin paths after validation",
+          "[SettingsVariance][LockedZagZeroDensity]")
+{
+    const auto zero = infill_settings_contracts::run_locked_zag(0.0, 100.0, 0.0, 25.0, 0.4, 0.4);
+    REQUIRE(zero.finite);
+    CHECK(zero.paths == 0);
+    CHECK(zero.perimeter_length > 0.0);
+}
+
+TEST_CASE("Locked-zag zero skeleton density emits no skeleton paths after validation",
+          "[SettingsVariance][LockedZagZeroDensity]")
+{
+    const auto zero = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 0.0, 0.4, 0.4);
+    REQUIRE(zero.finite);
+    CHECK(zero.paths == 0);
+    CHECK(zero.perimeter_length > 0.0);
+}
+
+TEST_CASE("Locked-zag skeleton density boundaries change isolated sparse fill",
+          "[SettingsVariance][LockedZagDensityBoundary]")
+{
+    const auto minimum = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 1.0);
+    const auto nominal = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0);
+    const auto maximum = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 100.0);
+
+    for (const auto &row : {minimum, nominal, maximum}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+    }
+
+    // Zero skin depth leaves this footprint in the skeleton. Its registered
+    // 1%, 25%, and 100% densities must change the sparse-fill spacing.
+    CHECK(nominal.length > minimum.length + 0.05);
+    CHECK(maximum.length > nominal.length + 0.05);
+    CHECK(nominal.flow_length > minimum.flow_length + 0.01);
+    CHECK(maximum.flow_length > nominal.flow_length + 0.01);
+    CHECK_THAT(minimum.perimeter_length, Catch::Matchers::WithinAbs(nominal.perimeter_length, 0.01));
+    CHECK_THAT(maximum.perimeter_length, Catch::Matchers::WithinAbs(nominal.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag skin and skeleton line width boundaries reach their isolated paths",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const auto skin_auto = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.0, 0.4);
+    const auto skin_nominal = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.4, 0.4);
+    const auto skin_wide = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0, 25.0, 0.6, 0.4);
+    const auto skeleton_auto = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.0);
+    const auto skeleton_nominal = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.4);
+    const auto skeleton_wide = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0, 25.0, 0.4, 0.6);
+
+    for (const auto &row : {skin_auto, skin_nominal, skin_wide,
+                            skeleton_auto, skeleton_nominal, skeleton_wide}) {
+        REQUIRE(row.finite);
+        REQUIRE(row.paths > 0);
+        REQUIRE(row.length > 0.0);
+        REQUIRE(row.flow_length > 0.0);
+        REQUIRE(row.perimeter_length > 0.0);
+        CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(row.max_width, 0.0001));
+    }
+
+    // With a 0.4 mm nozzle, zero requests the frInfill default (1.125 * nozzle).
+    // Positive absolute widths are carried to the selected zone's extrusion paths.
+    CHECK_THAT(skin_auto.min_width, Catch::Matchers::WithinAbs(0.45, 0.001));
+    CHECK_THAT(skin_nominal.min_width, Catch::Matchers::WithinAbs(0.4, 0.001));
+    CHECK_THAT(skin_wide.min_width, Catch::Matchers::WithinAbs(0.6, 0.001));
+    CHECK_THAT(skeleton_auto.min_width, Catch::Matchers::WithinAbs(0.45, 0.001));
+    CHECK_THAT(skeleton_nominal.min_width, Catch::Matchers::WithinAbs(0.4, 0.001));
+    CHECK_THAT(skeleton_wide.min_width, Catch::Matchers::WithinAbs(0.6, 0.001));
+
+    for (const auto &row : {skin_nominal, skin_wide, skeleton_auto, skeleton_nominal, skeleton_wide})
+        CHECK_THAT(row.perimeter_length, Catch::Matchers::WithinAbs(skin_auto.perimeter_length, 0.01));
+}
+
+TEST_CASE("Locked-zag percent widths scale with the selected nozzle",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const std::array<std::pair<const char *, double>, 2> nozzles{{
+        {"0.4", 0.4}, {"0.6", 0.6}
+    }};
+    for (const auto &[nozzle_text, nozzle] : nozzles) {
+        for (const char *width_key : {"skin_infill_line_width", "skeleton_infill_line_width"}) {
+            CAPTURE(width_key, nozzle);
+            const auto row = infill_settings_contracts::run_locked_zag_width(width_key, nozzle_text, 125.0, true);
+            REQUIRE(row.finite);
+            REQUIRE(row.paths > 0);
+            REQUIRE(row.length > 0.0);
+            REQUIRE(row.flow_length > 0.0);
+            CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(1.25 * nozzle, 0.001));
+            CHECK_THAT(row.max_width, Catch::Matchers::WithinAbs(1.25 * nozzle, 0.001));
+            CHECK(row.perimeter_length > 0.0);
+        }
+    }
+
+    // Absolute zero is the auto sentinel. At the second nozzle size it still resolves
+    // through the infill-role auto width of 1.125 times that nozzle.
+    const auto skin_auto_06 = infill_settings_contracts::run_locked_zag(25.0, 100.0, 0.0,
+                                                                        25.0, 0.0, 0.4, "0.6");
+    const auto skeleton_auto_06 = infill_settings_contracts::run_locked_zag(25.0, 0.0, 0.0,
+                                                                            25.0, 0.4, 0.0, "0.6");
+    REQUIRE(skin_auto_06.paths > 0);
+    REQUIRE(skeleton_auto_06.paths > 0);
+    CHECK_THAT(skin_auto_06.min_width, Catch::Matchers::WithinAbs(0.675, 0.001));
+    CHECK_THAT(skeleton_auto_06.min_width, Catch::Matchers::WithinAbs(0.675, 0.001));
+}
+
+TEST_CASE("Locked-zag absolute and percent width caps are inclusive and reach paths",
+          "[SettingsVariance][LockedZagLineWidthBoundary]")
+{
+    const std::array<std::pair<const char *, double>, 2> nozzles{{
+        {"0.4", 0.4}, {"0.6", 0.6}
+    }};
+    for (const auto &[nozzle_text, nozzle] : nozzles) {
+        for (const char *width_key : {"skin_infill_line_width", "skeleton_infill_line_width"}) {
+            CAPTURE(width_key, nozzle);
+
+            // Print::validate permits exactly five times the nozzle diameter. Exercise both
+            // accepted representations through real selected-zone paths at this exact cap.
+            for (const auto &[width_value, percent] : {std::pair<double, bool>{500.0, true},
+                                                        std::pair<double, bool>{5.0 * nozzle, false}}) {
+                CAPTURE(width_value, percent);
+                const auto row = infill_settings_contracts::run_locked_zag_width(width_key, nozzle_text,
+                                                                                  width_value, percent);
+                REQUIRE(row.finite);
+                REQUIRE(row.paths > 0);
+                REQUIRE(row.length > 0.0);
+                REQUIRE(row.flow_length > 0.0);
+                CHECK_THAT(row.min_width, Catch::Matchers::WithinAbs(5.0 * nozzle, 0.001));
+                CHECK_THAT(row.max_width, Catch::Matchers::WithinAbs(5.0 * nozzle, 0.001));
+            }
+
+            // The first value beyond the cap is validation-only; never slice it. Check
+            // percent and absolute encodings independently for the selected setting key.
+            for (const auto &[width_value, percent] : {std::pair<double, bool>{501.0, true},
+                                                        std::pair<double, bool>{5.01 * nozzle, false}}) {
+                CAPTURE(width_value, percent);
+                const DynamicPrintConfig invalid_config =
+                    infill_settings_contracts::locked_zag_width_config(width_key, nozzle_text,
+                                                                        width_value, percent);
+                Print invalid_print;
+                Model model;
+                init_print({make_cube(20.0, 20.0, 1.6)}, invalid_print, model, invalid_config, nullptr, false);
+                const StringObjectException validation = invalid_print.validate();
+                INFO(validation.string);
+                CHECK_FALSE(validation.string.empty());
+                CHECK(validation.opt_key == width_key);
+                CHECK_FALSE(validation.is_warning);
+            }
+        }
+    }
 }
 
 TEST_CASE("Minimum sparse area promotes only the analytically small component",
