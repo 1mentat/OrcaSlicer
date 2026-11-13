@@ -1369,6 +1369,66 @@ std::set<double> lift_height_deltas(const std::string &output, const DynamicPrin
     return heights;
 }
 
+TEST_CASE("Nullable filament lift enforcement inherits and selects surface policies",
+          "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
+{
+    struct PolicyCase {
+        const char *label;
+        const char *filament_policy;
+        const char *machine_policy;
+    };
+    const std::vector<PolicyCase> cases{
+        {"nil inherits Bottom Only", "nil", "Bottom Only"},
+        {"All Surfaces", "All Surfaces", "Bottom Only"},
+        {"Top Only", "Top Only", "Bottom Only"},
+        {"Bottom Only", "Bottom Only", "Top Only"},
+        {"Top and Bottom", "Top and Bottom", "All Surfaces"},
+    };
+
+    std::map<std::string, std::set<double>> lifts_by_policy;
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const PolicyCase &test : cases) {
+        CAPTURE(test.label, test.filament_policy, test.machine_policy);
+        DynamicPrintConfig config = filament_retraction_config(
+            "filament_retract_lift_enforce", test.filament_policy,
+            "retract_lift_enforce", test.machine_policy);
+        const std::string output = bounded_retraction_export(short_cube(1.0), config);
+        require_layer_marker_count(output, config, 5);
+
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+        lifts_by_policy.emplace(test.label, retraction_stats(output, config).lift_zs);
+    }
+
+    const std::set<double> &inherited = lifts_by_policy.at("nil inherits Bottom Only");
+    const std::set<double> &all_surfaces = lifts_by_policy.at("All Surfaces");
+    const std::set<double> &top_only = lifts_by_policy.at("Top Only");
+    const std::set<double> &bottom_only = lifts_by_policy.at("Bottom Only");
+    const std::set<double> &top_and_bottom = lifts_by_policy.at("Top and Bottom");
+    REQUIRE_FALSE(all_surfaces.empty());
+    REQUIRE_FALSE(top_only.empty());
+    REQUIRE_FALSE(bottom_only.empty());
+    CHECK(inherited == bottom_only);
+
+    for (const double z : top_only)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(1.4, 0.001));
+    for (const double z : bottom_only)
+        CHECK_THAT(z, Catch::Matchers::WithinAbs(0.6, 0.001));
+
+    std::set<double> top_bottom_union = top_only;
+    top_bottom_union.insert(bottom_only.begin(), bottom_only.end());
+    CHECK(top_and_bottom == top_bottom_union);
+    CHECK(std::includes(all_surfaces.begin(), all_surfaces.end(), top_only.begin(), top_only.end()));
+    CHECK(std::includes(all_surfaces.begin(), all_surfaces.end(), bottom_only.begin(), bottom_only.end()));
+    CHECK(all_surfaces.size() > top_bottom_union.size());
+}
+
 TEST_CASE("Zero machine and filament retraction lengths suppress emitted retracts", "[Wipe][FilamentRetractionOverrides][SettingsRetractionVariance][Pipeline]")
 {
     struct LengthCase {
@@ -1821,6 +1881,201 @@ TEST_CASE("Nullable filament overrides update applied retraction settings across
     REQUIRE(to_explicit != PrintBase::APPLY_STATUS_UNCHANGED);
     REQUIRE(print.config().retraction_length.values.size() == 1);
     CHECK_THAT(print.config().retraction_length.values.front(), Catch::Matchers::WithinAbs(1.25, 1e-6));
+}
+
+
+DynamicPrintConfig filament_wipe_override_config(const char *filament_key, const char *filament_value,
+                                                 const char *machine_key, const char *machine_value)
+{
+    DynamicPrintConfig config = nullable_retraction_config();
+    config.set_deserialize_strict({
+        {"top_shell_layers", "0"},
+        {"bottom_shell_layers", "0"},
+        {"sparse_infill_density", "0%"},
+        {"wipe", "1"},
+        {"wipe_distance", "2"},
+        {"wipe_speed", "10"},
+        {"retraction_speed", "30"},
+        {"retract_before_wipe", "0%"},
+        {"retract_after_wipe", "0%"},
+    });
+    config.set_deserialize_strict(machine_key, machine_value);
+    config.set_deserialize_strict(filament_key, filament_value);
+    const ConfigOption *override_option = config.option(filament_key, true);
+    REQUIRE(override_option != nullptr);
+    if (std::string(filament_value) == "nil")
+        REQUIRE(override_option->is_nil());
+    else
+        REQUIRE_FALSE(override_option->is_nil());
+    return config;
+}
+
+TEST_CASE("Nullable filament wipe inherits and overrides both boolean states",
+          "[Wipe][FilamentWipeOverrides][Pipeline]")
+{
+    struct WipeCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        bool expected;
+    };
+    const std::vector<WipeCase> cases{
+        {"nil over disabled machine wipe", "nil", "0", false},
+        {"nil over enabled machine wipe", "nil", "1", true},
+        {"explicit false over enabled machine wipe", "0", "1", false},
+        {"explicit true over disabled machine wipe", "1", "0", true},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const WipeCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_wipe_override_config(
+            "filament_wipe", test.filament_value, "wipe", test.machine_value);
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+
+        const WipeStats stats = first_wipe_stats(output, config);
+        CHECK(stats.saw_wipe == test.expected);
+        if (test.expected) {
+            CHECK_THAT(stats.path, Catch::Matchers::WithinAbs(2., 0.01));
+            CHECK_THAT(stats.before, Catch::Matchers::WithinAbs(0., 0.001));
+            CHECK_THAT(stats.during, Catch::Matchers::WithinAbs(0.8, 0.001));
+            CHECK_THAT(stats.after, Catch::Matchers::WithinAbs(0., 0.001));
+        } else {
+            CHECK_THAT(stats.path, Catch::Matchers::WithinAbs(0., 0.001));
+        }
+    }
+}
+
+TEST_CASE("Nullable filament wipe distance inherits and zero disables emitted wiping",
+          "[Wipe][FilamentWipeOverrides][Pipeline]")
+{
+    struct DistanceCase {
+        const char *label;
+        const char *filament_value;
+        double expected_path;
+        bool expected_wipe;
+    };
+    const std::vector<DistanceCase> cases{
+        {"nil inherits 2 mm machine path", "nil", 2., true},
+        {"explicit 0.75 mm replaces machine path", "0.75", 0.75, true},
+        {"explicit zero disables machine path", "0", 0., false},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const DistanceCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_wipe_override_config(
+            "filament_wipe_distance", test.filament_value, "wipe_distance", "2");
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+
+        const WipeStats stats = first_wipe_stats(output, config);
+        CHECK(stats.saw_wipe == test.expected_wipe);
+        CHECK_THAT(stats.path, Catch::Matchers::WithinAbs(test.expected_path, 0.01));
+        if (test.expected_wipe) {
+            CHECK_THAT(stats.before, Catch::Matchers::WithinAbs(0., 0.001));
+            CHECK_THAT(stats.during, Catch::Matchers::WithinAbs(0.8, 0.001));
+            CHECK_THAT(stats.after, Catch::Matchers::WithinAbs(0., 0.001));
+            CHECK_THAT(stats.feedrate, Catch::Matchers::WithinAbs(10. * 60., 0.01));
+        }
+    }
+}
+
+TEST_CASE("Nullable filament retract-before-wipe inherits and overrides percentage endpoints",
+          "[Wipe][FilamentWipeOverrides][Pipeline]")
+{
+    struct PercentCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        double expected_before;
+        double expected_during;
+    };
+    const std::vector<PercentCase> cases{
+        {"nil inherits zero machine percent", "nil", "0%", 0., 0.8},
+        {"explicit 100 percent over machine zero", "100%", "0%", 0.8, 0.},
+        {"explicit zero over machine 100 percent", "0%", "100%", 0., 0.8},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const PercentCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_wipe_override_config(
+            "filament_retract_before_wipe", test.filament_value,
+            "retract_before_wipe", test.machine_value);
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+
+        const WipeStats stats = first_wipe_stats(output, config);
+        REQUIRE(stats.saw_wipe);
+        CHECK_THAT(stats.before, Catch::Matchers::WithinAbs(test.expected_before, 0.001));
+        CHECK_THAT(stats.during, Catch::Matchers::WithinAbs(test.expected_during, 0.001));
+        CHECK_THAT(stats.after, Catch::Matchers::WithinAbs(0., 0.001));
+        CHECK_THAT(stats.before + stats.during + stats.after, Catch::Matchers::WithinAbs(0.8, 0.001));
+    }
+}
+
+TEST_CASE("Nullable filament retract-after-wipe inherits and overrides percentage endpoints",
+          "[Wipe][FilamentWipeOverrides][Pipeline]")
+{
+    struct PercentCase {
+        const char *label;
+        const char *filament_value;
+        const char *machine_value;
+        double expected_during;
+        double expected_after;
+    };
+    const std::vector<PercentCase> cases{
+        {"nil inherits zero machine percent", "nil", "0%", 0.8, 0.},
+        {"explicit 100 percent over machine zero", "100%", "0%", 0., 0.8},
+        {"explicit zero over machine 100 percent", "0%", "100%", 0.8, 0.},
+    };
+    DepositionStats baseline;
+    bool have_baseline = false;
+    for (const PercentCase &test : cases) {
+        CAPTURE(test.label);
+        DynamicPrintConfig config = filament_wipe_override_config(
+            "filament_retract_after_wipe", test.filament_value,
+            "retract_after_wipe", test.machine_value);
+        const std::string output = bounded_retraction_export(short_cube(), config);
+        require_layer_marker_count(output, config, 5);
+        const DepositionStats deposition = deposition_stats(output, config);
+        if (!have_baseline) {
+            baseline = deposition;
+            have_baseline = true;
+        } else {
+            require_same_deposition(baseline, deposition);
+        }
+
+        const WipeStats stats = first_wipe_stats(output, config);
+        REQUIRE(stats.saw_wipe);
+        CHECK_THAT(stats.before, Catch::Matchers::WithinAbs(0., 0.001));
+        CHECK_THAT(stats.during, Catch::Matchers::WithinAbs(test.expected_during, 0.001));
+        CHECK_THAT(stats.after, Catch::Matchers::WithinAbs(test.expected_after, 0.001));
+        CHECK_THAT(stats.before + stats.during + stats.after, Catch::Matchers::WithinAbs(0.8, 0.001));
+    }
 }
 
 
