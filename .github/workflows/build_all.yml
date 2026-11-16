@@ -380,6 +380,59 @@ jobs:
     - name: Pack deps/ for the Flatpak manifest
       run: ./scripts/flatpak/make_deps_tar.sh
       shell: bash
+    # The Flatpak system installation lives in the container's overlay layer; on some hosted runner
+    # image revisions (observed 20261111.127.1) `flatpak update` of the system runtimes fails there with
+    # "Invalid cross-device link". Place a verified, job-private copy of the pinned image's installation on
+    # the runner's bind-mounted work directory and select it with the documented FLATPAK_SYSTEM_DIR and
+    # FLATPAK_SYSTEM_CACHE_DIR (flatpak 1.18.1) so the action and every flatpak-builder subprocess use it.
+    # Same image, SDK, remotes and signature keys; the copy is checked fail-closed and removed after the build.
+    # The historical cause of the failure is not proven; this is a mitigation.
+    - name: Place the Flatpak system installation on the work directory (x86_64)
+      if: ${{ matrix.variant.arch == 'x86_64' }}
+      timeout-minutes: 10
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$RUNNER_TEMP" in /__w/_temp) ;; *) echo "unexpected RUNNER_TEMP: $RUNNER_TEMP" >&2; exit 1 ;; esac
+        root="$RUNNER_TEMP/flatpak-system-installation"
+        [ ! -e "$root" ] || { echo "stale directory $root" >&2; exit 1; }
+        [ ! -L /var/lib/flatpak ] || { echo "/var/lib/flatpak is a symlink" >&2; exit 1; }
+        need_mb=$(du -sx --block-size=1M /var/lib/flatpak | cut -f1)
+        avail_mb=$(df -Pm "$RUNNER_TEMP" | awk 'NR==2{print $4}')
+        echo "installation ${need_mb} MiB; free ${avail_mb} MiB"
+        [ "$avail_mb" -ge $(( need_mb * 2 + 8192 )) ] || { echo "insufficient free space for the private installation" >&2; exit 1; }
+        mkdir -m 700 "$root"
+        : > "$root/.owner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        timeout --kill-after=15 480 cp -a /var/lib/flatpak "$root/system"
+        mkdir -m 700 "$root/cache"
+        state() { flatpak --system list --runtime -d --columns=ref,origin,commit | sort; }
+        remotes() { flatpak remotes --system -d | sort; }
+        orig_state="$(state)"; orig_remotes="$(remotes)"
+        [ -n "$orig_state" ] || { echo "no installed runtimes found" >&2; exit 1; }
+        new_state="$(FLATPAK_SYSTEM_DIR="$root/system" FLATPAK_SYSTEM_CACHE_DIR="$root/cache" state)"
+        new_remotes="$(FLATPAK_SYSTEM_DIR="$root/system" FLATPAK_SYSTEM_CACHE_DIR="$root/cache" remotes)"
+        [ "$orig_state" = "$new_state" ] || { echo "installed refs or commits differ in the copy" >&2; exit 1; }
+        [ "$orig_remotes" = "$new_remotes" ] || { echo "remotes differ in the copy" >&2; exit 1; }
+        cmp /var/lib/flatpak/repo/config "$root/system/repo/config"
+        for key in /var/lib/flatpak/repo/*.trustedkeys.gpg; do
+          [ -e "$key" ] || continue
+          cmp "$key" "$root/system/repo/${key##*/}"
+        done
+        loc="$(FLATPAK_SYSTEM_DIR="$root/system" FLATPAK_SYSTEM_CACHE_DIR="$root/cache" flatpak info --system --show-location org.gnome.Sdk/x86_64/50)"
+        case "$loc" in "$root"/system/*) ;; *) echo "the selected installation is not the private copy: $loc" >&2; exit 1 ;; esac
+        cand_dev=$(stat -L -c %d -- "$loc"); orig_dev=$(stat -L -c %d /var/lib/flatpak)
+        [ -n "$cand_dev" ] && [ -n "$orig_dev" ] && [ "$cand_dev" != "$orig_dev" ] || { echo "the private installation is on the same device as /var/lib/flatpak" >&2; exit 1; }
+        echo "deployment location: $loc (device $cand_dev, original device $orig_dev)"
+        echo "FLATPAK_SYSTEM_DIR=$root/system" >> "$GITHUB_ENV"
+        echo "FLATPAK_SYSTEM_CACHE_DIR=$root/cache" >> "$GITHUB_ENV"
+    - name: Confirm the Flatpak steps see the private installation (x86_64)
+      if: ${{ matrix.variant.arch == 'x86_64' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "FLATPAK_SYSTEM_DIR=$FLATPAK_SYSTEM_DIR"
+        flatpak --installations
+        case "$(flatpak info --system --show-location org.gnome.Sdk/x86_64/50)" in "$FLATPAK_SYSTEM_DIR"/*) echo "selected installation confirmed" ;; *) echo "later steps do not see the private installation" >&2; exit 1 ;; esac
     - uses: flatpak/flatpak-github-actions/flatpak-builder@master
       with:
         bundle: OrcaSlicer-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
@@ -391,6 +444,18 @@ jobs:
         arch: ${{ matrix.variant.arch }}
         upload-artifact: false
         keep-build-dirs: true
+    - name: Remove the job-private Flatpak system installation (x86_64)
+      if: ${{ always() && matrix.variant.arch == 'x86_64' }}
+      timeout-minutes: 3
+      shell: bash
+      run: |
+        set +e
+        root="$RUNNER_TEMP/flatpak-system-installation"
+        if [ "$RUNNER_TEMP" = "/__w/_temp" ] && [ -d "$root" ] && [ ! -L "$root" ] && [ -e "$root/.owner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]; then
+          if rm -rf --one-file-system -- "$root"; then echo "removed $root"; else echo "::warning::failed to remove $root"; fi
+        else
+          echo "nothing owned by this run to remove"
+        fi
     # The build has just touched everything it can use, so an object untouched
     # for a week is dead, usually orphaned by a flag change.
     - name: Compiler cache statistics
