@@ -841,6 +841,17 @@ jobs:
           asset_content_type: application/octet-stream
           max_releases: 1
 
+      # Focused Catch executables are EXCLUDE_FROM_ALL, so nothing above links
+      # them. Build each (reusing the production libs in build/), run
+      # `--list-tests` to prove it starts, then delete only what this step made.
+      # Runs after packaging, uploads and deploys, so it cannot alter or block them;
+      # a failure still fails the leg (cache steps below use always()).
+      - name: Link focused test targets
+        if: runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
+        timeout-minutes: 60
+        shell: bash
+        run: python3 scripts/focused_targets.py build --build-dir build --config Release --jobs 2
+
       # The build has just touched everything it can use, so an object
       # untouched for a week is dead, usually orphaned by a flag change.
       - name: Compiler cache statistics
