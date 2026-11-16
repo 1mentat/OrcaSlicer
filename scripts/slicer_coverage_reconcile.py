@@ -358,8 +358,8 @@ def _capture_stage(label: str, argv: list[str], out: Path, cwd: Path,
         stdout = stdout.decode("utf-8", "replace")
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
-    stdout_path.write_text(stdout, encoding="utf-8")
-    stderr_path.write_text(stderr, encoding="utf-8")
+    stdout_path.write_bytes(stdout.encode("utf-8"))
+    stderr_path.write_bytes(stderr.encode("utf-8"))
     timings[label] = {
         "elapsed_wall_seconds": time.monotonic() - started,
         "returncode": code,
