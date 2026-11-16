@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Bounded painted-mesh segmentation mutants checked by real cube partition and max-width contracts.",
+  "mutants": [
+    {
+      "id": "painted-segmentation-max-width-beam-guard",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "if ((segmentation_max_width > 0.f || segmentation_interlocking_depth > 0.f) && !segmentation_interlocking_beam)",
+      "new": "if ((segmentation_max_width > 0.f || segmentation_interlocking_depth > 0.f) && segmentation_interlocking_beam)",
+      "description": "Invert the interlocking-beam guard so bounded segmentation is skipped for the ordinary path and applied only to beam mode.",
+      "test_filter": "PaintedSegmentation"
+    },
+    {
+      "id": "painted-segmentation-region-count",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "segmented_regions_merged.assign(num_layers, std::vector<ExPolygons>(num_facets_states - 1));",
+      "new": "segmented_regions_merged.assign(num_layers, std::vector<ExPolygons>(num_facets_states));",
+      "description": "Expose the default unpainted state in the returned painted-region vector instead of returning one slot per painted extruder.",
+      "test_filter": "PaintedSegmentation"
+    }
+  ]
+}

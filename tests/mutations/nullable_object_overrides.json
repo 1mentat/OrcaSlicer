@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Physical nullable object-override inheritance through Print processing.",
+  "mutants": [
+    {
+      "id": "print-region-object-nil-bypasses-variant-merge",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                            ConfigOptionVectorBase* opt_vec_src = static_cast<ConfigOptionVectorBase*>(my_opt);\n                            const ConfigOptionVectorBase* opt_vec_dest = static_cast<const ConfigOptionVectorBase*>(it->second.get());\n                            set_variant_override(*opt_vec_src, *opt_vec_dest, variant_index);",
+      "new": "                            my_opt->set(it->second.get());",
+      "test_filter": "Nil object overrides preserve inherited curled-wall gates",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Raw object-vector assignment bypasses nil-aware variant inheritance and enables curled-wall estimation when the inherited gate is false."
+    }
+  ]
+}

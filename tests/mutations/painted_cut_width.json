@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Painted-region width limits, alternating interlocking depth, and beam bypass.",
+  "mutants": [
+    {
+      "id": "painted-cut-depth-parity-inverted",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "const float  region_cut_width       = ((layer_idx % 2 == 0) && (interlocking_depth != 0.f)) ? interlocking_depth : cut_width;",
+      "new": "const float  region_cut_width       = ((layer_idx % 2 == 0) && (interlocking_depth == 0.f)) ? interlocking_depth : cut_width;",
+      "description": "Replace the nonzero-depth parity guard with a zero-depth guard; a valid configured depth then no longer trims even layers, while zero-depth becomes alternating.",
+      "test_filter": "PaintedCutWidth"
+    },
+    {
+      "id": "painted-wrapper-depth-dropped",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);",
+      "new": "return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, 0.f, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);",
+      "description": "Drop the configured interlocking depth at the public wrapper boundary; valid-depth parity must remain observable through the wrapper.",
+      "test_filter": "PaintedCutWidth"
+    },
+    {
+      "id": "painted-wrapper-beam-config-inverted",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "const bool   interlocking_beam  = print_object.config().interlocking_beam.value;",
+      "new": "const bool   interlocking_beam  = !print_object.config().interlocking_beam.value;",
+      "description": "Invert the wrapper beam setting; enabled beam mode must bypass the ordinary cut and match the unbounded result.",
+      "test_filter": "PaintedCutWidth"
+    },
+    {
+      "id": "painted-wrapper-max-width-dropped",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "const float  max_width          = float(print_object.config().mmu_segmented_region_max_width.value);",
+      "new": "const float  max_width          = 0.f;",
+      "description": "Drop the configured maximum width at the wrapper boundary; valid-depth odd layers must remain strictly smaller than their sliced source area.",
+      "test_filter": "PaintedCutWidth"
+    }
+  ]
+}

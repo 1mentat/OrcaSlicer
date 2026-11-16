@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Nullable object speed overrides inherit and restore parent feeds across nozzle variants.",
+  "mutants": [
+    {
+      "id": "object-speed-nullable-nil-overwrites-inherited-slot",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "if (src_idx < other->values.size() && !other->is_nil(size_t(dest_index[i]) * size_t(stride)))",
+      "new": "if (src_idx < other->values.size())",
+      "description": "Make the nil guard ineffective; nil initial/final states must still match the fresh parent after the same-Print transition for all four roles in both fixtures.",
+      "test_filter": "ObjectSpeedNullable"
+    },
+    {
+      "id": "object-speed-single-explicit-override-not-broadcast",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "if (source.size() == 1 && !source.is_nil(0))",
+      "new": "if (source.size() > 1 && !source.is_nil(0))",
+      "description": "Disable one-value broadcast; the two-extruder High Flow rows must still match the independent fresh explicit control in the transition.",
+      "test_filter": "ObjectSpeedNullable"
+    }
+  ]
+}
