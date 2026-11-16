@@ -143,23 +143,27 @@ it supports only CTest registrations that invoke one Catch executable with exact
 test name; any other registration fails while the selection is discovered, before any
 test runs. The option is rejected without `--backend gcov`.
 `--gcov-catch-batch-timeout SECONDS` bounds each Catch process (one per executable and
-working directory, or per FFF shard; default: `--timeout`). `--gcov-catch-batch-fff-shards 2` splits the single-CPU
-`fff_print_tests` cohort into two concurrent shards and needs a matching
-`gcov-tool`, found beside `--gcov` or on `PATH`, or given with `--gcov-tool` (which the
-parser accepts only with two shards). The profile directory must not already exist; the
-default, `OUT/gcov-data`, is inside the payload because the runner injects `--out`:
+working directory, or per FFF shard; default: `--timeout`).
+`--gcov-catch-batch-fff-shards 2` splits the single-CPU `fff_print_tests` cohort into two
+concurrent shards and needs a matching `gcov-tool`, found beside `--gcov` or on `PATH`,
+or given with `--gcov-tool` (which the parser accepts only with two shards). The profile
+directory must not already exist; the default, `OUT/gcov-data`, is inside the payload
+because the runner injects `--out`. The gcov backend, with or without batching, needs
+exactly the five test executables (`libslic3r_tests`, `fff_print_tests`,
+`sla_print_tests`, `libnest2d_tests`, `filament_group_tests`) as `--object`, and seven
+`--manifest` files, one per target: `libslic3r`, `libslic3r_cgal` and those five. The
+example abbreviates both lists:
 
 ```sh
 python scripts/validation_runner.py ...runner options as above... -- \
   python scripts/slicer_coverage.py run --backend gcov --gcov-catch-batch \
-  --root /absolute/source/checkout --object build/tests/libslic3r/libslic3r_tests \
+  --root /absolute/source/checkout --object build/tests/libslic3r/libslic3r_tests ... --manifest ... \
   --test-command 'ctest --test-dir build/tests -C Release -LE "NotWorking|RequiresApp" --no-tests=error' ...
 ```
 
 ### PR-validation evidence gates
 
-`slicer_pr_validation.py` applies, by default, a test-only harness overlay to each PR head and to its
-base. All of these options keep their meaning under the runner; its `--output-dir`,
+`slicer_pr_validation.py` applies, by default, a test-only harness overlay to each PR head and to its base. All of these options keep their meaning under the runner; its `--output-dir`,
 `--build-dir` and worktree-reuse rules above still apply.
 
 - **Tracked-diff binding.** The tracked state of a worktree is hashed from
@@ -179,7 +183,7 @@ base. All of these options keep their meaning under the runner; its `--output-di
   must still match. The conflict paths and stages seen in the index must equal the
   manifest exactly, the resolved bytes must hash to the pinned blob, and no unmerged
   path may remain; otherwise the run reports `overlay_resolution_invalid`. A base, head
-and patch with no row reports `overlay_resolution_missing`.
+  and patch with no row reports `overlay_resolution_missing`.
 - **`--minimum-tests N`** (default 1, must be positive). A run is comparable evidence
   only when its JUnit testcase count is at least `N`; otherwise a passing or failing
   result becomes `test_evidence_incomplete`. Infrastructure failures are not masked.
