@@ -381,7 +381,7 @@ TEST_CASE("Nearest-color IDs preserve first occurrence on an exact tie", "[Color
 }
 
 TEST_CASE("CIEDE2000 public RGB APIs match the independent reference fixtures",
-          "[ColorUtils]")
+          "[ColorUtils][ColorUtilsExtended][ColorUtilsCIEDEReference]")
 {
     // Expected values follow Sharma, Wu, and Dalal (2005),
     // https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/ciede2000noteCRNA.pdf
@@ -736,7 +736,7 @@ TEST_CASE("Mesh clustering rejects empty and mismatched face inputs without muta
 }
 
 TEST_CASE("Mesh clustering propagates ambiguous faces through connected and disconnected regions",
-          "[ColorUtils]")
+          "[ColorUtils][ColorUtilsExtended][ColorUtilsFlood]")
 {
     const Color gray{{128, 128, 128}};
     const Color blue_leaning{{140, 140, 180}};
