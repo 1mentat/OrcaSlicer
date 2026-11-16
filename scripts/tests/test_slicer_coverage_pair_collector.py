@@ -214,7 +214,7 @@ class PairCollectorTests(unittest.TestCase):
         self.assertEqual(report["lcov_union_line_audit"]["status"], "pass")
         self.assertEqual(report["integrity_status"], "error")
         self.assertEqual(report["integrity_failures"]["source_line_bounds"], [{
-            "source": str(self.source.resolve()), "reason": "line_outside_source", "line_count": 2,
+            "source": sc._path_key(self.source), "reason": "line_outside_source", "line_count": 2,
             "invalid_identity_count": 1, "line_samples": [4056],
         }])
         self.assertIn("DA:4056,0", (self.root / "report/coverage-union.info").read_text())
@@ -264,7 +264,7 @@ class PairCollectorTests(unittest.TestCase):
         audit = report["lcov_union_line_audit"]
         self.assertEqual(audit["status"], "error")
         self.assertEqual(audit["missing_identity_count"], 2)
-        self.assertTrue(all(item["source"] == str(self.source.resolve())
+        self.assertTrue(all(item["source"] == sc._path_key(self.source)
                             for item in audit["missing_identity_samples"]))
 
     def test_union_missing_da_line_fails_identity_audit(self):
@@ -275,7 +275,7 @@ class PairCollectorTests(unittest.TestCase):
         self.assertEqual(audit["status"], "error")
         self.assertEqual(audit["missing_identity_count"], 1)
         self.assertEqual(audit["missing_identity_samples"], [
-            {"source": str(self.source.resolve()), "line": 2},
+            {"source": sc._path_key(self.source), "line": 2},
         ])
 
     def test_union_unexpected_da_line_fails_identity_audit(self):
@@ -286,7 +286,7 @@ class PairCollectorTests(unittest.TestCase):
         self.assertEqual(audit["status"], "error")
         self.assertEqual(audit["unexpected_identity_count"], 1)
         self.assertEqual(audit["unexpected_identity_samples"], [
-            {"source": str(self.source.resolve()), "line": 3},
+            {"source": sc._path_key(self.source), "line": 3},
         ])
 
     def test_mapping_free_header_is_reported_without_failing_integrity(self):
@@ -294,7 +294,7 @@ class PairCollectorTests(unittest.TestCase):
         self.assertEqual(status, 0)
         report = json.loads((self.root / "report" / "coverage-report.json").read_text())
         self.assertEqual(report["status"], "observed")
-        self.assertEqual(report["mapping_free_headers"], [str(self.header.resolve())])
+        self.assertEqual(report["mapping_free_headers"], [sc._path_key(self.header)])
         self.assertNotIn("mapping_free_headers", report["integrity_failures"])
 
     def test_any_llvm_profile_mapping_warning_fails_closed_but_keeps_lcov_metric(self):
