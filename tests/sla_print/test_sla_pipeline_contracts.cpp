@@ -4064,3 +4064,215 @@ TEST_CASE("SLA support base safety distance changes public support routing",
     CHECK(std::abs(representative.support_max_x_mm - defaults.support_max_x_mm) > 0.5);
     CHECK(std::abs(maximum.support_max_x_mm - representative.support_max_x_mm) > 0.5);
 }
+
+TEST_CASE("SLA completed statistics follow tilt and area-fill changes on reapply",
+          "[SLAPrint][SLALifecycle][SLAStatisticsApply]")
+{
+    DynamicPrintConfig config = sla_statistics_config(2.0, 2.0, 100.0, 0.0, 0.0);
+    SlaCubeFixture fixture(config, make_cube(10.0, 10.0, 3.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const auto apply_and_compare = [&](const char *key, double value,
+                                       std::size_t expected_fast_layers,
+                                       std::size_t expected_slow_layers,
+                                       double expected_time) {
+        config.set_deserialize_strict({{key, value}});
+        const SLAPrint::ApplyStatus status = fixture.print.apply(fixture.model, config);
+        CHECK(status != SLAPrint::APPLY_STATUS_UNCHANGED);
+
+        fixture.print.process();
+        REQUIRE(fixture.print.finished());
+
+        const SlaStatisticsRun fresh = run_sla_statistics(config);
+        const SLAPrintStatistics &stats = fixture.print.print_statistics();
+        CHECK(stats.fast_layers_count == expected_fast_layers);
+        CHECK(stats.slow_layers_count == expected_slow_layers);
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(expected_time, 1e-8));
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(fresh.estimated_time, 1e-8));
+
+        SlaStatisticsRun reapplied;
+        reapplied.layer_times = stats.layers_times;
+        reapplied.object_material = stats.objects_used_material;
+        reapplied.support_material = stats.support_used_material;
+        reapplied.estimated_time = stats.estimated_print_time;
+        reapplied.fast_layers = stats.fast_layers_count;
+        reapplied.slow_layers = stats.slow_layers_count;
+
+        const SLAPrintObject *object = fixture.print.objects().front();
+        const double mm2_scale = scaled<double>(1.0) * scaled<double>(1.0);
+        for (const SLAPrintObject::SliceRecord &record : object->get_slice_index()) {
+            REQUIRE(record.is_valid());
+            CHECK(record.get_slice(soSupport).empty());
+            const ExPolygons &model_slice = record.get_slice(soModel);
+            REQUIRE(model_slice.size() == 1);
+            reapplied.model_slice_areas.push_back(model_slice.front().area() / mm2_scale);
+        }
+
+        CHECK(reapplied.fast_layers == fresh.fast_layers);
+        CHECK(reapplied.slow_layers == fresh.slow_layers);
+        check_same_sla_geometry(fresh, reapplied);
+        check_sla_layer_times(reapplied, fresh.layer_times);
+    };
+
+    const SLAPrintStatistics &initial_stats = fixture.print.print_statistics();
+    CHECK(initial_stats.fast_layers_count == 6);
+    CHECK(initial_stats.slow_layers_count == 0);
+    CHECK_THAT(initial_stats.estimated_print_time, Catch::Matchers::WithinAbs(12.0, 1e-8));
+
+    // All six layers are fast at 100% fill. Raising fast tilt by 2 s adds 12 s.
+    apply_and_compare("fast_tilt_time", 2.0, 6, 0, 24.0);
+    // At area_fill=0, each positive-area model layer is classified as slow.
+    apply_and_compare("area_fill", 0.0, 0, 6, 12.0);
+    // Those six slow layers now each include the 3 s slow-tilt duration.
+    apply_and_compare("slow_tilt_time", 3.0, 0, 6, 30.0);
+}
+
+TEST_CASE("SLA validation rejects nonpositive or nonfinite effective correction scales",
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionScaleValidation][SettingsVariance][MaterialCorrectionZ]")
+{
+    SlaCubeFixture positive_scale(sla_config(1.0), make_cube(10.0, 10.0, 4.0));
+    const auto positive_validation = positive_scale.print.validate();
+    INFO("positive scale validation: " << positive_validation.string);
+    REQUIRE(positive_validation.string.empty());
+    REQUIRE(positive_scale.print.objects().size() == 1);
+    const Vec3d positive_bounds = positive_scale.print.objects().front()->transformed_mesh().bounding_box().size();
+    CHECK(positive_bounds.x() > 0.);
+    CHECK(positive_bounds.y() > 0.);
+    CHECK(positive_bounds.z() > 0.);
+
+    struct InvalidCorrectionCase {
+        const char *name;
+        const char *primary_key;
+        double primary_value;
+        const char *secondary_key;
+        double secondary_value;
+    };
+    const std::array<InvalidCorrectionCase, 10> invalid_cases = {{
+        {"zero relative X", "relative_correction_x", 0.0, "material_correction_x", 1.0},
+        {"zero relative Y", "relative_correction_y", 0.0, "material_correction_y", 1.0},
+        {"zero relative Z", "relative_correction_z", 0.0, "material_correction_z", 1.0},
+        {"zero material X", "material_correction_x", 0.0, "relative_correction_x", 1.0},
+        {"zero material Y", "material_correction_y", 0.0, "relative_correction_y", 1.0},
+        {"zero material Z", "material_correction_z", 0.0, "relative_correction_z", 1.0},
+        {"negative effective factor", "relative_correction_y", -1.0, "material_correction_y", 1.0},
+        {"infinite scalar factor", "relative_correction_x",
+         std::numeric_limits<double>::infinity(), "material_correction_x", 1.0},
+        {"NaN scalar factor", "material_correction_y",
+         std::numeric_limits<double>::quiet_NaN(), "relative_correction_y", 1.0},
+        {"finite factors with infinite product", "relative_correction_z",
+         1e200, "material_correction_z", 1e200},
+    }};
+
+    for (const InvalidCorrectionCase &test_case : invalid_cases) {
+        INFO("invalid scale case: " << test_case.name);
+        DynamicPrintConfig config = sla_config(1.0);
+        if (std::isfinite(test_case.primary_value) && std::isfinite(test_case.secondary_value)) {
+            config.set_deserialize_strict({
+                {test_case.primary_key, test_case.primary_value},
+                {test_case.secondary_key, test_case.secondary_value},
+            });
+        } else {
+            config.set_key_value(test_case.primary_key, new ConfigOptionFloat(test_case.primary_value));
+            config.set_key_value(test_case.secondary_key, new ConfigOptionFloat(test_case.secondary_value));
+        }
+
+        Model empty_model;
+        SLAPrint print;
+        print.apply(empty_model, std::move(config));
+        REQUIRE(print.objects().empty());
+        const StringObjectException validation = print.validate();
+        INFO("invalid scale validation: " << validation.string);
+        CHECK_FALSE(validation.string.empty());
+    }
+}
+
+TEST_CASE("SLA maximum bridge length controls support head clustering and routed bridges",
+          "[SLAPrint][SLAPipeline][SettingsVariance][SLASupportMaxBridgeLength]")
+{
+    const MaxBridgeLengthRun minimum = process_max_bridge_length(0.0);
+    const MaxBridgeLengthRun below_spacing = process_max_bridge_length(2.9);
+    const MaxBridgeLengthRun above_spacing = process_max_bridge_length(3.1);
+    const MaxBridgeLengthRun default_length = process_max_bridge_length(std::nullopt);
+
+    // At 0 and 2.9 mm, the 3 mm 3D head separation leaves two unclustered pillars.
+    // At 3.1 mm and the implicit 15 mm default, routing joins the lower head to the
+    // upper center pillar with one actual bridge. The 0 mm pillar-link control keeps
+    // inter-pillar linking disabled in every row.
+    CHECK(minimum.pillar_count == 2);
+    CHECK(below_spacing.pillar_count == 2);
+    CHECK(above_spacing.pillar_count == 1);
+    CHECK(default_length.pillar_count == 1);
+    CHECK(minimum.bridge_count == 0);
+    CHECK(below_spacing.bridge_count == 0);
+    CHECK(above_spacing.bridge_count == 1);
+    CHECK(default_length.bridge_count == 1);
+    CHECK(minimum.linked_pillar_count == 0);
+    CHECK(below_spacing.linked_pillar_count == 0);
+    CHECK(above_spacing.linked_pillar_count == 0);
+    CHECK(default_length.linked_pillar_count == 0);
+    CHECK(std::abs(above_spacing.support_volume - below_spacing.support_volume) > 1e-6);
+    CHECK_THAT(minimum.support_volume,
+               Catch::Matchers::WithinRel(below_spacing.support_volume, 1e-6));
+    CHECK_THAT(default_length.support_volume,
+               Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
+}
+
+TEST_CASE("SLA zero critical angle links equal-height support pillars once",
+          "[SLAPrint][SLASupportCriticalAngleZero][SettingsVariance]")
+{
+    const TriangleMesh model = make_cube(10.0, 10.0, 1.0);
+    sla::SupportTreeConfig config;
+    config.object_elevation_mm = 5.0;
+    config.bridge_slope = 0.0;
+    config.head_front_radius_mm = 0.5;
+    config.head_back_radius_mm = 0.5;
+    config.head_fallback_radius_mm = 0.25;
+    config.head_width_mm = 1.0;
+    config.head_penetration_mm = 0.2;
+    config.base_radius_mm = 1.0;
+    config.base_height_mm = 1.0;
+    // Keep these 6 mm-separated heads out of one ground cluster; pillar
+    // interconnection is governed independently by the 10 mm link limit.
+    config.max_bridge_length_mm = 2.5;
+    config.max_pillar_link_distance_mm = 10.0;
+    const sla::SupportPoints points{
+        sla::SupportPoint(2.f, 5.f, 0.f, 0.5f, true),
+        sla::SupportPoint(8.f, 5.f, 0.f, 0.5f, true),
+    };
+    const std::array<std::pair<const char *, sla::PillarConnectionMode>, 3> modes{{
+        {"zigzag", sla::PillarConnectionMode::zigzag},
+        {"cross", sla::PillarConnectionMode::cross},
+        {"dynamic", sla::PillarConnectionMode::dynamic},
+    }};
+
+    // Both support points lie on the cube's bottom face. Their equal-height,
+    // 6 mm-separated pillars have a clear horizontal route below the model.
+    // At zero slope, every mode must emit the same single horizontal bridge;
+    // the shared-height case is handled before the normal zig-zag/cross loop.
+    for (const auto &[name, mode] : modes) {
+        INFO("pillar connection mode: " << name);
+        config.pillar_connection_mode = mode;
+        const sla::SupportableMesh input(model.its, points, config);
+        sla::SupportTreeBuilder tree;
+
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+        REQUIRE(tree.heads().size() == 2);
+        REQUIRE(tree.pillars().size() == 2);
+        REQUIRE(tree.crossbridges().size() == 1);
+        CHECK(tree.heads()[0].is_valid());
+        CHECK(tree.heads()[1].is_valid());
+        CHECK(tree.pillars()[0].links == 1);
+        CHECK(tree.pillars()[1].links == 1);
+
+        const sla::Bridge &bridge = tree.crossbridges().front();
+        CHECK_THAT(bridge.get_length(), Catch::Matchers::WithinAbs(6.0, 1e-6));
+        CHECK_THAT(bridge.startp.z(), Catch::Matchers::WithinAbs(bridge.endp.z(), 1e-9));
+    }
+}
