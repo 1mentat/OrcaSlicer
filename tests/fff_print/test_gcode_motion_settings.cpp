@@ -2727,7 +2727,7 @@ TEST_CASE("Walls after raft layers follow the configured speed ramp", "[GCode][S
     const auto &object_layers = print.objects().front()->layers();
     for (const ParsedMotion::RoleFeedSample &sample : found->second) {
         const size_t matching_layers = static_cast<size_t>(std::count_if(
-            object_layers.begin(), object_layers.end(), [sample, z_match_tolerance_mm](const Layer *candidate) {
+            object_layers.begin(), object_layers.end(), [sample](const Layer *candidate) {
                 return std::abs(sample.z - candidate->print_z) <= z_match_tolerance_mm;
             }));
         REQUIRE(matching_layers == 1);
