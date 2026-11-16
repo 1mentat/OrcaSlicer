@@ -1,10 +1,10 @@
-"""Configure-only checks for GCC coverage compiler-launcher arguments.
+"""Configure-only checks for coverage instrumentation and default-OFF behavior.
 
-The Linux/GNU-only fixture configures a tiny C and C++ project against the
-repository's SlicerCoverage.cmake module, then inspects Ninja's command list.
-It does not build fixture targets; CMake may use compiler identification probes
-during configuration. Non-Linux hosts and systems without GNU C/C++ compilers,
-CMake, or Ninja skip the test before configuration.
+Portable NONE-language controls verify that the original helpers leave an
+uninstrumented project untouched. The separate Linux/GNU-only fixture configures
+C and C++ targets, then inspects Ninja's command list without building those
+targets. That fixture keeps its original platform/tool requirements and skips;
+the workflow selects it explicitly on a preflight-checked GNU/Linux runner.
 """
 
 from collections import Counter
@@ -244,6 +244,117 @@ add_launcher_case(case_ccache_args __unset__
 
         self.assertEqual(rows_per_target, Counter({target: 4 for target in EXPECTED_SKIP}))
         self.assertEqual(len(seen), 24)
+
+
+class SlicerCoverageCMakeDefaultOffTests(unittest.TestCase):
+    def test_default_off_helpers_leave_none_project_untouched(self):
+        cmake = shutil.which("cmake")
+        ninja = shutil.which("ninja")
+        self.assertIsNotNone(cmake, "CMake is required for the NONE-language control")
+        self.assertIsNotNone(ninja, "Ninja is required for the NONE-language control")
+
+        with tempfile.TemporaryDirectory(prefix="slicer-coverage-default-off-") as temporary:
+            root = Path(temporary).resolve()
+            source = root / "fixture source"
+            build = root / "fixture build"
+            for relative in ("src", "tests"):
+                (source / relative).mkdir(parents=True, exist_ok=True)
+            (source / "src/fixture.cpp").write_text("// Not compiled.\n", encoding="utf-8")
+            (source / "tests/fixture.cpp").write_text("// Not compiled.\n", encoding="utf-8")
+            (source / "CMakeLists.txt").write_text(
+                """cmake_minimum_required(VERSION 3.13)
+project(SlicerCoverageDefaultOffFixture LANGUAGES NONE)
+if (NOT DEFINED SLICER_COVERAGE_MODULE OR NOT EXISTS \"${SLICER_COVERAGE_MODULE}\")
+    message(FATAL_ERROR \"SLICER_COVERAGE_MODULE must name the repository module\")
+endif()
+add_custom_target(production SOURCES src/fixture.cpp)
+add_custom_target(test_image SOURCES tests/fixture.cpp)
+set_property(TARGET production PROPERTY CUSTOM_MARKER \"production-preserved\")
+set_property(TARGET test_image PROPERTY CUSTOM_MARKER \"test-preserved\")
+get_directory_property(_includes_before INCLUDE_DIRECTORIES)
+include(\"${SLICER_COVERAGE_MODULE}\")
+if (SLICER_ENABLE_LLVM_SOURCE_COVERAGE OR SLICER_ENABLE_GCC_GCOV_COVERAGE OR
+    SLICER_COVERAGE_PROJECT_FUNCTIONS_ONLY)
+    message(FATAL_ERROR \"coverage options must default to OFF\")
+endif()
+slicer_enable_llvm_source_coverage(production)
+slicer_enable_llvm_source_coverage(test_image)
+slicer_force_link_static_library(test_image production)
+if (CMAKE_EXPORT_COMPILE_COMMANDS)
+    message(FATAL_ERROR \"default-OFF helpers enabled compile commands\")
+endif()
+if (EXISTS \"${CMAKE_BINARY_DIR}/slicer-coverage\")
+    message(FATAL_ERROR \"default-OFF helpers created a manifest directory\")
+endif()
+get_property(_manifests GLOBAL PROPERTY SLICER_COVERAGE_MANIFESTS)
+if (_manifests)
+    message(FATAL_ERROR \"default-OFF helpers registered a source manifest\")
+endif()
+get_directory_property(_includes_after INCLUDE_DIRECTORIES)
+if (NOT \"${_includes_after}\" STREQUAL \"${_includes_before}\")
+    message(FATAL_ERROR \"default-OFF helpers changed include directories\")
+endif()
+foreach(_target IN ITEMS production test_image)
+    foreach(_property IN ITEMS
+        COMPILE_DEFINITIONS COMPILE_OPTIONS INCLUDE_DIRECTORIES
+        LINK_OPTIONS LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+        get_target_property(_value ${_target} ${_property})
+        if (_value)
+            message(FATAL_ERROR
+                \"default-OFF helpers changed ${_target} ${_property}: ${_value}\")
+        endif()
+    endforeach()
+endforeach()
+get_target_property(_production_marker production CUSTOM_MARKER)
+get_target_property(_test_marker test_image CUSTOM_MARKER)
+if (NOT \"${_production_marker}\" STREQUAL \"production-preserved\" OR
+    NOT \"${_test_marker}\" STREQUAL \"test-preserved\")
+    message(FATAL_ERROR \"default-OFF helpers changed existing target properties\")
+endif()
+file(WRITE \"${CMAKE_BINARY_DIR}/default-off-ok.txt\" \"default OFF preserved\\n\")
+""",
+                encoding="utf-8",
+            )
+            configured = subprocess.run(
+                [
+                    cmake, "-S", str(source), "-B", str(build), "-G", "Ninja",
+                    "-DSLICER_COVERAGE_MODULE=" + str(REPOSITORY / "cmake/SlicerCoverage.cmake"),
+                ],
+                cwd=source, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60, check=False,
+            )
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            self.assertEqual(
+                (build / "default-off-ok.txt").read_text(encoding="utf-8"),
+                "default OFF preserved\n",
+            )
+
+    def test_main_cmake_retains_system_include_and_existing_targets_when_off(self):
+        root_cmake = (REPOSITORY / "CMakeLists.txt").read_text(encoding="utf-8")
+        expected_include_branch = """include(cmake/SlicerCoverage.cmake)
+# Coverage instrumentation can omit or inconsistently map system headers.
+# Keep our own inline definitions non-system in coverage builds so their
+# mappings stay consistent between the libraries and tests.
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE OR SLICER_ENABLE_GCC_GCOV_COVERAGE)
+    include_directories(${LIBDIR})
+else()
+    # For the bundled boost libraries (boost::nowide)
+    include_directories(SYSTEM ${LIBDIR})
+endif()"""
+        self.assertEqual(root_cmake.count(expected_include_branch), 1)
+        self.assertEqual(root_cmake.count("include(cmake/SlicerCoverage.cmake)"), 1)
+        self.assertEqual(root_cmake.count("slicer_enable_llvm_source_coverage(libslic3r)"), 1)
+        self.assertEqual(root_cmake.count("slicer_enable_llvm_source_coverage(libslic3r_cgal)"), 1)
+        test_loop = """foreach(_slicer_test IN ITEMS libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
+        slicer_enable_llvm_source_coverage(${_slicer_test})"""
+        self.assertEqual(root_cmake.count(test_loop), 1)
+        self.assertEqual(root_cmake.count("slicer_force_link_static_library(${_slicer_test} libslic3r)"), 1)
+        self.assertEqual(root_cmake.count("slicer_force_link_static_library(${_slicer_test} libslic3r_cgal)"), 1)
+
+        filament = (REPOSITORY / "tests/filament_group/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertEqual(filament.count("orcaslicer_discover_tests(${_TEST_NAME}_tests)"), 1)
+        self.assertEqual(filament.count("orcaslicer_copy_test_dlls()"), 1)
+        self.assertEqual(filament.count("SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY=1"), 1)
 
 
 if __name__ == "__main__":

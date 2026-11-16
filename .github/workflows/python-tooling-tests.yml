@@ -26,6 +26,10 @@ on:
       - 'scripts/tests/test_slicer_gcov_coverage.py'
       - 'scripts/tests/test_slicer_catch_batch.py'
       - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'cmake/SlicerCoverage.cmake'
+      - 'CMakeLists.txt'
+      - 'tests/filament_group/CMakeLists.txt'
+      - 'scripts/tests/test_slicer_coverage_cmake.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -52,6 +56,10 @@ on:
       - 'scripts/tests/test_slicer_gcov_coverage.py'
       - 'scripts/tests/test_slicer_catch_batch.py'
       - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'cmake/SlicerCoverage.cmake'
+      - 'CMakeLists.txt'
+      - 'tests/filament_group/CMakeLists.txt'
+      - 'scripts/tests/test_slicer_coverage_cmake.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -105,3 +113,29 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_catch_batch.py -v
       - name: Test GCOV and Catch batch integration
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_gcov_batch_integration.py -v
+      - name: Test coverage CMake default-OFF controls
+        run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeDefaultOffTests -v
+      - name: Require GNU tools for coverage CMake instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -B - <<'PY'
+          import re
+          import shutil
+          import subprocess
+
+          tools = {name: shutil.which(name) for name in ("cmake", "ninja", "gcc", "g++")}
+          missing = [name for name, path in tools.items() if path is None]
+          assert not missing, "missing required GNU/Linux instrumentation tools: " + ", ".join(missing)
+          for name in ("gcc", "g++"):
+              version = subprocess.run(
+                  [tools[name], "--version"], capture_output=True, text=True,
+                  timeout=10, check=False,
+              )
+              assert version.returncode == 0, name + " --version failed"
+              assert re.search(r"\bGCC\b|\bgcc\b|Free Software Foundation",
+                               version.stdout, re.IGNORECASE), name + " is not GNU"
+          print("GNU/Linux CMake instrumentation requirements verified")
+          PY
+      - name: Test GCC coverage CMake instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeLauncherTests -v
