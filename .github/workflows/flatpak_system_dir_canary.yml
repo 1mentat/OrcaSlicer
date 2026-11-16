@@ -1,0 +1,148 @@
+# NEVER MERGE. One-shot canary for the Flatpak system runtime update failure ("Failed to update
+# org.gnome.Sdk: Invalid cross-device link") on ubuntu-24.04 hosted runners. Work item:
+# flatpak-system-dir-canary-20261116. It checks nothing out and builds nothing.
+# It runs the exact bound operation (flatpak --system update --subpath= -y --noninteractive -v
+# org.gnome.Sdk/x86_64/50, see flatpak-builder builder_manifest_update_single_dep) twice from the
+# same starting state: once on the original system installation (/var/lib/flatpak, container
+# overlay) as the control, and once on a job-private copy placed on the runner's bind-mounted
+# ext4 work directory via the documented FLATPAK_SYSTEM_DIR / FLATPAK_SYSTEM_CACHE_DIR
+# variables (flatpak 1.18.1: doc/flatpak.xml, common/flatpak-dir.c
+# flatpak_get_system_default_base_dir_location). The pristine copy is taken BEFORE the control mutates
+# anything. Same pinned image, remotes, signature settings and refs; no cache, image, kernel,
+# Docker or permission change; the copy is deleted at the end.
+name: Flatpak system dir canary
+
+on:
+  push:
+    branches:
+      - diag/flatpak-system-dir-canary
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-system-dir-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Flatpak system installation location canary (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions@sha256:1de59efef01a946d9f28f1ec3458bf6f61dcee3507d7fecdd473f8134da4ec77
+      options: --privileged
+      volumes:
+        - /usr/local/lib/android:/usr/local/lib/android
+        - /usr/share/dotnet:/usr/share/dotnet
+        - /opt/ghc:/opt/ghc1
+        - /usr/local/share/boost:/usr/local/share/boost1
+        - /opt/hostedtoolcache:/opt/hostedtoolcache1
+    env:
+      CANARY_ROOT: ${{ runner.temp }}/flatpak-canary
+      REF: org.gnome.Sdk/x86_64/50
+    steps:
+      - name: Identities, filesystem layout and headroom (read-only)
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set +e +o pipefail
+          set -u
+          echo "work item: flatpak-system-dir-canary-20261116"
+          echo "workflow ref: ${GITHUB_REF} sha: ${GITHUB_SHA} run: ${GITHUB_RUN_ID} attempt: ${GITHUB_RUN_ATTEMPT}"
+          echo "container image digest: sha256:1de59efef01a946d9f28f1ec3458bf6f61dcee3507d7fecdd473f8134da4ec77"
+          uname -r
+          flatpak --version
+          flatpak-builder --version
+          echo "--- installations and system remotes"
+          flatpak --installations 2>&1 | head
+          flatpak remotes --system -d 2>&1 | cut -c1-200 | head
+          echo "--- filesystem per path"
+          for path in /var/lib/flatpak /var/tmp "$RUNNER_TEMP" "$GITHUB_WORKSPACE"; do
+            if [ -e "$path" ]; then
+              stat -f -c '%n fstype=%T' "$path"
+              stat -c '%n dev=%d' "$path"
+            fi
+          done
+          df -T /var/lib/flatpak "$RUNNER_TEMP" 2>&1 | head -6
+          for p in redirect_dir metacopy index xino_auto; do
+            printf 'overlay %s=' "$p"; cat "/sys/module/overlay/parameters/$p" 2>&1 | head -1
+          done
+          need_mb=$(du -sx --block-size=1M /var/lib/flatpak 2>/dev/null | cut -f1)
+          avail_mb=$(df -Pm "$RUNNER_TEMP" | awk 'NR==2{print $4}')
+          echo "installation size MiB: ${need_mb:-unknown}; free MiB at RUNNER_TEMP: ${avail_mb:-unknown}"
+
+      - name: Control and candidate updates from one pristine starting state (bounded)
+        timeout-minutes: 14
+        shell: bash
+        run: |
+          set +e +o pipefail
+          set -u
+          control_rc=99; cand_rc=99
+          case "$RUNNER_TEMP" in /__w/_temp|/__w/_temp/*) ;; *) echo "unexpected RUNNER_TEMP: $RUNNER_TEMP"; exit 2 ;; esac
+          [ -n "$CANARY_ROOT" ] && [ "$CANARY_ROOT" = "$RUNNER_TEMP/flatpak-canary" ] || { echo "bad CANARY_ROOT"; exit 2; }
+          [ ! -e "$CANARY_ROOT" ] || { echo "canary root already exists"; exit 2; }
+          need_mb=$(du -sx --block-size=1M /var/lib/flatpak | cut -f1)
+          avail_mb=$(df -Pm "$RUNNER_TEMP" | awk 'NR==2{print $4}')
+          need_total=$(( need_mb * 2 + 8192 ))
+          echo "need at least ${need_total} MiB free, have ${avail_mb} MiB"
+          if [ "${avail_mb:-0}" -lt "$need_total" ]; then echo "insufficient headroom; stopping"; exit 3; fi
+          mkdir -m 700 "$CANARY_ROOT" || exit 2
+          # --- pristine starting snapshot BEFORE anything mutates the original installation
+          echo "=== snapshot /var/lib/flatpak -> $CANARY_ROOT/system"
+          timeout --kill-after=15 420 cp -a /var/lib/flatpak "$CANARY_ROOT/system"
+          echo "snapshot copy rc=$?"
+          list_state() { flatpak --system list --runtime -d --columns=ref,origin,commit 2>&1 | sort; }
+          ORIG_STATE="$(list_state)"
+          ORIG_REMOTES="$(flatpak remotes --system -d 2>&1 | sort)"
+          SNAP_STATE="$(FLATPAK_SYSTEM_DIR="$CANARY_ROOT/system" FLATPAK_SYSTEM_CACHE_DIR="$CANARY_ROOT/cache" list_state)"
+          SNAP_REMOTES="$(FLATPAK_SYSTEM_DIR="$CANARY_ROOT/system" FLATPAK_SYSTEM_CACHE_DIR="$CANARY_ROOT/cache" flatpak remotes --system -d 2>&1 | sort)"
+          [ "$ORIG_STATE" = "$SNAP_STATE" ] && echo "SNAPSHOT identity: installed refs and commits identical" || echo "SNAPSHOT identity: MISMATCH"
+          [ "$ORIG_REMOTES" = "$SNAP_REMOTES" ] && echo "SNAPSHOT identity: remotes identical" || echo "SNAPSHOT identity: remotes MISMATCH"
+          cmp /var/lib/flatpak/repo/config "$CANARY_ROOT/system/repo/config" && echo "SNAPSHOT identity: repo/config identical (remote trust settings)"
+          grep -E '^\[remote|gpg-verify|url=|collection-id' /var/lib/flatpak/repo/config | cut -c1-120 | head -20
+          # --- control: original path
+          echo "=== CONTROL (original path /var/lib/flatpak): flatpak --system update --subpath= -y --noninteractive -v $REF"
+          log="$(mktemp)"
+          timeout --kill-after=15 360 flatpak --system update --subpath= -y --noninteractive -v "$REF" >"$log" 2>&1
+          control_rc=$?
+          tail -c 786432 "$log"
+          echo "=== CONTROL exit status: $control_rc (124 = timeout)"
+          rm -f "$log"
+          # --- candidate: job-private copy on the runner work directory
+          export FLATPAK_SYSTEM_DIR="$CANARY_ROOT/system"
+          export FLATPAK_SYSTEM_CACHE_DIR="$CANARY_ROOT/cache"
+          mkdir -m 700 "$FLATPAK_SYSTEM_CACHE_DIR"
+          echo "=== CANDIDATE location checks"
+          echo "FLATPAK_SYSTEM_DIR=$FLATPAK_SYSTEM_DIR"
+          flatpak --installations 2>&1 | head -3
+          loc="$(flatpak info --system --show-location "$REF" 2>&1 | head -1)"
+          echo "deployment location: $loc"
+          case "$loc" in "$CANARY_ROOT"/system/*) echo "LOCATION OK: under the job-private copy" ;; *) echo "LOCATION MISMATCH: not under the private copy" ;; esac
+          for path in "$FLATPAK_SYSTEM_DIR" "$FLATPAK_SYSTEM_CACHE_DIR"; do stat -f -c '%n fstype=%T' "$path"; stat -c '%n dev=%d' "$path"; done
+          echo "=== CANDIDATE (job-private path): flatpak --system update --subpath= -y --noninteractive -v $REF"
+          log="$(mktemp)"
+          timeout --kill-after=15 360 flatpak --system update --subpath= -y --noninteractive -v "$REF" >"$log" 2>&1
+          cand_rc=$?
+          tail -c 786432 "$log"
+          echo "=== CANDIDATE exit status: $cand_rc (124 = timeout)"
+          rm -f "$log"
+          echo "--- candidate installed refs after update"
+          list_state | cut -c1-200 | head -20
+          echo "RESULT control_rc=$control_rc candidate_rc=$cand_rc"
+          echo "$control_rc $cand_rc" > "$RUNNER_TEMP/canary-result"
+          exit "$cand_rc"
+
+      - name: Dispose the job-private copy
+        if: ${{ always() }}
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set +e +o pipefail
+          set -u
+          if [ "$CANARY_ROOT" = "$RUNNER_TEMP/flatpak-canary" ] && [ -d "$CANARY_ROOT" ] && [ ! -L "$CANARY_ROOT" ]; then
+            rm -rf --one-file-system -- "$CANARY_ROOT"
+            echo "disposed $CANARY_ROOT (exists afterwards: $([ -e "$CANARY_ROOT" ] && echo yes || echo no))"
+          else
+            echo "nothing to dispose"
+          fi
