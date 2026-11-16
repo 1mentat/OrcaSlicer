@@ -9722,7 +9722,12 @@ FontProp::HorizontalAlign read_horizontal_align(const char **attributes, unsigne
             return static_cast<FontProp::HorizontalAlign>(horizontal_align_int);
     }
 
-    return bimap_cvt(horizontal_align_to_name, std::string_view(horizontal_align_str), FontProp::HorizontalAlign::center);    
+    // An unknown name (from a newer or foreign producer) falls back to center. Check here so the
+    // assert in bimap_cvt is not reached for this input.
+    if (horizontal_align_to_name.right.find(std::string_view(horizontal_align_str)) == horizontal_align_to_name.right.end())
+        return FontProp::HorizontalAlign::center;
+
+    return bimap_cvt(horizontal_align_to_name, std::string_view(horizontal_align_str), FontProp::HorizontalAlign::center);
 }
 
 
@@ -9741,6 +9746,9 @@ FontProp::VerticalAlign read_vertical_align(const char **attributes, unsigned in
         if(boost::spirit::qi::parse(vertical_align_str.c_str(), vertical_align_str.c_str() + 1, boost::spirit::qi::int_, vertical_align_int))
             return static_cast<FontProp::VerticalAlign>(vertical_align_int);
     }
+
+    if (vertical_align_to_name.right.find(std::string_view(vertical_align_str)) == vertical_align_to_name.right.end())
+        return FontProp::VerticalAlign::center;
 
     return bimap_cvt(vertical_align_to_name, std::string_view(vertical_align_str), FontProp::VerticalAlign::center);
 }
