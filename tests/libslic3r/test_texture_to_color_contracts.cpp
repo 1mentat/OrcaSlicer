@@ -166,7 +166,7 @@ TEST_CASE("TextureToColor preserves repaired topology after pre-repair oversampl
 }
 
 TEST_CASE("TextureToColor reports cancellation after the mesh repair callback",
-          "[TextureToColor]")
+          "[TextureToColor][TextureToColorPublic][TextureToColorRepair]")
 {
     const TriMesh input = open_tetrahedron();
     const auto uv_coords = two_tone_open_tetra_uvs();
@@ -208,6 +208,57 @@ TEST_CASE("TextureToColor reports cancellation after the mesh repair callback",
         if (message == "Color clustering")
             saw_color_clustering_stage = true;
     }
+    CHECK(saw_callback_stage);
+    CHECK_FALSE(saw_color_clustering_stage);
+}
+
+TEST_CASE("TextureToColor cancellation after the repair callback also publishes the repair stage",
+          "[TextureToColor][TextureToColorPublic][TextureToColorRepair]")
+{
+    const TriMesh input = open_tetrahedron();
+    const auto uv_coords = two_tone_open_tetra_uvs();
+    const cv::Mat texture = two_tone_texture();
+    std::size_t callback_calls = 0;
+    std::size_t callback_input_faces = 0;
+    bool callback_progress_seen = false;
+    bool callback_saw_cancel_false = false;
+    std::atomic<bool> callback_finished{false};
+    TextureToColorSettings settings = repair_import_settings(
+        callback_calls, callback_input_faces, callback_progress_seen, callback_saw_cancel_false, &callback_finished);
+
+    TriMesh output = input;
+    std::vector<Color> colors{{233, 19, 7}};
+    // TextureToColor also reports progress from its TBB worker threads ("Computing face colors"),
+    // so the recorder has to be thread-safe.
+    std::mutex progress_mutex;
+    std::vector<std::string> progress_messages;
+    const auto record_progress = [&](AlgoProgress state) {
+        const std::lock_guard<std::mutex> lock(progress_mutex);
+        progress_messages.emplace_back(state.message ? state.message : "");
+    };
+    // The cancel callback is also polled from worker threads, hence the atomic flag.
+    const auto cancel_after_repair = [&]() { return callback_finished.load(); };
+    CHECK_FALSE(TextureToColor(input, uv_coords, texture, output, colors,
+                               settings, record_progress, cancel_after_repair));
+    CHECK(callback_calls == 1);
+    CHECK(callback_input_faces == input.indices.size() * 4);
+    CHECK(callback_progress_seen);
+    CHECK(callback_saw_cancel_false);
+    CHECK(callback_finished.load());
+
+    // "Color clustering" is the stage label TextureToColor publishes right after repair.
+    bool saw_repair_stage = false;
+    bool saw_callback_stage = false;
+    bool saw_color_clustering_stage = false;
+    for (const std::string &message : progress_messages) {
+        if (message == "Repairing mesh")
+            saw_repair_stage = true;
+        if (message == "private repair callback")
+            saw_callback_stage = true;
+        if (message == "Color clustering")
+            saw_color_clustering_stage = true;
+    }
+    CHECK(saw_repair_stage);
     CHECK(saw_callback_stage);
     CHECK_FALSE(saw_color_clustering_stage);
 }
