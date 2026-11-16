@@ -2,6 +2,7 @@
 #include <boost/filesystem/path.hpp>
 #include <memory>
 #include <cstdint>
+#include <limits>
 #include "test_utils.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/ClipperUtils.hpp"
