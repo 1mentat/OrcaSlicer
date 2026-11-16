@@ -25,6 +25,9 @@ inputs:
   include-hidden-files:
     description: Include hidden files in selection and upload
     default: 'false'
+  source-sha:
+    description: Commit recorded when git cannot identify the checkout on a GitHub-hosted runner
+    default: ${{ github.sha }}
 outputs:
   artifact-id:
     description: Uploaded artifact ID
@@ -41,6 +44,7 @@ runs:
     - name: Check lifecycle and actual upload bytes
       shell: bash
       env:
+        VALIDATION_UPLOAD_SOURCE_SHA: ${{ inputs.source-sha }}
         VALIDATION_UPLOAD_NAME: ${{ inputs.name }}
         VALIDATION_UPLOAD_PATH: ${{ inputs.path }}
         VALIDATION_UPLOAD_RETENTION_DAYS: ${{ inputs.retention-days }}
@@ -49,7 +53,7 @@ runs:
         VALIDATION_UPLOAD_OVERWRITE: ${{ inputs.overwrite }}
         VALIDATION_UPLOAD_COMPRESSION_LEVEL: ${{ inputs.compression-level }}
         VALIDATION_UPLOAD_INCLUDE_HIDDEN_FILES: ${{ inputs.include-hidden-files }}
-      run: python "$GITHUB_ACTION_PATH/../../../scripts/validation_upload.py"
+      run: python3 "$GITHUB_ACTION_PATH/../../../scripts/validation_upload.py"
     - name: Upload original artifact paths
       id: upload
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

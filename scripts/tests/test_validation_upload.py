@@ -166,6 +166,21 @@ class UploadPreflightTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(upload.UploadError, "authenticated"):
                 self.invoke(RUNNER_ENVIRONMENT=value)
 
+    def test_hosted_source_sha_substitutes_only_when_git_cannot_identify_checkout(self):
+        bare = self.root / "no-git"
+        bare.mkdir()
+        env = dict(self.env, GITHUB_WORKSPACE=str(bare), VALIDATION_UPLOAD_SOURCE_SHA="a" * 40)
+        self.assertEqual(upload.preflight(env)["source_sha"], "a" * 40)
+        with self.assertRaises(Exception):
+            upload.preflight(dict(env, VALIDATION_UPLOAD_SOURCE_SHA="not-a-sha"))
+        with self.assertRaises(Exception):
+            upload.preflight({k: v for k, v in env.items() if k != "VALIDATION_UPLOAD_SOURCE_SHA"})
+        # A checkout git can read always wins over the fallback.
+        self.assertEqual(self.invoke(VALIDATION_UPLOAD_SOURCE_SHA="a" * 40)["source_sha"], self.head)
+        # Non-hosted runs never use the fallback.
+        with self.assertRaises(Exception):
+            upload.preflight(dict(env, RUNNER_ENVIRONMENT="self-hosted"))
+
     def test_authenticated_manager_payload_only_and_wrong_source(self):
         receipt = self.manager()
         payload = Path(receipt["payload_dir"])

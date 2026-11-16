@@ -47,12 +47,22 @@ def _text(value: str, name: str) -> str:
     return value
 
 
-def _head(workspace: Path) -> str:
+def _head(workspace: Path, fallback: str = "") -> str:
     # Git context variables must not redirect identity away from this checkout.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    result = subprocess.run(["git", "-C", str(workspace), "rev-parse", "--verify", "HEAD^{commit}"],
-                            env=env, capture_output=True, text=True, timeout=10, check=True)
-    value = result.stdout.strip()
+    try:
+        result = subprocess.run(["git", "-C", str(workspace), "rev-parse", "--verify", "HEAD^{commit}"],
+                                env=env, capture_output=True, text=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError):
+        # Hosted jobs may run in a container or check out below the workspace
+        # root, where git is missing, refuses the owner, or finds no repository.
+        # The caller passes the workflow's own commit; non-hosted runs get no
+        # fallback because their ownership check compares against git.
+        if not fallback:
+            raise
+        value = fallback
+    else:
+        value = result.stdout.strip()
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
         raise UploadError("checkout HEAD is not a full commit identity")
     return value
@@ -152,7 +162,8 @@ def preflight(env: dict[str, str]) -> dict:
     temporary = Path(env["RUNNER_TEMP"]).resolve(strict=True)
     if not workspace.is_dir() or not temporary.is_dir():
         raise UploadError("workspace and runner temp must be directories")
-    head = _head(workspace)
+    hosted = env.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    head = _head(workspace, env.get("VALIDATION_UPLOAD_SOURCE_SHA", "") if hosted else "")
     actor = _text(env.get("GITHUB_ACTOR", ""), "CI owner")
     repository = _text(env.get("GITHUB_REPOSITORY", ""), "CI repository")
     run = _text(env.get("GITHUB_RUN_ID", ""), "CI run")
@@ -169,7 +180,7 @@ def preflight(env: dict[str, str]) -> dict:
         raise UploadError("if-no-files-found must be warn, error or ignore")
     roots = (workspace, temporary)
     disposal = "github-hosted provider disposal"
-    if env.get("RUNNER_ENVIRONMENT") != "github-hosted":
+    if not hosted:
         import validation_artifacts as artifacts
         required = ("VALIDATION_ARTIFACT_ROOT", "VALIDATION_ARTIFACT_RUN_ID", "VALIDATION_ARTIFACT_TOKEN",
                     "VALIDATION_ARTIFACT_DIR", "VALIDATION_SOURCE_SHA")
