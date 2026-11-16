@@ -30,6 +30,10 @@ on:
       - 'CMakeLists.txt'
       - 'tests/filament_group/CMakeLists.txt'
       - 'scripts/tests/test_slicer_coverage_cmake.py'
+      - 'tests/catch2/extras/CatchAddTests.cmake'
+      - 'tests/catch2/extras/CatchAddTestsPreprocess.py'
+      - 'scripts/tests/test_catch_preprocessor.py'
+      - 'scripts/tests/test_catch_discovery_isolation.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -60,6 +64,10 @@ on:
       - 'CMakeLists.txt'
       - 'tests/filament_group/CMakeLists.txt'
       - 'scripts/tests/test_slicer_coverage_cmake.py'
+      - 'tests/catch2/extras/CatchAddTests.cmake'
+      - 'tests/catch2/extras/CatchAddTestsPreprocess.py'
+      - 'scripts/tests/test_catch_preprocessor.py'
+      - 'scripts/tests/test_catch_discovery_isolation.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -139,3 +147,7 @@ jobs:
       - name: Test GCC coverage CMake instrumentation
         if: matrix.os == 'ubuntu-latest'
         run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeLauncherTests -v
+      - name: Test Catch discovery preprocessor
+        run: python -B -m unittest discover -s scripts/tests -p test_catch_preprocessor.py -v
+      - name: Test Catch discovery profile isolation
+        run: python -B -m unittest discover -s scripts/tests -p test_catch_discovery_isolation.py -v
