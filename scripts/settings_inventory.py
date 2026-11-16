@@ -60,7 +60,10 @@ _REGISTRATION_LAMBDA = re.compile(
     r"\[[^\]]*\]\s*\([^;]*?\)\s*\{"
 )
 _QUOTED = re.compile(r'\"([^\"]*)\"')
-_NUMBER_ASSIGN = re.compile(r"def->(?:min|max)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
+# Only the presence of a ConfigOptionDef min/max assignment is needed to decide
+# whether this registration has declared numeric bounds. The right-hand side
+# may be a named constant or an inherited expression rather than a literal.
+_BOUND_ASSIGN = re.compile(r"\bdef->(min|max)\s*=")
 _CONFIG_TYPE_ENUM = re.compile(r"\benum\s+ConfigOptionType\s*\{(?P<body>.*?)\};", re.DOTALL)
 _CONFIG_TYPE_ENTRY = re.compile(
     r"(?m)^\s*(co[A-Za-z0-9_]*)\s*(?:=\s*([^,\n]+))?\s*,?\s*$"
@@ -164,8 +167,7 @@ def _registration(key: str, option_type: str, line: int, *, origin: str,
                   default_declared: bool | None = None) -> dict[str, Any]:
     values = list(dict.fromkeys(enum_values))
     values.extend(value for value in _extract_enum_values(body) if value not in values)
-    ranges = {match.group(0).split("->", 1)[1].split("=", 1)[0].strip()
-              for match in _NUMBER_ASSIGN.finditer(body)}
+    ranges = {match.group(1) for match in _BOUND_ASSIGN.finditer(body)}
     return {
         "key": key,
         "type": option_type,
@@ -237,9 +239,16 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
     for index, match in enumerate(direct_matches):
         body_end = direct_matches[index + 1].start() if index + 1 < len(direct_matches) else len(segment)
         body = segment[match.start():body_end]
-        lambda_boundary = _REGISTRATION_LAMBDA.search(body)
-        if lambda_boundary:
-            body = body[:lambda_boundary.start()]
+        # A registration may be followed by a generated loop with its own
+        # ``def`` variable. Do not attribute that loop's inherited bounds to
+        # the preceding direct option.
+        boundaries = []
+        for pattern in (_REGISTRATION_LAMBDA, _DYNAMIC_ADD):
+            candidate = pattern.search(body)
+            if candidate is not None:
+                boundaries.append(candidate.start())
+        if boundaries:
+            body = body[:min(boundaries)]
         event = _registration(
             match.group(1), match.group(2), _line_number(source, segment_offset + match.start()),
             origin="direct", body=body,
@@ -275,6 +284,7 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
         for key in keys:
             events.append(_registration(
                 key, add_match.group(1), line, origin="literal_loop", default_declared=True,
+                body=loop.group("body"),
             ))
 
     # Belt remap options are registered through one lambda with three literal
@@ -357,15 +367,25 @@ def parse_print_config(source_path: Path) -> dict[str, Any]:
     }
 
 
-def _required_dimensions(option_type: str, *, nullable: bool = False) -> list[str]:
+def _required_dimensions(option_type: str, *, nullable: bool = False,
+                         range_declared: Iterable[str] | None = None) -> list[str]:
     if option_type in {"coEnum", "coEnums"}:
         dimensions = ["enum_values", "pipeline_oracle"]
     elif option_type in {"coBool", "coBools"}:
         dimensions = ["boolean_values", "pipeline_oracle"]
-    elif option_type in {
-        "coInt", "coInts", "coFloat", "coFloats", "coPercent", "coPercents",
-        "coFloatOrPercent", "coFloatsOrPercents",
-    }:
+    elif option_type in {"coInt", "coFloat", "coPercent", "coFloatOrPercent"}:
+        # No explicit min/max assignments means ConfigOptionDef retains its
+        # documented +/-FLT_MAX defaults. Such settings need representative
+        # values through the consumer, not invented registered-bound tests.
+        # Missing or malformed range metadata is unknown and remains strict.
+        bounds_known = isinstance(range_declared, (list, tuple))
+        has_declared_bounds = bool(range_declared) if bounds_known else True
+        numeric_dimension = "boundary_values" if has_declared_bounds else "representative_values"
+        dimensions = [numeric_dimension, "pipeline_oracle"]
+    elif option_type in {"coInts", "coFloats", "coPercents", "coFloatsOrPercents"}:
+        # A vector has meaningful shape and per-element behavior even without
+        # registered min/max. Keep boundary_values required until those vector
+        # boundaries (including empty, length, and element cases) are audited.
         dimensions = ["boundary_values", "pipeline_oracle"]
     else:
         dimensions = ["representative_values", "pipeline_oracle"]
@@ -380,7 +400,8 @@ def _refresh_evidence_status(report: dict[str, Any]) -> None:
     by_type: dict[str, Counter[str]] = defaultdict(Counter)
     for option in report["options"]:
         required = _required_dimensions(
-            option["type"], nullable=option.get("effective_nullable", option["nullable"]))
+            option["type"], nullable=option.get("effective_nullable", option["nullable"]),
+            range_declared=option.get("range_declared"))
         option["required_dimensions"] = required
         missing = [value for value in required if value not in option["evidence_dimensions"]]
         if "evidence" in option:
