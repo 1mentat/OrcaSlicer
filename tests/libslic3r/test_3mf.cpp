@@ -10475,8 +10475,10 @@ TEST_CASE("BBS 3MF decodes final and long Unicode path metadata", "[3MFArchiveVa
     REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
                      LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
     const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
-    REQUIRE(std::filesystem::exists(root / "docs" / leaf));
-    CHECK(read_file((root / "docs" / leaf).string()) == "unicode-auxiliary-contract");
+    // leaf is UTF-8; u8path keeps Windows from reading it in the ANSI code page.
+    const std::filesystem::path extracted = root / "docs" / std::filesystem::u8path(leaf);
+    REQUIRE(std::filesystem::exists(extracted));
+    CHECK(read_file(extracted.string()) == "unicode-auxiliary-contract");
     CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
 }
 
@@ -10515,7 +10517,7 @@ TEST_CASE("BBS 3MF reads complete final Unicode metadata beyond 1024 bytes",
     REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
                      LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
     const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
-    const std::filesystem::path extracted = root / "docs/unicode-é.txt";
+    const std::filesystem::path extracted = root / std::filesystem::u8path("docs/unicode-é.txt");
     REQUIRE(std::filesystem::exists(extracted));
     CHECK(read_file(extracted.string()) == "unicode-auxiliary-contract");
     CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
