@@ -1016,6 +1016,31 @@ TEST_CASE("SLA relative correction rebuilds transformed geometry", "[SLAPrint][S
     CHECK_THAT(model_slice_area_mm2(*fixture.print.objects().front()), Catch::Matchers::WithinRel(150.0, 0.01));
 }
 
+TEST_CASE("SLA correction vectors shorter than two values retain the unity fallback",
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionShortVector]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.5}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.5}));
+    config.set_deserialize_strict({
+        {"relative_correction_x", 2.0},
+        {"relative_correction_y", 3.0},
+        {"relative_correction_z", 4.0},
+        {"material_correction_x", 5.0},
+        {"material_correction_y", 6.0},
+        {"material_correction_z", 7.0},
+    });
+
+    Model empty_model;
+    SLAPrint print;
+    print.apply(empty_model, std::move(config));
+
+    const Vec3d correction = print.relative_correction();
+    CHECK_THAT(correction.x(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.y(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.z(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+}
+
 TEST_CASE("SLA model extension and deletion synchronize print objects by ID", "[SLAPrint][SLALifecycle]")
 {
     LifecycleFixture fixture;
