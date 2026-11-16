@@ -402,6 +402,10 @@ TEST_CASE("TextureToColor keeps local texture regions attached through subdivisi
     CHECK(right_seen);
 }
 
+// The ported cases keep the source helpers (their CHECK-based check_finite_and_valid differs from the
+// shared fixture header version); a named enclosing namespace makes them win over the file-wide
+// using-directive instead of being ambiguous with it.
+namespace gap_e_texture_to_color_cases {
 namespace {
 using Slic3r::tex2color::test::Color;
 
@@ -553,3 +557,5 @@ TEST_CASE("ClusterAndSmooth keeps the majority color after adaptive region smoot
                        WithinAbs(static_cast<double>(majority[channel]), 2.0));
     }
 }
+
+} // namespace gap_e_texture_to_color_cases

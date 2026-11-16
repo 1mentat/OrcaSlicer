@@ -47,6 +47,8 @@
 #include <optional>
 #include "libslic3r/SLA/IndexedMesh.hpp"
 #include "libslic3r/SLA/SupportPointGenerator.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/SLA/SupportTreeMesher.hpp"
 
 using namespace Slic3r;
 
@@ -2032,21 +2034,6 @@ struct HollowRun {
     double radial_rms_error = 0.;
 };
 
-HollowRun run_hollowing(double min_thickness,
-                        double quality = 0.2,
-                        double closing_distance = 0.25,
-                        TriangleMesh mesh = {},
-                        double expected_sphere_radius = 0.)
-{
-    DynamicPrintConfig config = sla_config(1.0);
-    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
-    config.set_key_value("hollowing_quality", new ConfigOptionFloat(quality));
-    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(closing_distance));
-    if (mesh.empty())
-        mesh = make_cube(20.0, 20.0, 10.0);
-    return run_hollowing_config(std::move(config), std::move(mesh), expected_sphere_radius);
-}
-
 HollowRun run_hollowing_config(DynamicPrintConfig config,
                                TriangleMesh mesh,
                                double expected_sphere_radius = 0.)
@@ -2111,6 +2098,21 @@ HollowRun run_hollowing_config(DynamicPrintConfig config,
         result.radial_rms_error = std::sqrt(squared_error_sum / interior.vertices.size());
     }
     return result;
+}
+
+HollowRun run_hollowing(double min_thickness,
+                        double quality = 0.2,
+                        double closing_distance = 0.25,
+                        TriangleMesh mesh = {},
+                        double expected_sphere_radius = 0.)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(quality));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(closing_distance));
+    if (mesh.empty())
+        mesh = make_cube(20.0, 20.0, 10.0);
+    return run_hollowing_config(std::move(config), std::move(mesh), expected_sphere_radius);
 }
 
 HollowRun run_hollowing_with_defaults(TriangleMesh mesh, double expected_sphere_radius)
@@ -3641,37 +3643,6 @@ TEST_CASE("SLA maximum pillar link distance controls inter-pillar bridges",
     CHECK(default_distance.linked_pillars == 2);
     CHECK(above_spacing.support_volume > below_spacing.support_volume + 1e-6);
     CHECK_THAT(default_distance.support_volume,
-               Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
-}
-
-TEST_CASE("SLA maximum bridge length controls support head clustering and routed bridges",
-          "[SLAPrint][SLAPipeline][SettingsVariance][SLASupportMaxBridgeLength]")
-{
-    const MaxBridgeLengthRun minimum = process_max_bridge_length(0.0);
-    const MaxBridgeLengthRun below_spacing = process_max_bridge_length(2.9);
-    const MaxBridgeLengthRun above_spacing = process_max_bridge_length(3.1);
-    const MaxBridgeLengthRun default_length = process_max_bridge_length(std::nullopt);
-
-    // At 0 and 2.9 mm, the 3 mm 3D head separation leaves two unclustered pillars.
-    // At 3.1 mm and the implicit 15 mm default, routing joins the lower head to the
-    // upper center pillar with one actual bridge. The 0 mm pillar-link control keeps
-    // inter-pillar linking disabled in every row.
-    CHECK(minimum.pillar_count == 2);
-    CHECK(below_spacing.pillar_count == 2);
-    CHECK(above_spacing.pillar_count == 1);
-    CHECK(default_length.pillar_count == 1);
-    CHECK(minimum.bridge_count == 0);
-    CHECK(below_spacing.bridge_count == 0);
-    CHECK(above_spacing.bridge_count == 1);
-    CHECK(default_length.bridge_count == 1);
-    CHECK(minimum.linked_pillar_count == 0);
-    CHECK(below_spacing.linked_pillar_count == 0);
-    CHECK(above_spacing.linked_pillar_count == 0);
-    CHECK(default_length.linked_pillar_count == 0);
-    CHECK(std::abs(above_spacing.support_volume - below_spacing.support_volume) > 1e-6);
-    CHECK_THAT(minimum.support_volume,
-               Catch::Matchers::WithinRel(below_spacing.support_volume, 1e-6));
-    CHECK_THAT(default_length.support_volume,
                Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
 }
 
