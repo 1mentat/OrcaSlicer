@@ -1,3 +1,7 @@
+#include <string_view>
+#include <string>
+#include <cmath>
+#include <catch2/catch_all.hpp>
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -471,6 +475,122 @@ TEST_CASE("Bed-plane intersections expose collisions absent from the above-bed v
 }
 
 } // namespace volume_geometry_contracts
+
+TEST_CASE("BuildVolume default state is invalid but harmless", "[BuildVolume][BuildVolumeVariance]")
+{
+    const BuildVolume volume;
+    CHECK_FALSE(volume.valid());
+    CHECK(volume.type() == BuildVolume_Type::Invalid);
+    CHECK(volume.type_name() == "Invalid");
+    CHECK(volume.printable_area().empty());
+    CHECK_THAT(volume.bounding_volume().min.x(), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(volume.bounding_volume().max.z(), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("BuildVolume rectangle bbox states separate inside collision outside and below", "[BuildVolume][BuildVolumeVariance]")
+{
+    const BuildVolume volume(volume_geometry_contracts::rectangle(0., 0., 20., 20.), 10., {}, {});
+    CHECK(volume.volume_state_bbox(BoundingBoxf3{Vec3d(2.f, 2.f, 1.f), Vec3d(8.f, 8.f, 9.f)}) == BuildVolume::ObjectState::Inside);
+    CHECK(volume.volume_state_bbox(BoundingBoxf3{Vec3d(18.f, 2.f, 1.f), Vec3d(22.f, 8.f, 9.f)}) == BuildVolume::ObjectState::Colliding);
+    CHECK(volume.volume_state_bbox(BoundingBoxf3{Vec3d(25.f, 2.f, 1.f), Vec3d(28.f, 8.f, 9.f)}) == BuildVolume::ObjectState::Outside);
+    CHECK(volume.volume_state_bbox(BoundingBoxf3{Vec3d(2.f, 2.f, -8.f), Vec3d(8.f, 8.f, -2.f)}, false) == BuildVolume::ObjectState::Outside);
+    CHECK(volume.volume_state_bbox(BoundingBoxf3{Vec3d(2.f, 2.f, -8.f), Vec3d(8.f, 8.f, -2.f)}) == BuildVolume::ObjectState::Inside);
+}
+
+TEST_CASE("BuildVolume may classify a completely below mesh separately from a mesh crossing the bed", "[BuildVolume][BuildVolumeVariance]")
+{
+    const BuildVolume volume(volume_geometry_contracts::rectangle(0., 0., 20., 20.), 10., {}, {});
+    const indexed_triangle_set cube = its_make_cube(10., 10., 5.);
+    CHECK(volume_geometry_contracts::object_state(volume, cube, 0.f, 0.f, -8.f, true) == BuildVolume::ObjectState::Below);
+    CHECK(volume_geometry_contracts::object_state(volume, cube, 0.f, 0.f, -2.f, true) == BuildVolume::ObjectState::Inside);
+}
+
+TEST_CASE("BuildVolume custom beds retain a convex collision witness", "[BuildVolume][BuildVolumeVariance]")
+{
+    const BuildVolume volume({{0., 0.}, {30., 0.}, {30., 30.}, {20., 30.}, {20., 10.},
+                              {10., 10.}, {10., 30.}, {0., 30.}}, 20., {}, {});
+    REQUIRE(volume.type() == BuildVolume_Type::Custom);
+    const indexed_triangle_set cube = its_make_cube(3., 3., 3.);
+    CHECK(volume_geometry_contracts::object_state(volume, cube, 13.f, 2.f) == BuildVolume::ObjectState::Inside);
+    CHECK(volume_geometry_contracts::object_state(volume, cube, -8.f, 2.f) == BuildVolume::ObjectState::Outside);
+    // Custom-bed collision uses the convex hull; a cube whose vertices straddle that hull
+    // boundary is reported as colliding rather than silently accepted.
+    CHECK(volume_geometry_contracts::object_state(volume, cube, 29.f, 29.f) == BuildVolume::ObjectState::Colliding);
+}
+
+TEST_CASE("BuildVolume per-extruder heights fall back independently and preserve shared volumes", "[BuildVolume][BuildVolumeVariance]")
+{
+    const auto bed = volume_geometry_contracts::rectangle(0., 0., 20., 20.);
+    // The third shape intentionally has no corresponding height entry: it
+    // must independently fall back to the shared bed height.
+    const BuildVolume volume(bed, 100., {bed, volume_geometry_contracts::rectangle(0., 0., 10., 20.), bed}, {40., 50.});
+    REQUIRE(volume.get_extruder_area_count() == 3);
+    CHECK_FALSE(volume.get_extruder_area_volume(0).same_with_bed);
+    CHECK(volume.get_extruder_area_volume(2).same_with_bed);
+    CHECK_THAT(volume.get_extruder_area_volume(0).bboxf.max.z(), Catch::Matchers::WithinAbs(40., 1e-6));
+    CHECK_THAT(volume.get_extruder_area_volume(1).bboxf.max.z(), Catch::Matchers::WithinAbs(50., 1e-6));
+    CHECK_THAT(volume.get_extruder_area_volume(2).bboxf.max.z(), Catch::Matchers::WithinAbs(100., 1e-6));
+    CHECK_THAT(volume.get_shared_volume().data[2], Catch::Matchers::WithinAbs(10., 1e-6));
+}
+
+TEST_CASE("BuildVolume all_paths_inside applies the semantic extrusion filter for each bed shape", "[BuildVolume][BuildVolumeVariance]")
+{
+    GCodeProcessorResult paths;
+    paths.moves.push_back(volume_geometry_contracts::extrusion_move(5.f, 5.f, 1.f));
+    const BuildVolume rectangle_volume(volume_geometry_contracts::rectangle(0., 0., 10., 10.), 10., {}, {});
+    CHECK(rectangle_volume.all_paths_inside(paths, BoundingBoxf3{}));
+    paths.moves.front().position.x() = 11.f;
+    CHECK_FALSE(rectangle_volume.all_paths_inside(paths, BoundingBoxf3{}));
+
+    GCodeProcessorResult circle_paths;
+    circle_paths.moves.push_back(volume_geometry_contracts::extrusion_move(1.f, 0.f, 1.f));
+    const BuildVolume circle_volume(volume_geometry_contracts::circle_bed(5., 96), 10., {}, {});
+    REQUIRE(circle_volume.type() == BuildVolume_Type::Circle);
+    CHECK(circle_volume.all_paths_inside(circle_paths, BoundingBoxf3{}));
+    circle_paths.moves.front().position.x() = 6.f;
+    CHECK_FALSE(circle_volume.all_paths_inside(circle_paths, BoundingBoxf3{}));
+}
+
+TEST_CASE("BuildVolume shared volume metadata records bed type and height", "[BuildVolume][BuildVolumeVariance]")
+{
+    const auto bed = volume_geometry_contracts::rectangle(0., 0., 20., 30.);
+    const BuildVolume volume(bed, 75., {volume_geometry_contracts::rectangle(0., 0., 10., 30.)}, {40.});
+    const auto &shared = volume.get_shared_volume();
+    CHECK(shared.type == static_cast<int>(BuildVolume_Type::Rectangle));
+    CHECK_THAT(shared.data[0], Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(shared.data[1], Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(shared.data[2], Catch::Matchers::WithinAbs(10., 1e-6));
+    CHECK_THAT(shared.data[3], Catch::Matchers::WithinAbs(30., 1e-6));
+    CHECK_THAT(shared.zs[0], Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK_THAT(shared.zs[1], Catch::Matchers::WithinAbs(40., 1e-6));
+}
+
+TEST_CASE("Unlimited circular extruder areas preserve the independent nozzle mask",
+          "[BuildVolume][BuildVolumeUnlimited][BuildVolumeVariance]")
+{
+    const auto bed = volume_geometry_contracts::rectangle(0., 0., 40., 30.);
+    const std::vector<std::vector<Vec2d>> areas{
+        volume_geometry_contracts::circle_bed(8., 96, {10., 15.}), volume_geometry_contracts::circle_bed(8., 96, {30., 15.})};
+    const BuildVolume volume(bed, 0., areas, {0., 0.});
+    REQUIRE(volume.get_extruder_area_count() == 2);
+    for (int nozzle = 0; nozzle < 2; ++nozzle) {
+        REQUIRE(volume.get_extruder_area_volume(nozzle).type == BuildVolume_Type::Circle);
+        REQUIRE_FALSE(volume.get_extruder_area_volume(nozzle).same_with_bed);
+    }
+    const indexed_triangle_set cylinder = its_make_cylinder(2., 3., PI / 18.);
+    std::vector<bool> inside;
+    CHECK(volume.check_object_state_with_extruder_areas(cylinder, volume_geometry_contracts::translation(10.f, 15.f, 1000.f), inside) ==
+          BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 2);
+    CHECK(inside[0]);
+    CHECK_FALSE(inside[1]);
+    CHECK(volume.check_object_state_with_extruder_areas(cylinder, volume_geometry_contracts::translation(30.f, 15.f, 1000.f), inside) ==
+          BuildVolume::ObjectState::Limited);
+    REQUIRE(inside.size() == 2);
+    CHECK_FALSE(inside[0]);
+    CHECK(inside[1]);
+}
+
 
 TEST_CASE("BuildVolume keeps empty extruder regions indexed and unprintable", "[BuildVolume]")
 {
