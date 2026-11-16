@@ -1005,7 +1005,7 @@ def self_check() -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(description=__doc__)
+    value = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     value.add_argument("--report", type=Path)
     value.add_argument("--warnings", type=Path)
     value.add_argument("--binary-root", type=Path)
