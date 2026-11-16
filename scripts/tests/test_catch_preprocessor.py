@@ -51,7 +51,8 @@ class CatchPreprocessorTests(unittest.TestCase):
             expected_selectors = {
                 malicious_name: (
                     'literal \\]==\\] terminator )\n'
-                    f'file(WRITE "{sentinel}" "executed")\n'
+                    # CatchAddTests.cmake doubles backslashes, including Windows path separators.
+                    f'file(WRITE "{str(sentinel).replace(chr(92), chr(92) * 2)}" "executed")\n'
                     '# ☃ slash\\\\ and comma\\,'
                 ),
                 "plain name": "plain name",
@@ -126,7 +127,8 @@ class CatchPreprocessorTests(unittest.TestCase):
                 self.assertEqual(output_path.parent, working / "reports with spaces")
                 self.assertRegex(output_path.name, r"^[A-Za-z0-9_]+$")
                 properties = {prop["name"]: prop["value"] for prop in test["properties"]}
-                self.assertEqual(properties["WORKING_DIRECTORY"], str(working))
+                # CMake may report this path with forward slashes on Windows.
+                self.assertEqual(Path(properties["WORKING_DIRECTORY"]), working)
                 actual_labels = properties.get("LABELS", [])
                 self.assertEqual(len(actual_labels), len(item["tags"]))
                 self.assertEqual(set(actual_labels), set(item["tags"]))
