@@ -2,19 +2,21 @@
 """Link-check the focused Catch test executables that ordinary ALL excludes.
 
 Inventory: scripts/focused_targets.txt, one target per line, optionally
-``name optional: <reason>`` for targets that exist only in some configurations.
+``name optional: <CMAKE_VAR>`` for targets declared only while that variable is on.
 Subcommands: ``check`` (inventory equals CMake-declared set) and ``build``.
 """
 
 from pathlib import Path
 import argparse
-import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
+import tempfile
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import slicer_process  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "scripts" / "focused_targets.txt"
@@ -60,7 +62,10 @@ def load_inventory(path=INVENTORY):
         name = name.strip()
         if name in entries or not re.fullmatch(r"[A-Za-z0-9_]+", name):
             raise ValueError("bad or duplicate inventory entry: " + raw)
-        entries[name] = (reason.strip() or "unspecified") if marker else None
+        reason = reason.strip()
+        if marker and not re.fullmatch(r"[A-Z0-9_]+", reason):
+            raise ValueError("optional reason must name a CMake variable: " + raw)
+        entries[name] = reason if marker else None
     return entries
 
 
@@ -70,81 +75,133 @@ def check(root=ROOT, inventory=INVENTORY):
     problems += ["in inventory, not CMake: " + n for n in sorted(set(listed) - set(declared))]
     problems += ["conditional in CMake but not marked optional: " + n
                  for n in sorted(declared) if declared[n] and n in listed and not listed[n]]
+    problems += ["marked optional but unconditional in CMake: " + n
+                 for n in sorted(listed) if listed[n] and n in declared and not declared[n]]
     return problems
 
 
-def _run(cmd, timeout):
-    # Argument lists only, never a shell; names come from the checked-in inventory.
-    # The child leads its own process group so a timeout kills ninja and the
-    # compilers too, not just cmake.
-    kwargs = {"start_new_session": True} if hasattr(os, "killpg") else {}
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, errors="replace", **kwargs)
+_FALSY = frozenset({"", "OFF", "0", "FALSE", "NO", "N", "IGNORE"})
+TAIL_BYTES = 3000
+
+
+def _run(cmd, timeout, tail=TAIL_BYTES):
+    """Run cmd in its own process group; return (exit code, output tail).
+
+    Timeouts map to 124 after the whole group is killed. ``tail=None`` returns
+    the full output. Names come from the checked-in inventory and are never
+    passed through a shell.
+    """
+    with tempfile.TemporaryDirectory(prefix="focused-targets-") as scratch:
+        log = Path(scratch) / "output.log"
+        with open(log, "wb") as handle:
+            try:
+                code = slicer_process.run_captured(
+                    cmd, timeout=timeout, output_file=handle).returncode
+            except subprocess.TimeoutExpired:
+                code = 124
+        with open(log, "rb") as handle:
+            if tail is not None:
+                handle.seek(max(0, log.stat().st_size - tail))
+            text = handle.read().decode("utf-8", errors="replace")
+    return code, text + ("\n[timed out after %ss]" % timeout if code == 124 else "")
+
+
+def cache_value(build_dir, variable):
+    """Return the CMakeCache.txt value of ``variable`` or None when unknown."""
     try:
-        out, _ = proc.communicate(timeout=timeout)
-        return proc.returncode, out
-    except subprocess.TimeoutExpired:
-        if kwargs:
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
-        out, _ = proc.communicate()
-        return 124, (out or "") + "\n[timed out after %ss]" % timeout
+        text = (Path(build_dir) / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^%s:\w+=(.*)$" % re.escape(variable), text, re.M)
+    return match.group(1).strip() if match else None
+
+
+def _is_off(value):
+    return value.upper() in _FALSY or value.upper().endswith("-NOTFOUND")
+
+
+def _inside(path, parent):
+    try:
+        path.resolve().relative_to(parent)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def build(build_dir, config, jobs, target_timeout, smoke_timeout, deadline=3300):
     build_dir = Path(build_dir).resolve()
     inventory = load_inventory()
     end = time.monotonic() + deadline
+    try:
+        tests = (build_dir / "tests").resolve(strict=True)
+        tests.relative_to(build_dir)
+    except (OSError, ValueError):
+        print("build/tests is missing or outside the build directory")
+        return 2
     code, out = _run(["cmake", "--build", str(build_dir), "--config", config,
-                      "--target", "help"], 300)
+                      "--target", "help"], 300, tail=None)
     if code:
         print("cannot list configured targets:\n" + out[-2000:])
         return 2
     configured = set(re.findall(r"^\.\.\. ([A-Za-z0-9_]+)", out, re.M)) | \
         set(re.findall(r"^([A-Za-z0-9_]+):", out, re.M))
     built, skipped, failed, smoked = [], [], [], 0
+
+    def fail(name, why):
+        failed.append(name)
+        print("FAILED %s (%s)" % (name, why))
+
     for name, reason in inventory.items():
         if name not in configured:
-            if reason:
+            value = cache_value(build_dir, reason) if reason else None
+            if reason and value is not None and _is_off(value):
                 skipped.append(name)
-                print("SKIPPED %s (not configured; optional: %s)" % (name, reason))
+                print("SKIPPED %s (not configured; %s=%s)" % (name, reason, value))
+            elif reason:
+                fail(name, "optional condition ON but target absent (%s=%s)" % (reason, value))
             else:
-                failed.append(name)
-                print("FAILED %s (required target not configured)" % name)
+                fail(name, "required target not configured")
+            continue
+        objects = tests.rglob("CMakeFiles/%s.dir" % name)
+        if any(True for _ in tests.rglob(name)) or any(True for _ in objects):
+            fail(name, "pre-existing output; nothing deleted")
             continue
         start = time.monotonic()
         remaining = end - start
         if remaining <= 0:
-            failed.append(name)
-            print("FAILED %s (not attempted: deadline)" % name)
+            fail(name, "not attempted: deadline")
             continue
         code, out = _run(["cmake", "--build", str(build_dir), "--config", config,
                           "--target", name, "-j", str(jobs)], min(target_timeout, remaining))
         if code:
             failed.append(name)
             print("FAILED %s (exit %d, %.0fs); last output:\n%s" % (
-                name, code, time.monotonic() - start, out[-3000:]))
+                name, code, time.monotonic() - start, out))
             continue
-        exes = [p for p in (build_dir / "tests").rglob(name) if p.is_file()]
-        if not exes:
-            failed.append(name)
-            print("FAILED %s (built but executable not found under build/tests)" % name)
+        exes = list(tests.rglob(name))
+        if len(exes) != 1 or exes[0].is_symlink() or not exes[0].is_file() \
+                or not _inside(exes[0], tests):
+            fail(name, "expected exactly one regular executable under build/tests, found %d;"
+                       " nothing deleted" % len(exes))
             continue
-        code, _ = _run([str(exes[0]), "--list-tests"], smoke_timeout)
-        if code:
-            failed.append(name)
-            print("FAILED %s (--list-tests exit %d)" % (name, code))
+        exe = exes[0]
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            fail(name, "deadline before --list-tests")
         else:
-            built.append(name)
-            smoked += 1
-            print("OK %s (built, linked, --list-tests exit 0, %.0fs)" % (
-                name, time.monotonic() - start))
-        # Remove only this target's executable and object directory.
-        for exe in exes:
-            exe.unlink()
-        for objs in (build_dir / "tests").rglob("CMakeFiles/%s.dir" % name):
-            shutil.rmtree(objs, ignore_errors=True)
+            code, _ = _run([str(exe), "--list-tests"], min(smoke_timeout, remaining))
+            if code:
+                fail(name, "--list-tests exit %d" % code)
+            else:
+                built.append(name)
+                smoked += 1
+                print("OK %s (built, linked, --list-tests exit 0, %.0fs)" % (
+                    name, time.monotonic() - start))
+        # Remove only the outputs of this focused target, verified absent before the build.
+        exe.unlink()
+        for objs in tests.rglob("CMakeFiles/%s.dir" % name):
+            if not objs.is_symlink() and _inside(objs, tests):
+                shutil.rmtree(objs, ignore_errors=True)
     print("FOCUSED_TARGETS_SUMMARY inventory=%d built=%d skipped_not_configured=%d "
           "failed=%d smoked=%d failed_targets=%s" % (
               len(inventory), len(built), len(skipped), len(failed), smoked,

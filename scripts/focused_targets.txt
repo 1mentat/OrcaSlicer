@@ -38,7 +38,7 @@ libslic3r_placeholder_parser_tests
 libslic3r_png_tests
 libslic3r_preset_bundle_tests
 libslic3r_preset_collection_tests
-libslic3r_sketch_engine_tests optional: declared only when SLIC3R_CAD is ON
+libslic3r_sketch_engine_tests optional: SLIC3R_CAD
 libslic3r_sl1_raster_settings_tests
 libslic3r_surface_collection_tests
 libslic3r_svg_tests

@@ -843,7 +843,8 @@ jobs:
 
       # Focused Catch executables are EXCLUDE_FROM_ALL, so nothing above links
       # them. Build each (reusing the production libs in build/), run
-      # `--list-tests` to prove it starts, then delete only what this step made.
+      # `--list-tests` to prove it starts, then delete only focused-target
+      # outputs that were verified absent beforehand.
       # Runs after packaging, uploads and deploys, so it cannot alter or block them;
       # a failure still fails the leg (cache steps below use always()).
       - name: Link focused test targets
