@@ -2624,11 +2624,10 @@ TEST_CASE("BBS 3MF md_name pairs reload exactly through the legacy second decode
     CHECK(loaded_model.model_info->metadata_items.at("CliKey") == "W:" + value);
 }
 
-// Every other metadata item is written escaped once but, as on main, read through a second legacy
-// decode: ordinary quotes, apostrophes, unicode and literal &quot;/&apos; spellings survive, while literal
-// &amp;/&lt;/&gt; spellings are decoded. Old files with arbitrary keys cannot be told apart from
-// double-escaped ones, so this pre-existing behaviour is pinned rather than changed.
-TEST_CASE("BBS 3MF custom metadata items keep main's legacy reader behaviour",
+// Every other metadata item is written with the same two escape layers as the header and md_name keys,
+// so a value stored in metadata_items survives save and load exactly, including literal entity spellings.
+// The reader's second legacy decode of old single-layer files is pinned separately below.
+TEST_CASE("BBS 3MF custom metadata items reload exactly through the double escape layer",
           "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
 {
     const auto entry = GENERATE(from_range(xml_entity_cases()));
@@ -2644,20 +2643,22 @@ TEST_CASE("BBS 3MF custom metadata items keep main's legacy reader behaviour",
     LoadedProject loaded;
     fixture.load(loaded_model, loaded);
     const auto &items = loaded_model.model_info->metadata_items;
-    CHECK(items.at("custom-item") == "I:" + entry.main_legacy);
+    CHECK(items.at("custom-item") == "I:" + value);
     CHECK(items.at(ORCA_PUBLISHED_TAG) == "1");
-    CHECK(items.at(ORCA_PUBLISHED_KEYS_TAG) == "[\"K:" + entry.main_legacy + "\"]");
+    CHECK(items.at(ORCA_PUBLISHED_KEYS_TAG) == "[\"K:" + value + "\"]");
 }
 
-// Keys of Bambu Studio's cloud fields and ModelId/Region keep the legacy second decode too: whether
-// Bambu Studio escapes them twice is unknown, and unknown is not proof of a single escape.
+// Keys of Bambu Studio's cloud fields, ModelId/Region and arbitrary custom keys keep the legacy second
+// decode: files from older writers hold a single layer for them, and a single layer is not
+// distinguishable from a double one.
 TEST_CASE("BBS 3MF ambiguous legacy keys keep main's second decode",
           "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
 {
     const auto entry = GENERATE(from_range(xml_entity_cases()));
     const std::string key = GENERATE(std::string("ProfileTitle"), std::string("ProfileCover"), std::string("ProfileDescription"),
                                      std::string("ProfileUserId"), std::string("ProfileUserName"), std::string("DesignerUserId"),
-                                     std::string("model_id"), std::string("Region"));
+                                     std::string("model_id"), std::string("Region"), std::string("custom-item"),
+                                     std::string(ORCA_PUBLISHED_KEYS_TAG));
     CAPTURE(key, entry.value);
     EntityArchive fixture;
     fixture.store();
