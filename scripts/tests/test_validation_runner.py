@@ -116,6 +116,29 @@ class ManagedRunTests(unittest.TestCase):
                                                 argv=["--out", "../escape"]), 2)
         artifacts.finish(self.root, record["run_id"], record["token"], "completed")
 
+    def test_writer_confines_gcov_data_dir_to_payload(self):
+        record = artifacts.create(self.root, "PR-610", "a" * 40, "tests", 60, 10000)
+        environment = {"VALIDATION_ARTIFACT_ROOT": str(self.root),
+                       "VALIDATION_ARTIFACT_RUN_ID": record["run_id"],
+                       "VALIDATION_ARTIFACT_TOKEN": record["token"],
+                       "VALIDATION_ARTIFACT_DIR": record["payload_dir"],
+                       "VALIDATION_SOURCE_SHA": "a" * 40}
+        payload = Path(record["payload_dir"]).resolve()
+        outside = str(self.root.parent / "gcov")
+        seen = []
+        with patch.dict(os.environ, environment), patch.object(subprocess, "check_output", return_value="a" * 40), \
+                contextlib.redirect_stderr(io.StringIO()):
+            for value in (outside, "relative", str(payload / ".." / "gcov")):
+                self.assertEqual(runner.managed_main(lambda args: self.fail("writer ran"),
+                                                    output_option="--out", default_name="result",
+                                                    argv=["--gcov-data-dir", value]), 2)
+            inside = str(payload / "gcov")
+            self.assertEqual(runner.managed_main(lambda args: seen.append(args) or 0,
+                                                output_option="--out", default_name="result",
+                                                argv=["--gcov-data-dir", inside]), 0)
+        self.assertEqual(len(seen), 1)
+        artifacts.finish(self.root, record["run_id"], record["token"], "completed")
+
     def test_producer_parsers_reject_abbreviated_output_override(self):
         import settings_inventory
         import slicer_mutation

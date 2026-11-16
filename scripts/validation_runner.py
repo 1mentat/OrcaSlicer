@@ -82,6 +82,10 @@ def managed_main(main, *, output_option: str, default_name: str,
         if work_root and (not Path(work_root).is_absolute() or
                           not _inside(Path(work_root).resolve(), payload)):
             raise artifacts.ArtifactError("work-root must be an absolute path inside the leased payload")
+        gcov_data_dir = _option(arguments, "--gcov-data-dir")
+        if gcov_data_dir and (not Path(gcov_data_dir).is_absolute() or
+                              not _inside(Path(gcov_data_dir).resolve(), payload)):
+            raise artifacts.ArtifactError("gcov-data-dir must be an absolute path inside the leased payload")
         build = _option(arguments, "--build")
         if build and (not Path(build).is_absolute() or not _inside(Path(build).resolve(), payload)):
             raise artifacts.ArtifactError("build must be an absolute path inside the leased payload")

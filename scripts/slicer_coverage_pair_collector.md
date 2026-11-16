@@ -2,9 +2,12 @@
 
 This offline collector binds each test executable to its own `.profraw` files using SHA-256 values in `native-pairs.json`. It runs LLVM merge/export per pair, filters each LCOV tracefile to the selected source root, and lets `lcov --add-tracefile` produce the line union. Per-object LLVM JSON and LCOV exports remain available under the output directory. It requires matching LLVM tools and LCOV 2.0.
 
-Run from the OrcaSlicer repository root with a new output directory:
+Run from the OrcaSlicer repository root through `scripts/validation_runner.py`; the output directory is created beneath the leased payload (see `docs/HLSD/validation-artifacts.md`):
 
 ```sh
+python scripts/validation_runner.py --root /absolute/private/store \
+  --work-item PR-610 --source-sha FULL_40_CHARACTER_COMMIT_SHA --owner maintainer \
+  --ttl-seconds 3600 --budget-bytes 1073741824 -- \
 python3 scripts/slicer_coverage_pair_collector.py \
   --root "$PWD" --source-root src --build-dir build \
   --compile-commands /path/to/compile_commands.json \

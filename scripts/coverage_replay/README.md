@@ -1,7 +1,7 @@
 # Diagnostic coverage replay
 
-`python scripts/slicer_coverage_reconcile.py --manifest <run.json> --out <new-directory>`
-replays the reviewed LLVM 18 mapping-warning reconciliation for one archived
+`python scripts/validation_runner.py --root <store> --work-item <id> --source-sha <sha> --owner <owner> --ttl-seconds <n> --budget-bytes <n> -- python scripts/slicer_coverage_reconcile.py --manifest <run.json> --out <new-directory>`
+(the output directory resolves beneath the leased payload) replays the reviewed LLVM 18 mapping-warning reconciliation for one archived
 full-suite run. The command produces structural export, warning dump, ELF
 inspector output, strict and all-kind matcher results, input hash checks, and
 per-stage wall timings. It does not run tests, merge profiles, compute or

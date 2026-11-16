@@ -1259,6 +1259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if report["status"] == "pass" else 2
 
 
+# Trailing REMAINDER ctest arguments mean an omitted --out cannot be appended by
+# managed_main, so --out is effectively required when run through the runner.
 if __name__ == "__main__":
     from validation_runner import managed_main
     raise SystemExit(managed_main(main, output_option='--out',

@@ -100,7 +100,9 @@ below the workspace root), the receipt records the `source-sha` input instead.
 
 `.github/validation-producers.json` lists tracked entrypoints and their lifecycle
 adapters. Repository lint checks registration and retention declarations; runtime
-size checks and disposal are verified separately. Private coverage producers
+size checks and disposal are verified separately. The public coverage producers
+(`coverage-validation`, `coverage-pair-collector`, `catch-batch` and
+`coverage-reconcile`) are registered in the same registry. Private coverage producers
 keep a corresponding registry in their own repository.
 
 ## Legacy data

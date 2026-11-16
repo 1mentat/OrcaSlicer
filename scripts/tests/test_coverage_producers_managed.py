@@ -125,7 +125,7 @@ class CoverageProducersManagedTests(unittest.TestCase):
         payload, environment = self._lease()
         script, _, prefix = PRODUCERS["catch-batch"]
         with patch.dict(os.environ, environment):
-            code, captured, stderr = self._run_main_block(script, prefix, ["--build-dir", "/abs/build"])
+            code, captured, stderr = self._run_main_block(script, prefix, ["--build-dir", str(Path(self.home) / "build")])
             self.assertEqual(code, 2)
             self.assertEqual(captured, [])
             self.assertIn("build-dir must stay relative", stderr)

@@ -6,9 +6,14 @@ which production sources are compiled (and writes a manifest); this file owns
 the profile merge, report denominator, evidence, and gate.  It never invents
 coverage for a source file that was not present in LLVM's export.
 
-Typical invocation (after a coverage-configured build)::
+Typical invocation (after a coverage-configured build). The writer requires the
+supervisor environment, so run it through ``scripts/validation_runner.py`` (see
+docs/HLSD/validation-artifacts.md)::
 
-    python scripts/slicer_coverage.py run \
+    python scripts/validation_runner.py --root /absolute/private/store \
+      --work-item PR-610 --source-sha FULL_40_CHARACTER_COMMIT_SHA --owner maintainer \
+      --ttl-seconds 3600 --budget-bytes 1073741824 -- \
+      python scripts/slicer_coverage.py run \
       --object build/tests/libslic3r/libslic3r_tests \
       --manifest build/slicer-coverage/libslic3r.sources.txt \
       --compile-commands build/compile_commands.json \
