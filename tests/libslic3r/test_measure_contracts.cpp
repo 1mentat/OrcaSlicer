@@ -1300,3 +1300,394 @@ TEST_CASE("Face box pruning keeps scale margins and overflowing bounds conservat
     check_vec(distance->from, Vec3d::Zero());
     check_vec(distance->to, Vec3d::Zero());
 }
+
+namespace {
+void require_distance(const std::optional<DistAndPoints> &distance, double expected, double tolerance = 1e-8)
+{
+    REQUIRE(distance.has_value());
+    CHECK_THAT(distance->dist, WithinAbs(expected, tolerance));
+}
+
+void require_point_circle_witness(const std::optional<DistAndPoints> &distance,
+                                  const SurfaceFeature &circle_feature, const Vec3d &point)
+{
+    REQUIRE(distance.has_value());
+    check_vec(distance->from, point);
+    check_on_circle(distance->to, circle_feature);
+}
+
+void require_reversed_point_circle_witness(const std::optional<DistAndPoints> &distance,
+                                           const SurfaceFeature &circle_feature, const Vec3d &point)
+{
+    REQUIRE(distance.has_value());
+    check_on_circle(distance->from, circle_feature);
+    check_vec(distance->to, point);
+}
+
+void require_circle_pair_witness(const std::optional<DistAndPoints> &distance, const SurfaceFeature &from_circle,
+                                const SurfaceFeature &to_circle)
+{
+    check_circle_pair_witness(distance, from_circle, to_circle);
+}
+
+namespace skew_oracle {
+
+struct CircleInput {
+    Vec3d center;
+    Vec3d normal;
+    double radius;
+};
+
+void check_pair(const CircleInput &a, const CircleInput &b)
+{
+    check_against_oracle(circle(a.center, a.normal, a.radius), circle(b.center, b.normal, b.radius));
+}
+
+}
+
+using skew_oracle::CircleInput;
+
+using skew_oracle::check_pair;
+} // namespace
+
+
+TEST_CASE("Measure handles perpendicular planes sharing their intersection origin", "[Measure][MeasureContracts]")
+{
+    // Both origins lie on the common intersection line.  This is a valid
+    // plane pair and must not depend on selecting an offset witness point.
+    const MeasurementResult result = get_measurement(
+        plane(5, Vec3d::UnitZ(), Vec3d::Zero()),
+        plane(6, Vec3d::UnitX(), Vec3d::Zero()));
+    REQUIRE(result.angle.has_value());
+    REQUIRE(std::isfinite(result.angle->angle));
+    CHECK_THAT(result.angle->angle, WithinAbs(0.5 * PI, 1e-8));
+}
+
+TEST_CASE("Affine feature transforms preserve representation policy", "[Measure][MeasureGeometryExtended]")
+{
+    Transform3d affine = Transform3d::Identity();
+    affine.linear() << 2.0, 0.0, 0.0,
+                       0.0, 3.0, 0.0,
+                       0.0, 0.0, 1.5;
+    affine.translation() = Vec3d(-4.0, 7.0, 2.0);
+
+    SurfaceFeature point(Vec3d(1.0, 2.0, 3.0));
+    point.translate(affine);
+    check_vec(point.get_point(), affine * Vec3d(1.0, 2.0, 3.0));
+
+    SurfaceFeature segment = edge(Vec3d(1.0, 2.0, 3.0), Vec3d(-2.0, 1.0, 0.0));
+    segment.translate(affine);
+    const auto [start, end] = segment.get_edge();
+    check_vec(start, affine * Vec3d(1.0, 2.0, 3.0));
+    check_vec(end, affine * Vec3d(-2.0, 1.0, 0.0));
+
+    SurfaceFeature z_plane = plane(4, Vec3d::UnitZ(), Vec3d(1.0, 2.0, 3.0));
+    z_plane.translate(affine);
+    const auto [plane_index, plane_normal, plane_origin] = z_plane.get_plane();
+    CHECK(plane_index == 4);
+    check_vec(plane_origin, affine * Vec3d(1.0, 2.0, 3.0));
+    check_vec(plane_normal, Vec3d::UnitZ());
+
+    SurfaceFeature xy_circle = circle(Vec3d(1.0, 2.0, 3.0), Vec3d::UnitZ(), 2.0);
+    xy_circle.translate(affine);
+    const auto [circle_center, circle_radius, circle_normal] = xy_circle.get_circle();
+    check_vec(circle_center, affine * Vec3d(1.0, 2.0, 3.0));
+    // Circle features retain the implementation's radius representation under
+    // anisotropic transforms; this is a policy check, not an exact transformed
+    // Euclidean-circle claim.
+    CHECK_THAT(circle_radius, WithinAbs(4.0, 1e-7));
+    check_vec(circle_normal, Vec3d::UnitZ());
+}
+
+TEST_CASE("Point circle contracts distinguish radial, axial, axis, and center measurements", "[Measure][MeasureGeometryExtended]")
+{
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0);
+    const MeasurementResult radial = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 0.0)), ring);
+    require_distance(radial.distance_strict, 2.0);
+    require_point_circle_witness(radial.distance_strict, ring, Vec3d(5.0, 0.0, 0.0));
+    check_vec(radial.distance_strict->to, Vec3d(3.0, 0.0, 0.0));
+
+    const MeasurementResult axial = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 4.0)), ring);
+    require_distance(axial.distance_strict, std::sqrt(20.0));
+    require_point_circle_witness(axial.distance_strict, ring, Vec3d(5.0, 0.0, 4.0));
+
+    const MeasurementResult axis_positive = get_measurement(SurfaceFeature(Vec3d(0.0, 0.0, 4.0)), ring);
+    require_distance(axis_positive.distance_strict, 5.0);
+    require_point_circle_witness(axis_positive.distance_strict, ring, Vec3d(0.0, 0.0, 4.0));
+    const MeasurementResult axis_negative = get_measurement(SurfaceFeature(Vec3d(0.0, 0.0, -4.0)), ring);
+    require_distance(axis_negative.distance_strict, 5.0);
+    require_point_circle_witness(axis_negative.distance_strict, ring, Vec3d(0.0, 0.0, -4.0));
+
+    const Vec3d axis_query(0.0, 0.0, 4.0);
+    const MeasurementResult axis_reversed = get_measurement(ring, SurfaceFeature(axis_query));
+    require_distance(axis_reversed.distance_strict, 5.0);
+    require_reversed_point_circle_witness(axis_reversed.distance_strict, ring, axis_query);
+
+    const MeasurementResult center_mode = get_measurement(SurfaceFeature(Vec3d(5.0, 0.0, 4.0)), ring, true);
+    require_distance(center_mode.distance_strict, std::sqrt(41.0));
+    check_vec(center_mode.distance_strict->to, Vec3d::Zero());
+
+    const MeasurementResult axis_center_mode = get_measurement(SurfaceFeature(Vec3d(0.0, 0.0, -4.0)), ring, true);
+    require_distance(axis_center_mode.distance_strict, 4.0);
+    check_vec(axis_center_mode.distance_strict->to, Vec3d::Zero());
+    const Vec3d center_query(0.0, 0.0, -4.0);
+    const MeasurementResult center_mode_reversed = get_measurement(ring, SurfaceFeature(center_query), true);
+    require_distance(center_mode_reversed.distance_strict, 4.0);
+    check_vec(center_mode_reversed.distance_strict->from, Vec3d::Zero());
+    check_vec(center_mode_reversed.distance_strict->to, center_query);
+}
+
+TEST_CASE("Pair matrix covers point, edge, circle, and plane boundary branches", "[Measure][MeasureGeometryExtended]")
+{
+    const SurfaceFeature z_plane = plane(0, Vec3d::UnitZ(), Vec3d::Zero(),
+                                         std::make_shared<std::vector<SurfaceFeature>>());
+    const MeasurementResult point_plane = get_measurement(SurfaceFeature(Vec3d(1.0, 2.0, 4.0)), z_plane);
+    require_distance(point_plane.distance_infinite, 4.0);
+    check_vec(point_plane.distance_infinite->to, Vec3d(1.0, 2.0, 0.0));
+
+    const SurfaceFeature parallel_a = edge(Vec3d::Zero(), Vec3d(4.0, 0.0, 0.0));
+    const SurfaceFeature parallel_b = edge(Vec3d(0.0, 2.0, 3.0), Vec3d(4.0, 2.0, 3.0));
+    const MeasurementResult parallel_edges = get_measurement(parallel_a, parallel_b);
+    require_distance(parallel_edges.distance_infinite, std::sqrt(13.0));
+    REQUIRE(parallel_edges.angle.has_value());
+    CHECK_THAT(parallel_edges.angle->angle, WithinAbs(0.0, 1e-8));
+
+    const SurfaceFeature skew_a = edge(Vec3d::Zero(), Vec3d(4.0, 0.0, 0.0));
+    const SurfaceFeature skew_b = edge(Vec3d(2.0, 0.0, 2.0), Vec3d(2.0, 4.0, 2.0));
+    const MeasurementResult skew_edges = get_measurement(skew_a, skew_b);
+    require_distance(skew_edges.distance_infinite, 2.0);
+    REQUIRE(skew_edges.angle.has_value());
+    CHECK_THAT(skew_edges.angle->angle, WithinAbs(0.5 * PI, 1e-8));
+    CHECK_FALSE(skew_edges.angle->coplanar);
+
+    const SurfaceFeature ring = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    const SurfaceFeature secant = edge(Vec3d(-5.0, 2.0, 0.0), Vec3d(5.0, 2.0, 0.0));
+    const MeasurementResult edge_ring = get_measurement(secant, ring);
+    require_distance(edge_ring.distance_infinite, 0.0);
+    const MeasurementResult edge_ring_center_mode = get_measurement(secant, ring, true);
+    REQUIRE(edge_ring_center_mode.distance_infinite.has_value());
+    CHECK_THAT(edge_ring_center_mode.distance_infinite->dist, WithinAbs(2.0, 1e-8));
+
+    const SurfaceFeature in_plane = edge(Vec3d(-2.0, 1.0, 0.0), Vec3d(3.0, 1.0, 0.0));
+    const MeasurementResult in_plane_result = get_measurement(in_plane, z_plane);
+    REQUIRE(in_plane_result.angle.has_value());
+    CHECK_THAT(in_plane_result.angle->angle, WithinAbs(0.0, 1e-8));
+
+    const auto boundary = std::make_shared<std::vector<SurfaceFeature>>();
+    boundary->emplace_back(edge(Vec3d(-10.0, 0.0, 0.0), Vec3d(10.0, 0.0, 0.0)));
+    const SurfaceFeature bounded_plane = plane(1, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
+    const MeasurementResult bounded_ring = get_measurement(circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0), bounded_plane);
+    REQUIRE(bounded_ring.distance_infinite.has_value());
+    CHECK(std::isfinite(bounded_ring.distance_infinite->dist));
+
+    const MeasurementResult coplanar_ring = get_measurement(ring, z_plane);
+    require_distance(coplanar_ring.distance_strict, 0.0);
+}
+
+TEST_CASE("Parallel circles return valid closest witnesses across geometric regimes", "[Measure][MeasureGeometryExtended]")
+{
+    const auto check_pair = [](const SurfaceFeature &a, const SurfaceFeature &b, double expected) {
+        const MeasurementResult result = get_measurement(a, b);
+        require_distance(result.distance_infinite, expected);
+        require_circle_pair_witness(result.distance_infinite, a, b);
+        // get_measurement canonically orders feature types, then restores the
+        // caller's endpoint order. This also checks symmetry of the witness.
+        const MeasurementResult reversed = get_measurement(b, a);
+        require_distance(reversed.distance_infinite, expected);
+        require_circle_pair_witness(reversed.distance_infinite, b, a);
+    };
+
+    const SurfaceFeature radius2 = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    const SurfaceFeature radius1 = circle(Vec3d(5.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0);
+    check_pair(radius2, radius1, 2.0); // externally disjoint
+    check_pair(radius2, circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0));
+    check_pair(radius2, circle(Vec3d(5.0, 0.0, -3.0), Vec3d::UnitZ(), 1.0), std::sqrt(13.0));
+    check_pair(radius2, circle(Vec3d(3.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 0.0); // external tangent
+
+    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0),
+               circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 1.0), 1.0); // nested
+    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0),
+               circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 3.0), 1.0); // reverse nested
+    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 3.0),
+               circle(Vec3d(0.0, 0.0, 2.0), Vec3d::UnitZ(), 1.0), std::sqrt(8.0)); // concentric axial
+    check_pair(circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0),
+               circle(Vec3d(0.0, 0.0, -2.0), Vec3d::UnitZ(), 2.0), 2.0); // equal concentric axial
+    check_pair(radius2, circle(Vec3d(1.0, 0.0, 0.0), Vec3d::UnitZ(), 2.0), 0.0); // coplanar intersection
+    check_pair(radius2, circle(Vec3d(1.0, 0.0, 2.0), Vec3d::UnitZ(), 2.0), 2.0); // axial intersection projection
+}
+
+TEST_CASE("Parallel circle witnesses survive rigid transforms", "[Measure][MeasureGeometryExtended]")
+{
+    SurfaceFeature first = circle(Vec3d::Zero(), Vec3d::UnitZ(), 2.0);
+    SurfaceFeature second = circle(Vec3d(5.0, 0.0, 3.0), Vec3d::UnitZ(), 1.0);
+    Transform3d rigid = Eigen::Translation3d(7.0, -4.0, 2.0) *
+                        Eigen::AngleAxisd(0.4, Vec3d(1.0, 2.0, 3.0).normalized());
+    first.translate(rigid);
+    second.translate(rigid);
+    const MeasurementResult result = get_measurement(first, second);
+    require_distance(result.distance_infinite, std::sqrt(13.0));
+    require_circle_pair_witness(result.distance_infinite, first, second);
+}
+
+TEST_CASE("Nonparallel circle solver returns independent geometric witnesses", "[Measure][MeasureGeometryExtended]")
+{
+    const SurfaceFeature horizontal = circle(Vec3d::Zero(), Vec3d::UnitZ(), 1.0);
+    const SurfaceFeature perpendicular = circle(Vec3d::Zero(), Vec3d::UnitY(), 1.0);
+    const MeasurementResult intersecting = get_measurement(horizontal, perpendicular);
+    require_distance(intersecting.distance_infinite, 0.0, 1e-6);
+    CHECK_THAT(intersecting.distance_infinite->from.norm(), WithinAbs(1.0, 1e-6));
+    CHECK_THAT(intersecting.distance_infinite->to.norm(), WithinAbs(1.0, 1e-6));
+    CHECK_THAT(intersecting.distance_infinite->from.z(), WithinAbs(0.0, 1e-6));
+    CHECK_THAT(intersecting.distance_infinite->to.y(), WithinAbs(0.0, 1e-6));
+
+    const SurfaceFeature offset = circle(Vec3d(0.0, 0.0, 3.0), Vec3d::UnitY(), 1.0);
+    const MeasurementResult separated = get_measurement(horizontal, offset);
+    REQUIRE(separated.distance_infinite.has_value());
+    CHECK_THAT(separated.distance_infinite->dist, WithinAbs(std::sqrt(11.0 - 2.0 * std::sqrt(10.0)), 1e-6));
+    CHECK_THAT((separated.distance_infinite->to - separated.distance_infinite->from).norm(),
+               WithinAbs(separated.distance_infinite->dist, 1e-6));
+    CHECK_THAT(separated.distance_infinite->from.norm(), WithinAbs(1.0, 1e-6));
+    CHECK_THAT(separated.distance_infinite->from.z(), WithinAbs(0.0, 1e-6));
+    CHECK_THAT((separated.distance_infinite->to - Vec3d(0.0, 0.0, 3.0)).norm(), WithinAbs(1.0, 1e-6));
+    CHECK_THAT((separated.distance_infinite->to - Vec3d(0.0, 0.0, 3.0)).dot(Vec3d::UnitY()),
+               WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("Reversed edge directions preserve angle and endpoint witnesses", "[Measure][MeasureGeometryExtended]")
+{
+    const SurfaceFeature first = edge(Vec3d(4.0, 0.0, 0.0), Vec3d::Zero());
+    const SurfaceFeature second = edge(Vec3d(2.0, 3.0, 2.0), Vec3d(2.0, -1.0, 2.0));
+    const MeasurementResult result = get_measurement(first, second);
+    REQUIRE(result.distance_infinite.has_value());
+    CHECK(std::isfinite(result.distance_infinite->dist));
+    REQUIRE(result.angle.has_value());
+    CHECK_THAT(result.angle->angle, WithinAbs(0.5 * PI, 1e-8));
+    CHECK(std::isfinite(result.angle->radius));
+}
+
+TEST_CASE("Edge and plane branches return finite witnesses for boundary consumers", "[Measure][MeasureGeometryExtended]")
+{
+    const auto boundary = std::make_shared<std::vector<SurfaceFeature>>();
+    boundary->emplace_back(edge(Vec3d(2.0, -10.0, 0.0), Vec3d(2.0, 10.0, 0.0)));
+    boundary->emplace_back(edge(Vec3d(-10.0, 3.0, 0.0), Vec3d(10.0, 3.0, 0.0)));
+    const SurfaceFeature floor = plane(7, Vec3d::UnitZ(), Vec3d::Zero(), boundary);
+
+    const SurfaceFeature diagonal = edge(Vec3d(0.0, 0.0, 3.0), Vec3d(4.0, 0.0, 5.0));
+    const MeasurementResult diagonal_floor = get_measurement(diagonal, floor);
+    REQUIRE(diagonal_floor.angle.has_value());
+    CHECK(std::isfinite(diagonal_floor.angle->angle));
+    REQUIRE(diagonal_floor.distance_infinite.has_value());
+    // The minimum is interior to both segments, so endpoint candidates miss the distance.
+    CHECK_THAT(diagonal_floor.distance_infinite->dist, WithinAbs(std::sqrt(64.0 / 5.0), 1e-7));
+    CHECK_THAT((diagonal_floor.distance_infinite->to - diagonal_floor.distance_infinite->from).norm(),
+               WithinAbs(diagonal_floor.distance_infinite->dist, 1e-7));
+
+    const SurfaceFeature vertical = edge(Vec3d(2.0, 3.0, 2.0), Vec3d(2.0, 3.0, 6.0));
+    const MeasurementResult vertical_floor = get_measurement(vertical, floor);
+    require_distance(vertical_floor.distance_infinite, 2.0);
+    REQUIRE(vertical_floor.angle.has_value());
+    CHECK_THAT(vertical_floor.angle->angle, WithinAbs(0.5 * PI, 1e-8));
+
+    const SurfaceFeature raised_ring = circle(Vec3d(0.0, 0.0, 5.0), Vec3d::UnitZ(), 2.0);
+    const auto no_boundaries = std::make_shared<std::vector<SurfaceFeature>>();
+    const MeasurementResult ring_floor = get_measurement(
+        raised_ring, plane(8, Vec3d::UnitZ(), Vec3d::Zero(), no_boundaries));
+    require_distance(ring_floor.distance_infinite, 5.0);
+}
+
+TEST_CASE("Cylinder extraction identifies circular end faces and stable plane ownership", "[Measure][MeasureGeometryExtended]")
+{
+    const indexed_triangle_set cylinder_mesh = its_make_cylinder(5.0, 10.0, PI / 16.0);
+    Measuring measuring(cylinder_mesh);
+    REQUIRE(measuring.get_num_of_planes() > 20);
+
+    std::set<int> all_faces;
+    size_t circular_features = 0;
+    size_t plane_features = 0;
+    int circle_plane = -1;
+    for (int plane_id = 0; plane_id < measuring.get_num_of_planes(); ++plane_id) {
+        const auto &facets = measuring.get_plane_triangle_indices(plane_id);
+        REQUIRE_FALSE(facets.empty());
+        all_faces.insert(facets.begin(), facets.end());
+        const auto &features = measuring.get_plane_features(static_cast<unsigned int>(plane_id));
+        REQUIRE_FALSE(features.empty());
+        REQUIRE(features.back().get_type() == SurfaceFeatureType::Plane);
+        ++plane_features;
+        for (size_t i = 0; i + 1 < features.size(); ++i) {
+            if (features[i].get_type() == SurfaceFeatureType::Circle) {
+                const auto [center, radius, normal] = features[i].get_circle();
+                CHECK_THAT(center.x(), WithinAbs(0.0, 0.15));
+                CHECK_THAT(center.y(), WithinAbs(0.0, 0.15));
+                CHECK_THAT(radius, WithinAbs(5.0, 0.15));
+                CHECK_THAT(std::abs(normal.z()), WithinAbs(1.0, 1e-7));
+                ++circular_features;
+                circle_plane = plane_id;
+            }
+        }
+    }
+    CHECK(all_faces.size() == cylinder_mesh.indices.size());
+    CHECK(plane_features == static_cast<size_t>(measuring.get_num_of_planes()));
+    CHECK(circular_features == 2);
+    REQUIRE(circle_plane >= 0);
+
+    const auto &circle_plane_faces = measuring.get_plane_triangle_indices(circle_plane);
+    const auto feature = measuring.get_feature(circle_plane_faces.front(), Vec3d(5.0, 0.0, 10.0),
+                                               Transform3d::Identity(), false);
+    REQUIRE(feature.has_value());
+    const bool circle_or_plane = feature->get_type() == SurfaceFeatureType::Circle ||
+                                 feature->get_type() == SurfaceFeatureType::Plane;
+    CHECK(circle_or_plane);
+}
+
+TEST_CASE("Cylinder feature selection honors endpoint and world transforms", "[Measure][MeasureGeometryExtended]")
+{
+    const indexed_triangle_set cylinder_mesh = its_make_cylinder(4.0, 6.0, PI / 12.0);
+    Measuring measuring(cylinder_mesh);
+    const Transform3d world = Eigen::Translation3d(11.0, -3.0, 2.0) *
+                              Eigen::AngleAxisd(0.25, Vec3d::UnitY());
+    const auto &facets = measuring.get_plane_triangle_indices(0);
+    REQUIRE_FALSE(facets.empty());
+    const Vec3d local_point = Vec3d(0.0, 0.0, 0.0);
+    const auto picked_plane = measuring.get_feature(facets.front(), local_point, world, true);
+    REQUIRE(picked_plane.has_value());
+    REQUIRE(picked_plane->get_type() == SurfaceFeatureType::Plane);
+    const auto [index, normal, origin] = picked_plane->get_plane();
+    CHECK(index == 0);
+    CHECK_THAT(normal.norm(), WithinAbs(1.0, 1e-7));
+    CHECK_THAT((origin - world * local_point).norm(), WithinAbs(0.0, 1e-7));
+}
+
+TEST_CASE("Skew circle solver agrees with independent angular minimization", "[Measure][MeasureGeometryExtended]")
+{
+    const skew_oracle::CircleInput cases[] = {
+        {Vec3d(.2, -.4, .6), Vec3d::UnitZ(), 1.3},
+        {Vec3d(2.4, .7, .3), Vec3d(std::sin(.56), 0., std::cos(.56)), 1.01},
+        {Vec3d(.82, 1.27, 1.37), Vec3d(std::sin(1.08), 0., std::cos(1.08)), 1.51},
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        skew_oracle::check_pair(cases[i], cases[(i + 1) % 3]);
+        skew_oracle::check_pair(cases[(i + 1) % 3], cases[i]);
+    }
+}
+
+TEST_CASE("Skew circle distances agree with angular minimization and geometric witnesses", "[Measure][MeasureSkew]")
+{
+    const int index = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    const double angle = .17 + .13 * index;
+    const CircleInput a{Vec3d(.2, -.4, .6), Vec3d::UnitZ(), 1.3 + .1 * index};
+    const CircleInput b{Vec3d(2.4 - .23 * index, .7 + .19 * index, .3 + .11 * index),
+                        Vec3d(std::sin(angle), 0., std::cos(angle)), .8 + .07 * index};
+    CAPTURE(index);
+    check_pair(a, b);
+    check_pair(b, a);
+}
+
+TEST_CASE("Perpendicular circles retain analytic separation and concentric intersection", "[Measure][MeasureSkew]")
+{
+    const double separation = GENERATE(0., 1., 4.);
+    const CircleInput a{Vec3d::Zero(), Vec3d::UnitZ(), 1.};
+    const CircleInput b{Vec3d(separation, 0., 0.), Vec3d::UnitY(), 1.};
+    check_pair(a, b);
+    check_pair(b, a);
+}

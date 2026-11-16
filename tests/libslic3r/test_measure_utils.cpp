@@ -181,3 +181,12 @@ TEST_CASE("MeasureUtils orthogonal vectors satisfy dot and length invariants", "
         CHECK_THAT(unit.norm(), WithinAbs(1.0, 1e-12));
     }
 }
+
+TEST_CASE("MeasureUtils orthogonal choice is deterministic at tied maxima", "[MeasureUtils]")
+{
+    const Vec3d v(3.0, 3.0, 1.0);
+    const Vec3d u = get_orthogonal(v, false);
+    CHECK_THAT(u[0], WithinAbs(3.0, 1e-12));
+    CHECK_THAT(u[1], WithinAbs(-3.0, 1e-12));
+    CHECK_THAT(u[2], WithinAbs(0.0, 1e-12));
+}
