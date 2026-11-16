@@ -559,3 +559,47 @@ TEST_CASE("ClusterAndSmooth keeps the majority color after adaptive region smoot
 }
 
 } // namespace gap_e_texture_to_color_cases
+
+namespace {
+Vec3d as_vec3d(const TriVertex &vertex)
+{
+    return Vec3d(vertex[0], vertex[1], vertex[2]);
+}
+} // namespace
+
+TEST_CASE("ClusterAndSmooth repairs an inconsistently wound tetrahedron",
+          "[TextureToColor][TextureToColorExtended][TextureToColorOptions]")
+{
+    TriMesh input = closed_tetrahedron();
+    std::swap(input.indices[0][1], input.indices[0][2]);
+    const std::vector<Color> input_colors(input.indices.size(), red);
+    const TextureToColorSettings settings = bounded_settings();
+
+    TriMesh out_mesh;
+    std::vector<Color> out_colors;
+    REQUIRE(ClusterAndSmooth(input, input_colors, out_mesh, out_colors, settings));
+    REQUIRE(out_mesh.indices.size() == 4);
+    REQUIRE(out_colors.size() == out_mesh.indices.size());
+    CHECK(color_utils::is_closed(out_mesh));
+    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
+               WithinAbs(1.0 / 6.0, 1e-5));
+    check_finite_and_valid(out_mesh);
+
+    // Repair makes neighboring faces consistently oriented; either global
+    // winding is valid. The tetrahedron's centroid gives an independent sign.
+    const Vec3d interior(0.25, 0.25, 0.25);
+    int orientation = 0;
+    for (const TriFace &face : out_mesh.indices) {
+        const Vec3d a = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[0])]);
+        const Vec3d b = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[1])]);
+        const Vec3d c = as_vec3d(out_mesh.vertices[static_cast<std::size_t>(face[2])]);
+        const Vec3d face_center = (a + b + c) / 3.0;
+        const double facing = (b - a).cross(c - a).dot(face_center - interior);
+        REQUIRE(std::abs(facing) > 1e-9);
+        if (orientation == 0)
+            orientation = facing > 0.0 ? 1 : -1;
+        CHECK(facing * orientation > 0.0);
+    }
+    for (const Color &color : out_colors)
+        CHECK(color == red);
+}
