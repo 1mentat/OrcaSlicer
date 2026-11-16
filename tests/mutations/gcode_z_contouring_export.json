@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public fixed-speed Z-contoured wall deposition preserves nominal layer bounds and minimum thickness.",
+  "mutants": [
+    {
+      "id": "gcode-zcontoured-fixed-path-height-zeroed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        coordf_t z_diff = unscale_(line.b.z());",
+      "new": "                        coordf_t z_diff = 0.;",
+      "expected_matches": 1,
+      "test_filter": "^GCodeZContouring$",
+      "ordinary_assertion_only": true,
+      "description": "Flatten every fixed-speed contoured deposition endpoint to nominal layer height. Earlier travel to a path start cannot satisfy the requirement for lowered wall extrusion."
+    },
+    {
+      "id": "gcode-zcontoured-fixed-path-height-sign-reversed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        double z = m_nominal_z + z_diff;\n                        if (z < 0.1) {",
+      "new": "                        double z = m_nominal_z - z_diff;\n                        if (z < 0.1) {",
+      "expected_matches": 1,
+      "test_filter": "^GCodeZContouring$",
+      "ordinary_assertion_only": true,
+      "description": "Reverse the fixed-speed Z correction. Lowered roof walls must remain below the nominal layer height and retain at least the configured minimum thickness; an upward correction fails the physical output bound."
+    }
+  ]
+}

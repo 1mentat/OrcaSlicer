@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "G-code processor public parsing and motion contracts.",
+  "mutants": [
+    {
+      "id": "m106-p0-is-print-fan-only",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (!line.has('P') || (line.has('P') && line.p() == 1.0f)) {",
+      "new": "    if (!line.has('P') || (line.has('P') && line.p() == 0.0f)) {",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "m221-percent-to-factor",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        value_s *= 0.01f;",
+      "new": "        value_s *= 0.02f;",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "m900-negative-pressure-advance-clamp",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "void GCodeProcessor::process_M900(const GCodeReader::GCodeLine &line)\n{\n    float pa_value = m_pressure_advance;\n    line.has_value('K', pa_value);\n    m_pressure_advance = std::max(0.0f, pa_value);",
+      "new": "void GCodeProcessor::process_M900(const GCodeReader::GCodeLine &line)\n{\n    float pa_value = m_pressure_advance;\n    line.has_value('K', pa_value);\n    m_pressure_advance = pa_value;",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "m203-repetier-must-ignore-command",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate",
+      "new": "    if (m_flavor == gcfRepetier)\n        ;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "vm104-forwards-temperature-command",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "void GCodeProcessor::process_VM104(const GCodeReader::GCodeLine& line)\n{\n    process_M104(line);\n}",
+      "new": "void GCodeProcessor::process_VM104(const GCodeReader::GCodeLine& line)\n{\n    (void)line;\n}",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "vm109-forwards-temperature-wait-command",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "void GCodeProcessor::process_VM109(const GCodeReader::GCodeLine& line)\n{\n    process_M109(line);\n}",
+      "new": "void GCodeProcessor::process_VM109(const GCodeReader::GCodeLine& line)\n{\n    (void)line;\n}",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "g28-no-axis-homes-all-cartesian-axes",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (!found)\n        new_line_raw += \" X0  Y0  Z0\";",
+      "new": "    if (!found)\n        new_line_raw += \" X1  Y1  Z1\";",
+      "test_filter": "GCodeProcessorPublic"
+    },
+    {
+      "id": "m204-legacy-s-form-sets-acceleration",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (line.has_value('S', value)) {\n                // Legacy acceleration format.",
+      "new": "            if (line.has_value('S', value) && false) {\n                // Legacy acceleration format.",
+      "test_filter": "GCodeProcessorPublic"
+    }
+  ]
+}

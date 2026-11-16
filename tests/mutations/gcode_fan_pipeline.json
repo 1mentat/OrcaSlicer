@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Public Print exports route cooling transitions through fan kickstart in both print sequences while preserving extrusion and path length.",
+  "mutants": [
+    {
+      "description": "Disable the by-layer public fan mover gate; the kickstart row must lose its generated PWM255-before-target ordering.",
+      "id": "gcode-public-fan-layer-wrapper-disabled",
+      "new": "        CNumericLocalesSetter locales_setter;\n\n        if (false) {\n",
+      "old": "        CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "GCodeFanPipeline"
+    },
+    {
+      "description": "Pass zero kickstart duration to the by-layer FanMover despite the public config; the PWM255 ordering witness must fail.",
+      "id": "gcode-public-fan-layer-kickstart-argument-dropped",
+      "new": "        CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    config.fan_speedup_overhangs.value,\n                    0.0f));",
+      "old": "        CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    config.fan_speedup_overhangs.value,\n                    (float)config.fan_kickstart.value));",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "GCodeFanPipeline"
+    },
+    {
+      "description": "Disable the explicit whole-layer flush. The focused public export checks preserved extrusion and cooling transitions; classify any survivor from native evidence.",
+      "id": "gcode-public-fan-layer-not-flushed",
+      "new": "        CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    config.fan_speedup_overhangs.value,\n                    (float)config.fan_kickstart.value));\n            //flush as it's a whole layer\n            return fan_mover->process_gcode(in, false);",
+      "old": "        CNumericLocalesSetter locales_setter;\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {\n            if (fan_mover.get() == nullptr)\n                fan_mover.reset(new Slic3r::FanMover(\n                    writer,\n                    std::abs((float)config.fan_speedup_time.value),\n                    config.fan_speedup_time.value > 0,\n                    config.use_relative_e_distances.value,\n                    config.fan_speedup_overhangs.value,\n                    (float)config.fan_kickstart.value));\n            //flush as it's a whole layer\n            return fan_mover->process_gcode(in, true);",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "GCodeFanPipeline"
+    },
+    {
+      "description": "Disable the by-object public fan mover gate; the by-object kickstart row must lose its generated PWM255-before-target ordering.",
+      "id": "gcode-public-fan-object-wrapper-disabled",
+      "new": "    const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,\n        [&fan_mover = this->m_fan_mover, &config = this->config(), &writer = this->m_writer](std::string in)->std::string {\n\n        if (false) {",
+      "old": "    const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,\n        [&fan_mover = this->m_fan_mover, &config = this->config(), &writer = this->m_writer](std::string in)->std::string {\n\n        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {",
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "GCodeFanPipeline"
+    }
+  ]
+}
