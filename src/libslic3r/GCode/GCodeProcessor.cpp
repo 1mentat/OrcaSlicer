@@ -3040,6 +3040,31 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
     return valid;
 }
 
+std::vector<int> GCodeProcessor::to_zero_based_extruder_map(const std::vector<int>& one_based_map)
+{
+    // Range-check before subtracting so no input can overflow or index outside the extruder tables.
+    std::vector<int> zero_based(one_based_map.size());
+    for (size_t i = 0; i < one_based_map.size(); ++i) {
+        if (one_based_map[i] < 1 || one_based_map[i] > static_cast<int>(MAXIMUM_EXTRUDER_NUMBER))
+            throw Slic3r::RuntimeError(format("Invalid filament_map entry %1% for filament %2%: expected an extruder number in [1, %3%].",
+                                              one_based_map[i], i, MAXIMUM_EXTRUDER_NUMBER));
+        zero_based[i] = one_based_map[i] - 1;
+    }
+    return zero_based;
+}
+
+void GCodeProcessor::cover_mapped_extruders()
+{
+    if (m_filament_maps.empty())
+        return;
+    const size_t extruder_count = static_cast<size_t>(*std::max_element(m_filament_maps.begin(), m_filament_maps.end())) + 1;
+    // Extruders beyond the declared nozzle list have no known volume; physical ids default to identity.
+    if (m_nozzle_volume.size() < extruder_count)
+        m_nozzle_volume.resize(extruder_count, 0.f);
+    for (size_t i = m_physical_extruder_map.size(); i < extruder_count; ++i)
+        m_physical_extruder_map.push_back(static_cast<int>(i));
+}
+
 void GCodeProcessor::apply_config(const PrintConfig& config)
 {
     m_parser.apply_config(config);
@@ -3110,9 +3135,10 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     // Preserve explicit mappings; pad only missing entries with the master extruder.
     if (filament_map.size() < filament_count)
         filament_map.resize(filament_count, config.master_extruder_id.value);
+    const std::vector<int> zero_based_map = to_zero_based_extruder_map(filament_map);
 
     for (size_t i = 0; i < filament_count; ++ i) {
-        m_extruder_offsets[i] = to_3d(config.extruder_offset.get_at(filament_map[i] - 1).cast<float>().eval(), 0.f);
+        m_extruder_offsets[i] = to_3d(config.extruder_offset.get_at(zero_based_map[i]).cast<float>().eval(), 0.f);
         m_extruder_colors[i]            = static_cast<unsigned char>(i);
         // Orca: pre-heat bookkeeping reads the filament's first per-variant column by design;
         // it feeds estimation-side heat-up modelling only, never the emitted commands.
@@ -3184,8 +3210,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
     if (filament_maps != nullptr) {
         // Use the same master-extruder fallback already resolved for filament offsets.
-        m_filament_maps = filament_map;
-        std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
+        m_filament_maps = zero_based_map;
+        cover_mapped_extruders();
     }
 
     const ConfigOptionBool* spiral_vase = config.option<ConfigOptionBool>("spiral_mode");
@@ -3407,7 +3433,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const auto *master_extruder = config.option<ConfigOptionInt>("master_extruder_id");
     if (m_filament_maps.size() < m_result.filaments_count)
         m_filament_maps.resize(m_result.filaments_count, master_extruder != nullptr ? master_extruder->value : 1);
-    std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
+    m_filament_maps = to_zero_based_extruder_map(m_filament_maps);
+    cover_mapped_extruders();
 
     //BBS
     const ConfigOptionFloats* filament_costs = config.option<ConfigOptionFloats>("filament_cost");
