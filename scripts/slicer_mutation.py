@@ -2075,11 +2075,11 @@ def run_mutation(args: argparse.Namespace) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
-    defaults = sub.add_parser("list-defaults", help="print the bounded built-in mutants as JSON")
+    defaults = sub.add_parser("list-defaults", allow_abbrev=False, help="print the bounded built-in mutants as JSON")
     defaults.set_defaults(list_defaults=True)
-    run = sub.add_parser("run", help="validate baseline and run bounded mutants")
+    run = sub.add_parser("run", allow_abbrev=False, help="validate baseline and run bounded mutants")
     run.add_argument("--root", default=".")
     run.add_argument("--build-dir", default="build")
     run.add_argument("--configure-command", help="optional CMake configure argv before the baseline build")
@@ -2108,7 +2108,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mutants-sha256", action="append",
                      help="require a reviewed manifest digest before repository/build work; repeat in --mutants order")
     run.add_argument("--max-mutants", type=int, default=DEFAULT_MAX_MUTANTS)
-    run.add_argument("--out", default="build/slicer-mutation")
+    run.add_argument("--out", help="output inside the leased artifact payload")
     run.add_argument("--work-root", help="parent directory for disposable worktree")
     run.add_argument("--persistent-worktree",
                      help="opt-in harness-owned detached worktree retained between runs; build may be mutant")
@@ -2153,4 +2153,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from validation_runner import managed_main
+    raise SystemExit(managed_main(main, output_option='--out',
+                                  default_name='mutation', readonly_actions=('list-defaults',)))

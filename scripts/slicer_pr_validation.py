@@ -3307,7 +3307,7 @@ def run_validation(args: argparse.Namespace) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--root", default=".", help="original repository checkout")
     parser.add_argument("--snapshot", default="build/evidence/open-prs.json")
     parser.add_argument("--harness-base", required=True,
@@ -3316,7 +3316,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="ref containing the testing harness")
     parser.add_argument("--deps-prefix", required=True,
                         help="native dependency install prefix for CMake")
-    parser.add_argument("--output-dir", default="build/evidence/pr-validation")
+    parser.add_argument("--output-dir", help="output inside the leased artifact payload")
     parser.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 1),
                         help="parallel compiler jobs; also the default test slots")
     parser.add_argument("--test-jobs", type=int,
@@ -3436,4 +3436,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from validation_runner import managed_main
+    raise SystemExit(managed_main(main, output_option='--output-dir',
+                                  default_name='pr-validation', readonly_actions=()))
