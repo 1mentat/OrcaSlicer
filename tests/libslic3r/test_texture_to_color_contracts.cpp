@@ -108,7 +108,7 @@ cv::Mat two_tone_texture()
 } // namespace
 
 TEST_CASE("TextureToColor preserves repaired topology after pre-repair oversampling",
-          "[TextureToColor]")
+          "[TextureToColor][TextureToColorPublic][TextureToColorRepair]")
 {
     const TriMesh input = open_tetrahedron();
     const auto uv_coords = two_tone_open_tetra_uvs();
