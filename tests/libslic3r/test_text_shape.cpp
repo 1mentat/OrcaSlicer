@@ -162,6 +162,38 @@ TEST_CASE("OCCT text shape leaves the caller's result untouched for non-positive
     CHECK(result.text_mesh.its.indices == sentinel.its.indices);
 }
 
+TEST_CASE("OCCT text shape exposes a closed finite mesh with height and thickness scaling", "[TextShape]")
+{
+    const Handle(Font_SystemFont) font = register_bundled_font();
+    const char *font_name = font->FontName().ToCString();
+
+    TextResult base{};
+    load_text_shape("Ag", font_name, 10.f, 0.6f, false, false, base);
+    const TextMeshSize base_metrics = closed_mesh_size(base.text_mesh);
+    REQUIRE(std::isfinite(base.text_width));
+    REQUIRE(base.text_width > 0.);
+    CHECK_THAT(base_metrics.depth, WithinAbs(0.6, 2e-3));
+
+    TextResult doubled{};
+    load_text_shape("Ag", font_name, 20.f, 0.6f, false, false, doubled);
+    const TextMeshSize doubled_metrics = closed_mesh_size(doubled.text_mesh);
+    REQUIRE(std::isfinite(doubled.text_width));
+    REQUIRE(doubled.text_width > 0.);
+    CHECK_THAT(doubled.text_width / base.text_width, WithinRel(2., 2e-3));
+    CHECK_THAT(doubled_metrics.width / base_metrics.width, WithinRel(2., 2e-2));
+    CHECK_THAT(doubled_metrics.height / base_metrics.height, WithinRel(2., 2e-2));
+    CHECK_THAT(doubled_metrics.depth, WithinAbs(0.6, 2e-3));
+
+    TextResult thicker{};
+    load_text_shape("Ag", font_name, 10.f, 1.8f, false, false, thicker);
+    const TextMeshSize thicker_metrics = closed_mesh_size(thicker.text_mesh);
+    REQUIRE(std::isfinite(thicker.text_width));
+    CHECK_THAT(thicker.text_width, WithinRel(base.text_width, 2e-3));
+    CHECK_THAT(thicker_metrics.width, WithinRel(base_metrics.width, 2e-2));
+    CHECK_THAT(thicker_metrics.height, WithinRel(base_metrics.height, 2e-2));
+    CHECK_THAT(thicker_metrics.depth, WithinAbs(1.8, 2e-3));
+}
+
 #if defined(__linux__)
 namespace {
 std::filesystem::path bundled_font_path()
