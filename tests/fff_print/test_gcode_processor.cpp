@@ -29,6 +29,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include <limits>
+#include <map>
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Utils.hpp"

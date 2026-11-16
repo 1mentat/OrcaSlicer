@@ -3047,7 +3047,7 @@ std::vector<int> GCodeProcessor::to_zero_based_extruder_map(const std::vector<in
     for (size_t i = 0; i < one_based_map.size(); ++i) {
         if (one_based_map[i] < 1 || one_based_map[i] > static_cast<int>(MAXIMUM_EXTRUDER_NUMBER))
             throw Slic3r::RuntimeError(format("Invalid filament_map entry %1% for filament %2%: expected an extruder number in [1, %3%].",
-                                              one_based_map[i], i, MAXIMUM_EXTRUDER_NUMBER));
+                                              one_based_map[i], i + 1, MAXIMUM_EXTRUDER_NUMBER));
         zero_based[i] = one_based_map[i] - 1;
     }
     return zero_based;
