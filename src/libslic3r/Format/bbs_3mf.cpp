@@ -2845,7 +2845,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else if (type == Preset::TYPE_FILAMENT) {
                 filament_names = dynamic_cast < ConfigOptionStrings* > (config.option("filament_settings_id"));
-                if (!filament_names) {
+                if (!filament_names || filament_names->values.empty()) {
                     BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", can not found filament_settings_id from  %1%\n") % dest_file;
                     //skip this file
                     return;
