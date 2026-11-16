@@ -951,7 +951,10 @@ public:
             return ascii_iequals(curr_cmd, "G28") || ascii_iequals(curr_cmd, "G29") || ascii_iequals(curr_cmd, "PRINT_START") ||
                    ascii_iequals(curr_cmd, "START_PRINT");
         };
-        assert(!m_lines.empty());
+        // A tool change can be the first exported line. With no earlier lines to
+        // backtrace into, leave it in place without touching the empty cache.
+        if (m_lines.empty())
+            return;
         const float time_step           = backtrace.time_step();
         size_t      rev_it_dist         = 0;    // distance from the end of the cache of the starting point of the backtrace
         float       last_time_insertion = 0.0f; // used to avoid inserting two lines at the same time
