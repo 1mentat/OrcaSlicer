@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "settings-sparse-pattern-routing",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t        params.pattern \t\t = region_config.sparse_infill_pattern.value;",
+      "new": "\t\t        params.pattern \t\t = ipRectilinear;",
+      "description": "Use the configured sparse infill pattern when constructing each internal fill.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "settings-top-pattern-routing",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.pattern = region_config.top_surface_pattern.value;",
+      "new": "params.pattern = ipMonotonicLine;",
+      "description": "Use the configured top surface pattern for top solid infill.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "settings-wall-generator-dispatch",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "    if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)",
+      "new": "    if (false)",
+      "description": "Dispatch Arachne wall generation when the wall generator setting requests it.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "settings-shell-mode-routing",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            if (region_config.ensure_vertical_shell_thickness.value == evstAll)",
+      "new": "            if (false)",
+      "description": "Honor the all-surface vertical shell thickness mode during shell discovery.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "settings-sparse-density-routing",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "\t\t        params.density       = float(region_config.sparse_infill_density);",
+      "new": "\t\t        params.density       = 15.f;",
+      "description": "Pass the configured sparse infill density to the fill generator, including 0 and 100 percent boundaries.",
+      "test_filter": "SettingsVariance"
+    },
+    {
+      "id": "settings-random-seam-routing",
+      "path": "src/libslic3r/GCode/SeamPlacer.cpp",
+      "old": "    if (setup == SeamPosition::spRandom) {\n      return true;\n    }",
+      "new": "    if (setup == SeamPosition::spRandom) {\n      return false;\n    }",
+      "description": "Keep random seam candidate selection from falling through to the deterministic score comparator.",
+      "test_filter": "SettingsVariance"
+    }
+  ]
+}

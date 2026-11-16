@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Typed silent-mode export estimation, with the legacy imported-key behavior retained as an independent control.",
+  "mutants": [
+    {
+      "id": "silent-mode-final-export-estimator-gate-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "&& config.silent_mode;",
+      "new": "&& false;",
+      "expected_matches": 1,
+      "description": "Disable the final export gate after processor config initialization. The typed true export must retain its finite slower stealth estimate; the imported-key compatibility case remains unchanged.",
+      "test_filter": "^SilentModeVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "3abe38020a51a89e3ee3227ce3e7fc9735de6d8e3284a54ad8980c64fb6a7968"
+    }
+  ]
+}

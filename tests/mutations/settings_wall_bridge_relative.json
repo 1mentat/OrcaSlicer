@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Absolute and relative internal bridge direction contracts.",
+  "mutants": [
+    {
+      "id": "settings-relative-internal-bridge-angle",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                        if (region_config.relative_bridge_angle.value)\n                            bridging_angle += custom_angle_rad;",
+      "new": "                        if (false)\n                            bridging_angle += custom_angle_rad;",
+      "description": "Drops the relative-angle branch. The candidate requires absolute mode to equal the explicit 30 degree angle and relative mode to equal each automatic bridge angle plus 30 degrees modulo PI.",
+      "test_filter": "RelativeBridgeAngle"
+    }
+  ]
+}

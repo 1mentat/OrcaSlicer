@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "sketch-plane-behind-ray-accepted",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "if (t < 0)",
+      "new": "if (false)",
+      "expected_matches": 1,
+      "test_filter": "^SketchPlaneGap$",
+      "description": "The behind-camera ray must remain a no-hit result; removing the rejection makes the returned local coordinate nonzero."
+    },
+    {
+      "id": "sketch-plane-curved-face-normal-reversed",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "gp_Dir n = gp_Dir(du.Crossed(dv));",
+      "new": "gp_Dir n = gp_Dir(dv.Crossed(du));",
+      "expected_matches": 1,
+      "test_filter": "^SketchPlaneGap$",
+      "description": "The analytic cylinder frame must point its normal radially outward and its local y axis along the cylinder axis."
+    },
+    {
+      "id": "sketch-plane-project-swaps-local-components",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "return {local.dot(x_axis), local.dot(y_axis)};",
+      "new": "return {local.dot(y_axis), local.dot(x_axis)};",
+      "expected_matches": 1,
+      "test_filter": "^SketchPlaneGap$",
+      "description": "The off-axis ray has known unequal local x/y coordinates, so swapping the basis components fails the geometric oracle."
+    }
+  ]
+}
