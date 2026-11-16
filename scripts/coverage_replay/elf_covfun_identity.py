@@ -977,14 +977,13 @@ def self_check() -> None:
         checked = binary_inventory(mock_report, root)
         assert len(checked) == len(EXPECTED_OBJECTS)
         warning_path = root / "warnings.stderr"
-        warning_path.write_text(
+        warning_path.write_bytes((
             "warning: 2 functions have mismatched data\n"
             "hash-mismatch: No profile record found for "
             "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n"
             "hash-mismatch: No profile record found for "
-            "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n",
-            encoding="utf-8",
-        )
+            "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n"
+        ).encode("utf-8"))
         report_path = root / "report.json"
         report_path.write_text(json.dumps(mock_report), encoding="utf-8")
         warning_data = parse_warnings(warning_path)
