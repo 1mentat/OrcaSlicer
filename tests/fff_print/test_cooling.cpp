@@ -1868,6 +1868,99 @@ bool has_deposition_after(const Evidence &evidence, size_t ordinal)
 }
 } // namespace
 
+namespace cooling_slowdown_contracts {
+
+std::string validated_slice(const TriangleMesh &mesh, const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({mesh}, print, model, config);
+    const auto validation = print.validate();
+    INFO("Print validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    return gcode(print);
+}
+
+struct LayerFeedEvidence {
+    std::map<int, std::vector<double>> feeds_by_layer;
+    double path_length = 0.0;
+    double filament_length = 0.0;
+    bool finite = true;
+};
+
+DynamicPrintConfig early_layer_speed_config(const int slow_down_layers)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_density", "0%"},
+        {"minimum_sparse_infill_area", 0.0},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"raft_layers", 0},
+        {"enable_support", false},
+        {"enable_arc_fitting", false},
+        {"gcode_comments", true},
+        {"gcode_flavor", "marlin2"},
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"slow_down_layers", slow_down_layers},
+        {"slow_down_for_layer_cooling", false},
+        {"slowdown_for_curled_perimeters", false},
+        {"initial_layer_speed", 30.0},
+        {"initial_layer_infill_speed", 30.0},
+        {"outer_wall_speed", 120.0},
+        {"inner_wall_speed", 120.0},
+        {"sparse_infill_speed", 120.0},
+        {"top_surface_speed", 120.0},
+        {"bridge_speed", 120.0},
+        {"filament_max_volumetric_speed", 200.0},
+        {"fan_cooling_layer_time", 0.0},
+        {"fan_min_speed", 0},
+        {"fan_max_speed", 0},
+    });
+    return config;
+}
+
+LayerFeedEvidence inspect_layer_feeds(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    LayerFeedEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&evidence](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double feed = line.has_f() ? line.f() : self.f();
+        const double xy = line.dist_XY(self);
+        const double filament = line.dist_E(self);
+        const int layer = static_cast<int>(std::lround(line.new_Z(self) / 0.2)) - 1;
+        evidence.feeds_by_layer[layer].push_back(feed);
+        evidence.path_length += xy;
+        evidence.filament_length += filament;
+        evidence.finite = evidence.finite && std::isfinite(feed) && feed > 0.0 &&
+                          std::isfinite(xy) && std::isfinite(filament);
+    });
+    return evidence;
+}
+
+double uniform_layer_feed(const LayerFeedEvidence &evidence, const int layer)
+{
+    const auto found = evidence.feeds_by_layer.find(layer);
+    REQUIRE(found != evidence.feeds_by_layer.end());
+    REQUIRE_FALSE(found->second.empty());
+    for (const double feed : found->second)
+        CHECK_THAT(feed, Catch::Matchers::WithinAbs(found->second.front(), 0.25));
+    return found->second.front();
+}
+
+} // namespace cooling_slowdown_contracts
+
 TEST_CASE("Slow-down layer count ramps early perimeter feed and preserves deposition",
           "[Cooling][SlowDownLayerCount]")
 {
