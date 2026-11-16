@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Groove dimensions, centered cutting geometry, repeated slots, rotation and part provenance.",
+  "mutants": [
+    {
+      "id": "cut-groove-flat-flap-width",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "const double flap_width             = is_approx(groove.flaps_angle, 0.f) ? groove.depth : groove.depth / sin(groove.flaps_angle);",
+      "new": "const double flap_width             = is_approx(groove.flaps_angle, 0.f) ? 0.0 : groove.depth / sin(groove.flaps_angle);",
+      "description": "A zero flap angle still contributes the full-depth mouth.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-flap-projection",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "const double total_flap_width       = 2.0 * flap_width * cos(groove.flaps_angle);",
+      "new": "const double total_flap_width       = 2.0 * flap_width * sin(groove.flaps_angle);",
+      "description": "Projected flap width follows cosine, including the nonzero-angle analytic case.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-radius-taper",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "const double plane_half_height      = 0.5f* (1.5f * (1.5f *m_radius));",
+      "new": "const double plane_half_height      = 0.5f* (1.5f * (1.5f *1.f));",
+      "description": "Groove taper width must respond to the supplied radius.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-taper-angle",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "const double flap_taper_offset      = plane_half_height * tan(groove.angle);",
+      "new": "const double flap_taper_offset      = plane_half_height * tan(groove.flaps_angle);",
+      "description": "Outer taper uses the groove angle, independently of flap angle.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-upper-plane-side",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "cut(tmp_object, cut_matrix_upper, ModelObjectCutAttribute::KeepLower, tmp_model_for_cut);",
+      "new": "cut(tmp_object, cut_matrix_upper, ModelObjectCutAttribute::KeepUpper, tmp_model_for_cut);",
+      "description": "The upper preview plane must retain the lower side for the upper part assembly.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-count-boundary",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "for (int i = 0; i < groove_count; i++) {",
+      "new": "for (int i = 0; i <= groove_count; i++) {",
+      "description": "The requested groove count must not create an extra degenerate groove.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-slot-offset",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "float offset_x = groove_offset_factor * (groove_gap + groove_width);",
+      "new": "float offset_x = groove_offset_factor * (groove_gap - groove_width);",
+      "description": "Multiple groove slots are separated by the sum of the requested gap and calculated mouth width.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-last-isolation",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "if (!is_last_groove) {",
+      "new": "if (is_last_groove) {",
+      "description": "Only non-last grooves need a right isolation cut.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-tolerance-depth",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "const double h_groove_shift_tolerance = groove_half_depth - (double)groove.depth_tolerance;",
+      "new": "const double h_groove_shift_tolerance = groove_half_depth + (double)groove.depth_tolerance;",
+      "description": "Connector clearance is cut inside the groove depth tolerance.",
+      "test_filter": "CutUtilsGroove"
+    },
+    {
+      "id": "cut-groove-keep-as-parts-marking",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "new_vol->cut_info.is_from_upper = false;",
+      "new": "new_vol->cut_info.is_from_upper = true;",
+      "description": "Keep-as-parts must retain provenance for both upper and lower volumes.",
+      "test_filter": "CutUtilsGroove"
+    }
+  ]
+}

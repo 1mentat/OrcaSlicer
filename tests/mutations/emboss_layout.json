@@ -1,0 +1,117 @@
+{
+  "mutants": [
+    {
+      "id": "rotation-axis",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "transformation *= Eigen::AngleAxisd(angle_z, Vec3d::UnitZ());",
+      "new": "transformation *= Eigen::AngleAxisd(angle_z, Vec3d::UnitY());",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "distance-axis",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "Vec3d translate = Vec3d::UnitZ() * (*distance);",
+      "new": "Vec3d translate = Vec3d::UnitY() * (*distance);",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "reverse-normal",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "Point norm(-surface_dir.y(), surface_dir.x());",
+      "new": "Point norm(surface_dir.y(), -surface_dir.x());",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "angle-coordinate-order",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "return std::atan2(norm_d.y(), norm_d.x());",
+      "new": "return std::atan2(norm_d.x(), norm_d.y());",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "sample-glyph-edge",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "Point   letter_center  = bb.center();",
+      "new": "Point   letter_center  = bb.max;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "sample-scale",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "double  distance_mm    = shape_distance * scale;",
+      "new": "double  distance_mm    = shape_distance * scale * 2.;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "whitespace-cursor",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "if (!bb.defined)\n            return cursor;",
+      "new": "if (!bb.defined)\n            return slice.start;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "sample-left-boundary",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "for (size_t index_plus_one = first_right_index; index_plus_one > 0; --index_plus_one)",
+      "new": "for (size_t index_plus_one = first_right_index; index_plus_one > 1; --index_plus_one)",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "sample-font-collection",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "unsigned int font_index = prop.collection_number.value_or(0);",
+      "new": "unsigned int font_index = 0;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "line-gap",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "line_height += prop.line_gap.value_or(0);",
+      "new": "line_height += 0;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "bottom-line-count",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "case FontProp::VerticalAlign::bottom: return line_height * (count_lines - 1);",
+      "new": "case FontProp::VerticalAlign::bottom: return line_height * count_lines;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "top-alignment-sign",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "case FontProp::VerticalAlign::top: return -ascent;",
+      "new": "case FontProp::VerticalAlign::top: return ascent;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "center-line-spacing",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "return -line_center + line_height * (count_lines - 1) / 2.;",
+      "new": "return -line_center + line_height * (count_lines - 1) / 3.;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    },
+    {
+      "id": "offset-unit-scale",
+      "path": "src/libslic3r/Emboss.cpp",
+      "old": "return scale * offset_in_font_point;",
+      "new": "return 2. * scale * offset_in_font_point;",
+      "test_filter": "EmbossLayout",
+      "description": "Emboss layout preserves the analytic placement, sampled geometry, or font-metric contract."
+    }
+  ],
+  "schema_version": 1
+}

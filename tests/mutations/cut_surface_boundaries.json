@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "AOI projection reflection and inclusive boundary selection contracts.",
+  "mutants": [
+    {
+      "id": "cut-surface-aoi-reflection-orientation",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "if (is_out_of(point_normals[2].first, point_normals[0])) {",
+      "new": "if (false) {",
+      "description": "Remove the reflected-projection normal correction; forward and negative ProjectZ AOI selections should diverge.",
+      "test_filter": "CutSurfaceExtended"
+    },
+    {
+      "id": "cut-surface-aoi-boundary-inclusion",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "return signed_distance > 1e-5;",
+      "new": "return signed_distance >= 0.;",
+      "description": "Classify exact AOI-boundary vertices as outside; the boundary-contact triangle contract should expose the lost triangle.",
+      "test_filter": "CutSurfaceExtended"
+    }
+  ]
+}

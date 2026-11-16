@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutation checks for DRCExport public contracts.",
+  "mutants": [
+    {
+      "id": "drc-export-quantization-ignored",
+      "path": "src/libslic3r/Format/DRC.cpp",
+      "old": "encoder.SetAttributeQuantization(GeometryAttribute::POSITION, bits);",
+      "new": "encoder.SetAttributeQuantization(GeometryAttribute::POSITION, DRC_BITS_DEFAULT);",
+      "description": "The public exporter must pass the requested position quantization through: the 8-bit row must retain a positive quantization error while the default and 30-bit rows remain high precision.",
+      "test_filter": "DRCExport"
+    },
+    {
+      "id": "drc-export-object-transform-dropped",
+      "path": "src/libslic3r/Format/DRC.cpp",
+      "old": "TriangleMesh mesh = model_object->mesh();",
+      "new": "TriangleMesh mesh = model_object->raw_mesh();",
+      "description": "The ModelObject overload must export the transformed public object mesh, including its volume and instance offsets; the independent literal-transform bounds/topology oracle must reject raw coordinates.",
+      "test_filter": "DRCExport"
+    }
+  ]
+}

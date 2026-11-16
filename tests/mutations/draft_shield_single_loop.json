@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Public draft-shield G-code emits three first-layer loops and either three or one later-layer loop according to single_loop_draft_shield while object deposition remains unchanged.",
+  "mutants": [
+    {
+      "id": "gcode-draft-shield-single-loop-gate-swapped-v2",
+      "description": "Invert the later-layer early-break gate. The disabled single-loop control must incorrectly collapse from three to one later-layer run; the enabled row already starts at the final loop and stays at one.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            if (!first_layer && print.m_config.single_loop_draft_shield) {",
+      "new": "            if (!first_layer && !print.m_config.single_loop_draft_shield) {",
+      "test_filter": "DraftShieldSingleLoop"
+    }
+  ]
+}
