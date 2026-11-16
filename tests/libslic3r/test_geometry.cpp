@@ -1470,6 +1470,31 @@ TEST_CASE("Transformation axis mirror inputs normalize independently", "[Geometr
     check_linear_and_offset(positive_z.get_matrix(), Matrix3d::Identity(), Vec3d::Zero());
 }
 
+namespace math_gap_contracts {
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("Transformation vector mirror inputs normalize and preserve scale and offset", "[Geometry][GeometryGap][MathGap]")
+{
+    const Vec3d scale(2., 3., 4.);
+    const Vec3d expected_offset(5., -6., 7.);
+    Geometry::Transformation transform;
+    transform.set_scaling_factor(scale);
+    transform.set_offset(expected_offset);
+
+    transform.set_mirror(Vec3d(0., 2., -0.5));
+
+    Matrix3d expected_linear = scale.asDiagonal();
+    expected_linear(2, 2) = -expected_linear(2, 2);
+    check_linear_and_offset(transform.get_matrix(), expected_linear, expected_offset);
+    const Vec3d absolute_scale = transform.get_scaling_factor();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(absolute_scale[axis], WithinAbs(scale[axis], 1e-12));
+    const Vec3d offset = transform.get_offset();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(offset[axis], WithinAbs(expected_offset[axis], 1e-12));
+}
+} // namespace math_gap_contracts
+
 TEST_CASE("Orthogonal transform axes remain free of skew after rotation and reflection",
           "[Geometry][Transformation][Skew]")
 {
