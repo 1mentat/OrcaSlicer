@@ -4863,7 +4863,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered, so this remains partial rather than claiming a complete numeric boundary matrix."
+      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered. These representative fixtures do not exhaust the unbounded numeric domain or arbitrary geometries."
     },
     "min_skirt_length": {
       "test": "tests/fff_print/test_skirt_brim.cpp",
