@@ -37,6 +37,7 @@ on:
       - 'scripts/validation_artifact_lint.py'
       - '.github/validation-producers.json'
       - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'scripts/tests/test_gcov_native_fixture.py'
       - 'cmake/SlicerCoverage.cmake'
       - 'CMakeLists.txt'
       - 'tests/filament_group/CMakeLists.txt'
@@ -86,6 +87,7 @@ on:
       - 'scripts/validation_artifact_lint.py'
       - '.github/validation-producers.json'
       - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'scripts/tests/test_gcov_native_fixture.py'
       - 'cmake/SlicerCoverage.cmake'
       - 'CMakeLists.txt'
       - 'tests/filament_group/CMakeLists.txt'
@@ -195,6 +197,9 @@ jobs:
       - name: Test GCC coverage CMake instrumentation
         if: matrix.os == 'ubuntu-latest'
         run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeLauncherTests -v
+      - name: Test tiny real GNU gcov fixture
+        if: matrix.os == 'ubuntu-latest'
+        run: python -B -m unittest discover -s scripts/tests -p test_gcov_native_fixture.py -v
       - name: Test Catch discovery preprocessor
         run: python -B -m unittest discover -s scripts/tests -p test_catch_preprocessor.py -v
       - name: Test Catch discovery profile isolation
