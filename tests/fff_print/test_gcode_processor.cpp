@@ -28,13 +28,8 @@
 #include <cmath>
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
-#include <catch2/catch_test_macros.hpp>
 #include <limits>
-#include <string>
 #include "libslic3r/Exception.hpp"
-#include "libslic3r/GCode/GCodeProcessor.hpp"
-#include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/libslic3r.h"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Utils.hpp"
 #include <catch2/catch_all.hpp>
@@ -3346,6 +3341,32 @@ DynamicPrintConfig header_config(const FullPrintConfig &full, const std::vector<
     return config;
 }
 
+using VolumesAndTime = std::pair<std::map<size_t, double>, float>;
+
+VolumesAndTime summarize(const GCodeProcessorResult &result)
+{
+    return {result.print_statistics.total_volumes_per_extruder,
+            result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time};
+}
+
+VolumesAndTime run_static(const std::vector<int> &filament_map, size_t nozzle_count)
+{
+    GCodeProcessor processor;
+    processor.apply_config(two_filament_config(filament_map, nozzle_count));
+    processor.initialize("extruder_map_bounds.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(tool_change_body);
+    processor.finalize(false);
+    return summarize(processor.get_result());
+}
+
+VolumesAndTime run_header(const std::vector<int> &filament_map, size_t nozzle_count)
+{
+    GCodeProcessor processor;
+    process_header_file(processor, header_config(two_filament_config(filament_map, nozzle_count), filament_map), tool_change_body);
+    return summarize(processor.get_result());
+}
+
 } // namespace
 
 TEST_CASE("Extruder map conversion validates before subtracting",
@@ -3390,6 +3411,11 @@ TEST_CASE("Static processor covers every mapped extruder with a nozzle volume",
         CHECK(processor.get_result().filaments_count == 2);
         CHECK(processor.get_result().print_statistics.total_volumes_per_extruder.size() == 2);
     }
+    // Padded (1 nozzle volume) and explicit (2 nozzle volumes) tables must give identical results.
+    for (const std::vector<int> &filament_map : {std::vector<int>{1, 2}, std::vector<int>{2, 1}}) {
+        CAPTURE(filament_map);
+        CHECK(run_static(filament_map, 1) == run_static(filament_map, 2));
+    }
 }
 
 TEST_CASE("Orca file import rejects out-of-range filament map headers",
@@ -3417,6 +3443,10 @@ TEST_CASE("Orca file import covers every mapped extruder with a nozzle volume",
         process_header_file(processor, header_config(two_filament_config(filament_map, nozzle_count), filament_map), tool_change_body);
         CHECK(processor.get_result().filaments_count == 2);
         CHECK(processor.get_result().print_statistics.total_volumes_per_extruder.size() == 2);
+    }
+    for (const std::vector<int> &filament_map : {std::vector<int>{1, 2}, std::vector<int>{2, 1}}) {
+        CAPTURE(filament_map);
+        CHECK(run_header(filament_map, 1) == run_header(filament_map, 2));
     }
 }
 
