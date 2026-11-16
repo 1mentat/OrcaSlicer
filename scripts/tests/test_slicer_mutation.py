@@ -1868,7 +1868,7 @@ class MutationTargetModeTests(unittest.TestCase):
             f"CMAKE_HOME_DIRECTORY:INTERNAL={repo}\nCMAKE_BUILD_TYPE:STRING=Release\n",
             encoding="utf-8")
         source = repo / "source.cpp"
-        source.write_text("before\n", encoding="utf-8")
+        source.write_bytes(b"before\n")
         output = root / "evidence"
         expected = root / "expected.json"
         expected.write_text(json.dumps(control_names), encoding="utf-8")
