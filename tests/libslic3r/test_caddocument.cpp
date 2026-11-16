@@ -219,6 +219,43 @@ TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter set
     REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 0.02));
 }
 
+TEST_CASE("Editing a rectangular sketch and Extrude keeps the original rectangular edit contract",
+          "[CadDocument][CadDocumentReplacement]")
+{
+    // Keep the original rectangular edit contract alongside the circle and moved-plane coverage.
+    CadDocument rectangle_doc;
+    const int rectangle_sketch = rectangle_doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                                           10.0, 10.0, 0.0, "Profile");
+    const int rectangle_extrude = rectangle_doc.add_extrude(rectangle_sketch, 5.0, false,
+                                                            BooleanMode::New, "Solid");
+    REQUIRE(rectangle_doc.recompute());
+    REQUIRE(rectangle_doc.error.empty());
+    REQUIRE(rectangle_doc.bodies.size() == 1);
+
+    CadFeature rectangle_edit;
+    rectangle_edit.type      = CadFeatureType::Extrude;
+    rectangle_edit.shape     = SketchShape::Rectangle;
+    rectangle_edit.plane     = SketchPlane::XY();
+    rectangle_edit.width     = 12.0;
+    rectangle_edit.height    = 8.0;
+    rectangle_edit.distance  = 4.0;
+    rectangle_edit.symmetric = false;
+    rectangle_edit.mode      = BooleanMode::New;
+    REQUIRE(rectangle_doc.replace_sketch_extrude(rectangle_sketch, rectangle_extrude, rectangle_edit));
+    REQUIRE(rectangle_doc.recompute());
+    REQUIRE(rectangle_doc.error.empty());
+    REQUIRE(rectangle_doc.bodies.size() == 1);
+    REQUIRE(rectangle_doc.display_mesh.facets_count() > 0);
+    CHECK(rectangle_doc.features[rectangle_sketch].name == "Profile");
+    CHECK(rectangle_doc.features[rectangle_sketch].type == CadFeatureType::Sketch);
+    CHECK(rectangle_doc.features[rectangle_extrude].name == "Solid");
+    CHECK(rectangle_doc.features[rectangle_extrude].type == CadFeatureType::Extrude);
+    CHECK_THAT(rectangle_doc.features[rectangle_sketch].width, Catch::Matchers::WithinAbs(12.0, 1e-9));
+    CHECK_THAT(rectangle_doc.features[rectangle_sketch].height, Catch::Matchers::WithinAbs(8.0, 1e-9));
+    CHECK_THAT(rectangle_doc.features[rectangle_extrude].distance, Catch::Matchers::WithinAbs(4.0, 1e-9));
+    CHECK_THAT(double(rectangle_doc.display_mesh.volume()), Catch::Matchers::WithinRel(384.0, 0.02));
+}
+
 TEST_CASE("Feature replacement rejects bad indices and rolls back a failed rebuild", "[CadDocument]")
 {
     CadDocument doc;
