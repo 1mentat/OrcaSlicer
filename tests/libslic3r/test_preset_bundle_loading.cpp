@@ -8083,7 +8083,7 @@ TEST_CASE("secure full config removes host credentials while retaining slicing v
     }
 }
 
-TEST_CASE("full SLA config merges selected profiles and marks SLA technology", "[Preset][Bundle][FullConfig]")
+TEST_CASE("full SLA config merges selected profiles and marks SLA technology", "[Preset][Bundle][FullConfig][PresetBundle][PresetBundleContracts]")
 {
     PresetBundle bundle;
     DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
@@ -8174,7 +8174,7 @@ TEST_CASE("Full FFF configuration falls back to the project filament volume map"
     check_double_vector(out.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values, {22., 13.});
 }
 
-TEST_CASE("Full FFF configuration records selected system filament changes", "[Preset][Bundle][FullConfig]")
+TEST_CASE("Full FFF configuration records selected system filament changes", "[Preset][Bundle][FullConfig][PresetBundle][PresetBundleContracts][PresetBundleFullFffProvenance]")
 {
     PresetBundle bundle;
     add_bundle_filament(bundle, "System PLA", "SYSTEM-PLA", "PLA", true);
@@ -8401,7 +8401,7 @@ TEST_CASE("current config export skips an existing file when the answer is 2", "
     CHECK_THAT(process.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.19, 1e-9));
 }
 
-TEST_CASE("current config export omits built-in default selections", "[Preset][Bundle][PresetExport]")
+TEST_CASE("current config export omits built-in default selections", "[Preset][Bundle][PresetExport][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-export-default");
     ScopedDataDir data(temp.path() / "data");
@@ -8660,7 +8660,7 @@ TEST_CASE("JSON preset import asks before replacing an installed profile and hon
     }
 }
 
-TEST_CASE("Preset bundle ZIP import preserves bundle identity and per-type files", "[Preset][Bundle][PresetBundleImport]")
+TEST_CASE("Preset bundle ZIP import preserves bundle identity and per-type files", "[Preset][Bundle][PresetBundleImport][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-bundle-import");
     ScopedDataDir      data(temp.path() / "data");
@@ -9078,7 +9078,7 @@ size_t load_json_vendor(PresetBundle &bundle, const boost::filesystem::path &roo
 } // namespace
 
 TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes lists",
-          "[Preset][Vendor][VendorJson]")
+          "[Preset][Vendor][VendorJson][PresetBundle]")
 {
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
@@ -9126,7 +9126,7 @@ TEST_CASE("JSON vendor printer metadata preserves machine fields and normalizes 
 
 
 TEST_CASE("JSON vendor printer metadata preserves SLA technology and empty lists",
-          "[Preset][Vendor][VendorJson][VendorJsonSla]")
+          "[Preset][Vendor][VendorJson][VendorJsonSla][PresetBundle]")
 {
     ScopedTemporaryDir dir;
     ScopedDataDir data(dir.path() / "json-vendor-data");
@@ -9192,7 +9192,7 @@ TEST_CASE("JSON vendor malformed lists return normally and retain models with va
 
 
 TEST_CASE("External config preserves project settings but filters print-host credentials",
-          "[Preset][ExternalConfigCredentials]")
+          "[Preset][ExternalConfigCredentials][PresetBundleLoading][PresetDeep][External]")
 {
     const std::vector<std::string> connection_keys{
         "print_host", "print_host_webui", "printhost_apikey", "printhost_cafile",
@@ -9377,7 +9377,7 @@ TEST_CASE("External preset override marks an existing profile dirty", "[Preset][
 
 namespace preset_bundle_workflow_contracts {
 
-TEST_CASE("G-code config loading activates an external profile from recognized metadata", "[Preset][ExternalGcodeConfig]")
+TEST_CASE("G-code config loading activates an external profile from recognized metadata", "[Preset][ExternalGcodeConfig][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-gcode");
     const fs::path gcode = temp.path() / "metadata.gcode";
@@ -9399,7 +9399,7 @@ TEST_CASE("G-code config loading activates an external profile from recognized m
 }
 
 TEST_CASE("External G-code config splits each filament slot into its own source profile",
-          "[Preset][ExternalGcodeConfig][MultiFilament]")
+          "[Preset][ExternalGcodeConfig][MultiFilament][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-multi-filament");
     const fs::path gcode = temp.path() / "multi.gcode";
@@ -9475,7 +9475,7 @@ BundleMetadata bundle_metadata(const std::string &id)
 
 } // namespace
 
-TEST_CASE("local bundle metadata and preset identity survive user loading", "[Preset][LocalBundleReload]")
+TEST_CASE("local bundle metadata and preset identity survive user loading", "[Preset][LocalBundleReload][PresetBundle][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-local");
     ScopedDataDir data(temp.path() / "data");
@@ -9741,7 +9741,7 @@ TEST_CASE("Subscribed bundle reconciliation prunes obsolete typed entries while 
 
 namespace preset_bundle_workflow_contracts {
 
-TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets", "[PresetBundle][PresetBundleSubscribedPrune]")
+TEST_CASE("subscribed bundle update writes metadata and prunes obsolete presets", "[PresetBundle][PresetBundleSubscribedPrune][PresetBundleWorkflowsExtended]")
 {
     ScopedTemporaryDir temp("preset-workflow-subscribed");
     ScopedDataDir data(temp.path() / "data");
@@ -11771,7 +11771,7 @@ void project_slots(PresetBundle &bundle, std::vector<std::string> names,
 namespace preset_ams_sync_contracts {
 
 TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metadata",
-          "[PresetBundleLoading][PresetAmsMatched]")
+          "[PresetBundleLoading][PresetAmsMatched][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -11817,7 +11817,7 @@ TEST_CASE("AMS overwrite serializes multi-color vectors into project configurati
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS synchronization keeps left and right physical trays in map order", "[PresetBundleLoading][PresetAmsPhysicalOrder]")
+TEST_CASE("AMS synchronization keeps left and right physical trays in map order", "[PresetBundleLoading][PresetAmsPhysicalOrder][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -11842,7 +11842,7 @@ TEST_CASE("AMS synchronization keeps left and right physical trays in map order"
 namespace preset_ams_sync_contracts {
 
 TEST_CASE("AMS sync retains the previous preset and reports an unknown material",
-          "[PresetBundleLoading][PresetAmsUnknown]")
+          "[PresetBundleLoading][PresetAmsUnknown][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -11866,7 +11866,7 @@ TEST_CASE("AMS sync retains the previous preset and reports an unknown material"
 namespace preset_ams_sync_contracts {
 
 TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing color",
-          "[PresetBundleLoading][PresetAmsUnchanged]")
+          "[PresetBundleLoading][PresetAmsUnchanged][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -11885,7 +11885,7 @@ TEST_CASE("AMS unchanged slots preserve their selected preset while refreshing c
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS unknown type uses the longest whole-word generic preset match", "[PresetBundleLoading][PresetAmsGenericType]")
+TEST_CASE("AMS unknown type uses the longest whole-word generic preset match", "[PresetBundleLoading][PresetAmsGenericType][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PA", "pa-id", "PA");
@@ -11910,7 +11910,7 @@ TEST_CASE("AMS unknown type uses the longest whole-word generic preset match", "
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS unknown material without generic preset falls back to a compatible system preset", "[PresetBundleLoading][PresetAmsSystemFallback]")
+TEST_CASE("AMS unknown material without generic preset falls back to a compatible system preset", "[PresetBundleLoading][PresetAmsSystemFallback][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "A Incompatible", "incompatible-id", "ABS").is_compatible = false;
@@ -11936,7 +11936,7 @@ TEST_CASE("AMS unknown material without generic preset falls back to a compatibl
 namespace preset_ams_sync_contracts {
 
 TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them",
-          "[PresetBundleLoading][PresetAmsPlaceholder]")
+          "[PresetBundleLoading][PresetAmsPlaceholder][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -11956,7 +11956,7 @@ TEST_CASE("AMS placeholders preserve empty trays while loaded trays replace them
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS placeholder merge fills slots beyond the existing project selection", "[PresetBundleLoading][PresetAmsExtendedPlaceholders]")
+TEST_CASE("AMS placeholder merge fills slots beyond the existing project selection", "[PresetBundleLoading][PresetAmsExtendedPlaceholders][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -12009,7 +12009,7 @@ TEST_CASE("AMS color-only index synchronization preserves names and mapped multi
 namespace preset_ams_sync_contracts {
 
 TEST_CASE("AMS color-only synchronization falls back to tray order without a map",
-          "[PresetBundleLoading][PresetAmsUnmappedColors]")
+          "[PresetBundleLoading][PresetAmsUnmappedColors][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
@@ -12029,7 +12029,7 @@ TEST_CASE("AMS color-only synchronization falls back to tray order without a map
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS color-only sync falls back to tray indices when a supplied map does not match", "[PresetBundleLoading][PresetAmsUnmatchedMapColors]")
+TEST_CASE("AMS color-only sync falls back to tray indices when a supplied map does not match", "[PresetBundleLoading][PresetAmsUnmatchedMapColors][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -12127,7 +12127,7 @@ TEST_CASE("AMS empty-id tray removes its mapping and retains the project slot", 
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS mapped sync appends each unmapped tray once when append is enabled", "[PresetBundleLoading][PresetAmsAppendEnabled]")
+TEST_CASE("AMS mapped sync appends each unmapped tray once when append is enabled", "[PresetBundleLoading][PresetAmsAppendEnabled][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -12171,7 +12171,7 @@ TEST_CASE("AMS unmapped trays sharing the selected preset and color are appended
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS map merges record all project slots pointing at one physical tray", "[PresetBundleLoading][PresetAmsMergedMapping]")
+TEST_CASE("AMS map merges record all project slots pointing at one physical tray", "[PresetBundleLoading][PresetAmsMergedMapping][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     system_filament(bundle, "Generic PLA", "pla-id", "PLA");
@@ -12267,7 +12267,7 @@ TEST_CASE("AMS overwrite re-appends mixed slots without changing their metadata"
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament types", "[PresetBundleLoading][PresetBblHrc]")
+TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament types", "[PresetBundleLoading][PresetBblHrc][PresetBundle][PresetAmsSync]")
 {
     PresetBundle bundle;
     VendorProfile& bbl = bundle.vendors["BBL"];
@@ -12299,7 +12299,7 @@ TEST_CASE("BBL HRC lookup filters vendor, missing values, and unknown filament t
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("extruder filament information partitions AMS cells by left and right extruder", "[PresetBundleLoading][PresetAmsCombo1]")
+TEST_CASE("extruder filament information partitions AMS cells by left and right extruder", "[PresetBundleLoading][PresetAmsCombo1][PresetBundle][PresetBundleContracts]")
 {
     PresetBundle bundle;
     bundle.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter", true)->values = {0.4, 0.6};
@@ -12341,7 +12341,7 @@ TEST_CASE("Single-extruder configuration returns no AMS extruder groups", "[Pres
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots", "[PresetBundleLoading][PresetAmsCombo3]")
+TEST_CASE("used TPU filament indices are zero-based and ignore unselected slots", "[PresetBundleLoading][PresetAmsCombo3][PresetBundle][PresetBundleContracts]")
 {
     PresetBundle bundle;
     add_inmemory_preset(bundle.filaments, "TPU").config.option<ConfigOptionStrings>("filament_type", true)->values = {"TPU"};
@@ -12379,7 +12379,7 @@ TEST_CASE("AMS combo ID matching is distinct from generic fallback and preserves
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS combo fallback prefers generic material then prior selection then compatible system material", "[PresetBundleLoading][PresetAmsComboFallback]")
+TEST_CASE("AMS combo fallback prefers generic material then prior selection then compatible system material", "[PresetBundleLoading][PresetAmsComboFallback][PresetBundle][AmsComboFallback]")
 {
     const int scenario = GENERATE(0, 1, 2, 3, 4);
     INFO("fallback scenario=" << scenario);
@@ -12487,7 +12487,7 @@ struct AmsValidationFixture {
 
 namespace preset_ams_validation_contracts {
 
-TEST_CASE("AMS tray temperatures reconcile only the identified compatible user material", "[PresetBundleLoading][PresetAmsValidation7]")
+TEST_CASE("AMS tray temperatures reconcile only the identified compatible user material", "[PresetBundleLoading][PresetAmsValidation7][PresetBundle][AmsValidation]")
 {
     const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6, 7, 8);
     CAPTURE(scenario);
@@ -12521,7 +12521,7 @@ TEST_CASE("AMS tray temperatures reconcile only the identified compatible user m
 
 namespace preset_ams_validation_contracts {
 
-TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[PresetBundleLoading][PresetAmsValidation9]")
+TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[PresetBundleLoading][PresetAmsValidation9][PresetBundle][AmsValidation]")
 {
     const int variant = GENERATE(0, 1, 2, 3);
     CAPTURE(variant);
@@ -12553,7 +12553,7 @@ TEST_CASE("AMS tray temperatures select the extruder and nozzle variant", "[Pres
 
 namespace preset_ams_validation_contracts {
 
-TEST_CASE("AMS duplicate validation scopes material identifiers by compatible system printer", "[PresetBundleLoading][PresetAmsValidation8]")
+TEST_CASE("AMS duplicate validation scopes material identifiers by compatible system printer", "[PresetBundleLoading][PresetAmsValidation8][PresetBundle][AmsValidation]")
 {
     const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6);
     CAPTURE(scenario);
@@ -12782,7 +12782,7 @@ TEST_CASE("Installed filament discovery persists compatible vendor defaults", "[
 }
 
 TEST_CASE("PresetBundle copy repairs vendor pointers and preserves selected configurations",
-          "[PresetBundleLoading][PresetBundleCopy]")
+          "[PresetBundleLoading][PresetBundleCopy][Preset][PresetBundleLifecycleExtended]")
 {
     PresetBundle original;
     VendorProfile vendor("Acme");
@@ -13152,7 +13152,7 @@ TEST_CASE("PresetCollection sync repair persists the direct parent's id for a st
     CHECK(persisted.sync_info == "update");
 }
 
-TEST_CASE("PresetBundle removes only the selected user's deleted cloud profiles", "[PresetBundleLoading][PresetCloudOtherUser]")
+TEST_CASE("PresetBundle removes only the selected user's deleted cloud profiles", "[PresetBundleLoading][PresetCloudOtherUser][Preset][PresetBundleLifecycleExtended]")
 {
     ScopedTemporaryDir temp("preset-bundle-remove-user");
     ScopedDataDir data(temp.path() / "data");
@@ -13295,7 +13295,7 @@ void set_two_extruder_project(PresetBundle &bundle)
 
 namespace preset_flush_matrix_contracts {
 
-TEST_CASE("flush matrix preserves dimensions and applies per extruder multipliers", "[PresetBundleLoading][PresetFlushMatrix1]")
+TEST_CASE("flush matrix preserves dimensions and applies per extruder multipliers", "[PresetBundleLoading][PresetFlushMatrix1][PresetBundle][PresetBundleContracts]")
 {
     PresetBundle bundle;
     set_two_extruder_project(bundle);
@@ -13324,7 +13324,7 @@ TEST_CASE("flush matrix preserves dimensions and applies per extruder multiplier
 
 namespace preset_flush_matrix_contracts {
 
-TEST_CASE("fast purge uses the fast multiplier independently of default multiplier", "[PresetBundleLoading][PresetFlushMatrix2]")
+TEST_CASE("fast purge uses the fast multiplier independently of default multiplier", "[PresetBundleLoading][PresetFlushMatrix2][PresetBundle][PresetBundleContracts]")
 {
     PresetBundle bundle;
     set_two_extruder_project(bundle);
@@ -13752,7 +13752,7 @@ TEST_CASE("project embedded external preset refreshes stored config without dirt
 }
 
 TEST_CASE("Saving an inherited preset keeps its parent",
-          "[PresetBundleLoading][PresetExternalSave3]")
+          "[PresetBundleLoading][PresetExternalSave3][Preset][PresetExternalSave]")
 {
     preset_lifecycle_contracts::ScopedPresetBundle scoped;
     PresetCollection &collection = scoped.bundle.prints;
@@ -13925,7 +13925,7 @@ TEST_CASE("Vendor bed texture lookup honors model ids and asset-root fallback", 
 namespace preset_asset_lookup_contracts {
 
 TEST_CASE("PresetUtils resolves configured printer assets from installed and bundled roots",
-          "[PresetBundleLoading][PresetAssetLookup3]")
+          "[PresetBundleLoading][PresetAssetLookup3][Preset][PresetAssetResolution]")
 {
     ScopedTemporaryDir dir("preset-utils-printer-assets");
     ScopedDataDir data(dir.path() / "data");
@@ -13991,7 +13991,7 @@ TEST_CASE("PresetUtils resolves configured printer assets from installed and bun
 namespace preset_asset_lookup_contracts {
 
 TEST_CASE("PresetUtils handles presets without a resolved printer model",
-          "[PresetBundleLoading][PresetAssetLookup4]")
+          "[PresetBundleLoading][PresetAssetLookup4][Preset][PresetAssetResolution]")
 {
     ScopedTemporaryDir dir("preset-utils-unresolved-printer");
     ScopedDataDir data(dir.path() / "data");
