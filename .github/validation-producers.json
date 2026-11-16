@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "producers": [
+    {
+      "id": "settings-inventory",
+      "path": "scripts/settings_inventory.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "mutation-validation",
+      "path": "scripts/slicer_mutation.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "pr-validation",
+      "path": "scripts/slicer_pr_validation.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--output-dir"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "module-feedback",
+      "path": "scripts/slicer_module_feedback.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "public-validation-upload",
+      "path": ".github/actions/validation-upload/action.yml",
+      "kind": "github-upload",
+      "lifecycle": "ephemeral-runner",
+      "retention_days": 14,
+      "max_bytes": 4294967296
+    }
+  ]
+}
