@@ -29,7 +29,7 @@
     {
       "id": "bbs3mf-model-metadata-drop",
       "path": "src/libslic3r/Format/bbs_3mf.cpp",
-      "old": "model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters);",
+      "old": "model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);",
       "new": "model_info.metadata_items[m_curr_metadata_name] = std::string();",
       "description": "Erase arbitrary model metadata values during XML import.",
       "test_filter": "Bbs3mfExtended"
