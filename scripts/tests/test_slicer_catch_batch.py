@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -174,6 +175,7 @@ class CatchBatchPlanningTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.measured_profile = self.root / "measured-profiles"
         self.build = self.root / "build"
         self.build.mkdir()
         self.test_dir = self.build / "tests"
@@ -313,14 +315,14 @@ class CatchBatchPlanningTests(unittest.TestCase):
 
     def assert_isolated_preflight_env(self, env):
         self.assertEqual(env["GCOV_PREFIX_STRIP"], "0")
-        self.assertIn("/preflight-profiles/", env["GCOV_PREFIX"])
-        self.assertIn("/preflight-profiles/", env["LLVM_PROFILE_FILE"])
+        self.assertIn("/preflight-profiles/", Path(env["GCOV_PREFIX"]).as_posix())
+        self.assertIn("/preflight-profiles/", Path(env["LLVM_PROFILE_FILE"]).as_posix())
         self.assertNotEqual(env["GCOV_PREFIX"], self.parent_env["GCOV_PREFIX"])
 
     def test_processor_cohorts_run_serially_with_parent_env_and_exact_junit(self):
         self.parent_env = {
-            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": "/coverage/measured",
-            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p.profraw",
+            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": str(self.measured_profile),
+            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p.profraw"),
         }
         raw = json.dumps(self.discovery, ensure_ascii=False).encode("utf-8")
         digest = hashlib.sha256(raw).hexdigest()
@@ -369,7 +371,7 @@ class CatchBatchPlanningTests(unittest.TestCase):
                     discovery_sha256=hashlib.sha256(raw).hexdigest(), discovery_raw_json=raw)
 
     def test_unexpected_list_match_fails_before_any_native_batch_process(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         self.unexpected_listed_by_exe["libslic3r_tests"] = ["another test selected by bad escaping"]
         raw = json.dumps(self.discovery).encode("utf-8")
@@ -384,8 +386,9 @@ class CatchBatchPlanningTests(unittest.TestCase):
                     affinity_controller=self.affinity)
         self.assertFalse(any(kind == "batch" for _, kind in self.call_order))
 
+    @unittest.skipIf(os.name == "nt", "GNU GCOV_PREFIX note-layout fixture requires POSIX absolute paths")
     def test_preflight_rejects_gcda_stamp_mismatch_before_any_native_batch_process(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         note = self.build / "src" / "unit.cpp.gcno"
         note.parent.mkdir(parents=True)
@@ -422,8 +425,9 @@ class CatchBatchPlanningTests(unittest.TestCase):
         self.assertTrue(Path(failed_batch["preflight_profile_epoch_receipt"]).is_file())
         self.assertTrue((out / "batch-report.json").is_file())
 
+    @unittest.skipIf(os.name == "nt", "GNU GCOV_PREFIX note-layout fixture requires POSIX absolute paths")
     def test_preflight_rejects_matching_note_outside_build_before_native_batch(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         allowed_note = self.build / "src" / "unit.cpp.gcno"
         allowed_note.parent.mkdir(parents=True)
@@ -463,7 +467,7 @@ class CatchBatchPlanningTests(unittest.TestCase):
                       failed["preflight_profile_epoch"]["mismatches"][0]["error"])
 
     def test_instrumented_preflight_rejects_no_gcda_but_generic_batch_allows_it(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         note = self.build / "src" / "unit.cpp.gcno"
         note.parent.mkdir(parents=True)
@@ -502,7 +506,7 @@ class CatchBatchPlanningTests(unittest.TestCase):
         self.assertEqual(self.call_order, [])
 
     def test_cpu_limit_restores_on_executor_exception(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         self.raise_on_batch = True
         raw = json.dumps(self.discovery).encode("utf-8")
@@ -538,8 +542,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
     def test_opt_in_fff_shards_run_concurrently_with_distinct_profiles_and_exact_union(self):
         self._add_fff_shard_cases()
         self.parent_env = {
-            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": "/coverage/measured",
-            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p-%m.profraw",
+            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": str(self.measured_profile),
+            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p-%m.profraw"),
         }
         active = 0
         max_active = 0
@@ -599,8 +603,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
     def test_fff_shard_timeout_is_reported_without_junit_or_success(self):
         self._add_fff_shard_cases()
         self.parent_env = {
-            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": "/coverage/measured",
-            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p-%m.profraw",
+            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": str(self.measured_profile),
+            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p-%m.profraw"),
         }
 
         def timeout_one_shard(argv, *, cwd, env, timeout, log_path, receipt_path):
@@ -633,8 +637,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
     def test_fff_shard_execution_error_is_incomplete_without_junit(self):
         self._add_fff_shard_cases()
         self.parent_env = {
-            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": "/coverage/measured",
-            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p-%m.profraw",
+            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": str(self.measured_profile),
+            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p-%m.profraw"),
         }
 
         def fail_one_shard(argv, *, cwd, env, timeout, log_path, receipt_path):
@@ -666,8 +670,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
     def test_fff_affinity_entry_failure_is_not_counted_as_a_process_launch(self):
         self._add_fff_shard_cases()
         self.parent_env = {
-            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": "/coverage/measured",
-            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p-%m.profraw",
+            "PATH": "/usr/bin", "LANG": "C", "GCOV_PREFIX": str(self.measured_profile),
+            "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p-%m.profraw"),
         }
 
         class FailFirstShardAffinityEntry(ThreadLocalFakeAffinityController):
@@ -703,7 +707,7 @@ class CatchBatchPlanningTests(unittest.TestCase):
         self.assertEqual(report["batch_process_launch_attempted_count"], attempts)
 
     def test_fff_shard_selector_rejects_absent_onecpu_cohort_before_execution(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
                            "GCOV_PREFIX_STRIP": "0"}
         raw = json.dumps(self.discovery, ensure_ascii=False).encode("utf-8")
         with self.assertRaisesRegex(batch.BatchValidationError, "exactly one one-CPU"):
@@ -734,8 +738,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
                 batch.LinuxAffinityController.available()
 
     def test_live_ctest_discovery_uses_private_profiles_and_records_raw_hash(self):
-        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": "/coverage/measured",
-                           "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": "/coverage/measured/%p.profraw"}
+        self.parent_env = {"PATH": "/usr/bin", "GCOV_PREFIX": str(self.measured_profile),
+                           "GCOV_PREFIX_STRIP": "0", "LLVM_PROFILE_FILE": str(self.measured_profile / "%p.profraw")}
         raw = json.dumps(self.discovery, ensure_ascii=False).encode("utf-8")
         observed_env = {}
 
@@ -756,8 +760,8 @@ class CatchBatchPlanningTests(unittest.TestCase):
             self.assertEqual(receipt["ctest_json_sha256"], hashlib.sha256(raw).hexdigest())
             self.assertEqual(command, self.ctest_argv())
             self.assertEqual(payload, self.discovery)
-            self.assertIn("/discovery-profiles/ctest/", observed_env["GCOV_PREFIX"])
-            self.assertIn("/discovery-profiles/ctest/", observed_env["LLVM_PROFILE_FILE"])
+            self.assertIn("/discovery-profiles/ctest/", Path(observed_env["GCOV_PREFIX"]).as_posix())
+            self.assertIn("/discovery-profiles/ctest/", Path(observed_env["LLVM_PROFILE_FILE"]).as_posix())
             self.assertNotEqual(observed_env["GCOV_PREFIX"], self.parent_env["GCOV_PREFIX"])
 
 if __name__ == "__main__":
