@@ -39,7 +39,6 @@ jobs:
         - /usr/local/share/boost:/usr/local/share/boost1
         - /opt/hostedtoolcache:/opt/hostedtoolcache1
     env:
-      CANARY_ROOT: ${{ runner.temp }}/flatpak-canary
       REF: org.gnome.Sdk/x86_64/50
     steps:
       - name: Identities, filesystem layout and headroom (read-only)
@@ -79,8 +78,8 @@ jobs:
           set +e +o pipefail
           set -u
           control_rc=99; cand_rc=99
+          CANARY_ROOT="$RUNNER_TEMP/flatpak-canary"
           case "$RUNNER_TEMP" in /__w/_temp|/__w/_temp/*) ;; *) echo "unexpected RUNNER_TEMP: $RUNNER_TEMP"; exit 2 ;; esac
-          [ -n "$CANARY_ROOT" ] && [ "$CANARY_ROOT" = "$RUNNER_TEMP/flatpak-canary" ] || { echo "bad CANARY_ROOT"; exit 2; }
           [ ! -e "$CANARY_ROOT" ] || { echo "canary root already exists"; exit 2; }
           need_mb=$(du -sx --block-size=1M /var/lib/flatpak | cut -f1)
           avail_mb=$(df -Pm "$RUNNER_TEMP" | awk 'NR==2{print $4}')
@@ -140,7 +139,8 @@ jobs:
         run: |
           set +e +o pipefail
           set -u
-          if [ "$CANARY_ROOT" = "$RUNNER_TEMP/flatpak-canary" ] && [ -d "$CANARY_ROOT" ] && [ ! -L "$CANARY_ROOT" ]; then
+          CANARY_ROOT="$RUNNER_TEMP/flatpak-canary"
+          if [ "$CANARY_ROOT" = "$RUNNER_TEMP/flatpak-canary" ] && case "$RUNNER_TEMP" in /__w/_temp) true ;; *) false ;; esac && [ -d "$CANARY_ROOT" ] && [ ! -L "$CANARY_ROOT" ]; then
             rm -rf --one-file-system -- "$CANARY_ROOT"
             echo "disposed $CANARY_ROOT (exists afterwards: $([ -e "$CANARY_ROOT" ] && echo yes || echo no))"
           else
