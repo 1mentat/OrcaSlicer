@@ -2488,7 +2488,6 @@ TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
 
 } // namespace independent_support_layer_height_contracts
 
-namespace support_settings_variance_contracts {
 namespace {
 
 SupportStats slice_first_layer_gap_ramp(const double first_layer_gap)
@@ -2519,7 +2518,6 @@ SupportStats slice_first_layer_gap_ramp(const double first_layer_gap)
 }
 
 } // namespace
-} // namespace support_settings_variance_contracts
 
 TEST_CASE("Support first-layer gap trims the first support layer only",
           "[SupportSettingsVariance][SupportMaterial][SupportObjectFirstLayerGap]")
