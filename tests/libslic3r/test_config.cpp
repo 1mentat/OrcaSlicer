@@ -7240,7 +7240,7 @@ TEST_CASE("ConfigBase setenv serializes the selected option using uppercase name
     REQUIRE(boost::nowide::unsetenv("SLIC3R_LAYER_HEIGHT") == 0);
 
     config.setenv_();
-    const char *value = std::getenv("SLIC3R_LAYER_HEIGHT");
+    const char *value = boost::nowide::getenv("SLIC3R_LAYER_HEIGHT");
     REQUIRE(value != nullptr);
     CHECK(std::string(value) == config.option<ConfigOptionFloat>("layer_height")->serialize());
 
