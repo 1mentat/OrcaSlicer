@@ -724,7 +724,8 @@ DynamicPrintConfig retraction_config()
         {"machine_end_gcode", ""},
     });
     config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{zhtNormal});
-    config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric{rletAllSurfaces});
+    config.set_key_value("retract_lift_enforce", new ConfigOptionEnumsGeneric(
+        &ConfigOptionEnum<RetractLiftEnforceType>::get_enum_values(), 1, rletAllSurfaces));
     return config;
 }
 
@@ -745,8 +746,8 @@ TriangleMesh separated_cubes()
 
 std::string export_mesh(TriangleMesh mesh, const DynamicPrintConfig &config)
 {
-    Print print;
     Model model;
+    Print print;
     init_print({std::move(mesh)}, print, model, config);
     const auto validation = print.validate();
     INFO(validation.string);
