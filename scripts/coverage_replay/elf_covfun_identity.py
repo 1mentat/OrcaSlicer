@@ -84,7 +84,9 @@ def read_bounded(path: Path, limit: int, label: str) -> bytes:
         fail(f"{label} is not a regular non-symlink file: {path}")
     if before.st_size < 0 or before.st_size > limit:
         fail(f"{label} exceeds bounded size {limit}: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY exists only on Windows; without it the CRT descriptor is text
+    # mode, drops "\r" and stops at 0x1A, which breaks the size check below.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -975,14 +977,13 @@ def self_check() -> None:
         checked = binary_inventory(mock_report, root)
         assert len(checked) == len(EXPECTED_OBJECTS)
         warning_path = root / "warnings.stderr"
-        warning_path.write_text(
+        warning_path.write_bytes((
             "warning: 2 functions have mismatched data\n"
             "hash-mismatch: No profile record found for "
             "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n"
             "hash-mismatch: No profile record found for "
-            "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n",
-            encoding="utf-8",
-        )
+            "'_ZN6Slic3r10MultiPoint3endEv' with hash = 0x0\n"
+        ).encode("utf-8"))
         report_path = root / "report.json"
         report_path.write_text(json.dumps(mock_report), encoding="utf-8")
         warning_data = parse_warnings(warning_path)
