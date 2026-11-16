@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "reduce-crossing-wall-route-planning-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (m_config.reduce_crossing_wall\n        && !m_avoid_crossing_perimeters.disabled_once()",
+      "new": "    if (false\n        && !m_avoid_crossing_perimeters.disabled_once()",
+      "description": "Disable the public reduce_crossing_wall gate. The paired same-layer route must lose its enabled multi-point detour while its retraction-associated direct counterpart crosses an already-emitted perimeter wall.",
+      "test_filter": "ReduceCrossingWall"
+    },
+    {
+      "id": "reduce-crossing-wall-disabled-once-guard-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        && !m_avoid_crossing_perimeters.disabled_once()\n",
+      "new": "        && m_avoid_crossing_perimeters.disabled_once()\n",
+      "description": "Invert the one-travel disable guard. The paired route contract must no longer observe the expected retraction-associated direct-disabled versus prior-wall-clear-detour-enabled behavior.",
+      "test_filter": "ReduceCrossingWall"
+    }
+  ]
+}
