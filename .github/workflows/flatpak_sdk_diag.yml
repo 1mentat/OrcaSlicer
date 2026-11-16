@@ -1,0 +1,102 @@
+# NEVER MERGE. One-shot, read-only diagnostic for the Flatpak system runtime update failure
+# ("Failed to update org.gnome.Sdk: Invalid cross-device link") seen on ubuntu-24.04 hosted runners.
+# Work item: flatpak-sdk-exdev-diag-20261116. It checks nothing out and builds nothing: it records
+# filesystem and overlay metadata, then runs only the exact `flatpak update` operations that
+# flatpak-builder runs against the system installation (see flatpak-builder src/builder-manifest.c
+# builder_manifest_update_single_dep), with verbose output and bounded time/output.
+name: Flatpak SDK update diagnostic
+
+on:
+  push:
+    branches:
+      - diag/flatpak-sdk-exdev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-sdk-exdev-diag
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: Flatpak system runtime update (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions@sha256:1de59efef01a946d9f28f1ec3458bf6f61dcee3507d7fecdd473f8134da4ec77
+      options: --privileged
+      volumes:
+        - /usr/local/lib/android:/usr/local/lib/android
+        - /usr/share/dotnet:/usr/share/dotnet
+        - /opt/ghc:/opt/ghc1
+        - /usr/local/share/boost:/usr/local/share/boost1
+        - /opt/hostedtoolcache:/opt/hostedtoolcache1
+    steps:
+      - name: Record identities and filesystem layout (read-only)
+        shell: bash
+        run: |
+          set -u
+          echo "work item: flatpak-sdk-exdev-diag-20261116"
+          echo "workflow ref: ${GITHUB_REF} sha: ${GITHUB_SHA} run: ${GITHUB_RUN_ID} attempt: ${GITHUB_RUN_ATTEMPT}"
+          echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          echo "container image digest: sha256:1de59efef01a946d9f28f1ec3458bf6f61dcee3507d7fecdd473f8134da4ec77"
+          uname -r
+          head -3 /etc/os-release
+          flatpak --version
+          flatpak-builder --version
+          ostree --version 2>&1 | head -3 || true
+          echo "--- installations"
+          flatpak --installations 2>&1 | head
+          echo "--- system remotes"
+          flatpak remotes --system -d 2>&1 | head
+          echo "--- installed system runtimes"
+          flatpak list --system --runtime -d --columns=ref,origin,installation 2>&1 | head -40
+          echo "--- filesystem type and device per path"
+          for path in /var/lib/flatpak /var/tmp /tmp "$HOME" "$GITHUB_WORKSPACE"; do
+            if [ -e "$path" ]; then
+              stat -f -c '%n fstype=%T' "$path"
+              stat -c '%n dev=%d' "$path"
+            fi
+          done
+          df -T / /var/lib/flatpak /var/tmp "$GITHUB_WORKSPACE" 2>&1 | head -20
+          echo "--- system installation layout"
+          ls -la /var/lib/flatpak 2>&1 | head -20
+          ls -d /var/lib/flatpak/runtime/* 2>&1 | head -20
+          echo "--- mounts"
+          findmnt -T /var/lib/flatpak 2>&1 | head -5
+          findmnt -T /var/tmp 2>&1 | head -5
+          findmnt -T "$GITHUB_WORKSPACE" 2>&1 | head -5
+          mount | grep -E ' on / | /var/lib/flatpak | /var/tmp | /__w' | tr ',' '\n' | grep -E ' on |type |redirect|index|metacopy|xino|userxattr|volatile' | cut -c1-160 | head -40
+          echo "--- overlay module parameters"
+          for p in redirect_dir metacopy index xino_auto nfs_export; do
+            printf '%s=' "$p"; cat "/sys/module/overlay/parameters/$p" 2>&1 | head -1
+          done
+
+      - name: Run the bound Flatpak runtime update operations (bounded)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -u -o pipefail
+          fail=0
+          refs=(
+            "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08"
+            "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra"
+            "runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra"
+            "runtime/org.gnome.Sdk.Locale/x86_64/50"
+            "runtime/org.gnome.Sdk/x86_64/50"
+          )
+          for ref in "${refs[@]}"; do
+            echo "=== flatpak update --subpath= -y --noninteractive --verbose $ref"
+            log="$(mktemp)"
+            timeout --kill-after=10 120 flatpak update --subpath= -y --noninteractive --verbose "$ref" >"$log" 2>&1
+            rc=$?
+            tail -c 358400 "$log"
+            echo "=== exit status for $ref: $rc"
+            rm -f "$log"
+            if [ "$rc" -ne 0 ]; then fail=1; fi
+          done
+          echo "--- system runtimes after the update attempts"
+          flatpak list --system --runtime -d --columns=ref,origin,installation 2>&1 | head -40
+          exit "$fail"
