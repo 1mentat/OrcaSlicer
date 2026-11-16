@@ -387,6 +387,60 @@ void PrintConfigDef::handle_legacy(
         self.assertEqual(options["filament_retraction_length"]["range_declared"],
                          options["retraction_length"]["range_declared"])
 
+    def test_literal_loop_options_see_their_own_loop_body_bounds(self):
+        source = """
+void PrintConfigDef::init_common_params() {
+    for (const char *key : {"loop_bounded", "loop_unbounded_peer"}) {
+        auto def = this->add(key, coFloat);
+        def->min = 0;
+    }
+}
+void PrintConfigDef::handle_legacy(
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "PrintConfig.cpp"
+            source_path.write_text(source, encoding="utf-8")
+            options = {
+                item["key"]: item
+                for item in settings_inventory.parse_print_config(source_path)["options"]
+            }
+        self.assertEqual(options["loop_bounded"]["range_declared"], ["min"])
+        self.assertEqual(options["loop_unbounded_peer"]["range_declared"], ["min"])
+
+    def test_report_passes_declared_ranges_into_scalar_classification(self):
+        source = """
+void PrintConfigDef::init_common_params() {
+    auto def = this->add("scalar_unbounded", coFloat);
+    def->set_default_value(new ConfigOptionFloat(1));
+    def = this->add("scalar_bounded", coFloat);
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloat(1));
+}
+void PrintConfigDef::handle_legacy(
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            (root / "tests" / "fixture.cpp").write_text("[ScalarRange]", encoding="utf-8")
+            source_path = root / "PrintConfig.cpp"
+            source_path.write_text(source, encoding="utf-8")
+            evidence_path = root / "evidence.json"
+            evidence_path.write_text(json.dumps({"entries": {
+                key: {"test": "tests/fixture.cpp", "tag": "[ScalarRange]",
+                      "dimensions": ["representative_values", "pipeline_oracle"],
+                      "reason": "Synthetic scalar range evidence."}
+                for key in ("scalar_unbounded", "scalar_bounded")
+            }}), encoding="utf-8")
+            report = settings_inventory.build_report(
+                root=root, source_path=source_path, evidence_path=evidence_path)
+        options = {item["key"]: item for item in report["options"]}
+        self.assertEqual(options["scalar_unbounded"]["status"], "declared_covered")
+        self.assertEqual(options["scalar_unbounded"]["required_dimensions"],
+                         ["representative_values", "pipeline_oracle"])
+        self.assertEqual(options["scalar_bounded"]["status"], "declared_partial")
+        self.assertIn("Missing required dimensions: boundary_values.",
+                      options["scalar_bounded"]["reason"])
+
     def test_real_source_captures_literal_metadata_and_direct_nullable(self):
         source = ROOT / "src/libslic3r/PrintConfig.cpp"
         options = {
