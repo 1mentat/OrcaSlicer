@@ -273,6 +273,14 @@ TEST_CASE("Picking checksum changes when any single RGB byte changes", "[Color]"
     }
 }
 
+TEST_CASE("Picking checksum has stable known vectors", "[Color]")
+{
+    CHECK(picking_checksum_alpha_channel(0, 0, 0) == 85);
+    CHECK(picking_checksum_alpha_channel(1, 2, 3) == 48);
+    CHECK(picking_checksum_alpha_channel(255, 0, 0) == 176);
+    CHECK(picking_checksum_alpha_channel(12, 34, 56) == 39);
+}
+
 TEST_CASE("Color equality allows 0.01 per component, alpha included", "[Color]")
 {
     const RGBA base{0.2f, 0.4f, 0.6f, 0.8f};
