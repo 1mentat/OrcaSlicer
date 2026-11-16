@@ -1,5 +1,6 @@
 """Exercise disposal and enforced cancellation using actual child commands."""
 
+import argparse
 import contextlib
 import io
 import json
@@ -153,6 +154,85 @@ class ManagedRunTests(unittest.TestCase):
             slicer_mutation._parser().parse_args(["run", "--out", "safe", "--ou", "/outside"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             slicer_module_feedback.parse_args(["--ou", "/outside"])
+
+    @staticmethod
+    def _all_parsers(parser):
+        found = [parser]
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for child in action.choices.values():
+                    found.extend(ManagedRunTests._all_parsers(child))
+        return found
+
+    def _coverage_cases(self):
+        """(label, module, effectful attribute, argv with a bypass attempt, parser factory)."""
+        import slicer_catch_batch
+        import slicer_coverage
+        import slicer_coverage_pair_collector
+        import slicer_coverage_reconcile
+        tail = ["--out", "safe", "--ou", "/outside"]
+        return (
+            ("coverage", slicer_coverage, "run_coverage",
+             ["run", "--object", "o", "--test-command", "t", *tail], slicer_coverage._parser),
+            ("pair", slicer_coverage_pair_collector, "collect",
+             ["--manifest", "m", "--pairs", "p", *tail], slicer_coverage_pair_collector._parser),
+            ("reconcile", slicer_coverage_reconcile, "preflight",
+             ["--manifest", "m", *tail], slicer_coverage_reconcile._parser),
+            ("catch-batch", slicer_catch_batch, "discover_ctest",
+             ["--build-dir", "b", "--batch-timeout", "1", *tail], slicer_catch_batch._parser),
+        )
+
+    def test_coverage_producer_parsers_reject_abbreviated_output_override(self):
+        for label, _, _, argv, factory in self._coverage_cases():
+            with self.subTest(producer=label):
+                for parser in self._all_parsers(factory()):
+                    self.assertFalse(parser.allow_abbrev)
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    factory().parse_args(argv)
+
+    def test_coverage_replay_parsers_reject_abbreviated_output_override(self):
+        sys.path.insert(0, str(SCRIPTS / "coverage_replay"))
+        import all_kinds_matcher
+        import coverage_warning_matcher
+        import elf_covfun_identity
+        import replay_controller
+        self.assertFalse(elf_covfun_identity.parser().allow_abbrev)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            elf_covfun_identity.main(["--output", "safe", "--outp", "/outside"])
+        for module, argv in (
+                (all_kinds_matcher, ["--inspector", "i", "--export", "e"]),
+                (coverage_warning_matcher, ["--inspector", "i", "--export", "e"]),
+                (replay_controller, ["--manifest", "m"])):
+            flag = "--out" if module is replay_controller else "--output"
+            built = []
+            real_parse = argparse.ArgumentParser.parse_args
+
+            def spy(parser, *args, **kwargs):
+                built.append(parser)
+                return real_parse(parser, *args, **kwargs)
+
+            with self.subTest(module=module.__name__), \
+                    patch.object(argparse.ArgumentParser, "parse_args", spy), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                module.main([*argv, flag, "safe", flag[:-1], "/outside"])
+            self.assertEqual([parser.allow_abbrev for parser in built], [False])
+
+    def test_managed_writer_does_not_run_on_abbreviated_output_override(self):
+        record = artifacts.create(self.root, "PR-610", "a" * 40, "tests", 60, 10000)
+        environment = {"VALIDATION_ARTIFACT_ROOT": str(self.root),
+                       "VALIDATION_ARTIFACT_RUN_ID": record["run_id"],
+                       "VALIDATION_ARTIFACT_TOKEN": record["token"],
+                       "VALIDATION_ARTIFACT_DIR": record["payload_dir"],
+                       "VALIDATION_SOURCE_SHA": "a" * 40}
+        for label, module, effect, argv, _ in self._coverage_cases():
+            with self.subTest(producer=label), patch.dict(os.environ, environment), \
+                    patch.object(subprocess, "check_output", return_value="a" * 40), \
+                    patch.object(module, effect, return_value=0) as writer:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    runner.managed_main(module.main, output_option="--out",
+                                        default_name="result", argv=argv)
+                writer.assert_not_called()
+        artifacts.finish(self.root, record["run_id"], record["token"], "completed")
 
 
 if __name__ == "__main__":
