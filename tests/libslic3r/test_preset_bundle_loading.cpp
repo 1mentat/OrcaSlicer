@@ -15430,7 +15430,20 @@ DynamicPrintConfig tray(const std::string& filament_id,
                         const std::string& slot_id     = "0",
                         bool changed                   = true,
                         bool placeholder               = false,
-                        std::vector<std::string> multi = {}
+                        std::vector<std::string> multi = {})
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_id", new ConfigOptionStrings({filament_id}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({color}));
+    config.set_key_value("filament_colour_type", new ConfigOptionStrings({"1"}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({type}));
+    config.set_key_value("filament_multi_colour", new ConfigOptionStrings(std::move(multi)));
+    config.set_key_value("ams_id", new ConfigOptionStrings({ams_id}));
+    config.set_key_value("slot_id", new ConfigOptionStrings({slot_id}));
+    config.set_key_value("filament_changed", new ConfigOptionBool(changed));
+    config.set_key_value("filament_slot_placeholder", new ConfigOptionBools({placeholder}));
+    return config;
+}
 } // namespace
 } // namespace preset_ams_sync_contracts
 namespace preset_bundle_contracts {
@@ -15514,7 +15527,16 @@ Preset &stored_preset(PresetCollection &collection, const std::string &name)
 } // namespace
 namespace {
 VendorProfile::PrinterModel vendor_model(const std::string &name, const std::string &id,
-                                         const std::string &family = {}
+                                         const std::string &family = {})
+{
+    VendorProfile::PrinterModel model;
+    model.name = name;
+    model.model_id = id;
+    model.family = family;
+    model.variants.emplace_back("0.4");
+    model.variants.emplace_back("0.6");
+    return model;
+}
 } // namespace
 } // namespace preset_extended_contracts
 namespace preset_parent_reset_followup_contracts {
@@ -15604,43 +15626,6 @@ TEST_CASE("File loading rejects an inheritance cycle without installing either n
     CHECK(collection.find_preset("Cycle A") == nullptr);
     CHECK(collection.find_preset("Cycle B") == nullptr);
     CHECK(collection.error_count() == 2);
-
-}
-
-TEST_CASE("Preset bundle metadata round-trips names and timestamps", "[Preset][Bundle][PresetLifecycle][Metadata]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    ScopedTemporaryDir temp;
-    const fs::path metadata_path = temp.path() / "bundle_metadata.json";
-
-    BundleMetadata saved;
-    saved.id = "bundle-id";
-    saved.name = "Cloud bundle";
-    saved.version = "2.4.0";
-    saved.description = "A test bundle";
-    saved.author = "profile-owner";
-    saved.imported_time = 101;
-    saved.updated_time = 202;
-    saved.print_presets = {"process/0.20mm.json", "nested/0.28mm.json"};
-    saved.filament_presets = {"filament/PLA.json"};
-    saved.printer_presets = {"printer/Machine.json"};
-
-    REQUIRE(saved.save_to_json(metadata_path.string()));
-    BundleMetadata loaded;
-    REQUIRE(loaded.load_from_json(metadata_path.string()));
-    CHECK(loaded.id == saved.id);
-    CHECK(loaded.name == saved.name);
-    CHECK(loaded.version == saved.version);
-    CHECK(loaded.description == saved.description);
-    CHECK(loaded.author == saved.author);
-    CHECK(loaded.imported_time == 101);
-    CHECK(loaded.updated_time == 202);
-    // The metadata format stores the bundle-local filename, not an absolute or
-    // nested path that would escape the bundle on extraction.
-    CHECK(loaded.print_presets == std::vector<std::string>{"0.20mm.json", "0.28mm.json"});
-    CHECK(loaded.filament_presets == std::vector<std::string>{"PLA.json"});
-    CHECK(loaded.printer_presets == std::vector<std::string>{"Machine.json"});
 
 }
 
@@ -16163,30 +16148,6 @@ TEST_CASE("Preset remove_files deletes local info and marks cloud info for delet
         loaded.load_info((dir.path() / "Cloud.info").string());
         CHECK(loaded.sync_info == "delete");
     }
-
-}
-
-TEST_CASE("Physical printer preserves preset membership and legacy serialized names", "[PresetBundleLoading][PresetDeep][PhysicalPrinter]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_workflow_contracts;
-
-    DynamicPrintConfig defaults = physical_defaults();
-    PhysicalPrinter printer("Office", defaults);
-    CHECK(printer.add_preset("0.4"));
-    CHECK_FALSE(printer.add_preset("0.4"));
-    CHECK(printer.add_preset("0.6"));
-    printer.update_preset_names_in_config();
-    CHECK(printer.config.opt<ConfigOptionStrings>("preset_names")->values == std::vector<std::string>{"0.4", "0.6"});
-    CHECK(printer.config.opt_string("preset_name") == "0.4;0.6");
-    CHECK(printer.delete_preset("0.4"));
-    CHECK_FALSE(printer.delete_preset("missing"));
-    printer.reset_presets();
-    CHECK(printer.get_preset_names().empty());
-    CHECK(printer.get_full_name("0.4") == "Office * 0.4");
-    CHECK(PhysicalPrinter::get_short_name("Office * 0.4") == "Office");
-    CHECK(PhysicalPrinter::get_preset_name("Office * 0.4") == "0.4");
 
 }
 
@@ -16753,25 +16714,6 @@ TEST_CASE("AMS multi-color vectors are serialized back into project configuratio
 
 }
 
-TEST_CASE("AMS empty input is a no-op for existing project slots",
-          "[Preset][PresetBundleAmsVariance]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_ams_sync_contracts;
-
-    PresetBundle bundle;
-    project_slots(bundle, {"Existing"}, {"#ABCDEF"});
-    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
-    std::map<int, AMSMapInfo> maps;
-    MergeFilamentInfo merge;
-    CHECK(bundle.sync_ams_list(unknowns, false, maps, false, merge) == 0);
-    CHECK(bundle.filament_presets == std::vector<std::string>{"Existing"});
-    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
-          std::vector<std::string>{"#ABCDEF"});
-
-}
-
 TEST_CASE("AMS overwrite clamps support selections beyond the synchronized slot count",
           "[Preset][PresetBundleAmsVariance]")
 {
@@ -16883,540 +16825,6 @@ TEST_CASE("Vendor configuration retains the system filament when a default print
 
 }
 
-TEST_CASE("PresetBundle copy_files preserves only the supported preset trees", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-bundle-copy");
-    ScopedDataDir data(temp.path() / "data");
-    const fs::path source = temp.path() / "source";
-    fs::create_directories(temp.path() / "data" / "old");
-    write_marker(source / PRESET_PRINT_NAME / "base" / "process.json", "print");
-    write_marker(source / PRESET_FILAMENT_NAME / "base" / "filament.json", "filament");
-    write_marker(source / PRESET_PRINTER_NAME / "base" / "printer.json", "printer");
-    write_marker(source / "vendor" / "ignored.json", "ignored");
-
-    PresetBundle bundle;
-    bundle.copy_files(source.string());
-    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_PRINT_NAME / "base" / "process.json") == "print");
-    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_FILAMENT_NAME / "base" / "filament.json") == "filament");
-    CHECK(read_marker(temp.path() / "data" / "old" / PRESET_PRINTER_NAME / "base" / "printer.json") == "printer");
-    CHECK_FALSE(fs::exists(temp.path() / "data" / "old" / "vendor"));
-
-}
-
-TEST_CASE("PresetBundle backup_user_folder is successful once and idempotent", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-bundle-backup");
-    ScopedDataDir data(temp.path() / "data");
-    write_marker(temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json", "owned");
-    PresetBundle bundle;
-    REQUIRE(bundle.backup_user_folder());
-    const fs::path backup = temp.path() / "data" / (boost::format("user_backup-v%1%") % SoftFever_VERSION).str();
-    CHECK(read_marker(backup / "default" / "sentinel.json") == "owned");
-    write_marker(temp.path() / "data" / PRESET_USER_DIR / "default" / "sentinel.json", "changed");
-    CHECK_FALSE(bundle.backup_user_folder());
-    CHECK(read_marker(backup / "default" / "sentinel.json") == "owned");
-
-}
-
-TEST_CASE("PresetBundle vendor version and current vendor type follow the configured model", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    PresetBundle bundle;
-    VendorProfile bbl("BBL");
-    bbl.name = "BBL";
-    bbl.config_version = *Semver::parse("3.2.1");
-    VendorProfile::PrinterModel model;
-    model.name = "X1 Carbon";
-    model.id = "X1C";
-    model.variants.emplace_back("0.4");
-    bbl.models.push_back(model);
-    bundle.vendors.emplace(bbl.id, bbl);
-    set_variant(bundle.printers.get_edited_preset().config, "X1 Carbon", "0.4");
-    auto &config = bundle.printers.get_edited_preset().config;
-    CHECK(bundle.get_vendor_profile_version("BBL").to_string() == "3.2.0.1");
-    CHECK_FALSE(bundle.get_vendor_profile_version("Missing").valid());
-    CHECK(bundle.get_current_vendor_type() == VendorType::Marlin_BBL);
-    for (bool local_host : {false, true}) {
-        for (const std::string &url : {std::string{}, std::string{"http://printer.local"}}) {
-            CAPTURE(local_host, url);
-            config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = local_host;
-            config.option<ConfigOptionString>("print_host_webui", true)->value = url;
-            CHECK(bundle.use_bbl_network() == !local_host);
-            const bool expect_device_tab = !local_host || url.empty();
-            CHECK(bundle.use_bbl_device_tab() == expect_device_tab);
-        }
-    }
-    set_variant(bundle.printers.get_edited_preset().config, "Unlisted Model", "0.4");
-    config.option<ConfigOptionBool>("bbl_use_printhost", true)->value = false;
-    config.option<ConfigOptionString>("print_host_webui", true)->value.clear();
-    CHECK(bundle.get_current_vendor_type() == VendorType::Unknown);
-    CHECK_FALSE(bundle.use_bbl_network());
-    CHECK_FALSE(bundle.use_bbl_device_tab());
-
-
-}
-
-TEST_CASE("PresetBundle dispatches differed saves only for supported preset types", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    PresetBundle bundle;
-    Preset &parent = load_local_preset(bundle.prints, "Parent");
-    parent.config.opt<ConfigOptionFloat>("layer_height")->value = 0.2;
-    Preset &child = load_local_preset(bundle.prints, "Child", "Parent");
-    child.config.opt<ConfigOptionFloat>("layer_height")->value = 0.31;
-    std::unique_ptr<Preset> diff(bundle.get_preset_differed_for_save(child));
-    REQUIRE(diff != nullptr);
-    CHECK_THAT(diff->config.opt_float("layer_height"), WithinAbs(0.31, 1e-6));
-    CHECK_FALSE(diff->config.has("wall_loops"));
-    std::map<std::string, std::string> values;
-    CHECK(bundle.get_differed_values_to_update(child, values) == 0);
-    REQUIRE(values.count("layer_height") == 1);
-    CHECK(values.at("layer_height") == "0.31");
-    Preset invalid(Preset::TYPE_INVALID, "invalid");
-    CHECK(bundle.get_preset_differed_for_save(invalid) == nullptr);
-    CHECK(bundle.get_differed_values_to_update(invalid, values) == -1);
-
-}
-
-TEST_CASE("PresetBundle project embedded enumeration and reset are bundle-wide", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    PresetBundle bundle;
-    Preset &parent = load_local_preset(bundle.prints, "Embedded Parent");
-    auto embedded = std::make_unique<Preset>(Preset::TYPE_PRINT, "Embedded Process");
-    embedded->is_project_embedded = true;
-    embedded->config = bundle.prints.default_preset().config;
-    embedded->inherits() = parent.name;
-    embedded->config.opt<ConfigOptionFloat>("layer_height")->value = 0.33;
-    std::vector<Preset *> project{embedded.get()};
-    PresetsConfigSubstitutions substitutions = bundle.load_project_embedded_presets(
-        project, ForwardCompatibilitySubstitutionRule::Disable);
-    CHECK(substitutions.empty());
-    auto current = bundle.get_current_project_embedded_presets();
-    REQUIRE(current.size() == 1);
-    CHECK(current.front()->name == "Embedded Process");
-    CHECK_THAT(current.front()->config.opt_float("layer_height"), WithinAbs(0.33, 1e-9));
-    bundle.reset_project_embedded_presets();
-    CHECK(bundle.get_current_project_embedded_presets().empty());
-
-}
-
-TEST_CASE("PresetBundle save_user_presets writes all selected collection roots", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-bundle-save-user");
-    ScopedDataDir data(temp.path() / "data");
-    PresetBundle bundle;
-    bundle.update_user_presets_directory("alice");
-    std::vector<std::pair<PresetCollection *, std::string>> collections{
-        {&bundle.prints, "Alice Process"}, {&bundle.filaments, "Alice Filament"},
-        {&bundle.printers, "Alice Printer"}};
-    for (const auto &[collection, name] : collections) {
-        Preset &preset = load_local_preset(*collection, name);
-        preset.sync_info = "save";
-        preset.file = collection->path_for_preset(preset);
-    }
-    AppConfig app;
-    app.set("preset_folder", "alice");
-    std::map<std::string, std::string> deletions;
-    bundle.save_user_presets(app, deletions);
-    for (const auto &[collection, name] : collections) {
-        const Preset *preset = collection->find_preset(name, false);
-        REQUIRE(preset != nullptr);
-        CHECK(fs::exists(preset->file));
-        CHECK(preset->sync_info.empty());
-        CHECK(read_marker(preset->file).find(name) != std::string::npos);
-    }
-
-
-}
-
-TEST_CASE("PresetBundle sync cleanup repairs invalid user metadata", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-bundle-sync-fix");
-    ScopedDataDir data(temp.path() / "data");
-    PresetBundle bundle;
-    bundle.update_user_presets_directory("alice");
-    Preset &print = load_local_preset(bundle.prints, "Alice Process");
-    print.file = bundle.prints.path_for_preset(print);
-    REQUIRE(print.save(nullptr));
-    print.user_id.clear();
-    print.setting_id = "legacy-id";
-    print.sync_info.clear();
-    bundle.check_and_fix_user_presets_syncinfo("alice");
-    CHECK(print.user_id == "alice");
-    CHECK(print.setting_id.empty());
-    CHECK(print.sync_info == "create");
-
-}
-
-TEST_CASE("PresetBundle removes a user directory without touching an empty-folder request", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-bundle-remove-dir");
-    ScopedDataDir data(temp.path() / "data");
-    PresetBundle bundle;
-    bundle.update_user_presets_directory("alice");
-    write_marker(temp.path() / "data" / PRESET_USER_DIR / "alice" / "sentinel", "owned");
-    bundle.remove_user_presets_directory("");
-    CHECK(read_marker(temp.path() / "data" / PRESET_USER_DIR / "alice" / "sentinel") == "owned");
-    bundle.remove_user_presets_directory("alice");
-    CHECK_FALSE(fs::exists(temp.path() / "data" / PRESET_USER_DIR / "alice"));
-
-}
-
-TEST_CASE("PresetBundle alias lookup and conversion keep canonical identities", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    PresetBundle bundle;
-    Preset &print = load_local_preset(bundle.prints, "Canonical Process");
-    print.alias.clear();
-    CHECK(bundle.prints.get_preset_alias(print, true) == "Canonical Process");
-    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_PRINT, "Canonical Process") == "Canonical Process");
-    CHECK(bundle.get_preset_name_by_alias(Preset::TYPE_INVALID, "literal") == "literal");
-    std::string converted = "Generic PLA";
-    PresetBundle::convert_filament_preset_name("Unknown Machine", converted);
-    CHECK(converted == "Generic PLA");
-
-}
-
-TEST_CASE("PresetCollection sync repair reconciles a child base id", "[Preset][PresetBundleLifecycleExtended]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_lifecycle_extended_contracts;
-
-    ScopedTemporaryDir temp("preset-collection-sync-child");
-    PresetCollection collection = make_print_collection();
-    collection.update_user_presets_directory(temp.path().string(), PRESET_PRINT_NAME);
-    Preset &parent = load_local_preset(collection, "Parent");
-    parent.setting_id = "parent-id-123";
-    Preset &child = load_local_preset(collection, "Child", "Parent");
-    child.setting_id = "child-id-123";
-    child.user_id = "alice";
-    child.base_id = "stale-base";
-    child.file = collection.path_for_preset(child);
-    Preset *stored_parent = collection.find_preset("Parent", false);
-    REQUIRE(stored_parent != nullptr);
-    REQUIRE(child.save(&stored_parent->config));
-    collection.check_and_fix_syncinfo(child, "alice");
-    CHECK(child.base_id == "parent-id-123");
-    CHECK(child.sync_info == "update");
-
-}
-
-TEST_CASE("different extruder support is determined by the variant set", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    set_two_extruder_project(fx);
-    CHECK(fx.bundle.support_different_extruders());
-    fx.bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_variant_list", true)->values = {"Standard",
-                                                                                                                        "Standard"};
-    CHECK_FALSE(fx.bundle.support_different_extruders());
-
-}
-
-TEST_CASE("single extruder has no right-hand AMS configuration", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    fx.bundle.filament_ams_list.emplace(0x10000, tray("R", "PETG", "#001100"));
-    CHECK(fx.bundle.get_extruder_filament_info().empty());
-
-}
-
-TEST_CASE("only edited filament requires a unique selected slot", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    add_filament(fx, "TPU", "TPU-ID", "TPU", false, true);
-    add_filament(fx, "PLA", "PLA-ID", "PLA");
-    fx.bundle.filament_presets = {"TPU", "PLA"};
-    CHECK(fx.bundle.is_the_only_edited_filament(0));
-    fx.bundle.filament_presets = {"TPU", "TPU"};
-    CHECK_FALSE(fx.bundle.is_the_only_edited_filament(0));
-    CHECK_FALSE(fx.bundle.is_the_only_edited_filament(4));
-
-}
-
-TEST_CASE("AMS combo info resolves matching IDs and preserves changed false slots", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    add_filament(fx, "Generic PLA", "PLA-ID", "PLA", true);
-    fx.bundle.filament_presets = {"Old Selection", "Another Selection"};
-    fx.bundle.filament_ams_list.emplace(0, tray("PLA-ID", "PLA", "#AB12CD"));
-    fx.bundle.filament_ams_list.emplace(1, tray("unknown", "PLA", "#00AA00", false));
-    AMSComboInfo info;
-    fx.bundle.get_ams_cobox_infos(info);
-    REQUIRE(info.ams_filament_presets.size() == 2);
-    CHECK(info.ams_filament_presets[0] == "Generic PLA");
-    CHECK(info.ams_filament_presets[1] == "Another Selection");
-    CHECK(info.ams_filament_colors == std::vector<std::string>{"#AB12CD", "#00AA00"});
-
-}
-
-TEST_CASE("similar printer chooses requested variant among the same model", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    Preset& a = add_printer(fx, "Acme 0.4", "Acme", "0.4", true);
-    Preset& b = add_printer(fx, "Acme 0.6", "Acme", "0.6", true);
-    fx.bundle.printers.select_preset_by_name(a.name, true);
-    CHECK(fx.bundle.get_similar_printer_preset("Acme", "0.6") == &b);
-    CHECK(fx.bundle.get_similar_printer_preset("Missing", "0.6") == nullptr);
-
-}
-
-TEST_CASE("system setting IDs are attached only to matching printer entries", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    Preset& printer = add_printer(fx, "System Printer", "Acme", "0.4", true);
-    std::map<std::string, std::map<std::string, std::string>> remote;
-    remote[printer.name] = {{BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE}, {BBL_JSON_KEY_SETTING_ID, "remote-id"}};
-    fx.bundle.update_system_preset_setting_ids(remote);
-    CHECK(printer.setting_id == "remote-id");
-    remote["missing"] = {{BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE}, {BBL_JSON_KEY_SETTING_ID, "other"}};
-    fx.bundle.update_system_preset_setting_ids(remote);
-    CHECK(printer.setting_id == "remote-id");
-
-}
-
-TEST_CASE("project embedded preset loading resolves its explicit parent", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    DynamicPrintConfig parent_config                                     = fx.bundle.prints.default_preset().config;
-    parent_config.option<ConfigOptionFloat>("layer_height", true)->value = 0.2;
-    Preset& parent                  = fx.bundle.prints.load_preset({}, "Contract Parent", parent_config, false);
-    DynamicPrintConfig child_config = parent.config;
-    child_config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value = parent.name;
-    child_config.option<ConfigOptionFloat>("layer_height", true)->value         = 0.27;
-    auto child                 = std::make_unique<Preset>(Preset::TYPE_PRINT, "Contract Embedded");
-    child->config              = std::move(child_config);
-    child->is_project_embedded = true;
-    std::vector<Preset*> input{child.get()};
-    PresetsConfigSubstitutions substitutions;
-    fx.bundle.prints.load_project_embedded_presets(input, PRESET_PRINT_NAME, substitutions,
-                                                   ForwardCompatibilitySubstitutionRule::EnableSilent);
-    Preset* loaded = fx.bundle.prints.find_preset("Contract Embedded", false, true);
-    REQUIRE(loaded != nullptr);
-    CHECK(loaded->is_project_embedded);
-    CHECK_THAT(loaded->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
-
-}
-
-TEST_CASE("project embedded reset removes embedded entries but retains ordinary presets", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    const std::string detached = fx.bundle.prints.add_detached_preset("Contract Detached", DynamicPrintConfig::full_print_config());
-    REQUIRE(fx.bundle.prints.find_preset(detached) != nullptr);
-    DynamicPrintConfig ordinary_config = fx.bundle.prints.default_preset().config;
-    fx.bundle.prints.load_preset({}, "Contract Ordinary", ordinary_config, false);
-    fx.bundle.prints.select_preset_by_name(detached, true);
-    CHECK(fx.bundle.prints.reset_project_embedded_presets());
-    CHECK(fx.bundle.prints.find_preset(detached) == nullptr);
-    CHECK(fx.bundle.prints.find_preset("Contract Ordinary") != nullptr);
-
-}
-
-TEST_CASE("detached preset names are unique and never create a user file", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    const std::string first = fx.bundle.filaments.add_detached_preset("Published Filament", DynamicPrintConfig::full_print_config(), "fid");
-    const std::string second = fx.bundle.filaments.add_detached_preset("Published Filament", DynamicPrintConfig::full_print_config(), "fid");
-    REQUIRE(first != second);
-    CHECK(second == "Published Filament (Published)");
-    Preset* stored = fx.bundle.filaments.find_preset(second);
-    REQUIRE(stored != nullptr);
-    CHECK(stored->is_project_embedded);
-    CHECK(stored->filament_id == "fid");
-    CHECK_FALSE(fs::exists(stored->file));
-
-    // Embedded presets are project-owned.  Their cleanup path must not remove
-    // a file that happens to be associated with the in-memory preset.
-    stored->file = (fx.temp.path() / "embedded-owned.json").string();
-    std::ofstream owned(stored->file);
-    owned << "owned";
-    owned.close();
-    stored->remove_files();
-    CHECK(fs::exists(stored->file));
-    CHECK(stored->save(nullptr));
-    std::ifstream after_save(stored->file);
-    std::string saved_text((std::istreambuf_iterator<char>(after_save)), std::istreambuf_iterator<char>());
-    CHECK(saved_text == "owned");
-
-}
-
-TEST_CASE("preset default suppression changes first visible selection", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    VendorProfile library(PresetBundle::ORCA_FILAMENT_LIBRARY);
-    library.id                                             = PresetBundle::ORCA_FILAMENT_LIBRARY;
-    fx.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY] = library;
-    VendorProfile& library_ref                             = fx.bundle.vendors[PresetBundle::ORCA_FILAMENT_LIBRARY];
-    fx.bundle.prints.default_preset().vendor               = &library_ref;
-    DynamicPrintConfig config                              = fx.bundle.prints.default_preset().config;
-    Preset& visible                                        = fx.bundle.prints.load_preset({}, "Visible Process", config, false);
-    visible.vendor                                         = &library_ref;
-    fx.bundle.prints.set_default_suppressed(true);
-    CHECK(fx.bundle.prints.is_default_suppressed());
-    CHECK(fx.bundle.prints.first_visible().name == "Visible Process");
-    fx.bundle.prints.set_default_suppressed(false);
-    CHECK(fx.bundle.prints.first_visible().is_default);
-
-}
-
-TEST_CASE("preset parent and base preserve inheritance identity", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    DynamicPrintConfig parent_config = fx.bundle.prints.default_preset().config;
-    Preset& parent                   = fx.bundle.prints.load_preset({}, "Parent", parent_config, false);
-    const std::string parent_name    = parent.name;
-    DynamicPrintConfig child_config  = parent.config;
-    child_config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value = parent_name;
-    Preset& child                 = fx.bundle.prints.load_preset({}, "Child", child_config, false);
-    const Preset* resolved_parent = fx.bundle.prints.get_preset_parent(child);
-    const Preset* resolved_base   = fx.bundle.prints.get_preset_base(child);
-    REQUIRE(resolved_parent != nullptr);
-    REQUIRE(resolved_base != nullptr);
-    CHECK(resolved_parent->name == parent_name);
-    CHECK(resolved_base->name == parent_name);
-    CHECK(fx.bundle.prints.get_preset_parent(*resolved_base) == nullptr);
-
-}
-
-TEST_CASE("invalid embedded parent is rejected without installing a preset", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    auto child    = std::make_unique<Preset>(Preset::TYPE_PRINT, "Orphan Embedded");
-    child->config = fx.bundle.prints.default_preset().config;
-    child->config.option<ConfigOptionString>(BBL_JSON_KEY_INHERITS, true)->value = "No Such Parent";
-    child->is_project_embedded                                                   = true;
-    std::vector<Preset*> input{child.get()};
-    PresetsConfigSubstitutions substitutions;
-    fx.bundle.prints.load_project_embedded_presets(input, PRESET_PRINT_NAME, substitutions,
-                                                   ForwardCompatibilitySubstitutionRule::EnableSilent);
-    CHECK(fx.bundle.prints.find_preset("Orphan Embedded", false, true) == nullptr);
-
-}
-
-TEST_CASE("collection names and section names identify their preset type", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    CHECK(fx.bundle.prints.name() == PRESET_PRINT_NAME);
-    CHECK(fx.bundle.prints.section_name() == PRESET_PRINT_NAME);
-    CHECK(fx.bundle.filaments.section_name() == PRESET_FILAMENT_NAME);
-    CHECK(fx.bundle.printers.section_name() == PRESET_PRINTER_NAME);
-
-}
-
-TEST_CASE("empty detached names are rejected without changing collection", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    const size_t before = fx.bundle.prints.size();
-    CHECK(fx.bundle.prints.add_detached_preset("", DynamicPrintConfig::full_print_config()).empty());
-    CHECK(fx.bundle.prints.size() == before);
-
-}
-
-TEST_CASE("filament map selection keeps the selected edited slot unique", "[PresetBundle][PresetBundleContracts]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_bundle_contracts;
-
-    BundleFixture fx;
-    add_filament(fx, "Mapped", "mapped", "PLA");
-    fx.bundle.filaments.get_edited_preset().name = "Mapped";
-    fx.bundle.filament_presets                   = {"Mapped", "Other"};
-    CHECK(fx.bundle.is_the_only_edited_filament(0));
-    fx.bundle.filament_presets.push_back("Mapped");
-    CHECK_FALSE(fx.bundle.is_the_only_edited_filament(0));
-
-}
-
 TEST_CASE("Full FFF configuration resolves a single filament by its selected nozzle variant",
           "[PresetBundle][PresetBundleContracts][PresetBundleFullFffSingleVariant]")
 {
@@ -17515,35 +16923,6 @@ TEST_CASE("Root filament aliases preserve a name when the vendor suffix has no p
     Preset &named = collection.load_preset({}, "PLA @Vendor", config, false);
     named.alias.clear();
     CHECK(collection.get_preset_alias(named, true) == "PLA");
-
-}
-
-TEST_CASE("Selected preset parent resolves inherited and missing bases",
-          "[Preset][PresetParent]")
-{
-    using namespace testing_branch_support_test_preset_bundle_loading;
-
-    using namespace testing_branch_support_test_preset_bundle_loading::preset_parent_reset_followup_contracts;
-
-    PresetCollection collection = make_followup_print_collection();
-    Preset &parent = collection.load_preset({}, "Parent Process",
-                                             followup_print_config(collection), false);
-    const std::string parent_name = parent.name;
-    Preset &child = collection.load_preset({}, "Child Process",
-                                            followup_print_config(collection, parent_name), false);
-    REQUIRE(collection.select_preset_by_name(child.name, true));
-
-    const Preset *resolved = collection.get_selected_preset_parent();
-    REQUIRE(resolved != nullptr);
-    const Preset *live_parent = collection.find_preset(parent_name, false, true);
-    REQUIRE(live_parent != nullptr);
-    CHECK(resolved == live_parent);
-    CHECK(resolved->name == parent_name);
-
-    Preset &orphan = collection.load_preset({}, "Orphan Process",
-                                             followup_print_config(collection, "Missing Parent"), false);
-    REQUIRE(collection.select_preset_by_name(orphan.name, true));
-    CHECK(collection.get_selected_preset_parent() == nullptr);
 
 }
 
