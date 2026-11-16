@@ -48,6 +48,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include <array>
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -2104,5 +2105,1474 @@ TEST_CASE("Per-object skirt is generated per instance (original M189 four-row fi
         }
         CHECK(total_instances == 2);
         CHECK(instance_ids == std::set<size_t>{ 0, 1 });
+    }
+}
+
+namespace {
+struct PaintedEfcBrimSample
+{
+    ExPolygons raw_outline;
+    ExPolygons compensated_outline;
+    BoundingBox brim_paths;
+    Point painted_point;
+};
+
+static ExPolygons painted_efc_outline(const PrintObject &object)
+{
+    ExPolygons outline;
+    for (LayerRegion *region : object.layers().front()->regions())
+        append(outline, closing_ex(region->slices.surfaces, float(SCALED_EPSILON)));
+    return outline;
+}
+
+static BoundingBox painted_efc_bounds(const ExPolygons &outline)
+{
+    BoundingBox bounds;
+    for (const ExPolygon &polygon : outline)
+        bounds.merge(get_extents(polygon.contour));
+    return bounds;
+}
+
+static double painted_efc_area_mm2(const ExPolygons &outline)
+{
+    double area = 0.0;
+    for (const ExPolygon &polygon : outline)
+        area += unscale<double>(unscale<double>(std::abs(polygon.area())));
+    return area;
+}
+
+static bool painted_efc_is_axis_aligned_rectangle(const ExPolygon &polygon)
+{
+    if (polygon.num_contours() != 1 || polygon.contour.points.size() < 4)
+        return false;
+
+    const BoundingBox bounds = get_extents(polygon.contour);
+    if (!bounds.defined)
+        return false;
+
+    for (const Point &point : polygon.contour.points) {
+        const bool on_vertical_edge = point.x() == bounds.min.x() || point.x() == bounds.max.x();
+        const bool on_horizontal_edge = point.y() == bounds.min.y() || point.y() == bounds.max.y();
+        if (!on_vertical_edge && !on_horizontal_edge)
+            return false;
+    }
+
+    const double rectangle_area = double(bounds.max.x() - bounds.min.x()) *
+                                  double(bounds.max.y() - bounds.min.y());
+    return std::abs(double(polygon.area())) == rectangle_area;
+}
+
+static Point painted_efc_rectangle_projection(const BoundingBox &rectangle, const Point &from)
+{
+    return Point(std::clamp(from.x(), rectangle.min.x(), rectangle.max.x()),
+                 std::clamp(from.y(), rectangle.min.y(), rectangle.max.y()));
+}
+
+static const ExPolygon &painted_efc_leftmost_island(const ExPolygons &outline)
+{
+    return *std::min_element(outline.begin(), outline.end(), [](const ExPolygon &a, const ExPolygon &b) {
+        return get_extents(a.contour).min.x() < get_extents(b.contour).min.x();
+    });
+}
+
+static const ExPolygon &painted_efc_rightmost_island(const ExPolygons &outline)
+{
+    return *std::max_element(outline.begin(), outline.end(), [](const ExPolygon &a, const ExPolygon &b) {
+        return get_extents(a.contour).min.x() < get_extents(b.contour).min.x();
+    });
+}
+
+static BrimPoint painted_efc_point_in_model(const Point &point, const PrintObject &object,
+                                             const Model &model, double radius)
+{
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object.center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    Vec3d model_position = model_transform.inverse() *
+        Vec3d(unscale<double>(point.x()), unscale<double>(point.y()), 0);
+    model_position.z() = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    return BrimPoint(model_position.cast<float>(), float(radius));
+}
+
+static BoundingBox painted_efc_local_brim_bounds(Print &print, const PrintObject &object)
+{
+    Polylines paths;
+    for (const auto &entry : print.get_brimMap())
+        entry.second.collect_polylines(paths);
+
+    Point print_shift = object.instances().front().shift_without_plate_offset();
+    const Vec3d plate_origin = print.get_plate_origin();
+    print_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+
+    BoundingBox bounds;
+    for (const Polyline &path : paths)
+        for (const Point &point : path.points)
+            bounds.merge(point - print_shift);
+    return bounds;
+}
+
+static PaintedEfcBrimSample process_painted_efc_brim(bool use_efc_outline, bool two_islands,
+                                                      double compensation, double ear_radius)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops", 0 },
+        { "brim_type", "painted" },
+        { "brim_width", 15 },
+        { "brim_object_gap", 0.1 },
+        { "brim_ears_outer_only", true },
+        { "brim_use_efc_outline", use_efc_outline },
+        { "elefant_foot_compensation", compensation },
+        { "elefant_foot_compensation_layers", 1 },
+        { "raft_layers", 0 },
+        { "initial_layer_line_width", 0.5 },
+    });
+
+    TriangleMesh mesh = make_cube(20., 20., 20.);
+    if (two_islands) {
+        TriangleMesh adjacent = make_cube(20., 40., 20.);
+        adjacent.translate(20.1f, 0.f, 0.f);
+        mesh.merge(adjacent);
+    }
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(mesh));
+    init_print(std::move(meshes), print, model, config);
+    print.process();
+
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    ExPolygons raw_outline = object->layers().front()->lslices;
+    REQUIRE_FALSE(raw_outline.empty());
+    const ExPolygon &raw_leftmost = painted_efc_leftmost_island(raw_outline);
+    const BoundingBox raw_bounds = get_extents(raw_leftmost.contour);
+    const Point painted_point(raw_bounds.max.x() - scaled(0.01), raw_bounds.max.y() - scaled(0.01));
+    REQUIRE(raw_leftmost.contains(painted_point, false));
+
+    model.objects.front()->brim_points = {
+        painted_efc_point_in_model(painted_point, *object, model, ear_radius),
+    };
+    print.apply(model, config);
+    print.process();
+
+    object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    PaintedEfcBrimSample sample;
+    sample.raw_outline = object->layers().front()->lslices;
+    sample.compensated_outline = painted_efc_outline(*object);
+    sample.painted_point = painted_point;
+    sample.brim_paths = painted_efc_local_brim_bounds(print, *object);
+    REQUIRE(sample.raw_outline.size() == (two_islands ? 2 : 1));
+    REQUIRE(sample.compensated_outline.size() == (two_islands ? 2 : 1));
+    REQUIRE(sample.brim_paths.defined);
+    return sample;
+}
+
+namespace brim_ears_gap_boundaries {
+
+using skirt_settings_variance::Bounds;
+using skirt_settings_variance::first_layer_model_bounds;
+
+struct BrimEvidence {
+    size_t positive_xy_moves = 0;
+    size_t arc_moves = 0;
+    size_t segments_near_nib_tip = 0;
+    double xy_length = 0.0;
+    double filament = 0.0;
+    double minimum_model_clearance = std::numeric_limits<double>::infinity();
+    double closest_segment_to_nib_tip = std::numeric_limits<double>::infinity();
+    double closest_endpoint_to_nib_tip = std::numeric_limits<double>::infinity();
+    Bounds bounds;
+    bool finite = true;
+};
+
+struct BrimSample {
+    BrimEvidence brim;
+    Bounds model_bounds;
+};
+
+BrimEvidence inspect_brim(const std::string &output, const DynamicPrintConfig &config,
+                          const Bounds *model_bounds = nullptr,
+                          double nib_tip_x = std::numeric_limits<double>::quiet_NaN(),
+                          double nib_tip_y = std::numeric_limits<double>::quiet_NaN())
+{
+    BrimEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, model_bounds, nib_tip_x, nib_tip_y](GCodeReader &self,
+                                                                                const GCodeReader::GCodeLine &line) {
+        // Keep the established emitted-description contract: generated brim
+        // moves are marked by lowercase "brim" comments. TYPE/FEATURE state
+        // does not identify this output consistently across the fixtures.
+        if (line.comment().find("brim") == std::string_view::npos)
+            return;
+        if (line.cmd_is("G2") || line.cmd_is("G3")) {
+            if (line.extruding(self))
+                ++evidence.arc_moves;
+            return;
+        }
+        if (!line.cmd_is("G1") || !line.extruding(self))
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double e = std::abs(line.dist_E(self));
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        if (!std::isfinite(xy) || !std::isfinite(e) || !std::isfinite(start_x) ||
+            !std::isfinite(start_y) || !std::isfinite(end_x) || !std::isfinite(end_y)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy <= EPSILON || e <= 0.0)
+            return;
+
+        for (const auto &[x, y] : { std::pair<double, double>{start_x, start_y},
+                                    std::pair<double, double>{end_x, end_y} }) {
+            evidence.bounds.min_x = std::min(evidence.bounds.min_x, x);
+            evidence.bounds.max_x = std::max(evidence.bounds.max_x, x);
+            evidence.bounds.min_y = std::min(evidence.bounds.min_y, y);
+            evidence.bounds.max_y = std::max(evidence.bounds.max_y, y);
+            if (model_bounds != nullptr) {
+                const double dx = std::max({ model_bounds->min_x - x, 0.0, x - model_bounds->max_x });
+                const double dy = std::max({ model_bounds->min_y - y, 0.0, y - model_bounds->max_y });
+                evidence.minimum_model_clearance = std::min(
+                    evidence.minimum_model_clearance, std::hypot(dx, dy));
+            }
+            if (std::isfinite(nib_tip_x) && std::isfinite(nib_tip_y)) {
+                const double endpoint_distance = std::hypot(x - nib_tip_x, y - nib_tip_y);
+                evidence.closest_endpoint_to_nib_tip = std::min(
+                    evidence.closest_endpoint_to_nib_tip, endpoint_distance);
+            }
+        }
+        if (std::isfinite(nib_tip_x) && std::isfinite(nib_tip_y)) {
+            // A segment can pass near the nib tip while both emitted endpoints are
+            // farther away. Measure distance to the physical XY deposition segment.
+            const double dx = end_x - start_x;
+            const double dy = end_y - start_y;
+            const double length_squared = dx * dx + dy * dy;
+            if (!std::isfinite(length_squared) || length_squared <= 0.0) {
+                evidence.finite = false;
+                return;
+            }
+            const double raw_projection =
+                ((nib_tip_x - start_x) * dx + (nib_tip_y - start_y) * dy) / length_squared;
+            if (!std::isfinite(raw_projection)) {
+                evidence.finite = false;
+                return;
+            }
+            const double projection = std::clamp(raw_projection, 0.0, 1.0);
+            const double closest_x = start_x + projection * dx;
+            const double closest_y = start_y + projection * dy;
+            const double segment_distance = std::hypot(closest_x - nib_tip_x, closest_y - nib_tip_y);
+            if (!std::isfinite(segment_distance)) {
+                evidence.finite = false;
+                return;
+            }
+            evidence.closest_segment_to_nib_tip = std::min(
+                evidence.closest_segment_to_nib_tip, segment_distance);
+            if (segment_distance < 4.9)
+                ++evidence.segments_near_nib_tip;
+        }
+        ++evidence.positive_xy_moves;
+        evidence.xy_length += xy;
+        evidence.filament += e;
+    });
+    return evidence;
+}
+
+DynamicPrintConfig outer_brim_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "skirt_loops",                0 },
+        { "raft_layers",                0 },
+        { "enable_support",              false },
+        { "enable_prime_tower",          false },
+        { "enable_arc_fitting",          false },
+        { "brim_type",                  "outer_only" },
+        { "brim_width",                  5.0 },
+        { "brim_flow_ratio",             1.0 },
+        { "gcode_comments",              true },
+    });
+    return config;
+}
+
+BrimSample export_outer_brim(bool set_gap, double gap)
+{
+    DynamicPrintConfig config = outer_brim_config();
+    if (set_gap)
+        config.set_deserialize_strict({ { "brim_object_gap", gap } });
+
+    Print print;
+    init_and_process_print({ make_cube(20.0, 20.0, 2.0) }, print, config);
+    BrimSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds);
+    return sample;
+}
+
+TriangleMesh shallow_nib_prism(const Vec3d &part_offset)
+{
+    // its_make_prism() defines a triangle with a 0.5 mm +Z apex and a 2 mm
+    // base width. Rx(+90) then Rz(+90) maps that apex to +X; translation places
+    // its base on the cube's right face at X=20, so the first-layer slice spans
+    // 20.5 mm in X. The 0.5 mm tip is below the positive 1 mm DP tolerance.
+    TriangleMesh nib = make_prism(2.0f, 2.0f, 0.5f);
+    nib.rotate_x(float(PI / 2.0));
+    nib.rotate_z(float(PI / 2.0));
+    nib.translate(float(20.0 - part_offset.x()), float(10.0 - part_offset.y()),
+                  float(1.0 - part_offset.z()));
+    return nib;
+}
+
+BrimSample export_auto_ears(double detection_length)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "initial_layer_line_width",   0.5 },
+        { "elefant_foot_compensation",   0.0 },
+        { "xy_contour_compensation",    0.0 },
+        { "xy_hole_compensation",       0.0 },
+        { "skirt_loops",                0 },
+        { "raft_layers",                0 },
+        { "enable_support",              false },
+        { "enable_prime_tower",          false },
+        { "enable_arc_fitting",          false },
+        { "brim_type",                  "brim_ears" },
+        { "brim_width",                  5.0 },
+        { "brim_flow_ratio",             1.0 },
+        { "brim_object_gap",             0.0 },
+        // At this triangle tip the internal angle is 126.87 degrees. Brim.cpp
+        // passes (180 - max_angle) to Polygon::convex_points(), so 130 degrees
+        // admits its ~53-degree turn while preserving the square-corner ears.
+        { "brim_ears_max_angle",         130.0 },
+        { "brim_ears_outer_only",        true },
+        { "brim_ears_detection_length",  detection_length },
+        { "gcode_comments",              true },
+    });
+
+    Print print;
+    Model model;
+    init_print({ make_cube(20.0, 20.0, 2.0) }, print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    const Vec3d part_offset = model.objects.front()->volumes.front()->get_offset();
+    ModelVolume *nib = model.objects.front()->add_volume(
+        shallow_nib_prism(part_offset), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(nib != nullptr);
+    nib->set_offset(part_offset);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+
+    BrimSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    const double nib_tip_x = sample.model_bounds.max_x;
+    const double nib_tip_y = (sample.model_bounds.min_y + sample.model_bounds.max_y) / 2.0;
+    const double model_x_span = sample.model_bounds.max_x - sample.model_bounds.min_x;
+    const double model_y_span = sample.model_bounds.max_y - sample.model_bounds.min_y;
+    INFO("first-layer model bounds x=[" << sample.model_bounds.min_x << ", "
+         << sample.model_bounds.max_x << "] span=" << model_x_span << " mm; y=["
+         << sample.model_bounds.min_y << ", " << sample.model_bounds.max_y
+         << "] span=" << model_y_span << " mm; nib tip=(" << nib_tip_x << ", " << nib_tip_y << ")");
+    REQUIRE_THAT(model_x_span, Catch::Matchers::WithinAbs(20.5, 0.02));
+    REQUIRE_THAT(model_y_span, Catch::Matchers::WithinAbs(20.0, 0.02));
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds, nib_tip_x, nib_tip_y);
+    return sample;
+}
+
+void require_same_model_bounds(const Bounds &a, const Bounds &b)
+{
+    CHECK_THAT(a.min_x, Catch::Matchers::WithinAbs(b.min_x, 0.01));
+    CHECK_THAT(a.max_x, Catch::Matchers::WithinAbs(b.max_x, 0.01));
+    CHECK_THAT(a.min_y, Catch::Matchers::WithinAbs(b.min_y, 0.01));
+    CHECK_THAT(a.max_y, Catch::Matchers::WithinAbs(b.max_y, 0.01));
+}
+
+void require_valid_brim(const BrimEvidence &brim)
+{
+    REQUIRE(brim.finite);
+    REQUIRE(brim.arc_moves == 0);
+    REQUIRE(brim.positive_xy_moves > 0);
+    REQUIRE(brim.xy_length > 0.0);
+    REQUIRE(brim.filament > 0.0);
+    REQUIRE(std::isfinite(brim.minimum_model_clearance));
+    REQUIRE(std::isfinite(brim.bounds.min_x));
+    REQUIRE(std::isfinite(brim.bounds.max_x));
+    REQUIRE(std::isfinite(brim.bounds.min_y));
+    REQUIRE(std::isfinite(brim.bounds.max_y));
+}
+
+}
+
+namespace brim_range_settings {
+
+using brim_ears_gap_boundaries::BrimEvidence;
+using brim_ears_gap_boundaries::inspect_brim;
+using brim_ears_gap_boundaries::require_same_model_bounds;
+using brim_ears_gap_boundaries::require_valid_brim;
+using skirt_settings_variance::Bounds;
+using skirt_settings_variance::first_layer_model_bounds;
+
+constexpr double LARGE_BED_MM = 600.0;
+constexpr double LARGE_HEIGHT_MM = 1200.0;
+constexpr double BELT_COS_TILT = 0.70710678118654752440;
+
+struct FlatWidthSample {
+    BrimEvidence brim;
+    Bounds model_bounds;
+    long perimeter_segments = 0;
+    size_t model_extruding_moves = 0;
+    double model_xy_length = 0.0;
+    double model_filament = 0.0;
+};
+
+struct BeltExtentSample {
+    Bounds brim_bounds;
+    Bounds model_bounds;
+    long brim_segments = 0;
+    long generated_brim_segments = 0;
+    long perimeter_segments = 0;
+    size_t model_extruding_moves = 0;
+    double model_xy_length = 0.0;
+    double model_filament = 0.0;
+    bool finite = true;
+};
+
+struct RoleMotionEvidence {
+    size_t extruding_moves = 0;
+    double xy_length = 0.0;
+    double filament = 0.0;
+    bool finite = true;
+};
+
+static bool finite_bounds(const Bounds &bounds)
+{
+    return std::isfinite(bounds.min_x) && std::isfinite(bounds.max_x) &&
+           std::isfinite(bounds.min_y) && std::isfinite(bounds.max_y) &&
+           bounds.min_x < bounds.max_x && bounds.min_y < bounds.max_y;
+}
+
+static void add_point(Bounds &bounds, const double x, const double y)
+{
+    bounds.min_x = std::min(bounds.min_x, x);
+    bounds.max_x = std::max(bounds.max_x, x);
+    bounds.min_y = std::min(bounds.min_y, y);
+    bounds.max_y = std::max(bounds.max_y, y);
+}
+
+static void add_extrusions(const ExtrusionEntityCollection &entities, const Point &world_shift,
+                           Bounds &bounds)
+{
+    Polylines polylines;
+    entities.collect_polylines(polylines);
+    for (const Polyline &polyline : polylines)
+        for (const Point &point : polyline.points)
+            add_point(bounds, unscale<double>(point.x() + world_shift.x()),
+                      unscale<double>(point.y() + world_shift.y()));
+}
+
+static RoleMotionEvidence inspect_role_motion(const std::string &output,
+                                              const DynamicPrintConfig &config,
+                                              const std::string &role)
+{
+    RoleMotionEvidence evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, &role](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self) || line.comment().find(role) == std::string_view::npos)
+            return;
+        const double xy = line.dist_XY(self);
+        const double filament = std::abs(line.dist_E(self));
+        const double feed = line.new_F(self);
+        if (!std::isfinite(xy) || !std::isfinite(filament) || !std::isfinite(feed) ||
+            !std::isfinite(self.x()) || !std::isfinite(self.y()) || !std::isfinite(self.z()) ||
+            !std::isfinite(line.new_X(self)) || !std::isfinite(line.new_Y(self)) ||
+            !std::isfinite(line.new_Z(self))) {
+            evidence.finite = false;
+            return;
+        }
+        ++evidence.extruding_moves;
+        if (xy > EPSILON)
+            evidence.xy_length += xy;
+        evidence.filament += filament;
+    });
+    evidence.finite = evidence.finite && std::isfinite(evidence.xy_length) &&
+                      std::isfinite(evidence.filament);
+    return evidence;
+}
+
+static DynamicPrintConfig flat_range_config(const bool set_width, const double width)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",                 0.2 },
+        { "initial_layer_print_height",   0.2 },
+        { "initial_layer_line_width",     0.5 },
+        { "elefant_foot_compensation",    0.0 },
+        { "xy_contour_compensation",      0.0 },
+        { "xy_hole_compensation",         0.0 },
+        { "printable_area",               "0x0,600x0,600x600,0x600" },
+        { "printable_height",             LARGE_HEIGHT_MM },
+        { "skirt_loops",                  0 },
+        { "raft_layers",                  0 },
+        { "enable_support",               false },
+        { "enable_prime_tower",           false },
+        { "enable_arc_fitting",           false },
+        { "brim_type",                    "outer_only" },
+        { "brim_flow_ratio",              1.0 },
+        { "brim_object_gap",               0.0 },
+        { "gcode_comments",               true },
+        { "layer_change_gcode",          "G92 E0\n" },
+    });
+    if (set_width)
+        config.set_deserialize_strict({ { "brim_width", width } });
+    return config;
+}
+
+static DynamicPrintConfig belt_range_config(const bool set_leading, const double leading,
+                                           const bool set_lateral, const double lateral)
+{
+    DynamicPrintConfig config = belt_brim_config();
+    config.set_deserialize_strict({
+        { "printable_area",       "0x0,600x0,600x600,0x600" },
+        { "printable_height",     LARGE_HEIGHT_MM },
+        { "brim_type",            "outer_only" },
+        { "brim_width",           0.0 },
+        { "brim_object_gap",      0.0 },
+        { "enable_arc_fitting",   false },
+        { "gcode_comments",       true },
+    });
+    if (set_leading)
+        config.set_deserialize_strict({ { "leading_brim_length", leading } });
+    if (set_lateral)
+        config.set_deserialize_strict({ { "extra_brim_width", lateral } });
+    return config;
+}
+
+static void init_centered_cube(Print &print, Model &model, const DynamicPrintConfig &config)
+{
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(make_cube(20.0, 20.0, 20.0));
+    meshes.back().translate(float(LARGE_BED_MM / 2.0 - 10.0),
+                            float(LARGE_BED_MM / 2.0 - 10.0), 0.f);
+    init_print(std::move(meshes), print, model, config, nullptr, false);
+}
+
+static FlatWidthSample export_flat_width(const bool set_width, const double width)
+{
+    const DynamicPrintConfig config = flat_range_config(set_width, width);
+    Print print;
+    Model model;
+    init_centered_cube(print, model, config);
+    const auto validation = print.validate();
+    INFO("flat width=" << (set_width ? width : 0.0) << " validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    FlatWidthSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds);
+    sample.perimeter_segments = role_segments(output, "perimeter");
+    const RoleMotionEvidence model_motion = inspect_role_motion(output, config, "perimeter");
+    REQUIRE(model_motion.finite);
+    REQUIRE(sample.perimeter_segments > 0);
+    REQUIRE(model_motion.extruding_moves > 0);
+    REQUIRE(model_motion.xy_length > 0.0);
+    REQUIRE(model_motion.filament > 0.0);
+    sample.model_extruding_moves = model_motion.extruding_moves;
+    sample.model_xy_length = model_motion.xy_length;
+    sample.model_filament = model_motion.filament;
+    return sample;
+}
+
+static Bounds belt_model_slice_bounds(const PrintObject &object, const Point &world_shift)
+{
+    Bounds bounds;
+    for (const Layer *layer : object.layers())
+        for (const ExPolygon &slice : layer->lslices)
+            for (const Point &point : slice.contour.points)
+                add_point(bounds, unscale<double>(point.x() + world_shift.x()),
+                          unscale<double>(point.y() + world_shift.y()));
+    return bounds;
+}
+
+static BeltExtentSample export_belt_extent(const bool set_leading, const double leading,
+                                           const bool set_lateral, const double lateral)
+{
+    const DynamicPrintConfig config = belt_range_config(set_leading, leading, set_lateral, lateral);
+    Print print;
+    Model model;
+    init_centered_cube(print, model, config);
+    const auto validation = print.validate();
+    INFO("belt leading=" << (set_leading ? leading : 0.0)
+         << " lateral=" << (set_lateral ? lateral : 0.0)
+         << " validation=" << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    BeltExtentSample sample;
+    sample.brim_segments = role_segments(output, "brim");
+    sample.perimeter_segments = role_segments(output, "perimeter");
+    const RoleMotionEvidence model_motion = inspect_role_motion(output, config, "perimeter");
+    sample.finite = model_motion.finite;
+    REQUIRE(sample.perimeter_segments > 0);
+    REQUIRE(model_motion.finite);
+    REQUIRE(model_motion.extruding_moves > 0);
+    REQUIRE(model_motion.xy_length > 0.0);
+    REQUIRE(model_motion.filament > 0.0);
+    sample.model_extruding_moves = model_motion.extruding_moves;
+    sample.model_xy_length = model_motion.xy_length;
+    sample.model_filament = model_motion.filament;
+
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE(object->instances().size() == 1);
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point world_shift = object->instances().front().shift_without_plate_offset();
+    world_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    sample.model_bounds = belt_model_slice_bounds(*object, world_shift);
+    REQUIRE(finite_bounds(sample.model_bounds));
+
+    for (const ExtrusionEntityCollection &band : object->belt_brim_by_layer())
+        add_extrusions(band, world_shift, sample.brim_bounds);
+    for (const BeltBrimBand &band : object->belt_brim_prologue())
+        add_extrusions(band.fills, world_shift, sample.brim_bounds);
+    sample.generated_brim_segments = belt_brim_segments(*object);
+    REQUIRE(sample.brim_segments == sample.generated_brim_segments);
+
+    if (sample.brim_segments > 0) {
+        REQUIRE(finite_bounds(sample.brim_bounds));
+        // All tested settings fit well inside this 600 mm square after the 300 mm
+        // fixture translation.  This guards against measuring an unclipped apron.
+        CHECK(sample.brim_bounds.min_x > 0.0);
+        CHECK(sample.brim_bounds.max_x < LARGE_BED_MM);
+        CHECK(sample.brim_bounds.min_y > 0.0);
+        CHECK(sample.brim_bounds.max_y < LARGE_BED_MM);
+    }
+    return sample;
+}
+
+static void check_no_emitted_brim(const FlatWidthSample &sample)
+{
+    CHECK(sample.brim.finite);
+    CHECK(sample.brim.positive_xy_moves == 0);
+    CHECK(sample.brim.filament == 0.0);
+    CHECK(sample.perimeter_segments > 0);
+}
+
+static void check_no_emitted_brim(const BeltExtentSample &sample)
+{
+    CHECK(sample.brim_segments == 0);
+    CHECK(sample.generated_brim_segments == 0);
+    CHECK(sample.perimeter_segments > 0);
+    CHECK(sample.finite);
+    CHECK(sample.model_extruding_moves > 0);
+    CHECK(sample.model_xy_length > 0.0);
+    CHECK(sample.model_filament > 0.0);
+}
+
+static std::vector<double> flat_side_clearances(const FlatWidthSample &sample)
+{
+    return {
+        sample.model_bounds.min_x - sample.brim.bounds.min_x,
+        sample.brim.bounds.max_x - sample.model_bounds.max_x,
+        sample.model_bounds.min_y - sample.brim.bounds.min_y,
+        sample.brim.bounds.max_y - sample.model_bounds.max_y,
+    };
+}
+
+}
+
+namespace brim_type_hollow_boundaries {
+
+using brim_range_settings::BrimEvidence;
+using brim_range_settings::Bounds;
+using brim_range_settings::RoleMotionEvidence;
+using brim_range_settings::inspect_brim;
+using brim_range_settings::inspect_role_motion;
+using brim_range_settings::require_same_model_bounds;
+using brim_range_settings::require_valid_brim;
+using brim_range_settings::first_layer_model_bounds;
+
+struct HollowSample {
+    BrimEvidence brim;
+    struct EmittedRegions {
+        size_t positive_xy_moves = 0;
+        size_t arc_moves = 0;
+        size_t inside_hole_midpoints = 0;
+        size_t outside_model_midpoints = 0;
+        bool finite = true;
+    } emitted_regions;
+    Bounds model_bounds;
+    RoleMotionEvidence model_motion;
+    size_t brim_loops = 0;
+    size_t hole_count = 0;
+    bool brim_enters_hole = false;
+};
+
+static Bounds polygon_bounds(const Polygon &polygon)
+{
+    Bounds bounds;
+    for (const Point &point : polygon.points) {
+        const double x = unscale<double>(point.x());
+        const double y = unscale<double>(point.y());
+        bounds.min_x = std::min(bounds.min_x, x);
+        bounds.max_x = std::max(bounds.max_x, x);
+        bounds.min_y = std::min(bounds.min_y, y);
+        bounds.max_y = std::max(bounds.max_y, y);
+    }
+    return bounds;
+}
+
+static HollowSample::EmittedRegions inspect_emitted_regions(const std::string &output,
+                                                             const DynamicPrintConfig &config,
+                                                             const Bounds &model_bounds,
+                                                             const Polygon &world_hole)
+{
+    HollowSample::EmittedRegions evidence;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(output, [&evidence, &model_bounds, &world_hole](GCodeReader &self,
+                                                                        const GCodeReader::GCodeLine &line) {
+        if (line.comment().find("brim") == std::string_view::npos)
+            return;
+        if (line.cmd_is("G2") || line.cmd_is("G3")) {
+            if (line.extruding(self))
+                ++evidence.arc_moves;
+            return;
+        }
+        if (!line.cmd_is("G1") || !line.extruding(self))
+            return;
+
+        const double xy = line.dist_XY(self);
+        const double e = std::abs(line.dist_E(self));
+        const double start_x = self.x();
+        const double start_y = self.y();
+        const double end_x = line.new_X(self);
+        const double end_y = line.new_Y(self);
+        if (!std::isfinite(xy) || !std::isfinite(e) || !std::isfinite(start_x) ||
+            !std::isfinite(start_y) || !std::isfinite(end_x) || !std::isfinite(end_y)) {
+            evidence.finite = false;
+            return;
+        }
+        if (xy <= EPSILON || e <= 0.0)
+            return;
+
+        const double midpoint_x = (start_x + end_x) / 2.0;
+        const double midpoint_y = (start_y + end_y) / 2.0;
+        if (!std::isfinite(midpoint_x) || !std::isfinite(midpoint_y)) {
+            evidence.finite = false;
+            return;
+        }
+        ++evidence.positive_xy_moves;
+        if (Slic3r::contains(world_hole, Point::new_scale(midpoint_x, midpoint_y), false))
+            ++evidence.inside_hole_midpoints;
+        if (midpoint_x < model_bounds.min_x || midpoint_x > model_bounds.max_x ||
+            midpoint_y < model_bounds.min_y || midpoint_y > model_bounds.max_y)
+            ++evidence.outside_model_midpoints;
+    });
+    return evidence;
+}
+
+static HollowSample export_hollow_brim(const char *brim_type, const double width,
+                                       const double outer_size = 40.0,
+                                       const double object_height = 20.0,
+                                       const double origin_x = 80.0,
+                                       const double origin_y = 80.0,
+                                       const char *filament_type = nullptr)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",                 0.2 },
+        { "initial_layer_print_height",   0.2 },
+        { "initial_layer_line_width",     0.5 },
+        { "elefant_foot_compensation",    0.0 },
+        { "xy_contour_compensation",      0.0 },
+        { "xy_hole_compensation",         0.0 },
+        { "skirt_loops",                  0 },
+        { "raft_layers",                  0 },
+        { "enable_support",               false },
+        { "enable_prime_tower",           false },
+        { "enable_arc_fitting",           false },
+        { "brim_type",                    brim_type },
+        { "brim_width",                   width },
+        { "brim_flow_ratio",              1.0 },
+        { "brim_object_gap",              0.0 },
+        { "gcode_comments",               true },
+        { "gcode_flavor",                 "marlin" },
+        { "use_relative_e_distances",     true },
+        { "layer_change_gcode",           "G92 E0\n" },
+        { "printable_area",               "0x0,250x0,250x210,0x210" },
+    });
+
+    if (filament_type != nullptr)
+        config.set_deserialize_strict({ { "filament_type", filament_type } });
+
+    TriangleMesh shell = make_cube(float(outer_size), float(outer_size), float(object_height));
+    shell.translate(float(origin_x), float(origin_y), 0.f);
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(shell));
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    REQUIRE(model.objects.size() == 1);
+    ModelObject *model_object = model.objects.front();
+    ModelVolume *through_hole = model_object->add_volume(
+        make_cube(20.0, 20.0, float(object_height)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    REQUIRE(through_hole != nullptr);
+    through_hole->set_offset(Vec3d(origin_x + (outer_size - 20.0) / 2.0,
+                                   origin_y + (outer_size - 20.0) / 2.0, 0.0));
+    print.apply(model, config);
+    print.set_status_silent();
+    if (filament_type != nullptr) {
+        // Mirror the public Plater preparation before slicing. The test restores both
+        // process-wide tables with ScopeGuard so the material case is order-independent.
+        Model::setExtruderParams(config, 1);
+        Model::setPrintSpeedTable(config, print.config());
+    }
+
+    const StringObjectException validation = print.validate();
+    INFO("brim type=" << brim_type << " width=" << width << " validation=" << validation.string
+         << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(object != nullptr);
+    REQUIRE_FALSE(object->layers().empty());
+    REQUIRE_FALSE(object->layers().front()->lslices.empty());
+    REQUIRE(object->layers().front()->lslices.size() == 1);
+    REQUIRE(object->layers().front()->lslices.front().holes.size() == 1);
+    REQUIRE(object->instances().size() == 1);
+
+    HollowSample sample;
+    sample.model_bounds = first_layer_model_bounds(print);
+    sample.hole_count = object->layers().front()->lslices.front().holes.size();
+    sample.brim_loops = brim_loop_count(print);
+    sample.brim_enters_hole = brim_enters_first_layer_hole(print);
+
+    Polygon hole = object->layers().front()->lslices.front().holes.front();
+    REQUIRE(hole.points.size() == 4);
+    coord_t min_hole_x = hole.points.front().x();
+    coord_t max_hole_x = hole.points.front().x();
+    coord_t min_hole_y = hole.points.front().y();
+    coord_t max_hole_y = hole.points.front().y();
+    std::set<std::pair<coord_t, coord_t>> corners;
+    for (const Point &point : hole.points) {
+        min_hole_x = std::min(min_hole_x, point.x());
+        max_hole_x = std::max(max_hole_x, point.x());
+        min_hole_y = std::min(min_hole_y, point.y());
+        max_hole_y = std::max(max_hole_y, point.y());
+        corners.emplace(point.x(), point.y());
+    }
+    REQUIRE(corners.size() == 4);
+    for (const Point &point : hole.points) {
+        const bool x_is_rectangle_boundary =
+            point.x() == min_hole_x || point.x() == max_hole_x;
+        const bool y_is_rectangle_boundary =
+            point.y() == min_hole_y || point.y() == max_hole_y;
+        REQUIRE(x_is_rectangle_boundary);
+        REQUIRE(y_is_rectangle_boundary);
+    }
+    Point world_shift = object->instances().front().shift_without_plate_offset();
+    const Vec3d plate_origin = print.get_plate_origin();
+    world_shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    hole.translate(world_shift);
+    const Bounds hole_bounds = polygon_bounds(hole);
+    REQUIRE_THAT(hole_bounds.max_x - hole_bounds.min_x,
+                 Catch::Matchers::WithinAbs(20.0, 0.05));
+    REQUIRE_THAT(hole_bounds.max_y - hole_bounds.min_y,
+                 Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT((hole_bounds.min_x + hole_bounds.max_x) / 2.0,
+               Catch::Matchers::WithinAbs((sample.model_bounds.min_x + sample.model_bounds.max_x) / 2.0, 0.05));
+    CHECK_THAT((hole_bounds.min_y + hole_bounds.max_y) / 2.0,
+               Catch::Matchers::WithinAbs((sample.model_bounds.min_y + sample.model_bounds.max_y) / 2.0, 0.05));
+    CHECK(hole_bounds.min_x > sample.model_bounds.min_x);
+    CHECK(hole_bounds.max_x < sample.model_bounds.max_x);
+    CHECK(hole_bounds.min_y > sample.model_bounds.min_y);
+    CHECK(hole_bounds.max_y < sample.model_bounds.max_y);
+
+    const std::string output = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    sample.brim = inspect_brim(output, config, &sample.model_bounds);
+    sample.emitted_regions = inspect_emitted_regions(output, config, sample.model_bounds, hole);
+    sample.model_motion = inspect_role_motion(output, config, "perimeter");
+    return sample;
+}
+
+static void require_positive_model(const HollowSample &sample, const double expected_size = 40.0)
+{
+    REQUIRE(sample.model_motion.finite);
+    REQUIRE(sample.model_motion.extruding_moves > 0);
+    REQUIRE(sample.model_motion.xy_length > 0.0);
+    REQUIRE(sample.model_motion.filament > 0.0);
+    REQUIRE(sample.hole_count == 1);
+    CHECK_THAT(sample.model_bounds.max_x - sample.model_bounds.min_x,
+               Catch::Matchers::WithinAbs(expected_size, 0.05));
+    CHECK_THAT(sample.model_bounds.max_y - sample.model_bounds.min_y,
+               Catch::Matchers::WithinAbs(expected_size, 0.05));
+}
+
+static void require_same_model_motion(const RoleMotionEvidence &reference,
+                                      const RoleMotionEvidence &changed)
+{
+    REQUIRE(reference.finite);
+    REQUIRE(changed.finite);
+    REQUIRE(reference.extruding_moves > 0);
+    REQUIRE(changed.extruding_moves > 0);
+    CHECK_THAT(changed.xy_length,
+               Catch::Matchers::WithinAbs(reference.xy_length, 0.02));
+    CHECK_THAT(changed.filament,
+               Catch::Matchers::WithinAbs(reference.filament, 0.01));
+}
+
+}
+
+namespace brim_auto_material_boundaries {
+
+using brim_type_hollow_boundaries::HollowSample;
+using brim_type_hollow_boundaries::export_hollow_brim;
+using brim_type_hollow_boundaries::require_positive_model;
+using brim_type_hollow_boundaries::require_same_model_bounds;
+using brim_type_hollow_boundaries::require_same_model_motion;
+using brim_type_hollow_boundaries::require_valid_brim;
+
+static std::array<double, 4> outer_reach(const HollowSample &sample)
+{
+    return {
+        sample.model_bounds.min_x - sample.brim.bounds.min_x,
+        sample.brim.bounds.max_x - sample.model_bounds.max_x,
+        sample.model_bounds.min_y - sample.brim.bounds.min_y,
+        sample.brim.bounds.max_y - sample.model_bounds.max_y,
+    };
+}
+
+}
+} // namespace
+
+
+TEST_CASE("Painted brim ears follow the compensated outline when enabled", "[SkirtBrim][PaintedBrimEfc]")
+{
+    constexpr double compensation = 1.2;
+    constexpr double ear_radius = 4.0;
+    const PaintedEfcBrimSample raw_brim = process_painted_efc_brim(false, false, compensation, ear_radius);
+    const PaintedEfcBrimSample compensated_brim = process_painted_efc_brim(true, false, compensation, ear_radius);
+
+    REQUIRE(compensated_brim.raw_outline.size() == 1);
+    REQUIRE(compensated_brim.compensated_outline.size() == 1);
+    const ExPolygon &raw_rectangle = compensated_brim.raw_outline.front();
+    const ExPolygon &efc_rectangle = compensated_brim.compensated_outline.front();
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_rectangle));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_rectangle));
+    const BoundingBox raw_bounds = get_extents(raw_rectangle.contour);
+    const BoundingBox efc_bounds = get_extents(efc_rectangle.contour);
+    CHECK_THAT(unscale<double>(double(efc_bounds.min.x() - raw_bounds.min.x())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_bounds.max.x() - efc_bounds.max.x())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(efc_bounds.min.y() - raw_bounds.min.y())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_bounds.max.y() - efc_bounds.max.y())),
+        Catch::Matchers::WithinAbs(compensation, 0.05));
+    REQUIRE(compensated_brim.painted_point.x() > efc_bounds.max.x());
+    REQUIRE(compensated_brim.painted_point.y() > efc_bounds.max.y());
+    const Point projected_point = painted_efc_rectangle_projection(efc_bounds, compensated_brim.painted_point);
+    REQUIRE(projected_point == Point(efc_bounds.max.x(), efc_bounds.max.y()));
+    const double raw_ear_extent = unscale<double>(double(raw_brim.brim_paths.max.x() - raw_brim.painted_point.x()));
+    const double compensated_ear_extent = unscale<double>(
+        double(compensated_brim.brim_paths.max.x() - projected_point.x()));
+    INFO("painted radius=" << ear_radius << " mm, raw x extent=" << raw_ear_extent
+         << " mm, compensated x extent=" << compensated_ear_extent << " mm");
+
+    CHECK_THAT(raw_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+    CHECK_THAT(compensated_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+    CHECK(raw_brim.brim_paths.max.x() > compensated_brim.brim_paths.max.x() + scaled(0.5));
+
+    const BoundingBox model_outline_without_brim_follow_bounds = painted_efc_bounds(raw_brim.compensated_outline);
+    const BoundingBox model_outline_with_brim_follow_bounds = painted_efc_bounds(compensated_brim.compensated_outline);
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.min.x() - model_outline_with_brim_follow_bounds.min.x())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.max.x() - model_outline_with_brim_follow_bounds.max.x())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.min.y() - model_outline_with_brim_follow_bounds.min.y())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(unscale<double>(double(model_outline_without_brim_follow_bounds.max.y() - model_outline_with_brim_follow_bounds.max.y())),
+        Catch::Matchers::WithinAbs(0.0, 0.01));
+    CHECK_THAT(painted_efc_area_mm2(raw_brim.compensated_outline),
+        Catch::Matchers::WithinAbs(painted_efc_area_mm2(compensated_brim.compensated_outline), 0.01));
+}
+
+TEST_CASE("Painted brim ears stay on the island containing their painted point", "[SkirtBrim][PaintedBrimEfc]")
+{
+    constexpr double compensation = 2.0;
+    constexpr double ear_radius = 1.8;
+    const PaintedEfcBrimSample sample = process_painted_efc_brim(true, true, compensation, ear_radius);
+
+    REQUIRE(sample.raw_outline.size() == 2);
+    REQUIRE(sample.compensated_outline.size() == 2);
+    const ExPolygon &raw_left = painted_efc_leftmost_island(sample.raw_outline);
+    const ExPolygon &raw_right = painted_efc_rightmost_island(sample.raw_outline);
+    const ExPolygon &efc_left = painted_efc_leftmost_island(sample.compensated_outline);
+    const ExPolygon &efc_right = painted_efc_rightmost_island(sample.compensated_outline);
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_left));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(raw_right));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_left));
+    REQUIRE(painted_efc_is_axis_aligned_rectangle(efc_right));
+    const BoundingBox raw_left_bounds = get_extents(raw_left.contour);
+    const BoundingBox raw_right_bounds = get_extents(raw_right.contour);
+    const BoundingBox efc_left_bounds = get_extents(efc_left.contour);
+    const BoundingBox efc_right_bounds = get_extents(efc_right.contour);
+    CHECK_THAT(unscale<double>(double(raw_left_bounds.max.x() - raw_left_bounds.min.x())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_left_bounds.max.y() - raw_left_bounds.min.y())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.max.x() - raw_right_bounds.min.x())),
+        Catch::Matchers::WithinAbs(20.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.max.y() - raw_right_bounds.min.y())),
+        Catch::Matchers::WithinAbs(40.0, 0.05));
+    CHECK_THAT(unscale<double>(double(raw_right_bounds.min.x() - raw_left_bounds.max.x())),
+        Catch::Matchers::WithinAbs(0.1, 0.05));
+    for (const auto &pair : { std::make_pair(&raw_left_bounds, &efc_left_bounds),
+                              std::make_pair(&raw_right_bounds, &efc_right_bounds) }) {
+        CHECK_THAT(unscale<double>(double(pair.second->min.x() - pair.first->min.x())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.first->max.x() - pair.second->max.x())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.second->min.y() - pair.first->min.y())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+        CHECK_THAT(unscale<double>(double(pair.first->max.y() - pair.second->max.y())),
+            Catch::Matchers::WithinAbs(compensation, 0.05));
+    }
+    REQUIRE(sample.painted_point.x() > efc_left_bounds.max.x());
+    REQUIRE(sample.painted_point.y() > efc_left_bounds.max.y());
+    REQUIRE(sample.painted_point.x() < efc_right_bounds.min.x());
+    REQUIRE(sample.painted_point.y() >= efc_right_bounds.min.y());
+    REQUIRE(sample.painted_point.y() <= efc_right_bounds.max.y());
+    const Point expected_own_projection = painted_efc_rectangle_projection(efc_left_bounds, sample.painted_point);
+    const Point expected_global_projection(efc_right_bounds.min.x(), sample.painted_point.y());
+
+    const double own_distance = unscale<double>(
+        (expected_own_projection - sample.painted_point).cast<double>().norm());
+    const double global_distance = unscale<double>(
+        (expected_global_projection - sample.painted_point).cast<double>().norm());
+    const BoundingBox right_bounds = get_extents(efc_right.contour);
+    INFO("painted point local=" << sample.painted_point << ", own projection=" << expected_own_projection
+         << ", global projection=" << expected_global_projection << ", own distance=" << own_distance
+         << " mm, global distance=" << global_distance << " mm");
+
+    REQUIRE(raw_left.contains(sample.painted_point, false));
+    REQUIRE(global_distance + 0.25 < own_distance);
+    REQUIRE(expected_global_projection.x() > expected_own_projection.x() + scaled(2.0));
+    REQUIRE(right_bounds.inflated(scaled(0.1)).contains(expected_global_projection));
+
+    const double emitted_ear_extent = unscale<double>(
+        double(sample.brim_paths.max.x() - expected_own_projection.x()));
+    CHECK_THAT(emitted_ear_extent, Catch::Matchers::WithinAbs(ear_radius, 0.75));
+}
+
+TEST_CASE("Brim object gap changes emitted clearance without changing the model",
+          "[SkirtBrim][BrimEarsGapBoundaries]")
+{
+    using namespace brim_ears_gap_boundaries;
+    const BrimSample default_gap = export_outer_brim(false, 0.0);
+    const BrimSample minimum_gap = export_outer_brim(true, 0.0);
+    const BrimSample middle_gap = export_outer_brim(true, 1.0);
+    const BrimSample maximum_gap = export_outer_brim(true, 2.0);
+
+    require_valid_brim(default_gap.brim);
+    require_valid_brim(minimum_gap.brim);
+    require_valid_brim(middle_gap.brim);
+    require_valid_brim(maximum_gap.brim);
+    require_same_model_bounds(default_gap.model_bounds, minimum_gap.model_bounds);
+    require_same_model_bounds(minimum_gap.model_bounds, middle_gap.model_bounds);
+    require_same_model_bounds(middle_gap.model_bounds, maximum_gap.model_bounds);
+
+    CHECK_THAT(default_gap.brim.minimum_model_clearance,
+               Catch::Matchers::WithinAbs(minimum_gap.brim.minimum_model_clearance, 0.03));
+    CHECK(middle_gap.brim.minimum_model_clearance > minimum_gap.brim.minimum_model_clearance + 0.8);
+    CHECK(maximum_gap.brim.minimum_model_clearance > middle_gap.brim.minimum_model_clearance + 0.8);
+}
+
+TEST_CASE("Brim ear detection length zero keeps a small corner in the emitted geometry",
+          "[SkirtBrim][BrimEarsGapBoundaries]")
+{
+    using namespace brim_ears_gap_boundaries;
+    const BrimSample disabled = export_auto_ears(0.0);
+    const BrimSample default_length = export_auto_ears(1.0);
+    const BrimSample positive_length = export_auto_ears(2.0);
+
+    require_valid_brim(disabled.brim);
+    require_valid_brim(default_length.brim);
+    require_valid_brim(positive_length.brim);
+    require_same_model_bounds(disabled.model_bounds, default_length.model_bounds);
+    require_same_model_bounds(default_length.model_bounds, positive_length.model_bounds);
+    INFO("disabled ear: nearest segment=" << disabled.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << disabled.brim.closest_endpoint_to_nib_tip << " mm");
+    INFO("1 mm ear: nearest segment=" << default_length.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << default_length.brim.closest_endpoint_to_nib_tip << " mm");
+    INFO("2 mm ear: nearest segment=" << positive_length.brim.closest_segment_to_nib_tip
+         << " mm, nearest endpoint=" << positive_length.brim.closest_endpoint_to_nib_tip << " mm");
+    CHECK(disabled.brim.segments_near_nib_tip > 0);
+    CHECK(default_length.brim.segments_near_nib_tip == 0);
+    CHECK(positive_length.brim.segments_near_nib_tip == 0);
+    CHECK(disabled.brim.closest_segment_to_nib_tip < 4.9);
+    CHECK(default_length.brim.closest_segment_to_nib_tip >= 4.9);
+    CHECK(positive_length.brim.closest_segment_to_nib_tip >= 4.9);
+}
+
+TEST_CASE("Brim width endpoints change emitted plate clearance without changing the model",
+          "[SkirtBrim][BrimRangeBoundaries]")
+{
+    using namespace brim_range_settings;
+    const FlatWidthSample default_width = export_flat_width(false, 0.0);
+    const FlatWidthSample minimum_width = export_flat_width(true, 0.0);
+    const FlatWidthSample representative = export_flat_width(true, 5.0);
+    const FlatWidthSample maximum_width = export_flat_width(true, 100.0);
+
+    for (const FlatWidthSample *sample : { &default_width, &minimum_width, &representative, &maximum_width }) {
+        REQUIRE(sample->brim.finite);
+        CHECK(sample->perimeter_segments > 0);
+        CHECK(sample->model_extruding_moves > 0);
+        CHECK(sample->model_xy_length > 0.0);
+        CHECK(sample->model_filament > 0.0);
+    }
+    check_no_emitted_brim(default_width);
+    check_no_emitted_brim(minimum_width);
+    require_same_model_bounds(default_width.model_bounds, minimum_width.model_bounds);
+    require_same_model_bounds(minimum_width.model_bounds, representative.model_bounds);
+    require_same_model_bounds(representative.model_bounds, maximum_width.model_bounds);
+    CHECK(default_width.perimeter_segments == minimum_width.perimeter_segments);
+    CHECK(minimum_width.perimeter_segments == representative.perimeter_segments);
+    CHECK(representative.perimeter_segments == maximum_width.perimeter_segments);
+    CHECK(default_width.model_extruding_moves == minimum_width.model_extruding_moves);
+    CHECK(minimum_width.model_extruding_moves == representative.model_extruding_moves);
+    CHECK(representative.model_extruding_moves == maximum_width.model_extruding_moves);
+    CHECK_THAT(minimum_width.model_xy_length, Catch::Matchers::WithinAbs(representative.model_xy_length, 0.02));
+    CHECK_THAT(representative.model_xy_length, Catch::Matchers::WithinAbs(maximum_width.model_xy_length, 0.02));
+    CHECK_THAT(minimum_width.model_filament, Catch::Matchers::WithinAbs(representative.model_filament, 0.01));
+    CHECK_THAT(representative.model_filament, Catch::Matchers::WithinAbs(maximum_width.model_filament, 0.01));
+
+    require_valid_brim(representative.brim);
+    require_valid_brim(maximum_width.brim);
+    const std::vector<double> representative_clearance = flat_side_clearances(representative);
+    const std::vector<double> maximum_clearance = flat_side_clearances(maximum_width);
+    REQUIRE(representative_clearance.size() == 4);
+    REQUIRE(maximum_clearance.size() == 4);
+    for (size_t i = 0; i < representative_clearance.size(); ++i) {
+        CAPTURE(i, representative_clearance[i], maximum_clearance[i]);
+        CHECK_THAT(representative_clearance[i], Catch::Matchers::WithinAbs(5.0, 1.0));
+        CHECK_THAT(maximum_clearance[i], Catch::Matchers::WithinAbs(100.0, 1.0));
+    }
+}
+
+TEST_CASE("Leading belt brim endpoints extend only the downhill reach",
+          "[SkirtBrim][BrimRangeBoundaries][belt]")
+{
+    using namespace brim_range_settings;
+    const BeltExtentSample default_length = export_belt_extent(false, 0.0, false, 0.0);
+    const BeltExtentSample minimum_length = export_belt_extent(true, 0.0, false, 0.0);
+    // The positive lateral control creates the same contact footprint without using the
+    // leading setting. Comparing against it cancels the larger whole-model Y extent of
+    // this tilted cube without reimplementing BeltBrim's contact-footprint clipping.
+    const BeltExtentSample lateral_anchor = export_belt_extent(true, 0.0, true, 5.0);
+    const BeltExtentSample representative = export_belt_extent(true, 5.0, true, 5.0);
+    const BeltExtentSample maximum_length = export_belt_extent(true, 100.0, true, 5.0);
+
+    check_no_emitted_brim(default_length);
+    check_no_emitted_brim(minimum_length);
+    REQUIRE(lateral_anchor.brim_segments > 0);
+    REQUIRE(representative.brim_segments > 0);
+    REQUIRE(maximum_length.brim_segments > 0);
+    require_same_model_bounds(default_length.model_bounds, minimum_length.model_bounds);
+    require_same_model_bounds(minimum_length.model_bounds, representative.model_bounds);
+    require_same_model_bounds(representative.model_bounds, maximum_length.model_bounds);
+    require_same_model_bounds(minimum_length.model_bounds, lateral_anchor.model_bounds);
+    CHECK(default_length.perimeter_segments == minimum_length.perimeter_segments);
+    CHECK(minimum_length.perimeter_segments == representative.perimeter_segments);
+    CHECK(representative.perimeter_segments == maximum_length.perimeter_segments);
+    CHECK(lateral_anchor.perimeter_segments == representative.perimeter_segments);
+    CHECK(default_length.model_extruding_moves == minimum_length.model_extruding_moves);
+    CHECK(minimum_length.model_extruding_moves == representative.model_extruding_moves);
+    CHECK(representative.model_extruding_moves == maximum_length.model_extruding_moves);
+    CHECK(lateral_anchor.model_extruding_moves == representative.model_extruding_moves);
+    CHECK_THAT(minimum_length.model_xy_length, Catch::Matchers::WithinAbs(representative.model_xy_length, 0.02));
+    CHECK_THAT(representative.model_xy_length, Catch::Matchers::WithinAbs(maximum_length.model_xy_length, 0.02));
+    CHECK_THAT(minimum_length.model_filament, Catch::Matchers::WithinAbs(representative.model_filament, 0.01));
+    CHECK_THAT(representative.model_filament, Catch::Matchers::WithinAbs(maximum_length.model_filament, 0.01));
+    CHECK_THAT(lateral_anchor.model_xy_length, Catch::Matchers::WithinAbs(representative.model_xy_length, 0.02));
+    CHECK_THAT(lateral_anchor.model_filament, Catch::Matchers::WithinAbs(representative.model_filament, 0.01));
+
+    // BeltBrimFrame selects slice Y as from_axis for this X-tilted fixture.  At 45°,
+    // the slice-Y projection is the true configured belt distance multiplied by cos(45°).
+    // The control uses the identical positive lateral setting, so any shared offset between
+    // model slices and the contact footprint cancels without reproducing that footprint's
+    // production clipping algorithm.
+    const double representative_lead =
+        (lateral_anchor.brim_bounds.min_y - representative.brim_bounds.min_y) / BELT_COS_TILT;
+    const double maximum_lead =
+        (lateral_anchor.brim_bounds.min_y - maximum_length.brim_bounds.min_y) / BELT_COS_TILT;
+    INFO("observed belt lead, true-distance mm: 5=" << representative_lead
+         << " 100=" << maximum_lead);
+    CHECK_THAT(representative_lead, Catch::Matchers::WithinAbs(5.0, 1.5));
+    CHECK_THAT(maximum_lead, Catch::Matchers::WithinAbs(100.0, 2.0));
+    CHECK_THAT(representative.brim_bounds.min_x,
+               Catch::Matchers::WithinAbs(lateral_anchor.brim_bounds.min_x, 0.5));
+    CHECK_THAT(representative.brim_bounds.max_x,
+               Catch::Matchers::WithinAbs(lateral_anchor.brim_bounds.max_x, 0.5));
+    CHECK_THAT(maximum_length.brim_bounds.min_x,
+               Catch::Matchers::WithinAbs(lateral_anchor.brim_bounds.min_x, 0.5));
+    CHECK_THAT(maximum_length.brim_bounds.max_x,
+               Catch::Matchers::WithinAbs(lateral_anchor.brim_bounds.max_x, 0.5));
+}
+
+TEST_CASE("Extra belt brim endpoints extend symmetrically across the belt",
+          "[SkirtBrim][BrimRangeBoundaries][belt]")
+{
+    using namespace brim_range_settings;
+    const BeltExtentSample default_width = export_belt_extent(false, 0.0, false, 0.0);
+    const BeltExtentSample minimum_width = export_belt_extent(false, 0.0, true, 0.0);
+    const BeltExtentSample representative = export_belt_extent(false, 0.0, true, 5.0);
+    const BeltExtentSample maximum_width = export_belt_extent(false, 0.0, true, 100.0);
+
+    check_no_emitted_brim(default_width);
+    check_no_emitted_brim(minimum_width);
+    REQUIRE(representative.brim_segments > 0);
+    REQUIRE(maximum_width.brim_segments > 0);
+    require_same_model_bounds(default_width.model_bounds, minimum_width.model_bounds);
+    require_same_model_bounds(minimum_width.model_bounds, representative.model_bounds);
+    require_same_model_bounds(representative.model_bounds, maximum_width.model_bounds);
+    CHECK(default_width.perimeter_segments == minimum_width.perimeter_segments);
+    CHECK(minimum_width.perimeter_segments == representative.perimeter_segments);
+    CHECK(representative.perimeter_segments == maximum_width.perimeter_segments);
+    CHECK(default_width.model_extruding_moves == minimum_width.model_extruding_moves);
+    CHECK(minimum_width.model_extruding_moves == representative.model_extruding_moves);
+    CHECK(representative.model_extruding_moves == maximum_width.model_extruding_moves);
+    CHECK_THAT(minimum_width.model_xy_length, Catch::Matchers::WithinAbs(representative.model_xy_length, 0.02));
+    CHECK_THAT(representative.model_xy_length, Catch::Matchers::WithinAbs(maximum_width.model_xy_length, 0.02));
+    CHECK_THAT(minimum_width.model_filament, Catch::Matchers::WithinAbs(representative.model_filament, 0.01));
+    CHECK_THAT(representative.model_filament, Catch::Matchers::WithinAbs(maximum_width.model_filament, 0.01));
+
+    const double representative_left =
+        representative.model_bounds.min_x - representative.brim_bounds.min_x;
+    const double representative_right =
+        representative.brim_bounds.max_x - representative.model_bounds.max_x;
+    const double maximum_left = maximum_width.model_bounds.min_x - maximum_width.brim_bounds.min_x;
+    const double maximum_right = maximum_width.brim_bounds.max_x - maximum_width.model_bounds.max_x;
+    INFO("observed cross-belt reach, mm: 5=" << representative_left << "/" << representative_right
+         << " 100=" << maximum_left << "/" << maximum_right);
+    CHECK_THAT(representative_left, Catch::Matchers::WithinAbs(5.0, 1.5));
+    CHECK_THAT(representative_right, Catch::Matchers::WithinAbs(5.0, 1.5));
+    CHECK_THAT(maximum_left, Catch::Matchers::WithinAbs(100.0, 2.0));
+    CHECK_THAT(maximum_right, Catch::Matchers::WithinAbs(100.0, 2.0));
+    CHECK_THAT(representative.brim_bounds.min_y,
+               Catch::Matchers::WithinAbs(maximum_width.brim_bounds.min_y, 0.5));
+    CHECK_THAT(representative.brim_bounds.max_y,
+               Catch::Matchers::WithinAbs(maximum_width.brim_bounds.max_y, 0.5));
+}
+
+TEST_CASE("Flat brim types follow both boundaries of a hollow model",
+          "[SkirtBrim][BrimTypeHollowBoundaries]")
+{
+    using namespace brim_type_hollow_boundaries;
+
+    const HollowSample outer = export_hollow_brim("outer_only", 5.0);
+    const HollowSample inner = export_hollow_brim("inner_only", 5.0);
+    const HollowSample both  = export_hollow_brim("outer_and_inner", 5.0);
+    const HollowSample flat_leading_edge = export_hollow_brim("leading_edge_only", 5.0);
+
+    require_positive_model(outer);
+    require_positive_model(inner);
+    require_positive_model(both);
+    require_positive_model(flat_leading_edge);
+    require_valid_brim(outer.brim);
+    require_valid_brim(inner.brim);
+    require_valid_brim(both.brim);
+    require_valid_brim(flat_leading_edge.brim);
+    REQUIRE(outer.brim_loops > 0);
+    REQUIRE(inner.brim_loops > 0);
+    REQUIRE(both.brim_loops > outer.brim_loops);
+    REQUIRE(both.brim_loops > inner.brim_loops);
+
+    require_same_model_bounds(outer.model_bounds, inner.model_bounds);
+    require_same_model_bounds(inner.model_bounds, both.model_bounds);
+    require_same_model_motion(outer.model_motion, inner.model_motion);
+    require_same_model_motion(inner.model_motion, both.model_motion);
+    require_same_model_bounds(outer.model_bounds, flat_leading_edge.model_bounds);
+    require_same_model_motion(outer.model_motion, flat_leading_edge.model_motion);
+
+    for (const HollowSample *sample : { &outer, &inner, &both, &flat_leading_edge }) {
+        REQUIRE(sample->emitted_regions.finite);
+        CHECK(sample->emitted_regions.arc_moves == 0);
+        CHECK(sample->emitted_regions.positive_xy_moves > 0);
+    }
+
+    CHECK_FALSE(outer.brim_enters_hole);
+    CHECK(inner.brim_enters_hole);
+    CHECK(both.brim_enters_hole);
+    CHECK(outer.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(outer.emitted_regions.outside_model_midpoints > 0);
+    CHECK(inner.emitted_regions.inside_hole_midpoints > 0);
+    CHECK(inner.emitted_regions.outside_model_midpoints == 0);
+    CHECK(both.emitted_regions.inside_hole_midpoints > 0);
+    CHECK(both.emitted_regions.outside_model_midpoints > 0);
+    CHECK(flat_leading_edge.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(flat_leading_edge.emitted_regions.outside_model_midpoints > 0);
+    CHECK_THAT(flat_leading_edge.brim.xy_length,
+               Catch::Matchers::WithinAbs(outer.brim.xy_length, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.filament,
+               Catch::Matchers::WithinAbs(outer.brim.filament, 0.01));
+    CHECK(flat_leading_edge.brim.positive_xy_moves == outer.brim.positive_xy_moves);
+    CHECK_THAT(flat_leading_edge.brim.bounds.min_x,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.min_x, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.max_x,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.max_x, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.min_y,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.min_y, 0.02));
+    CHECK_THAT(flat_leading_edge.brim.bounds.max_y,
+               Catch::Matchers::WithinAbs(outer.brim.bounds.max_y, 0.02));
+    CHECK(flat_leading_edge.emitted_regions.inside_hole_midpoints ==
+          outer.emitted_regions.inside_hole_midpoints);
+    CHECK(flat_leading_edge.emitted_regions.outside_model_midpoints ==
+          outer.emitted_regions.outside_model_midpoints);
+    CHECK(inner.brim.bounds.min_x > inner.model_bounds.min_x);
+    CHECK(inner.brim.bounds.max_x < inner.model_bounds.max_x);
+    CHECK(inner.brim.bounds.min_y > inner.model_bounds.min_y);
+    CHECK(inner.brim.bounds.max_y < inner.model_bounds.max_y);
+
+    CHECK(outer.brim.bounds.min_x < outer.model_bounds.min_x - 1.0);
+    CHECK(outer.brim.bounds.max_x > outer.model_bounds.max_x + 1.0);
+    CHECK(outer.brim.bounds.min_y < outer.model_bounds.min_y - 1.0);
+    CHECK(outer.brim.bounds.max_y > outer.model_bounds.max_y + 1.0);
+    CHECK_THAT(both.brim.bounds.min_x, Catch::Matchers::WithinAbs(outer.brim.bounds.min_x, 0.1));
+    CHECK_THAT(both.brim.bounds.max_x, Catch::Matchers::WithinAbs(outer.brim.bounds.max_x, 0.1));
+    CHECK_THAT(both.brim.bounds.min_y, Catch::Matchers::WithinAbs(outer.brim.bounds.min_y, 0.1));
+    CHECK_THAT(both.brim.bounds.max_y, Catch::Matchers::WithinAbs(outer.brim.bounds.max_y, 0.1));
+    CHECK(both.brim.xy_length > outer.brim.xy_length + 1.0);
+    CHECK(both.brim.xy_length > inner.brim.xy_length + 1.0);
+}
+
+TEST_CASE("Flat auto brim creates an outer ring when explicit width is zero",
+          "[SkirtBrim][BrimTypeHollowBoundaries]")
+{
+    using namespace brim_type_hollow_boundaries;
+
+    // A separate, wider 120x120x30 hollow part activates Auto even when the FFF test
+    // helper has not populated Model::extruderParamsMap and Model falls back to its
+    // conservative 200 mm thermal-length reference. The independent enum fixture above
+    // remains 40x40x20.
+    const HollowSample explicit_zero = export_hollow_brim("outer_only", 0.0,
+                                                          120.0, 30.0, 65.0, 45.0);
+    const HollowSample automatic     = export_hollow_brim("auto_brim", 0.0,
+                                                          120.0, 30.0, 65.0, 45.0);
+
+    require_positive_model(explicit_zero, 120.0);
+    require_positive_model(automatic, 120.0);
+    require_same_model_bounds(explicit_zero.model_bounds, automatic.model_bounds);
+    require_same_model_motion(explicit_zero.model_motion, automatic.model_motion);
+
+    CHECK(explicit_zero.brim.positive_xy_moves == 0);
+    CHECK(explicit_zero.brim_loops == 0);
+    CHECK(explicit_zero.emitted_regions.positive_xy_moves == 0);
+    require_valid_brim(automatic.brim);
+    REQUIRE(automatic.emitted_regions.finite);
+    CHECK(automatic.emitted_regions.arc_moves == 0);
+    CHECK(automatic.emitted_regions.positive_xy_moves > 0);
+    CHECK(automatic.emitted_regions.inside_hole_midpoints == 0);
+    CHECK(automatic.emitted_regions.outside_model_midpoints > 0);
+    REQUIRE(automatic.brim_loops > 0);
+    CHECK_FALSE(automatic.brim_enters_hole);
+    CHECK(automatic.brim.bounds.min_x < automatic.model_bounds.min_x - 1.0);
+    CHECK(automatic.brim.bounds.max_x > automatic.model_bounds.max_x + 1.0);
+    CHECK(automatic.brim.bounds.min_y < automatic.model_bounds.min_y - 1.0);
+    CHECK(automatic.brim.bounds.max_y > automatic.model_bounds.max_y + 1.0);
+}
+
+TEST_CASE("Auto brim follows filament thermal length and caps its height input",
+          "[SkirtBrim][BrimAutoMaterialBoundaries]")
+{
+    using namespace brim_auto_material_boundaries;
+
+    const GlobalSpeedMap saved_speed_map = Model::printSpeedMap;
+    const std::map<size_t, ExtruderParams> saved_extruder_params = Model::extruderParamsMap;
+    ScopeGuard restore_model_static_state([&]() {
+        Model::printSpeedMap = saved_speed_map;
+        Model::extruderParamsMap = saved_extruder_params;
+    });
+
+    // One tool is configured through the same public preparation API used before
+    // Plater slicing; the helper calls it before Print::process(). The 120 mm square
+    // keeps the thermal-width term above the 5 mm omission threshold at 30 mm PLA height,
+    // while height 20 remains below it. The 250x210 bed leaves ample room for the capped
+    // PC brim in every direction.
+    const HollowSample pla_below_omission = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 20.0, 65.0, 45.0, "PLA");
+    const HollowSample pla_height_30 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 30.0, 65.0, 45.0, "PLA");
+    const HollowSample pla_height_60 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 60.0, 65.0, 45.0, "PLA");
+    const HollowSample pc_height_30 = export_hollow_brim(
+        "auto_brim", 0.0, 120.0, 30.0, 65.0, 45.0, "PC");
+
+    for (const HollowSample *sample : { &pla_below_omission, &pla_height_30,
+                                        &pla_height_60, &pc_height_30 })
+        require_positive_model(*sample, 120.0);
+    require_same_model_bounds(pla_below_omission.model_bounds, pla_height_30.model_bounds);
+    require_same_model_bounds(pla_height_30.model_bounds, pla_height_60.model_bounds);
+    require_same_model_bounds(pla_height_60.model_bounds, pc_height_30.model_bounds);
+    require_same_model_motion(pla_height_30.model_motion, pc_height_30.model_motion);
+
+    REQUIRE(pla_below_omission.emitted_regions.finite);
+    CHECK(pla_below_omission.brim.positive_xy_moves == 0);
+    CHECK(pla_below_omission.brim_loops == 0);
+    CHECK(pla_below_omission.emitted_regions.positive_xy_moves == 0);
+
+    for (const HollowSample *sample : { &pla_height_30, &pla_height_60, &pc_height_30 }) {
+        require_valid_brim(sample->brim);
+        REQUIRE(sample->emitted_regions.finite);
+        CHECK(sample->emitted_regions.arc_moves == 0);
+        CHECK(sample->emitted_regions.positive_xy_moves > 0);
+        CHECK(sample->emitted_regions.inside_hole_midpoints == 0);
+        CHECK(sample->emitted_regions.outside_model_midpoints > 0);
+        CHECK(sample->brim.bounds.min_x > 0.0);
+        CHECK(sample->brim.bounds.max_x < 250.0);
+        CHECK(sample->brim.bounds.min_y > 0.0);
+        CHECK(sample->brim.bounds.max_y < 210.0);
+    }
+
+    const std::array<double, 4> pla_30_reach = outer_reach(pla_height_30);
+    const std::array<double, 4> pla_60_reach = outer_reach(pla_height_60);
+    const std::array<double, 4> pc_30_reach = outer_reach(pc_height_30);
+    INFO("PLA 30 mm reaches L/R/Y0/Y1=" << pla_30_reach[0] << "/" << pla_30_reach[1]
+         << "/" << pla_30_reach[2] << "/" << pla_30_reach[3]
+         << "; PLA 60 mm=" << pla_60_reach[0] << "/" << pla_60_reach[1]
+         << "/" << pla_60_reach[2] << "/" << pla_60_reach[3]
+         << "; PC 30 mm=" << pc_30_reach[0] << "/" << pc_30_reach[1]
+         << "/" << pc_30_reach[2] << "/" << pc_30_reach[3]);
+    for (size_t direction = 0; direction < pla_30_reach.size(); ++direction) {
+        CHECK(pla_30_reach[direction] > 5.0);
+        CHECK_THAT(pla_60_reach[direction], Catch::Matchers::WithinAbs(
+            pla_30_reach[direction], 0.08));
+        CHECK(pc_30_reach[direction] > pla_30_reach[direction] + 8.0);
     }
 }

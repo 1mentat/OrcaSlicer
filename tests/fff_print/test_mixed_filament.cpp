@@ -1392,3 +1392,21 @@ TEST_CASE("Unused manual filament map entries preserve slicing state while refre
     compare_output(after, fresh);
     compare_output(after, before);
 }
+
+TEST_CASE("Mixed filament sublayer ratios stay paired with permuted components",
+          "[MixedFilament][MixedComponents][SettingsVariance]")
+{
+    using namespace mixed_gradient_gcode_contracts;
+
+    // The configured order assigns 0.4 to component 2 and 0.6 to component 1. The
+    // consumer normalizes 2,3 to 0.4,0.6, then sorts components for physical emission
+    // while preserving each component's paired height: tool 0 therefore receives 0.6.
+    check_sublayer_ratio_export("2,1", "2,3", 0.6);
+}
+
+TEST_CASE("Mixed filament empty sublayer ratios use equal component weights",
+          "[MixedFilament][SublayerRatios][SettingsVariance]")
+{
+    using namespace mixed_gradient_gcode_contracts;
+    check_sublayer_ratio_export("1,2", "", 0.5);
+}

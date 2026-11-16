@@ -2488,6 +2488,75 @@ TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
 
 } // namespace independent_support_layer_height_contracts
 
+TEST_CASE("Support first-layer gap trims the first support layer only",
+          "[SupportSettingsVariance][SupportMaterial][SupportObjectFirstLayerGap]")
+{
+    const ConfigOptionDef *definition = print_config_def.get("support_object_first_layer_gap");
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->type == coFloat);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(0.0, 1e-12));
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(10.0, 1e-12));
+    for (const double value : {0.0, 2.0, 10.0})
+        CHECK(definition->is_value_valid(value));
+    CHECK_FALSE(definition->is_value_valid(-0.01));
+    CHECK_FALSE(definition->is_value_valid(10.01));
+
+    const auto gap_zero = support_settings_variance_contracts::slice_first_layer_gap_ramp(0.0);
+    const auto gap_two = support_settings_variance_contracts::slice_first_layer_gap_ramp(2.0);
+    const auto gap_maximum = support_settings_variance_contracts::slice_first_layer_gap_ramp(10.0);
+    for (const auto *observation : {&gap_zero, &gap_two, &gap_maximum}) {
+        REQUIRE(observation->finite);
+        REQUIRE(observation->base_segments > 0);
+        REQUIRE(observation->base_length_by_layer.size() >= 2);
+    }
+
+    // G-code parsing stores Z as float-backed coordinates, so match the model's known
+    // 0.2 mm first-layer height with a tolerance instead of exact map lookup.
+    const auto layer_at_z = [](const auto &observation, const double z) {
+        const auto &layers = observation.base_length_by_layer;
+        auto it = layers.lower_bound(z);
+        if (it != layers.end() && std::fabs(it->first - z) <= EPSILON)
+            return it;
+        if (it != layers.begin()) {
+            --it;
+            if (std::fabs(it->first - z) <= EPSILON)
+                return it;
+        }
+        return layers.end();
+    };
+    constexpr double first_layer_z = 0.2;
+    const auto zero_first = layer_at_z(gap_zero, first_layer_z);
+    const auto two_first = layer_at_z(gap_two, first_layer_z);
+    const auto maximum_first = layer_at_z(gap_maximum, first_layer_z);
+    REQUIRE(zero_first != gap_zero.base_length_by_layer.end());
+    REQUIRE(two_first != gap_two.base_length_by_layer.end());
+    REQUIRE(maximum_first != gap_maximum.base_length_by_layer.end());
+    CHECK_THAT(zero_first->first, Catch::Matchers::WithinAbs(first_layer_z, EPSILON));
+    CHECK_THAT(two_first->first, Catch::Matchers::WithinAbs(first_layer_z, EPSILON));
+    CHECK_THAT(maximum_first->first, Catch::Matchers::WithinAbs(first_layer_z, EPSILON));
+    REQUIRE(zero_first->second > 0.0);
+    REQUIRE(two_first->second > 0.0);
+    REQUIRE(maximum_first->second > 0.0);
+    CHECK(zero_first->second > two_first->second + 1.0);
+    CHECK(two_first->second > maximum_first->second + 1.0);
+
+    // This setting trims only support on the object's first layer. Later support layers are
+    // deliberately held constant so they witness that the ordinary support/object gap remains
+    // governed by support_object_xy_distance.
+    std::size_t later_layers = 0;
+    for (const auto &[z, length] : gap_zero.base_length_by_layer) {
+        if (std::fabs(z - first_layer_z) <= EPSILON)
+            continue;
+        ++later_layers;
+        const auto two_it = gap_two.base_length_by_layer.find(z);
+        const auto max_it = gap_maximum.base_length_by_layer.find(z);
+        REQUIRE(two_it != gap_two.base_length_by_layer.end());
+        REQUIRE(max_it != gap_maximum.base_length_by_layer.end());
+        CHECK_THAT(two_it->second, Catch::Matchers::WithinAbs(length, 1e-3));
+        CHECK_THAT(max_it->second, Catch::Matchers::WithinAbs(length, 1e-3));
+    }
+    REQUIRE(later_layers > 0);
+}
 } // namespace support_settings_variance_contracts
 
 namespace support_bridge_no_support_contracts {
