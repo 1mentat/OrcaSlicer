@@ -2,8 +2,10 @@
 """Unit tests for the LLVM coverage report boundary (stdlib only)."""
 
 from pathlib import Path
+import contextlib
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -12,6 +14,28 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import slicer_coverage  # noqa: E402
+
+
+@contextlib.contextmanager
+def _fixture_launcher(script):
+    """Run a Python fixture tool through the real process API on every OS.
+
+    Windows cannot execute a POSIX-shebang script as a PE image, so launch it
+    through the interpreter; POSIX keeps executing the script directly.
+    """
+    if os.name != "nt":
+        yield
+        return
+    real_run = slicer_coverage._run
+
+    def run(argv, **kwargs):
+        argv = list(argv)
+        if argv and argv[0] == str(script):
+            argv = [sys.executable, str(script), *argv[1:]]
+        return real_run(argv, **kwargs)
+
+    with mock.patch.object(slicer_coverage, "_run", run):
+        yield
 
 
 class CoverageEvidenceTests(unittest.TestCase):
@@ -321,10 +345,11 @@ class CoverageExportTests(unittest.TestCase):
                 "'summary': {'lines': {'covered': 0, 'count': 1}}}]}]}))\n"
             )
             fake_cov.chmod(0o755)
-            evidence = slicer_coverage._compiler_source_evidence(
-                str(fake_cov), [source], commands, timeout=5,
-                inventory_profile=inventory_profile,
-            )
+            with _fixture_launcher(fake_cov):
+                evidence = slicer_coverage._compiler_source_evidence(
+                    str(fake_cov), [source], commands, timeout=5,
+                    inventory_profile=inventory_profile,
+                )
             self.assertEqual(evidence["status"], "ok")
             self.assertEqual(evidence["mapped_sources"], [str(source)])
             self.assertEqual(evidence["mapping_free_sources"], [])
@@ -383,10 +408,11 @@ class CoverageExportTests(unittest.TestCase):
             )
             fake_cov.chmod(0o755)
 
-            evidence = slicer_coverage._compiler_source_evidence(
-                str(fake_cov), [mapped, mapping_free, header_only], compile_commands, timeout=10,
-                inventory_profile=inventory_profile,
-            )
+            with _fixture_launcher(fake_cov):
+                evidence = slicer_coverage._compiler_source_evidence(
+                    str(fake_cov), [mapped, mapping_free, header_only], compile_commands, timeout=10,
+                    inventory_profile=inventory_profile,
+                )
 
             self.assertEqual(evidence["status"], "ok")
             self.assertEqual(evidence["mapped_sources"], [str(mapped)])
