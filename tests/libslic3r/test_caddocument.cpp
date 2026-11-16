@@ -168,7 +168,7 @@ TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "
     CHECK_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(800.0, 0.02));
 }
 
-TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument]")
+TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument][CadDocumentReplacement]")
 {
     CadDocument doc;
     int sketch = -1, extrude = -1;
