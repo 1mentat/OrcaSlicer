@@ -658,6 +658,21 @@ TestResult process_buffer(const std::string &gcode, FullPrintConfig config = {})
     return result;
 }
 
+// The source-branch process_buffer: the caller owns the process-global parser dialect
+// (s_IsBBLPrinter) instead of the helper forcing it, for cases that select the dialect.
+TestResult process_buffer_with_caller_dialect(const std::string &gcode, FullPrintConfig config = {})
+{
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.initialize("gcode_processor_public_contract.gcode");
+    processor.initialize_result_moves();
+    processor.process_buffer(gcode);
+    processor.finalize(false);
+    TestResult result;
+    result = std::move(processor.extract_result());
+    return result;
+}
+
 float stealth_time(const GCodeProcessorResult &result)
 {
     return result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].time;
@@ -2359,6 +2374,17 @@ TEST_CASE("Malformed optional commands preserve a later valid move", "[GCodeProc
 
 namespace {
 
+constexpr const char *continuous_rising_outer_wall_gcode =
+    "M83\nG90\n"
+    "G1 X0 Y0 Z0.2 F600\n"
+    ";TYPE:Outer wall\n"
+    "G1 X10 Y0 E1 F600\n"
+    "G1 X10 Y10 Z0.4 E1\n"
+    "G1 X0 Y10 E1\n"
+    "G1 X10.05 Y10 E1\n"
+    ";TYPE:Inner wall\n"
+    "G1 X10.10 Y10 E1\n";
+
 TestResult process_continuous_rising_outer_wall(bool detect_layer_from_tags)
 {
     // TYPE: is the compatible/Marlin role dialect. The process-global BBL flag
@@ -2392,7 +2418,7 @@ TestResult process_continuous_rising_outer_wall_with_config(const FullPrintConfi
     const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
     const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
     GCodeProcessor::s_IsBBLPrinter = false;
-    return process_buffer(continuous_rising_outer_wall_gcode, config);
+    return process_buffer_with_caller_dialect(continuous_rising_outer_wall_gcode, config);
 }
 
 TestResult import_continuous_rising_outer_wall_with_config(const FullPrintConfig &config)
@@ -2518,7 +2544,7 @@ TEST_CASE("Default color changes cycle and wrap public color metadata", "[GCodeP
     CAPTURE(is_bbl_printer);
     const std::string color_change = is_bbl_printer ? "; COLOR_CHANGE,T0\n" : ";COLOR_CHANGE,T0\n";
 
-    const auto result = process_buffer(
+    const auto result = process_buffer_with_caller_dialect(
         std::string("M83\nG90\nG1 X0 Y0 Z0.2 F600\n") +
         color_change + "G1 X1 Y0 E0.1 F600\n" +
         color_change + "G1 X2 Y0 E0.1 F600\n" +
@@ -2574,9 +2600,9 @@ TEST_CASE("Malformed color changes match an independent fallback and preserve va
     const std::string malformed = GENERATE(std::string("#12GGZZ"), std::string("0x12ABCD"),
                                             std::string("#12345"), std::string("#1234567"));
 
-    const auto fallback = process_buffer(make_fixture(""));
-    const auto malformed_result = process_buffer(make_fixture(std::string(",") + malformed));
-    const auto explicit_result = process_buffer(make_fixture(",#aBc123"));
+    const auto fallback = process_buffer_with_caller_dialect(make_fixture(""));
+    const auto malformed_result = process_buffer_with_caller_dialect(make_fixture(std::string(",") + malformed));
+    const auto explicit_result = process_buffer_with_caller_dialect(make_fixture(",#aBc123"));
     REQUIRE(fallback.custom_gcode_per_print_z.size() == 1);
     REQUIRE(malformed_result.custom_gcode_per_print_z.size() == 1);
     REQUIRE(explicit_result.custom_gcode_per_print_z.size() == 1);
