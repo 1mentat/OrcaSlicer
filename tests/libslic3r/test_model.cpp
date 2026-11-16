@@ -1434,6 +1434,42 @@ TEST_CASE("Volume conversion resets offset and records the source unit", "[Model
 
 namespace model_extended_contracts {
 
+TEST_CASE("Partial unit conversion clones only selected volumes and preserves metadata", "[Model][ModelUnitConversion][ModelPartialUnitConversion]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *inch = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(inch != nullptr);
+    inch->name = "inch";
+    inch->source.input_file = "inch.stl";
+    ModelVolume *untouched = object->add_volume(make_cube(2, 2, 2), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(untouched != nullptr);
+    untouched->name = "millimeter";
+
+    Model converted_model;
+    object->convert_units(converted_model.objects, ConversionType::CONV_FROM_INCH, { 0 });
+    REQUIRE(converted_model.objects.size() == 1);
+    REQUIRE(converted_model.objects.front() != nullptr);
+    REQUIRE(converted_model.objects.front()->volumes.size() == 2);
+    REQUIRE(converted_model.objects.front()->volumes[0] != nullptr);
+    REQUIRE(converted_model.objects.front()->volumes[1] != nullptr);
+    model_bounds_contracts::check_vec3d(
+        converted_model.objects.front()->volumes[0]->mesh().bounding_box().size().cast<double>(),
+        Vec3d(25.4, 25.4, 25.4), 1e-3);
+    model_bounds_contracts::check_vec3d(
+        converted_model.objects.front()->volumes[1]->mesh().bounding_box().size().cast<double>(),
+        Vec3d(2, 2, 2), 1e-5);
+    CHECK(converted_model.objects.front()->volumes[0]->source.is_converted_from_inches);
+    CHECK_FALSE(converted_model.objects.front()->volumes[1]->source.is_converted_from_inches);
+    CHECK(converted_model.objects.front()->volumes[0]->name == "inch");
+    CHECK(converted_model.objects.front()->volumes[0]->source.input_file == "inch.stl");
+}
+
+} // namespace model_extended_contracts
+
+namespace model_extended_contracts {
+
 TEST_CASE("Only-one-part and connector cleanup distinguish model and auxiliary volumes", "[Model][ModelConnectorCleanup]")
 {
     Model model;
@@ -1485,6 +1521,34 @@ TEST_CASE("Material painting round-trips serialized triangle state and resets", 
 }
 
 } // namespace model_extended_contracts
+
+namespace model_painted_geometry_contracts {
+
+TEST_CASE("Model volumes report painted and assigned extruders", "[Model][ModelPainting]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    ModelVolume *unpainted = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *painted = object->add_volume(make_cube(2., 2., 2.), ModelVolumeType::MODEL_PART, false);
+    REQUIRE(unpainted != nullptr);
+    REQUIRE(painted != nullptr);
+
+    CHECK(unpainted->get_extruders() == std::vector<int>{ 1 });
+
+    painted->config.set("extruder", 4);
+    REQUIRE(painted->mesh().its.indices.size() >= 2);
+    TriangleSelector selector(painted->mesh());
+    selector.set_facet(0, EnforcerBlockerType::Extruder2);
+    selector.set_facet(1, EnforcerBlockerType::Extruder32);
+    REQUIRE(painted->mmu_segmentation_facets.set(selector));
+
+    const std::vector<int> expected_extruders{ 2, 32, 4 };
+    CHECK(painted->get_extruders() == expected_extruders);
+    CHECK(unpainted->get_extruders() == std::vector<int>{ 1 });
+}
+
+} // namespace model_painted_geometry_contracts
 
 namespace model_extended_contracts {
 

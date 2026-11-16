@@ -728,3 +728,21 @@ TEST_CASE("AppConfig resolves endpoint overrides", "[AppConfig][AppConfigPrefere
     REQUIRE(config.version_check_url() == "https://example.invalid/version");
     REQUIRE(config.profile_update_url() == "https://example.invalid/profile");
 }
+
+TEST_CASE("AppConfig resolves endpoint overrides and config existence", "[AppConfig][AppConfigPreferences]")
+{
+    ScopedAppConfigDataDir scoped_dir;
+    AppConfig config;
+
+    REQUIRE_FALSE(config.exists());
+    REQUIRE(config.version_check_url() == "https://check-version.orcaslicer.com/latest");
+    REQUIRE(config.profile_update_url() == "https://check-version.orcaslicer.com/profile");
+
+    config.set("version_check_url", "https://example.invalid/version");
+    config.set("orca_updater_url", "https://example.invalid/profile");
+    REQUIRE(config.version_check_url() == "https://example.invalid/version");
+    REQUIRE(config.profile_update_url() == "https://example.invalid/profile");
+
+    config.save();
+    REQUIRE(config.exists());
+}
