@@ -89,9 +89,21 @@ def _run(argv: Sequence[str], *, cwd: Path | None = None, env: dict[str, str] | 
         )
 
 
+def _split_command_line(command: str) -> list[str]:
+    if os.name != "nt":
+        return shlex.split(command)
+    # Non-POSIX shlex keeps quote characters inside tokens; reuse the reviewed
+    # CommandLineToArgvW splitter so Windows argv semantics are native.
+    from slicer_mutation import MutationError, split_command as split_windows_command
+    try:
+        return split_windows_command(command)
+    except MutationError as exc:
+        raise CoverageError(str(exc)) from exc
+
+
 def split_command(command: str | Sequence[str]) -> list[str]:
     if isinstance(command, str):
-        argv = shlex.split(command, posix=(os.name != "nt"))
+        argv = _split_command_line(command)
     else:
         argv = [str(part) for part in command]
     if not argv:
@@ -456,7 +468,7 @@ def _compile_command_arguments(entry: dict[str, Any]) -> list[str]:
         return list(arguments)
     command = entry.get("command")
     if isinstance(command, str) and command.strip():
-        return shlex.split(command, posix=(os.name != "nt"))
+        return _split_command_line(command)
     return []
 
 

@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -672,8 +673,18 @@ class CoverageDiagnosticTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_command_splitting_does_not_use_a_shell(self):
-        self.assertEqual(slicer_coverage.split_command("ctest --test-dir 'build/tests'"),
+        # Windows argv parsing does not treat single quotes as quoting.
+        quoted = '"build/tests"' if os.name == "nt" else "'build/tests'"
+        self.assertEqual(slicer_coverage.split_command(f"ctest --test-dir {quoted}"),
                          ["ctest", "--test-dir", "build/tests"])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows argv round trip")
+    def test_windows_command_splitting_round_trips_argv(self):
+        argv = ["tool.exe", "two words", 'quote"inside', "trailing\\", "dir with\\slash\\",
+                "", "plain\\path"]
+        self.assertEqual(slicer_coverage.split_command(subprocess.list2cmdline(argv)), argv)
+        entry = {"command": subprocess.list2cmdline(argv)}
+        self.assertEqual(slicer_coverage._compile_command_arguments(entry), argv)
 
 
 class ProvenanceTests(unittest.TestCase):
