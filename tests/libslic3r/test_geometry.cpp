@@ -954,6 +954,46 @@ TEST_CASE("Closed line splitting clips the closing edge and omits the duplicate 
     CHECK(clipped_length == 20 * mm);
 }
 
+TEST_CASE("Closed line splitting omits the duplicate endpoint", "[Geometry][GeometryContract][LineSplit]")
+{
+    const coord_t mm = scale_(1.0);
+    const ExPolygon clip{{{0, 0}, {10 * mm, 0}, {10 * mm, 10 * mm}, {0, 10 * mm}}};
+    const Polyline path{
+        Point(-5 * mm, 2 * mm), Point(15 * mm, 2 * mm),
+        Point(15 * mm, 8 * mm), Point(-5 * mm, 8 * mm)
+    };
+
+    const Algorithm::SplittedLine split = Algorithm::split_line(path, ExPolygons{clip}, true);
+    REQUIRE(split.size() >= path.points.size());
+    CHECK(split.front().p != split.back().p);
+
+    coord_t clipped_length = 0;
+    for (size_t i = 0; i + 1 < split.size(); ++i) {
+        if (!split[i].clipped)
+            continue;
+        CHECK(split[i].p.y() == split[i + 1].p.y());
+        size_t source_edge = 2;
+        if (split[i].p.y() == 2 * mm) {
+            CHECK(split[i + 1].p.y() == 2 * mm);
+            source_edge = 0;
+        } else {
+            CHECK(split[i].p.y() == 8 * mm);
+            CHECK(split[i + 1].p.y() == 8 * mm);
+        }
+        CHECK_FALSE(split[i].is_src());
+        CHECK_FALSE(split[i + 1].is_src());
+        CHECK(split[i].get_src_index() == source_edge);
+        CHECK(split[i + 1].get_src_index() == source_edge);
+        CHECK(split[i].p.x() >= 0);
+        CHECK(split[i].p.x() <= 10 * mm);
+        CHECK(split[i + 1].p.x() >= 0);
+        CHECK(split[i + 1].p.x() <= 10 * mm);
+        const coord_t dx = split[i + 1].p.x() - split[i].p.x();
+        clipped_length += dx < 0 ? -dx : dx;
+    }
+    CHECK(clipped_length == 20 * mm);
+}
+
 TEST_CASE("Line splitting returns no junctions for an empty path", "[Geometry][GeometryContract][LineSplit]")
 {
     const coord_t mm = scale_(1.0);
