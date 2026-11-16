@@ -1066,3 +1066,35 @@ TEST_CASE("MakerWorld links reject alternate authorities and malformed HTTP orig
         CHECK_FALSE(is_makerworld_link(url));
     }
 }
+
+TEST_CASE("write_file_atomically rejects a directory target and preserves its contents", "[Utils][UtilsIOContracts][UtilsAtomicTarget]") {
+    ScopedTemporaryDir dir;
+    const boost::filesystem::path target = dir.path() / "preset.json";
+    boost::filesystem::create_directory(target);
+    const boost::filesystem::path existing = target / "keep.json";
+    std::ofstream(existing.string()) << "keep";
+
+    std::string content;
+    load_string_file(existing, content);
+    REQUIRE(content == "keep");
+
+    const std::error_code ec = write_file_atomically(target.string(), "replacement");
+    REQUIRE(static_cast<bool>(ec));
+    REQUIRE(boost::filesystem::is_directory(target));
+    load_string_file(existing, content);
+    CHECK(content == "keep");
+}
+
+TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "[Utils][UtilsLoggingContracts]")
+{
+    const unsigned previous_level = get_logging_level();
+    ScopeGuard restore_level([previous_level] { set_logging_level(previous_level); });
+    set_logging_level(2); // warning suppresses informational memory diagnostics.
+
+    CHECK(log_memory_info(false).empty());
+    const std::string forced = log_memory_info(true);
+    CHECK_FALSE(forced.empty());
+#ifndef WIN32
+    CHECK(forced.find("Peak memory usage:") != std::string::npos);
+#endif
+}

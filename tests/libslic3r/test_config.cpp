@@ -30,6 +30,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
 #include <functional>
 #include <iomanip>
 #include <ios>
@@ -6129,3 +6131,1561 @@ TEST_CASE("Flush matrix extraction preserves legacy blocks and explicit nozzle b
         CHECK_THAT(known_single[i], Catch::Matchers::WithinAbs(legacy[i], 0.));
     }
 }
+
+namespace gap_c_config_test_cases {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace testing_branch_support_test_config {
+using namespace Slic3r;
+
+namespace {
+
+bool is_percent_option_type(const ConfigOptionType type)
+{
+    return type == coPercent || type == coPercents;
+}
+
+std::string representative_serialization(const ConfigOptionDef &def, const ConfigOption &option)
+{
+    const std::string serialized = option.serialize();
+    if (!serialized.empty())
+        return serialized;
+
+    switch (def.type) {
+    case coString:
+        return "schema-roundtrip";
+    case coStrings:
+        return "schema-roundtrip;second-value";
+    case coPoint:
+        return "1,2";
+    case coPoints:
+        return "1x2,3x4";
+    case coPointsGroups:
+        return "1x2,3x4#5x6";
+    case coIntsGroups:
+        return "1,2#3";
+    case coBools:
+        return "0,1";
+    case coFloats:
+    case coInts:
+    case coPercents:
+    case coFloatsOrPercents:
+        return is_percent_option_type(def.type) ? "0%" : "0";
+    default:
+        return serialized;
+    }
+}
+
+} // namespace
+
+namespace print_config_behavior_contracts {
+using namespace Slic3r;
+
+namespace {
+
+bool has_error(const std::map<std::string, std::string> &errors, const char *key)
+{
+    return errors.find(key) != errors.end();
+}
+
+void require_all_false(const ConfigOptionBools *option)
+{
+    REQUIRE(option != nullptr);
+    REQUIRE(option->values.size() == 2);
+    CHECK(std::all_of(option->values.begin(), option->values.end(), [](unsigned char value) { return value == 0; }));
+}
+
+DynamicPrintConfig complete_config()
+{
+    DynamicPrintConfig config;
+    config.apply(FullPrintConfig::defaults(), false);
+    return config;
+}
+
+} // namespace
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+} // namespace print_config_behavior_contracts
+
+namespace config_multi_mapping_contracts {
+namespace {
+
+void check_speeds(const DynamicPrintConfig &config, const std::vector<double> &expected)
+{
+    const auto *option = config.option<ConfigOptionFloats>("outer_wall_speed");
+    REQUIRE(option != nullptr);
+    REQUIRE(option->values.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(option->values[i], Catch::Matchers::WithinAbs(expected[i], 1e-9));
+}
+
+const std::set<std::string> kMappingKeys{
+    "print_extruder_id",
+    "print_extruder_variant",
+    "outer_wall_speed",
+    "small_perimeter_speed",
+    "enable_overhang_speed",
+};
+
+void set_variant_columns(DynamicPrintConfig &config,
+                         std::vector<int> ids,
+                         std::vector<std::string> variants)
+{
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values = std::move(ids);
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values = std::move(variants);
+}
+
+void set_single_arrays(DynamicPrintConfig &config, double outer_speed, bool overhang)
+{
+    config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {outer_speed};
+    config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {overhang};
+}
+
+void set_multi_arrays(DynamicPrintConfig &config,
+                      std::vector<double> outer_speed,
+                      std::vector<FloatOrPercent> small_speed,
+                      std::vector<unsigned char> overhang)
+{
+    config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = std::move(outer_speed);
+    config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values = std::move(small_speed);
+    config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = std::move(overhang);
+}
+
+} // namespace
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+} // namespace config_multi_mapping_contracts
+
+namespace config_residual_contracts {
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void check_values(const std::vector<double> &actual, const std::vector<double> &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        CHECK_THAT(actual[i], WithinAbs(expected[i], 1e-9));
+}
+
+struct EnvironmentRestore {
+    std::string name;
+    std::string old_value;
+    bool had_value;
+
+    explicit EnvironmentRestore(std::string key) : name(std::move(key))
+    {
+        const char *value = std::getenv(name.c_str());
+        had_value = value != nullptr;
+        if (had_value)
+            old_value = value;
+    }
+
+    ~EnvironmentRestore()
+    {
+        if (had_value)
+            boost::nowide::setenv(name.c_str(), old_value.c_str(), 1);
+        else
+            boost::nowide::unsetenv(name.c_str());
+    }
+};
+
+} // namespace
+
+} // namespace config_residual_contracts
+
+namespace print_config_active_followup_contracts {
+
+namespace {
+
+double polygon_area_mm2(const Points &points)
+{
+    if (points.size() < 3)
+        return 0.;
+    double twice_area = 0.;
+    for (size_t index = 0; index < points.size(); ++index) {
+        const Point &a = points[index];
+        const Point &b = points[(index + 1) % points.size()];
+        twice_area += unscale_(a.x()) * unscale_(b.y()) - unscale_(b.x()) * unscale_(a.y());
+    }
+    return std::abs(twice_area) * 0.5;
+}
+
+} // namespace
+
+} // namespace print_config_active_followup_contracts
+
+} // namespace testing_branch_support_test_config
+
+TEST_CASE("Config JSON loading honors grouped geometry and declared vector aliases", "[Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    const std::string area_json = GENERATE(
+        std::string(R"(["0x0,20x0,20x20,0x20","5x5,15x5,15x15,5x15"])"),
+        std::string(R"([["0x0,20x0,20x20,0x20"],["5x5,15x5,15x15,5x15"]])"));
+    ScopedTemporaryFile tmp(".json");
+    {
+        boost::nowide::ofstream out(tmp.string());
+        REQUIRE(out.is_open());
+        out << "{\"extruder_printable_area\":" << area_json
+            << R"(,"perimeter_feed_rate":["37","64"]})";
+        out.close();
+        REQUIRE(out.good());
+    }
+
+    // Exercise ConfigBase's schema-driven JSON loader without DynamicPrintConfig's
+    // print-specific legacy filtering, while retaining the registered print option types.
+    struct PrintSchemaConfig : DynamicConfig {
+        const ConfigDef *def() const override { return &print_config_def; }
+    };
+    PrintSchemaConfig config;
+    const ConfigSubstitutions substitutions = config.load(
+        tmp.string(), ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(substitutions.empty());
+
+    const ConfigOptionPointsGroups *areas = config.option<ConfigOptionPointsGroups>("extruder_printable_area");
+    REQUIRE(areas != nullptr);
+    REQUIRE(areas->values.size() == 2);
+    const Vec2ds expected_areas[] = {
+        { Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.) },
+        { Vec2d(5., 5.), Vec2d(15., 5.), Vec2d(15., 15.), Vec2d(5., 15.) },
+    };
+    for (size_t group = 0; group < areas->values.size(); ++group) {
+        REQUIRE(areas->values[group].size() == expected_areas[group].size());
+        for (size_t point = 0; point < expected_areas[group].size(); ++point) {
+            CHECK_THAT(areas->values[group][point].x(), Catch::Matchers::WithinAbs(expected_areas[group][point].x(), 1e-9));
+            CHECK_THAT(areas->values[group][point].y(), Catch::Matchers::WithinAbs(expected_areas[group][point].y(), 1e-9));
+        }
+    }
+
+    const ConfigOptionFloatsNullable *inner_wall_speeds = config.option<ConfigOptionFloatsNullable>("inner_wall_speed");
+    REQUIRE(inner_wall_speeds != nullptr);
+    REQUIRE(inner_wall_speeds->values.size() == 2);
+    CHECK_THAT(inner_wall_speeds->values[0], Catch::Matchers::WithinAbs(37., 1e-9));
+    CHECK_THAT(inner_wall_speeds->values[1], Catch::Matchers::WithinAbs(64., 1e-9));
+
+}
+
+TEST_CASE("Registered option representatives serialize and deserialize strictly", "[Config][Schema][RoundTrip]")
+{
+    using namespace testing_branch_support_test_config;
+
+    size_t roundtripped = 0;
+
+    for (const auto &[key, def] : print_config_def.options) {
+        INFO(key);
+        const std::unique_ptr<ConfigOption> source(def.create_default_option());
+        REQUIRE(source != nullptr);
+        const std::string representative = representative_serialization(def, *source);
+        REQUIRE_FALSE(representative.empty());
+
+        const std::unique_ptr<ConfigOption> restored(def.create_default_option());
+        REQUIRE(restored != nullptr);
+        REQUIRE(restored->deserialize(representative));
+        CHECK(restored->serialize() == representative);
+        ++roundtripped;
+    }
+
+    CHECK(roundtripped == print_config_def.options.size());
+
+}
+
+TEST_CASE("All registered boolean settings accept only the canonical serialized values", "[Config][Schema][Bool]")
+{
+    using namespace testing_branch_support_test_config;
+
+    size_t bool_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (def.type != coBool && def.type != coBools)
+            continue;
+        ++bool_options;
+
+        INFO(key);
+        const std::unique_ptr<ConfigOption> option(def.create_empty_option());
+        REQUIRE(option != nullptr);
+        REQUIRE(option->deserialize("0"));
+        CHECK(option->serialize() == "0");
+        REQUIRE(option->deserialize("1"));
+        CHECK(option->serialize() == "1");
+        CHECK_FALSE(option->deserialize("2"));
+
+        if (def.type == coBools) {
+            REQUIRE(option->deserialize("0,1"));
+            CHECK(option->serialize() == "0,1");
+            if (def.nullable) {
+                REQUIRE(option->deserialize("nil"));
+                CHECK(option->serialize() == "nil");
+            }
+        }
+    }
+    CHECK(bool_options > 0);
+
+}
+
+TEST_CASE("Legacy SLA vector migration preserves explicit axis options", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config;
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.1, 1.2}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.9, 0.8}));
+    config.set_deserialize_strict({
+        {"relative_correction_x", 1.7},
+        {"material_correction_z", 1.4},
+    });
+
+    handle_legacy_sla(config);
+
+    CHECK_THAT(config.opt_float("relative_correction_x"), Catch::Matchers::WithinAbs(1.7, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_y"), Catch::Matchers::WithinAbs(1.1, 1e-9));
+    CHECK_THAT(config.opt_float("relative_correction_z"), Catch::Matchers::WithinAbs(1.2, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_x"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_y"), Catch::Matchers::WithinAbs(0.9, 1e-9));
+    CHECK_THAT(config.opt_float("material_correction_z"), Catch::Matchers::WithinAbs(1.4, 1e-9));
+
+}
+
+TEST_CASE("Firmware retraction validation checks flavor and wipe independently", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    const bool firmware = GENERATE(false, true);
+    const bool wipe = GENERATE(false, true);
+    const std::string flavor = GENERATE("teacup", "klipper");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("use_firmware_retraction", firmware);
+    config.set_deserialize_strict("gcode_flavor", flavor);
+    config.set_deserialize_strict("wipe", wipe ? "1" : "0");
+    const bool incompatible = firmware && (wipe || flavor == "teacup");
+    CHECK(has_error(config.validate(true), "use_firmware_retraction") == incompatible);
+
+}
+
+TEST_CASE("PrintConfig validation reports spiral mode's incompatible process settings", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("spiral_mode", true);
+    config.set("wall_loops", 2);
+    config.set_deserialize_strict("sparse_infill_density", "15");
+    config.set("top_shell_layers", 1);
+    config.set("enable_support", true);
+    config.set("enforce_support_layers", 1);
+    const auto errors = config.validate(true);
+    CHECK(has_error(errors, "wall_loops"));
+    CHECK(has_error(errors, "sparse_infill_density"));
+    CHECK(has_error(errors, "top_shell_layers"));
+    CHECK(has_error(errors, "enable_support"));
+    CHECK(has_error(errors, "enforce_support_layers"));
+
+    config.set("wall_loops", 1);
+    config.set_deserialize_strict("sparse_infill_density", "0");
+    config.set("top_shell_layers", 0);
+    config.set("enable_support", false);
+    config.set("enforce_support_layers", 0);
+    CHECK_FALSE(has_error(config.validate(true), "wall_loops"));
+    CHECK_FALSE(has_error(config.validate(true), "sparse_infill_density"));
+    CHECK_FALSE(has_error(config.validate(true), "top_shell_layers"));
+    CHECK_FALSE(has_error(config.validate(true), "enable_support"));
+    CHECK_FALSE(has_error(config.validate(true), "enforce_support_layers"));
+
+}
+
+TEST_CASE("PrintConfig validation applies nozzle-relative bridge width limits", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    DynamicPrintConfig too_wide = DynamicPrintConfig::full_print_config();
+    too_wide.set_deserialize_strict("nozzle_diameter", "0.4");
+    too_wide.set_deserialize_strict("bridge_line_width", "0.41");
+    CHECK(has_error(too_wide.validate(), "bridge_line_width"));
+
+    DynamicPrintConfig at_limit = DynamicPrintConfig::full_print_config();
+    at_limit.set_deserialize_strict("nozzle_diameter", "0.4");
+    at_limit.set_deserialize_strict("bridge_line_width", "0.4");
+    CHECK_FALSE(has_error(at_limit.validate(), "bridge_line_width"));
+
+}
+
+TEST_CASE("normalize_fdm migrates a legacy extruder without overwriting explicit roles", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    DynamicPrintConfig config = complete_config();
+    config.option<ConfigOptionInt>("extruder", true)->value = 2;
+    config.set("outer_wall_filament_id", 3);
+    config.set("inner_wall_filament_id", 0);
+    config.set("sparse_infill_filament_id", 0);
+    config.set("internal_solid_filament_id", 0);
+    config.set("top_surface_filament_id", 0);
+    config.set("bottom_surface_filament_id", 0);
+    config.normalize_fdm();
+
+    CHECK_FALSE(config.has("extruder"));
+    CHECK(config.opt_int("sparse_infill_filament_id") == 2);
+    CHECK(config.opt_int("outer_wall_filament_id") == 3);
+    CHECK(config.opt_int("inner_wall_filament_id") == 2);
+    CHECK(config.opt_int("internal_solid_filament_id") == 2);
+    CHECK(config.opt_int("top_surface_filament_id") == 2);
+    CHECK(config.opt_int("bottom_surface_filament_id") == 2);
+
+}
+
+TEST_CASE("normalize_fdm clamps spiral process values and the resolution floor", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    DynamicPrintConfig config = complete_config();
+    config.set("spiral_mode", true);
+    config.set("wall_loops", 4);
+    config.set("top_shell_layers", 3);
+    config.set_deserialize_strict("sparse_infill_density", "20");
+    config.set_deserialize_strict("resolution", "0.0001");
+    config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+    config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {false, false};
+    config.normalize_fdm();
+
+    CHECK(config.opt_int("wall_loops") == 1);
+    CHECK(config.opt_int("top_shell_layers") == 0);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(0.001, 1e-9));
+    require_all_false(config.opt<ConfigOptionBools>("retract_when_changing_layer"));
+
+}
+
+TEST_CASE("normalize_fdm_2 records prime tower changes for one filament and keeps two-filament tower rules", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig one = DynamicPrintConfig::full_print_config();
+    one.set("enable_prime_tower", true);
+    one.set("independent_support_layer_height", true);
+    const auto one_changed = one.normalize_fdm_2(1, 1);
+    CHECK_FALSE(one.opt_bool("enable_prime_tower"));
+    CHECK(std::find(one_changed.begin(), one_changed.end(), "enable_prime_tower") != one_changed.end());
+
+    DynamicPrintConfig two = DynamicPrintConfig::full_print_config();
+    two.set("enable_prime_tower", true);
+    two.set("independent_support_layer_height", true);
+    const auto two_changed = two.normalize_fdm_2(1, 2);
+    CHECK(two.opt_bool("enable_prime_tower"));
+    CHECK_FALSE(two.opt_bool("independent_support_layer_height"));
+    CHECK(std::find(two_changed.begin(), two_changed.end(), "independent_support_layer_height") != two_changed.end());
+
+}
+
+TEST_CASE("get_parameter_size uses variant cardinality and stride-specific machine dimensions", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config;
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow"}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard", "Bowden High Flow"}));
+
+    CHECK(config.get_parameter_size("machine_max_speed_x", 9) == 4);
+    CHECK(config.get_parameter_size("machine_max_acceleration_x", 9) == 4);
+    CHECK(config.get_parameter_size("filament_flow_ratio", 9) == 3);
+    CHECK(config.get_parameter_size("outer_wall_speed", 9) == 4);
+    CHECK(config.get_parameter_size("unknown_option", 9) == 9);
+
+}
+
+TEST_CASE("AMS count serialization is sorted and preserves empty extruder slots", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    const std::vector<std::map<int, int>> source = {
+        {{2, 5}, {1, 3}},
+        {},
+        {{4, 1}},
+    };
+    const auto serialized = save_extruder_ams_count_to_string(source);
+    CHECK(serialized == std::vector<std::string>{"1#3|2#5", "", "4#1"});
+    CHECK(get_extruder_ams_count(serialized) == source);
+
+}
+
+TEST_CASE("Nozzle statistics skip malformed tokens while retaining valid inventory", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    const auto parsed = get_extruder_nozzle_stats({"Standard#2|Broken|High Flow#1", "Unknown#9|E3D High Flow#3"});
+    REQUIRE(parsed.size() == 2);
+    CHECK(parsed[0].at(nvtStandard) == 2);
+    CHECK(parsed[0].at(nvtHighFlow) == 1);
+    CHECK(parsed[1].at(nvtE3DHighFlow) == 3);
+    CHECK(parsed[1].count(nvtStandard) == 0);
+    CHECK(save_extruder_nozzle_stats_to_string(parsed) == std::vector<std::string>{"Standard#2|High Flow#1", "E3D High Flow#3"});
+
+}
+
+TEST_CASE("PrintConfig validates mixed filament metadata cardinality", "[PrintConfigBehavior][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true}));
+    config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2"}));
+    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5"}));
+    config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true}));
+    config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8"}));
+    config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0;1,1"}));
+    CHECK_FALSE(config.validate().count("filament_mixed_components"));
+    CHECK_FALSE(config.validate().count("filament_mixed_sublayer_ratios"));
+
+    config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.4"}));
+    CHECK(config.validate().count("filament_mixed_sublayer_ratios"));
+
+}
+
+TEST_CASE("normalize_fdm_1 backfills active filament roles through the split public step", "[PrintConfigBehavior][Config][NormalizeFdm1]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    SECTION("legacy extruder keeps an explicit outer-wall role")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.option<ConfigOptionInt>("extruder", true)->value = 2;
+        config.set("outer_wall_filament_id", 3);
+        config.set("inner_wall_filament_id", 0);
+        config.set("sparse_infill_filament_id", 0);
+        config.set("internal_solid_filament_id", 0);
+        config.set("top_surface_filament_id", 0);
+        config.set("bottom_surface_filament_id", 0);
+
+        config.normalize_fdm_1();
+
+        CHECK_FALSE(config.has("extruder"));
+        CHECK(config.opt_int("outer_wall_filament_id") == 3);
+        CHECK(config.opt_int("inner_wall_filament_id") == 2);
+        CHECK(config.opt_int("sparse_infill_filament_id") == 2);
+        CHECK(config.opt_int("internal_solid_filament_id") == 2);
+        CHECK(config.opt_int("top_surface_filament_id") == 2);
+        CHECK(config.opt_int("bottom_surface_filament_id") == 2);
+    }
+
+    SECTION("a sparse-filament override backfills missing solid and surface roles")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.set("sparse_infill_filament_id", 4);
+        config.set("internal_solid_filament_id", 0);
+        config.set("top_surface_filament_id", 0);
+        config.set("bottom_surface_filament_id", 0);
+
+        config.normalize_fdm_1();
+
+        CHECK(config.opt_int("sparse_infill_filament_id") == 4);
+        CHECK(config.opt_int("internal_solid_filament_id") == 4);
+        CHECK(config.opt_int("top_surface_filament_id") == 4);
+        CHECK(config.opt_int("bottom_surface_filament_id") == 4);
+    }
+
+}
+
+TEST_CASE("normalize_fdm_1 applies spiral safety normalization and is idempotent", "[PrintConfigBehavior][Config][NormalizeFdm1]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    DynamicPrintConfig config = complete_config();
+    config.set("spiral_mode", true);
+    config.set("alternate_extra_wall", true);
+    config.set("wall_loops", 4);
+    config.set("top_shell_layers", 3);
+    config.set_deserialize_strict("sparse_infill_density", "20");
+    config.set_deserialize_strict("resolution", "0.0001");
+    config.set_deserialize_strict("retract_when_changing_layer", "1,1");
+    config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer", true)->values = {true, true};
+
+    config.normalize_fdm_1();
+
+    CHECK(config.opt_int("wall_loops") == 1);
+    CHECK(config.opt_int("top_shell_layers") == 0);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value, Catch::Matchers::WithinAbs(0., 1e-9));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(0.001, 1e-9));
+    require_all_false(config.opt<ConfigOptionBools>("retract_when_changing_layer"));
+    CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+    const auto *nullable_retract = config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    REQUIRE(nullable_retract != nullptr);
+    REQUIRE(nullable_retract->values.size() == 2);
+    CHECK(nullable_retract->values[0] == 0);
+    CHECK(nullable_retract->values[1] == 0);
+
+    const int normalized_wall_loops = config.opt_int("wall_loops");
+    const int normalized_top_shell_layers = config.opt_int("top_shell_layers");
+    const double normalized_density = config.opt<ConfigOptionPercent>("sparse_infill_density")->value;
+    const double normalized_resolution = config.opt_float("resolution");
+    const auto normalized_retract = config.opt<ConfigOptionBools>("retract_when_changing_layer")->values;
+    const auto normalized_nullable_retract = nullable_retract->values;
+    config.normalize_fdm_1();
+    CHECK(config.opt_int("wall_loops") == normalized_wall_loops);
+    CHECK(config.opt_int("top_shell_layers") == normalized_top_shell_layers);
+    CHECK_THAT(config.opt<ConfigOptionPercent>("sparse_infill_density")->value,
+               Catch::Matchers::WithinAbs(normalized_density, 1e-12));
+    CHECK_THAT(config.opt_float("resolution"), Catch::Matchers::WithinAbs(normalized_resolution, 1e-12));
+    CHECK(config.opt<ConfigOptionBools>("retract_when_changing_layer")->values == normalized_retract);
+    CHECK(config.opt<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer")->values == normalized_nullable_retract);
+    CHECK_FALSE(config.opt_bool("alternate_extra_wall"));
+
+}
+
+TEST_CASE("normalize_fdm_2 preserves a prime tower for a single mixed filament", "[PrintConfigBehavior][Config][NormalizeFdm2Variance]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set("enable_prime_tower", true);
+    config.set("independent_support_layer_height", true);
+    config.set("enable_wrapping_detection", false);
+    config.set_deserialize_strict("timelapse_type", "0");
+    config.set_deserialize_strict("print_sequence", "by layer");
+    config.set_key_value("filament_is_mixed", new ConfigOptionBools({true}));
+
+    const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+
+    CHECK(config.opt_bool("enable_prime_tower"));
+    CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+    CHECK(config.normalize_fdm_2(1, 1).empty());
+
+}
+
+TEST_CASE("PrintConfig validates mixed filament component and gradient semantics", "[PrintConfigBehavior][Config][MixedFilamentValidation]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_behavior_contracts;
+
+    auto valid_mixed = [] {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, true}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,2"}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "0.5,0.5"}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, true}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0.2,0.8"}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0|1,1"}));
+        return config;
+    };
+
+    SECTION("a two-component gradient is accepted")
+    {
+        const auto errors = valid_mixed().validate();
+        CHECK(errors.empty());
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient"));
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient_range"));
+        CHECK_FALSE(has_error(errors, "filament_mixed_gradient_curve"));
+    }
+
+    SECTION("parameters without a mixed slot are rejected")
+    {
+        DynamicPrintConfig config = complete_config();
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"1"}));
+        CHECK(has_error(config.validate(), "filament_is_mixed"));
+    }
+
+    SECTION("a physical component outside the available range is rejected")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "1,3"}));
+        CHECK(has_error(config.validate(), "filament_mixed_components"));
+    }
+
+    SECTION("a mixed slot cannot be used as a physical component")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, true, true, false, false}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "3,1", "1,2", "", ""}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "1,1", "1,2", "", ""}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, false, false, false}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "", "", ""}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "", "", ""}));
+        CHECK(has_error(config.validate(), "filament_mixed_components"));
+    }
+
+    SECTION("a three-component gradient is rejected")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("filament_is_mixed", new ConfigOptionBools({false, false, false, true}));
+        config.set_key_value("filament_mixed_components", new ConfigOptionStrings({"", "", "", "1,2,3"}));
+        config.set_key_value("filament_mixed_sublayer_ratios", new ConfigOptionStrings({"", "", "", "1,1,1"}));
+        config.set_key_value("filament_mixed_gradient", new ConfigOptionBools({false, false, false, true}));
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "", "0.2,0.8"}));
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "", "0,0|1,1"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient"));
+    }
+
+    SECTION("gradient range must stay inside the open unit interval")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_gradient_range", new ConfigOptionStrings({"", "", "0,0.8"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient_range"));
+    }
+
+    SECTION("gradient curve needs two valid control points")
+    {
+        DynamicPrintConfig config = valid_mixed();
+        config.set_key_value("filament_mixed_gradient_curve", new ConfigOptionStrings({"", "", "0,0"}));
+        CHECK(has_error(config.validate(), "filament_mixed_gradient_curve"));
+    }
+
+}
+
+TEST_CASE("Single-to-multi copies variant identity and limits numeric columns", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 1, 2}, {"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"});
+    set_variant_columns(single, {99}, {"old"});
+    set_single_arrays(single, 100., true);
+    single.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values = {FloatOrPercent(50., true)};
+    set_multi_arrays(multi, {80., 160., 240.},
+                     {FloatOrPercent(40., false), FloatOrPercent(60., true), FloatOrPercent(30., false)},
+                     {0, 1, 0});
+
+    std::set<std::string> keys = kMappingKeys;
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys,
+                                                       "print_extruder_id", "print_extruder_variant") == 0);
+    CHECK(single.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2}));
+    CHECK(single.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"Direct Drive Standard", "Direct Drive High Flow", "Bowden Standard"}));
+    // The source defaults cap the user's single value independently in each target column.
+    check_speeds(single, {80., 100., 100.});
+    const auto &small = single.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed")->values;
+    REQUIRE(small.size() == 3);
+    CHECK_THAT(small[0].value, Catch::Matchers::WithinAbs(40., 1e-9));
+    CHECK(small[0].percent == false);
+    CHECK_THAT(small[1].value, Catch::Matchers::WithinAbs(50., 1e-9));
+    CHECK(small[1].percent == true);
+    CHECK_THAT(small[2].value, Catch::Matchers::WithinAbs(30., 1e-9));
+    CHECK(small[2].percent == false);
+    // Bools retain the user's single value for every new variant; the source bool array only supplies width.
+    CHECK(single.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({1, 1, 1}));
+
+}
+
+TEST_CASE("Single-to-multi leaves unselected and source-missing settings untouched", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 2}, {"A", "B"});
+    set_single_arrays(single, 42., false);
+    single.option<ConfigOptionInt>("wall_loops", true)->value = 7;
+    // Deliberately omit outer_wall_speed from the source. The variant metadata is valid,
+    // but a missing source option must not erase the caller's current value.
+    std::set<std::string> keys{"outer_wall_speed", "wall_loops"};
+
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys,
+                                                       "print_extruder_id", "print_extruder_variant") == 0);
+    check_speeds(single, {42.});
+    CHECK(single.option<ConfigOptionInt>("wall_loops")->value == 7);
+
+}
+
+TEST_CASE("Single-to-multi rejects a missing variant option without changing values", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_single_arrays(single, 42., true);
+    const auto before = single.option<ConfigOptionFloats>("outer_wall_speed", true)->values;
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    CHECK(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "missing_variant") == -1);
+    check_speeds(single, before);
+
+}
+
+TEST_CASE("Single-to-multi ignores unknown keys while applying known mappings", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig single;
+    DynamicPrintConfig multi;
+    set_variant_columns(multi, {1, 2}, {"A", "B"});
+    set_single_arrays(single, 90., false);
+    multi.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {30., 40.};
+    std::set<std::string> keys{"unknown_mapping_key", "outer_wall_speed"};
+
+    REQUIRE(single.update_values_from_single_to_multi(multi, keys, "print_extruder_id", "print_extruder_variant") == 0);
+    check_speeds(single, {30., 40.});
+
+}
+
+TEST_CASE("Multi-to-multi remaps duplicate variants and preserves numeric minima", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 1, 2}, {"A", "B", "A"});
+    set_variant_columns(new_config, {1, 1, 2, 2}, {"A", "B", "A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {10., 20., 30.};
+    old_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values =
+        {FloatOrPercent(1., false), FloatOrPercent(2., false), FloatOrPercent(3., false)};
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 1, 0};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {100., 200., 300., 400.};
+    new_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed", true)->values =
+        {FloatOrPercent(50., true), FloatOrPercent(60., true), FloatOrPercent(70., true), FloatOrPercent(80., true)};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0, 0, 0};
+    std::vector<std::string> new_extruder_variants{"A", "B"};
+
+    std::set<std::string> keys = kMappingKeys;
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    CHECK(old_config.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>({1, 1, 2, 2}));
+    CHECK(old_config.option<ConfigOptionStrings>("print_extruder_variant")->values ==
+          std::vector<std::string>({"A", "B", "A", "B"}));
+    check_speeds(old_config, {10., 200., 300., 20.});
+    const auto &small = old_config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed")->values;
+    REQUIRE(small.size() == 4);
+    CHECK_THAT(small[0].value, Catch::Matchers::WithinAbs(1., 1e-9));
+    CHECK_THAT(small[1].value, Catch::Matchers::WithinAbs(60., 1e-9));
+    CHECK_THAT(small[2].value, Catch::Matchers::WithinAbs(70., 1e-9));
+    CHECK_THAT(small[3].value, Catch::Matchers::WithinAbs(2., 1e-9));
+    CHECK_FALSE(small[0].percent);
+    CHECK(small[1].percent);
+    CHECK(small[2].percent);
+    CHECK_FALSE(small[3].percent);
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({0, 0, 0, 1}));
+
+}
+
+TEST_CASE("Multi-to-multi keeps destination values when no new extruder target matches", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 2}, {"A", "B"});
+    set_variant_columns(new_config, {1, 2}, {"A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11., 22.};
+    old_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {1, 0};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101., 202.};
+    new_config.option<ConfigOptionBools>("enable_overhang_speed", true)->values = {0, 0};
+    std::vector<std::string> new_extruder_variants{"C"};
+    std::set<std::string> keys{"outer_wall_speed", "enable_overhang_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    check_speeds(old_config, {101., 202.});
+    CHECK(old_config.option<ConfigOptionBools>("enable_overhang_speed")->values == std::vector<unsigned char>({0, 0}));
+
+}
+
+TEST_CASE("Multi-to-multi skips an unmatched target row but still copies identity arrays", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1, 2}, {"A", "B"});
+    set_variant_columns(new_config, {1, 2}, {"A", "B"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11., 22.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101., 202.};
+    std::vector<std::string> new_extruder_variants{"B", "A"};
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    // Neither (id=1, B) nor (id=2, A) exists in the destination row.
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant",
+                                                         new_extruder_variants) == 0);
+    check_speeds(old_config, {101., 202.});
+
+}
+
+TEST_CASE("Multi-to-multi treats unknown keys as no-ops without suppressing known keys", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1}, {"A"});
+    set_variant_columns(new_config, {1}, {"A"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {111.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants{"A"};
+    std::set<std::string> keys{"unknown_mapping_key", "outer_wall_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant", variants) == 0);
+    check_speeds(old_config, {101.});
+
+}
+
+TEST_CASE("Multi-to-multi rejects absent identity columns without touching the source", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants{"A"};
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    CHECK(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                       "missing_id", "missing_variant", variants) == -1);
+    check_speeds(old_config, {11.});
+
+}
+
+TEST_CASE("Multi-to-multi with no target extruders still copies destination arrays", "[Config][ConfigMultiMapping]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::config_multi_mapping_contracts;
+
+    DynamicPrintConfig old_config;
+    DynamicPrintConfig new_config;
+    set_variant_columns(old_config, {1}, {"A"});
+    set_variant_columns(new_config, {1}, {"A"});
+    old_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {11.};
+    new_config.option<ConfigOptionFloats>("outer_wall_speed", true)->values = {101.};
+    std::vector<std::string> variants;
+    std::set<std::string> keys{"outer_wall_speed"};
+
+    REQUIRE(old_config.update_values_from_multi_to_multi(new_config, keys,
+                                                         "print_extruder_id", "print_extruder_variant", variants) == 0);
+    check_speeds(old_config, {101.});
+
+}
+
+TEST_CASE("DynamicConfig copy, move, plus, swap, and erase preserve ownership", "[Config][ConfigContracts]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicConfig original;
+    original.set_key_value("count", new ConfigOptionInt(4));
+
+    const ConfigBase &original_base = original;
+    DynamicConfig copied_from_base(original_base);
+    REQUIRE(copied_from_base.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied_from_base.opt<ConfigOptionInt>("count")->value == 4);
+    copied_from_base.opt<ConfigOptionInt>("count")->value = 6;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+
+    DynamicConfig copied(original);
+    copied.opt<ConfigOptionInt>("count")->value = 9;
+    CHECK(original.opt<ConfigOptionInt>("count")->value == 4);
+    CHECK_FALSE(original == copied);
+
+    // Exercise the final, all-keys-equal return path as well as the early
+    // mismatch path above.  A mutation of that final return must be visible
+    // to this independent equality contract.
+    DynamicConfig identical(original);
+    CHECK(original == identical);
+
+    DynamicConfig extra;
+    extra.set_key_value("label", new ConfigOptionString("extra"));
+    extra.set_key_value("count", new ConfigOptionInt(12));
+    copied += extra;
+    REQUIRE(copied.has("label"));
+    CHECK(copied.opt_string("label") == "extra");
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 12);
+    CHECK(extra.opt<ConfigOptionInt>("count")->value == 12);
+    extra.opt<ConfigOptionInt>("count")->value = 13;
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 12);
+
+    DynamicConfig replacement;
+    replacement.set_key_value("count", new ConfigOptionInt(17));
+    replacement.set_key_value("label", new ConfigOptionString("moved"));
+    copied += std::move(replacement);
+    CHECK(replacement.empty());
+    REQUIRE(copied.opt<ConfigOptionInt>("count") != nullptr);
+    CHECK(copied.opt<ConfigOptionInt>("count")->value == 17);
+    CHECK(copied.opt_string("label") == "moved");
+
+    DynamicConfig moved(std::move(copied));
+    CHECK(copied.empty());
+    CHECK(moved.size() == 2);
+    DynamicConfig swapped;
+    swapped.set_key_value("other", new ConfigOptionBool(true));
+    moved.swap(swapped);
+    CHECK(moved.has("other"));
+    CHECK(swapped.has("count"));
+    CHECK(swapped.erase("count"));
+    CHECK_FALSE(swapped.erase("count"));
+
+}
+
+TEST_CASE("ConfigBase setenv serializes the selected option using uppercase names", "[Config][ConfigContracts]")
+{
+    using namespace testing_branch_support_test_config;
+    using testing_branch_support_test_config::config_residual_contracts::EnvironmentRestore;
+
+    DynamicConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.275));
+    EnvironmentRestore restore("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(boost::nowide::unsetenv("SLIC3R_LAYER_HEIGHT") == 0);
+
+    config.setenv_();
+    const char *value = std::getenv("SLIC3R_LAYER_HEIGHT");
+    REQUIRE(value != nullptr);
+    CHECK(std::string(value) == config.option<ConfigOptionFloat>("layer_height")->serialize());
+
+}
+
+TEST_CASE("Static print config exposes only its initialized option set", "[Config][ConfigContracts]")
+{
+    using namespace testing_branch_support_test_config;
+
+    PrintObjectConfig object_config;
+    const auto keys = object_config.keys();
+    REQUIRE_FALSE(keys.empty());
+    CHECK(object_config.has("layer_height"));
+    CHECK_FALSE(object_config.has("not_a_print_object_option"));
+    CHECK(object_config.def() != nullptr);
+    CHECK(object_config.def()->has("layer_height"));
+    CHECK_FALSE(object_config.def()->options.empty());
+
+}
+
+TEST_CASE("Config definitions retain defaults and metadata for a static option", "[Config][ConfigContracts]")
+{
+    using namespace testing_branch_support_test_config;
+
+    PrintObjectConfig object_config;
+    const ConfigOptionDef *definition = object_config.def()->get("layer_height");
+    REQUIRE(definition != nullptr);
+    REQUIRE(static_cast<bool>(definition->default_value));
+    CHECK(definition->type == coFloat);
+    CHECK(definition->default_value->serialize() == object_config.option("layer_height")->serialize());
+    CHECK(object_config.def()->keys().size() >= object_config.keys().size());
+
+}
+
+TEST_CASE("DynamicPrintConfig set_deserialize updates typed values and absolute ratios", "[Config][ConfigContracts]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", 0.24},
+        {"outer_wall_line_width", "120%"},
+        {"inner_wall_line_width", 0.42}
+    });
+    CHECK_THAT(config.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(0.24, 1e-9));
+    CHECK(config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->percent);
+    CHECK_THAT(config.get_abs_value("outer_wall_line_width", 0.42), WithinAbs(0.504, 1e-9));
+
+}
+
+TEST_CASE("Grouped integer settings form a strict lexicographic order", "[Config][ConfigContracts][ConfigGroupOrder]")
+{
+    using namespace testing_branch_support_test_config;
+
+    ConfigOptionIntsGroups value({std::vector<int>{1, 9}});
+    REQUIRE_FALSE(value < value);
+    const ConfigOptionIntsGroups identical(value);
+    CHECK_FALSE(value < identical);
+    CHECK_FALSE(identical < value);
+    const ConfigOptionIntsGroups empty;
+    CHECK_FALSE(empty < empty);
+    CHECK(empty < value);
+    CHECK_FALSE(value < empty);
+    const ConfigOptionIntsGroups longer({std::vector<int>{1, 9}, std::vector<int>{2}});
+    CHECK(value < longer);
+    CHECK_FALSE(longer < value);
+    const ConfigOptionIntsGroups higher({std::vector<int>{2, 0}});
+    CHECK(value < higher);
+    CHECK_FALSE(higher < value);
+
+}
+
+TEST_CASE("ConfigOption base accessors fail closed and scalar overrides copy values", "[Config][ConfigContracts][ConfigBase]")
+{
+    using namespace testing_branch_support_test_config;
+
+    ConfigOptionString text("left");
+    ConfigOption &base = text;
+
+    REQUIRE_THROWS_AS(base.getInt(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getFloat(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.getBool(), BadOptionTypeException);
+    REQUIRE_THROWS_AS(base.setInt(9), BadOptionTypeException);
+
+    ConfigOptionInt number(3);
+    ConfigOption &number_base = number;
+    number_base.setInt(-7);
+    CHECK(number_base.getInt() == -7);
+
+    ConfigOptionString same("left");
+    ConfigOptionString replacement("right");
+    std::vector<int> default_index{0};
+    CHECK_FALSE(base.overriden_by(&same));
+    CHECK(base.overriden_by(&replacement));
+    REQUIRE(base.apply_override(&replacement, default_index));
+    CHECK(text.value == "right");
+    CHECK_FALSE(base.apply_override(&text, default_index));
+
+}
+
+TEST_CASE("ConfigBase apply_only materializes indexed vector slots", "[Config][ConfigContracts][ConfigApplyOnly]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig source = DynamicPrintConfig::full_print_config();
+    auto *source_plugins = source.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(source_plugins != nullptr);
+    source_plugins->values = {"alpha", "beta"};
+
+    // The ordinary vector case preserves the untouched slot while copying only #1.
+    DynamicPrintConfig populated = DynamicPrintConfig::full_print_config();
+    auto *populated_plugins = populated.option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(populated_plugins != nullptr);
+    populated_plugins->values = {"left", "right"};
+    populated.apply_only(source, {"slicing_pipeline_plugin#1"});
+    CHECK(populated_plugins->values == std::vector<std::string>{"left", "beta"});
+
+    // A DynamicPrintConfig made from a selected default set has no vector object yet;
+    // the indexed route must create, seed, and then update the requested slot.
+    std::unique_ptr<DynamicPrintConfig> sparse(DynamicPrintConfig::new_from_defaults_keys({"layer_height"}));
+    REQUIRE(sparse != nullptr);
+    REQUIRE_FALSE(sparse->has("slicing_pipeline_plugin"));
+    sparse->apply_only(source, {"slicing_pipeline_plugin#1"});
+    const auto *materialized_plugins = sparse->option<ConfigOptionStrings>("slicing_pipeline_plugin");
+    REQUIRE(materialized_plugins != nullptr);
+    REQUIRE(materialized_plugins->values.size() == 2);
+    CHECK(materialized_plugins->values == std::vector<std::string>{"alpha", "beta"});
+
+}
+
+TEST_CASE("DynamicConfig indexed accessors address owned vector slots", "[Config][ConfigContracts][ConfigAccessors]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicConfig config;
+    config.set_key_value("ratio_slots", new ConfigOptionFloatsOrPercentsNullable({FloatOrPercent(12., false), FloatOrPercent(25., true)}));
+    config.set_key_value("int_slots", new ConfigOptionInts({3, 5}));
+    config.set_key_value("nullable_int_slots", new ConfigOptionIntsNullable({ConfigOptionIntsNullable::nil_value(), 11}));
+    config.set_key_value("enum_slots", new ConfigOptionEnumsGeneric({4, 9}));
+    config.set_key_value("nullable_enum_slots", new ConfigOptionEnumsGenericNullable({ConfigOptionEnumsGenericNullable::nil_value(), 12}));
+    auto *nullable_bool_slots = new ConfigOptionBoolsNullable;
+    nullable_bool_slots->values = {ConfigOptionBoolsNullable::nil_value(), 0};
+    config.set_key_value("nullable_bool_slots", nullable_bool_slots);
+
+    FloatOrPercent &ratio_slot = config.opt_float_or_percent_nullable("ratio_slots", 1);
+    ratio_slot.value = 30.;
+    ratio_slot.percent = true;
+    config.opt_int("int_slots", 1) = 7;
+    config.opt_int_nullable("nullable_int_slots", 1) = 13;
+
+    const DynamicConfig &view = config;
+    CHECK_THAT(view.opt_float_or_percent_nullable("ratio_slots", 1).value, WithinAbs(30., 1e-12));
+    CHECK(view.opt_float_or_percent_nullable("ratio_slots", 1).percent);
+    CHECK(view.opt_int("int_slots", 1) == 7);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 1) == 13);
+    CHECK(view.opt_int_nullable("nullable_int_slots", 0) == ConfigOptionIntsNullable::nil_value());
+    CHECK(view.opt_enum("enum_slots", 1) == 9);
+    CHECK(view.opt_enum_nullable("nullable_enum_slots", 1) == 12);
+    CHECK(view.opt_bool_nullable("nullable_bool_slots", 0));
+    CHECK_FALSE(view.opt_bool_nullable("nullable_bool_slots", 1));
+
+}
+
+TEST_CASE("Prime tower normalization preserves wrapping and smooth timelapse exceptions", "[PrintConfigBehavior][Config][NormalizeFdm2Variance]")
+{
+    using namespace testing_branch_support_test_config;
+
+    auto make_config = [] {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set("enable_prime_tower", true);
+        config.set("independent_support_layer_height", true);
+        config.set("enable_wrapping_detection", false);
+        config.set_deserialize_strict("filament_is_mixed", "0");
+        config.set_deserialize_strict("timelapse_type", "0");
+        config.set_deserialize_strict("print_sequence", "by layer");
+        return config;
+    };
+
+    SECTION("wrapping detection keeps the tower but still disables independent support layers")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set("enable_wrapping_detection", true);
+        const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+        REQUIRE(config.opt_bool("enable_prime_tower"));
+        REQUIRE_FALSE(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(1, 1);
+        CHECK(second.empty());
+        CHECK(config.opt_bool("enable_prime_tower"));
+        CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    }
+
+    SECTION("smooth timelapse keeps the tower but still disables independent support layers")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set_deserialize_strict("timelapse_type", "1");
+        const t_config_option_keys changed = config.normalize_fdm_2(1, 1);
+        REQUIRE(config.opt_bool("enable_prime_tower"));
+        REQUIRE_FALSE(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"independent_support_layer_height"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(1, 1);
+        CHECK(second.empty());
+        CHECK(config.opt_bool("enable_prime_tower"));
+        CHECK_FALSE(config.opt_bool("independent_support_layer_height"));
+    }
+
+    SECTION("multiple by-object objects disable the tower")
+    {
+        DynamicPrintConfig config = make_config();
+        config.set_deserialize_strict("print_sequence", "by object");
+        const t_config_option_keys changed = config.normalize_fdm_2(2, 2);
+        REQUIRE_FALSE(config.opt_bool("enable_prime_tower"));
+        CHECK(config.opt_bool("independent_support_layer_height"));
+        CHECK(changed == t_config_option_keys{"enable_prime_tower"});
+
+        const t_config_option_keys second = config.normalize_fdm_2(2, 2);
+        CHECK(second.empty());
+        CHECK_FALSE(config.opt_bool("enable_prime_tower"));
+        CHECK(config.opt_bool("independent_support_layer_height"));
+    }
+
+}
+
+TEST_CASE("normalize_fdm applies the used-filament prime-tower policy", "[PrintConfigActive][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    struct Row {
+        int used_filaments;
+        const char *print_sequence;
+        const char *timelapse_type;
+        bool prime_tower;
+        bool independent_support_layer_height;
+    };
+    const Row rows[] = {
+        {1, "by layer",  "0", false, true},
+        {2, "by layer",  "0", true,  false},
+        {2, "by object", "0", false, true},
+        {1, "by layer",  "1", true,  false},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.used_filaments << " filaments, " << row.print_sequence << ", timelapse " << row.timelapse_type) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("enable_prime_tower", true);
+            config.set("independent_support_layer_height", true);
+            config.set_deserialize_strict({
+                {"print_sequence", row.print_sequence},
+                {"timelapse_type", row.timelapse_type},
+            });
+
+            config.normalize_fdm(row.used_filaments);
+
+            CHECK(config.opt_bool("enable_prime_tower") == row.prime_tower);
+            CHECK(config.opt_bool("independent_support_layer_height") == row.independent_support_layer_height);
+        }
+    }
+
+}
+
+TEST_CASE("get_bed_shape uses the shared extruder intersection for dynamic and full configs", "[PrintConfigActive][Config]")
+{
+    using namespace testing_branch_support_test_config;
+    using namespace testing_branch_support_test_config::print_config_active_followup_contracts;
+
+    const Vec2ds printable = {
+        Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)
+    };
+    const Vec2ds extruder_areas[] = {
+        {Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)},
+        {Vec2d(5., 0.), Vec2d(18., 0.), Vec2d(18., 20.), Vec2d(5., 20.)},
+    };
+
+    DynamicPrintConfig dynamic;
+    dynamic.set_key_value("printable_area", new ConfigOptionPoints(printable));
+    dynamic.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({extruder_areas[0], extruder_areas[1]}));
+
+    const Points dynamic_shared = get_bed_shape(dynamic, true);
+    const Points dynamic_full = get_bed_shape(dynamic, false);
+    REQUIRE_FALSE(dynamic_shared.empty());
+    REQUIRE_FALSE(dynamic_full.empty());
+    CHECK_THAT(polygon_area_mm2(dynamic_shared), Catch::Matchers::WithinAbs(260., 1e-6));
+    CHECK_THAT(polygon_area_mm2(dynamic_full), Catch::Matchers::WithinAbs(400., 1e-6));
+
+    FullPrintConfig full;
+    full.printable_area.values = printable;
+    full.extruder_printable_area.values = {extruder_areas[0], extruder_areas[1]};
+    const Points full_shared = get_bed_shape(full, true);
+    REQUIRE_FALSE(full_shared.empty());
+    CHECK_THAT(polygon_area_mm2(full_shared), Catch::Matchers::WithinAbs(260., 1e-6));
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(full, false)), Catch::Matchers::WithinAbs(400., 1e-6));
+
+    dynamic.erase("extruder_printable_area");
+    full.extruder_printable_area.values.clear();
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(dynamic, true)), Catch::Matchers::WithinAbs(400., 1e-6));
+    CHECK_THAT(polygon_area_mm2(get_bed_shape(full, true)), Catch::Matchers::WithinAbs(400., 1e-6));
+    CHECK(get_bed_shape(DynamicPrintConfig{}, false).empty());
+
+}
+
+TEST_CASE("get_real_skirt_dist follows skirt, draft-shield, width, and nozzle fallbacks", "[PrintConfigActive][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    struct Row {
+        int skirt_height;
+        int skirt_loops;
+        bool draft_shield;
+        double distance;
+        double initial_width;
+        double line_width;
+        std::vector<double> nozzle_diameters;
+        double expected;
+    };
+    const Row rows[] = {
+        {0, 0, false, 1.5, 0.6, 0.4, {0.4}, 0.0},
+        {1, 2, false, 1.5, 0.6, 0.4, {0.4}, 2.7},
+        {1, 2, false, 1.0, 0.0, 0.5, {0.4}, 2.0},
+        {1, 1, false, 0.2, 0.0, 0.0, {0.45, 0.6}, 0.8},
+        {1, 1, false, 0.1, 0.0, 0.0, {}, 0.5},
+    };
+
+    for (const Row &row : rows) {
+        DYNAMIC_SECTION(row.skirt_height << " height, " << row.skirt_loops << " loops, draft " << row.draft_shield
+                        << ", distance " << row.distance << ", widths " << row.initial_width << '/' << row.line_width) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set("skirt_height", row.skirt_height);
+            config.set("skirt_loops", row.skirt_loops);
+            config.set("skirt_distance", row.distance);
+            config.set_deserialize_strict("draft_shield", row.draft_shield ? "enabled" : "disabled");
+            config.set("initial_layer_line_width", row.initial_width);
+            config.set("line_width", row.line_width);
+            config.opt<ConfigOptionFloats>("nozzle_diameter")->values = row.nozzle_diameters;
+
+            CHECK_THAT(get_real_skirt_dist(config), Catch::Matchers::WithinAbs(row.expected, 1e-6));
+        }
+    }
+
+}
+
+TEST_CASE("Variant vector replacement restores mapped slots and imports fallback values",
+          "[Config][ConfigVariantRestore]")
+{
+    using namespace testing_branch_support_test_config;
+
+    ConfigOptionInts destination({10, 20, 30, 40});
+    ConfigOptionInts source({100, 200, 300});
+    std::vector<int> restore_index{3, -1, 99};
+
+    destination.set_with_restore_2(&source, restore_index, 1, 2);
+
+    CHECK(destination.values == std::vector<int>{10, 40, 200, 300, 40});
+    CHECK(source.values == std::vector<int>{100, 200, 300});
+
+}
+
+TEST_CASE("Variant vector replacement handles a short range and missing source values",
+          "[Config][ConfigVariantRestore]")
+{
+    using namespace testing_branch_support_test_config;
+
+    SECTION("the requested removal is clamped at the vector end") {
+        ConfigOptionInts destination({1, 2, 3});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 2, 8);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 9});
+    }
+
+    SECTION("a zero-length replacement inserts without deleting the following slot") {
+        ConfigOptionInts destination({1, 2});
+        ConfigOptionInts source({9});
+        std::vector<int> restore_index{-1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 0);
+
+        CHECK(destination.values == std::vector<int>{1, 9, 2});
+    }
+
+    SECTION("a short source supplies its first value for unmatched variant slots") {
+        ConfigOptionInts destination({1, 2, 3, 4, 5});
+        ConfigOptionInts source({8});
+        std::vector<int> restore_index{1, -1, -1};
+
+        destination.set_with_restore_2(&source, restore_index, 1, 2, true);
+
+        CHECK(destination.values == std::vector<int>{1, 2, 8, 8, 4, 5});
+    }
+
+}
+
+TEST_CASE("ConfigBase scalar getters resolve registered values and line width inheritance", "[Config][ConfigGetter]")
+{
+    using namespace testing_branch_support_test_config;
+
+    const bool comments_enabled = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigBase &base = config;
+
+    auto *layer_height = config.option<ConfigOptionFloat>("layer_height");
+    auto *slow_down_layers = config.option<ConfigOptionInt>("slow_down_layers");
+    auto *gcode_comments = config.option<ConfigOptionBool>("gcode_comments");
+    auto *max_detour = config.option<ConfigOptionFloatOrPercent>("max_travel_detour_distance");
+    auto *seam_start = config.option<ConfigOptionFloatOrPercent>("seam_slope_start_height");
+    auto *line_width = config.option<ConfigOptionFloatOrPercent>("line_width");
+    auto *outer_wall_width = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
+    auto *bridge_density = config.option<ConfigOptionPercent>("bridge_density");
+    REQUIRE(layer_height != nullptr);
+    REQUIRE(slow_down_layers != nullptr);
+    REQUIRE(gcode_comments != nullptr);
+    REQUIRE(max_detour != nullptr);
+    REQUIRE(seam_start != nullptr);
+    REQUIRE(line_width != nullptr);
+    REQUIRE(outer_wall_width != nullptr);
+    REQUIRE(bridge_density != nullptr);
+
+    layer_height->value = 0.2;
+    slow_down_layers->value = 3;
+    gcode_comments->value = comments_enabled;
+    max_detour->value = 2.75;
+    max_detour->percent = false;
+    seam_start->value = 50.;
+    seam_start->percent = true;
+    line_width->value = 0.48;
+    line_width->percent = false;
+    outer_wall_width->value = 0.;
+    outer_wall_width->percent = false;
+    bridge_density->value = 37.;
+
+    CHECK_THAT(base.get_abs_value("layer_height"), Catch::Matchers::WithinAbs(0.2, 1e-12));
+    CHECK_THAT(base.get_abs_value("slow_down_layers"), Catch::Matchers::WithinAbs(3., 1e-12));
+    CHECK_THAT(base.get_abs_value("gcode_comments"), Catch::Matchers::WithinAbs(comments_enabled ? 1. : 0., 1e-12));
+    CHECK_THAT(base.get_abs_value("max_travel_detour_distance"), Catch::Matchers::WithinAbs(2.75, 1e-12));
+    // This setting is explicitly defined as a percentage of layer_height.
+    CHECK_THAT(base.get_abs_value("seam_slope_start_height"), Catch::Matchers::WithinAbs(0.1, 1e-12));
+    // A zero *_line_width value inherits the separately pinned line_width value.
+    CHECK_THAT(base.get_abs_value("outer_wall_line_width"), Catch::Matchers::WithinAbs(0.48, 1e-12));
+    // bridge_density has no ratio_over base; its percentage is returned as a unit ratio.
+    CHECK_THAT(base.get_abs_value("bridge_density"), Catch::Matchers::WithinAbs(0.37, 1e-12));
+    REQUIRE_THROWS_AS(base.get_abs_value("not_a_registered_config_key"), std::runtime_error);
+
+}
+
+} // namespace gap_c_config_test_cases
