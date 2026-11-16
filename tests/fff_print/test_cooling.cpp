@@ -15,6 +15,8 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/ModelArrange.hpp"
+#include <boost/filesystem/operations.hpp>
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include <catch2/catch_all.hpp>
