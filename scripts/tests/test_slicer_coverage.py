@@ -2,8 +2,11 @@
 """Unit tests for the LLVM coverage report boundary (stdlib only)."""
 
 from pathlib import Path
+import contextlib
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +15,28 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import slicer_coverage  # noqa: E402
+
+
+@contextlib.contextmanager
+def _fixture_launcher(script):
+    """Run a Python fixture tool through the real process API on every OS.
+
+    Windows cannot execute a POSIX-shebang script as a PE image, so launch it
+    through the interpreter; POSIX keeps executing the script directly.
+    """
+    if os.name != "nt":
+        yield
+        return
+    real_run = slicer_coverage._run
+
+    def run(argv, **kwargs):
+        argv = list(argv)
+        if argv and argv[0] == str(script):
+            argv = [sys.executable, str(script), *argv[1:]]
+        return real_run(argv, **kwargs)
+
+    with mock.patch.object(slicer_coverage, "_run", run):
+        yield
 
 
 class CoverageEvidenceTests(unittest.TestCase):
@@ -321,10 +346,11 @@ class CoverageExportTests(unittest.TestCase):
                 "'summary': {'lines': {'covered': 0, 'count': 1}}}]}]}))\n"
             )
             fake_cov.chmod(0o755)
-            evidence = slicer_coverage._compiler_source_evidence(
-                str(fake_cov), [source], commands, timeout=5,
-                inventory_profile=inventory_profile,
-            )
+            with _fixture_launcher(fake_cov):
+                evidence = slicer_coverage._compiler_source_evidence(
+                    str(fake_cov), [source], commands, timeout=5,
+                    inventory_profile=inventory_profile,
+                )
             self.assertEqual(evidence["status"], "ok")
             self.assertEqual(evidence["mapped_sources"], [str(source)])
             self.assertEqual(evidence["mapping_free_sources"], [])
@@ -383,10 +409,11 @@ class CoverageExportTests(unittest.TestCase):
             )
             fake_cov.chmod(0o755)
 
-            evidence = slicer_coverage._compiler_source_evidence(
-                str(fake_cov), [mapped, mapping_free, header_only], compile_commands, timeout=10,
-                inventory_profile=inventory_profile,
-            )
+            with _fixture_launcher(fake_cov):
+                evidence = slicer_coverage._compiler_source_evidence(
+                    str(fake_cov), [mapped, mapping_free, header_only], compile_commands, timeout=10,
+                    inventory_profile=inventory_profile,
+                )
 
             self.assertEqual(evidence["status"], "ok")
             self.assertEqual(evidence["mapped_sources"], [str(mapped)])
@@ -646,8 +673,18 @@ class CoverageDiagnosticTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_command_splitting_does_not_use_a_shell(self):
-        self.assertEqual(slicer_coverage.split_command("ctest --test-dir 'build/tests'"),
+        # Windows argv parsing does not treat single quotes as quoting.
+        quoted = '"build/tests"' if os.name == "nt" else "'build/tests'"
+        self.assertEqual(slicer_coverage.split_command(f"ctest --test-dir {quoted}"),
                          ["ctest", "--test-dir", "build/tests"])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows argv round trip")
+    def test_windows_command_splitting_round_trips_argv(self):
+        argv = ["tool.exe", "two words", 'quote"inside', "trailing\\", "dir with\\slash\\",
+                "", "plain\\path"]
+        self.assertEqual(slicer_coverage.split_command(subprocess.list2cmdline(argv)), argv)
+        entry = {"command": subprocess.list2cmdline(argv)}
+        self.assertEqual(slicer_coverage._compile_command_arguments(entry), argv)
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -660,10 +697,11 @@ class ProvenanceTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             manifest.parent.mkdir(parents=True)
             binary.write_bytes(b"test-binary")
-            manifest.write_text("src/libslic3r/Print.cpp\n", encoding="utf-8")
-            cache.write_text("CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
+            # Binary writes keep the hashed bytes identical on every platform.
+            manifest.write_bytes(b"src/libslic3r/Print.cpp\n")
+            cache.write_bytes(b"CMAKE_BUILD_TYPE:STRING=Release\n")
             compile_commands = cache.parent / "compile_commands.json"
-            compile_commands.write_text("[]\n", encoding="utf-8")
+            compile_commands.write_bytes(b"[]\n")
 
             provenance = slicer_coverage._coverage_provenance(
                 root, [binary], [manifest], cache.parent
