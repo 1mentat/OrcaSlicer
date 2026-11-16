@@ -1638,7 +1638,7 @@ std::string xml_escape_double_quotes_attribute_value(std::string text)
     return text;
 }
 
-std::string xml_unescape(std::string s)
+std::string xml_unescape(std::string s, XmlUnescapePolicy policy)
 {
 	std::string ret;
 	std::string::size_type i = 0;
@@ -1659,6 +1659,16 @@ std::string xml_unescape(std::string s)
 			else if (s.substr(i, 5) == "&amp;") {
 				ret += s.substr(pos, i - pos) + "&";
 				i += 5;
+				pos = i;
+			}
+			else if (policy == XmlUnescapePolicy::Full && s.substr(i, 6) == "&quot;") {
+				ret += s.substr(pos, i - pos) + "\"";
+				i += 6;
+				pos = i;
+			}
+			else if (policy == XmlUnescapePolicy::Full && s.substr(i, 6) == "&apos;") {
+				ret += s.substr(pos, i - pos) + "'";
+				i += 6;
 				pos = i;
 			}
 			else {
