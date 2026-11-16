@@ -9,6 +9,7 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <libnoise/module/perlin.h>
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
@@ -972,6 +973,52 @@ TEST_CASE("Holes run against the wall direction", "[Perimeters]")
     }
 }
 
+TEST_CASE("Filter out gap fill threshold removes short classic wall gaps",
+          "[GapFillFilterSettings][Perimeters]")
+{
+    const ConfigOptionDef *option = print_config_def.get("filter_out_gap_fill");
+    REQUIRE(option != nullptr);
+    REQUIRE(option->type == coFloat);
+
+    DynamicPrintConfig keep_config = hole_direction_config(1, "ccw");
+    keep_config.set_deserialize_strict({
+        {"filter_out_gap_fill", 0.0},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Print keep_print;
+    Model keep_model;
+    square_tube(keep_print, keep_model, keep_config, 1., 1.);
+    const StringObjectException keep_validation = keep_print.validate();
+    INFO(keep_validation.string);
+    REQUIRE(keep_validation.string.empty());
+    const std::vector<WallDirections> keep = wall_directions(keep_print);
+    REQUIRE(keep.size() == 25);
+    REQUIRE(keep[keep.size() / 2].gap_fills > 0);
+
+    // Every possible gap path in this 20 mm fixture is shorter than 100 mm.
+    // The option has no declared maximum, so this is a valid high threshold.
+    DynamicPrintConfig drop_config = hole_direction_config(1, "ccw");
+    drop_config.set_deserialize_strict({
+        {"filter_out_gap_fill", 100.0},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    Print drop_print;
+    Model drop_model;
+    square_tube(drop_print, drop_model, drop_config, 1., 1.);
+    const StringObjectException drop_validation = drop_print.validate();
+    INFO(drop_validation.string);
+    REQUIRE(drop_validation.string.empty());
+    const std::vector<WallDirections> drop = wall_directions(drop_print);
+    REQUIRE(drop.size() == keep.size());
+    CHECK(drop[drop.size() / 2].gap_fills == 0);
+    for (size_t i = 0; i < keep.size(); ++i) {
+        CAPTURE(i);
+        CHECK(drop[i].contours_ccw == keep[i].contours_ccw);
+        CHECK(drop[i].holes_ccw == keep[i].holes_ccw);
+        CHECK(drop[i].inner_walls == keep[i].inner_walls);
+    }
+}
+
 // A hole whose outer wall touches the contour's all around, with nothing between them, runs with the contour
 // on every layer, so the two walls of a thin tube are laid side by side in the same direction.
 TEST_CASE("A hole whose outer wall touches the contour's runs with it", "[Perimeters]")
@@ -1734,7 +1781,480 @@ TEST_CASE("Disabled fuzzy skin is a no-op for the registered noise pipeline",
         CHECK_THAT(disabled.widths[i], Catch::Matchers::WithinAbs(none.widths[i], 1e-6));
 }
 
+struct PerlinNoiseSettings {
+    double scale;
+    int octaves;
+    double persistence;
+};
+
+struct PerlinPerimeterSlice {
+    OuterPerimeterSnapshot perimeter;
+    double slice_z;
+};
+
+DynamicPrintConfig perlin_noise_settings_config(bool enable_fuzzy_skin, const PerlinNoiseSettings &settings)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"wall_loops", 1},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", enable_fuzzy_skin ? "external" : "none"},
+        {"fuzzy_skin_first_layer", false},
+        {"fuzzy_skin_mode", "displacement"},
+        {"fuzzy_skin_noise_type", "perlin"},
+        {"fuzzy_skin_thickness", 0.35},
+        {"fuzzy_skin_point_distance", 0.4},
+        {"fuzzy_skin_scale", settings.scale},
+        {"fuzzy_skin_octaves", settings.octaves},
+        {"fuzzy_skin_persistence", settings.persistence},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+        {"fuzzy_skin_layers_between_ripple_offset", 1},
+        {"enable_arc_fitting", false},
+        {"detect_overhang_wall", false},
+        {"use_relative_e_distances", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+PerlinPerimeterSlice slice_perlin_noise_settings(bool enable_fuzzy_skin, const PerlinNoiseSettings &settings)
+{
+    // A long, narrow prism spans enough of the world-space field for the
+    // 500 mm feature-size endpoint to produce observable interior samples.
+    TriangleMesh shape = make_cube(300., 12., 0.8);
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(std::move(shape));
+    // Keep the same model-local outline in the control and active slices.
+    init_print(std::move(meshes), print, model, perlin_noise_settings_config(enable_fuzzy_skin, settings), nullptr, false);
+    const StringObjectException validation = print.validate();
+    INFO("Print validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+    REQUIRE_FALSE(print.objects().empty());
+    REQUIRE(print.objects().front()->config().wall_generator.value == PerimeterGeneratorType::Classic);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 4);
+    const size_t layer_index = layers.size() / 2;
+    REQUIRE(layers[layer_index]->regions().size() == 1);
+    const PrintRegionConfig &region_config = layers[layer_index]->regions().front()->region().config();
+    REQUIRE_FALSE(region_config.detect_overhang_wall.value);
+    REQUIRE_THAT(region_config.fuzzy_skin_scale.value, Catch::Matchers::WithinAbs(settings.scale, 1e-9));
+    REQUIRE(region_config.fuzzy_skin_octaves.value == settings.octaves);
+    REQUIRE_THAT(region_config.fuzzy_skin_persistence.value, Catch::Matchers::WithinAbs(settings.persistence, 1e-9));
+    return {outer_perimeters_at(print, layer_index), layers[layer_index]->slice_z};
+}
+
+struct SafePerlinReference {
+    Vec2d projection_mm;
+    double distance_mm = std::numeric_limits<double>::max();
+    bool interior = false;
+    size_t segment_index = std::numeric_limits<size_t>::max();
+};
+
+SafePerlinReference nearest_safe_perlin_reference(const Point &point, const OuterPerimeterSnapshot &reference)
+{
+    SafePerlinReference result;
+    result.distance_mm = nearest_safe_reference_distance_mm(point, reference, result.interior);
+    if (!result.interior)
+        return result;
+
+    // Reuse the established corner/tie filter; select the nearest safe straight side
+    // only to recover the point where the independently configured field was sampled.
+    for (size_t i = 0; i < reference.segments.size(); ++i) {
+        const Segment &segment = reference.segments[i];
+        double t = 0., length = 0.;
+        const double distance = reference_segment_distance_mm(point, segment, t, length);
+        if (distance > result.distance_mm + kFuzzyDistanceTieMm)
+            continue;
+        const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+        const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+        result.projection_mm = a + t * (b - a);
+        result.segment_index = i;
+        return result;
+    }
+    result.interior = false;
+    return result;
+}
+
+void require_perlin_pipeline_matches_configured_field(const PerlinNoiseSettings &settings,
+                                                       const PerlinPerimeterSlice &actual,
+                                                       const PerlinPerimeterSlice &reference)
+{
+    REQUIRE_THAT(actual.slice_z, Catch::Matchers::WithinAbs(reference.slice_z, 1e-9));
+    REQUIRE(actual.perimeter.points.size() > reference.perimeter.points.size());
+
+    noise::module::Perlin expected_field;
+    expected_field.SetFrequency(1.0 / settings.scale);
+    expected_field.SetOctaveCount(settings.octaves);
+    expected_field.SetPersistence(settings.persistence);
+
+    size_t safe_samples = 0;
+    size_t nontrivial_expected_offsets = 0;
+    std::vector<size_t> witnesses_by_reference_side(reference.perimeter.segments.size(), 0);
+    double maximum_residual_mm = 0.;
+    constexpr double thickness_mm = 0.35;
+    for (const Point &point : actual.perimeter.points) {
+        const SafePerlinReference projected = nearest_safe_perlin_reference(point, reference.perimeter);
+        if (!projected.interior)
+            continue;
+        ++safe_samples;
+
+        const double expected_offset_mm = std::abs(expected_field.GetValue(projected.projection_mm.x(),
+                                                                           projected.projection_mm.y(),
+                                                                           actual.slice_z) * thickness_mm);
+        if (expected_offset_mm > 0.01) {
+            ++nontrivial_expected_offsets;
+            ++witnesses_by_reference_side[projected.segment_index];
+        }
+        const double residual_mm = std::abs(projected.distance_mm - expected_offset_mm);
+        maximum_residual_mm = std::max(maximum_residual_mm, residual_mm);
+    }
+
+    const size_t nontrivial_sides = std::count_if(witnesses_by_reference_side.begin(), witnesses_by_reference_side.end(),
+                                                  [](size_t count) { return count > 0; });
+    CAPTURE(settings.scale, settings.octaves, settings.persistence, safe_samples, nontrivial_expected_offsets,
+            nontrivial_sides, maximum_residual_mm);
+    REQUIRE(safe_samples >= 8);
+    REQUIRE(nontrivial_expected_offsets >= 3);
+    REQUIRE(nontrivial_sides >= 2);
+    CHECK_THAT(maximum_residual_mm, Catch::Matchers::WithinAbs(0., 0.002));
+}
+
+void require_fuzzy_noise_numeric_registration(const char *key, ConfigOptionType type,
+                                              double minimum, double nominal, double maximum)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == type);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(minimum, 1e-6));
+    CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(maximum, 1e-6));
+    if (type == coInt)
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == int(nominal));
+    else
+        CHECK_THAT(definition->get_default_value<ConfigOptionFloat>()->value, Catch::Matchers::WithinAbs(nominal, 1e-9));
+}
+
+TEST_CASE("Perlin fuzzy skin scale controls emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_scale", coFloat, 0.1, 1.0, 500.0);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const double scale : {0.1, 1.0, 500.0}) {
+        CAPTURE(scale);
+        const PerlinNoiseSettings settings{scale, nominal.octaves, nominal.persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
+}
+
+TEST_CASE("Perlin fuzzy skin octaves control emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_octaves", coInt, 1, 4, 10);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const int octaves : {1, 4, 10}) {
+        CAPTURE(octaves);
+        const PerlinNoiseSettings settings{nominal.scale, octaves, nominal.persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
+}
+
+TEST_CASE("Perlin fuzzy skin persistence controls emitted external-wall displacement",
+          "[FuzzySkinNoiseParametersPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_fuzzy_noise_numeric_registration("fuzzy_skin_persistence", coFloat, 0.01, 0.5, 1.0);
+    const PerlinNoiseSettings nominal{1.0, 4, 0.5};
+    const PerlinPerimeterSlice reference = slice_perlin_noise_settings(false, nominal);
+    for (const double persistence : {0.01, 0.5, 1.0}) {
+        CAPTURE(persistence);
+        const PerlinNoiseSettings settings{nominal.scale, nominal.octaves, persistence};
+        const PerlinPerimeterSlice actual = slice_perlin_noise_settings(true, settings);
+        require_perlin_pipeline_matches_configured_field(settings, actual, reference);
+    }
+}
+
 } // namespace fuzzy_mode_pipeline_contracts
+
+namespace fuzzy_mode_pipeline_contracts {
+
+struct RipplePipelineSettings {
+    int cycles;
+    double offset_percent;
+    int layers_per_group;
+};
+
+struct RipplePipelinePrint {
+    std::vector<OuterPerimeterSnapshot> perimeters;
+};
+
+DynamicPrintConfig ripple_pipeline_config(bool enabled, const RipplePipelineSettings &settings)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"wall_direction", "ccw"},
+        {"wall_loops", 1},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"initial_layer_line_width", 0.45},
+        {"outer_wall_line_width", 0.45},
+        {"line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", enabled ? "external" : "none"},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_mode", "displacement"},
+        {"fuzzy_skin_noise_type", "ripple"},
+        {"fuzzy_skin_thickness", 0.4},
+        {"fuzzy_skin_point_distance", 0.5},
+        {"fuzzy_skin_ripples_per_layer", settings.cycles},
+        {"fuzzy_skin_ripple_offset", settings.offset_percent},
+        {"fuzzy_skin_layers_between_ripple_offset", settings.layers_per_group},
+        {"detect_overhang_wall", false},
+        {"overhang_reverse", false},
+        {"seam_position", "aligned"},
+        {"enable_arc_fitting", false},
+        {"elephant_foot_compensation", 0},
+        {"use_relative_e_distances", false},
+        {"nozzle_diameter", "0.4"},
+    });
+    return config;
+}
+
+RipplePipelinePrint slice_ripple_pipeline_print(bool enabled, const RipplePipelineSettings &settings)
+{
+    Print print;
+    Model model;
+    init_print({make_cube(20., 20., 2.4)}, print, model, ripple_pipeline_config(enabled, settings));
+    const StringObjectException validation = print.validate();
+    INFO("Print validation error: " << validation.string);
+    REQUIRE(validation.string.empty());
+    print.process();
+
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->config().wall_generator.value == PerimeterGeneratorType::Classic);
+    const auto &layers = print.objects().front()->layers();
+    REQUIRE(layers.size() == 12); // 2.4 mm / 0.2 mm produces 12 object layers.
+    REQUIRE(layers[1]->regions().size() == 1);
+    const PrintRegionConfig &resolved = layers[1]->regions().front()->region().config();
+    REQUIRE(resolved.fuzzy_skin_noise_type.value == NoiseType::Ripple);
+    REQUIRE(resolved.fuzzy_skin_ripples_per_layer.value == settings.cycles);
+    REQUIRE_THAT(resolved.fuzzy_skin_ripple_offset.value,
+                 Catch::Matchers::WithinAbs(settings.offset_percent, 1e-9));
+    REQUIRE(resolved.fuzzy_skin_layers_between_ripple_offset.value == settings.layers_per_group);
+    REQUIRE_FALSE(resolved.detect_overhang_wall.value);
+
+    RipplePipelinePrint result;
+    result.perimeters.reserve(layers.size());
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id)
+        result.perimeters.push_back(outer_perimeters_at(print, layer_id));
+    return result;
+}
+
+struct SignedRippleSample {
+    double arc_mm = 0.;
+    double signed_offset_mm = 0.;
+    Vec2d projection_mm = Vec2d::Zero();
+};
+
+std::vector<SignedRippleSample> signed_ripple_samples(const OuterPerimeterSnapshot &actual,
+                                                       const OuterPerimeterSnapshot &reference)
+{
+    std::vector<double> segment_start_mm(reference.segments.size(), 0.);
+    double accumulated_mm = 0.;
+    for (size_t i = 0; i < reference.segments.size(); ++i) {
+        const Segment &segment = reference.segments[i];
+        segment_start_mm[i] = accumulated_mm;
+        accumulated_mm += unscale_((segment.b - segment.a).cast<double>().norm());
+    }
+
+    std::vector<SignedRippleSample> samples;
+    for (const Point &point : actual.points) {
+        const SafePerlinReference nearest = nearest_safe_perlin_reference(point, reference);
+        if (!nearest.interior)
+            continue;
+        const Segment &segment = reference.segments[nearest.segment_index];
+        const Vec2d a(unscale_(segment.a.x()), unscale_(segment.a.y()));
+        const Vec2d b(unscale_(segment.b.x()), unscale_(segment.b.y()));
+        const Vec2d tangent = (b - a).normalized();
+        const Vec2d normal(-tangent.y(), tangent.x());
+        const Vec2d point_mm(unscale_(point.x()), unscale_(point.y()));
+        const double along_mm = (nearest.projection_mm - a).dot(tangent);
+        samples.push_back({segment_start_mm[nearest.segment_index] + along_mm,
+                           (point_mm - nearest.projection_mm).dot(normal),
+                           nearest.projection_mm});
+    }
+    std::stable_sort(samples.begin(), samples.end(), [](const SignedRippleSample &a, const SignedRippleSample &b) {
+        return a.arc_mm < b.arc_mm;
+    });
+    return samples;
+}
+
+size_t ripple_sign_changes(const std::vector<SignedRippleSample> &samples)
+{
+    std::vector<int> signs;
+    signs.reserve(samples.size());
+    for (const SignedRippleSample &sample : samples) {
+        if (sample.signed_offset_mm > 0.01)
+            signs.push_back(1);
+        else if (sample.signed_offset_mm < -0.01)
+            signs.push_back(-1);
+    }
+    if (signs.size() < 2)
+        return 0;
+    size_t changes = 0;
+    for (size_t i = 0; i < signs.size(); ++i)
+        changes += signs[i] != signs[(i + 1) % signs.size()];
+    return changes;
+}
+
+struct RipplePairSummary {
+    size_t paired_samples = 0;
+    size_t nontrivial_pairs = 0;
+    double maximum_projection_delta_mm = 0.;
+    double maximum_offset_relation_error_mm = 0.;
+};
+
+RipplePairSummary summarize_ripple_relation(const std::vector<SignedRippleSample> &a,
+                                             const std::vector<SignedRippleSample> &b,
+                                             double expected_sign)
+{
+    REQUIRE(a.size() == b.size());
+    RipplePairSummary result;
+    result.paired_samples = a.size();
+    for (size_t i = 0; i < a.size(); ++i) {
+        result.maximum_projection_delta_mm = std::max(
+            result.maximum_projection_delta_mm, (a[i].projection_mm - b[i].projection_mm).norm());
+        result.maximum_offset_relation_error_mm = std::max(
+            result.maximum_offset_relation_error_mm,
+            std::abs(a[i].signed_offset_mm - expected_sign * b[i].signed_offset_mm));
+        if (std::abs(a[i].signed_offset_mm) > 0.05 && std::abs(b[i].signed_offset_mm) > 0.05)
+            ++result.nontrivial_pairs;
+    }
+    return result;
+}
+
+void require_ripple_relation(const std::vector<SignedRippleSample> &a,
+                             const std::vector<SignedRippleSample> &b,
+                             double expected_sign)
+{
+    const RipplePairSummary summary = summarize_ripple_relation(a, b, expected_sign);
+    CAPTURE(expected_sign, summary.paired_samples, summary.nontrivial_pairs,
+            summary.maximum_projection_delta_mm, summary.maximum_offset_relation_error_mm);
+    REQUIRE(summary.paired_samples >= 16);
+    REQUIRE(summary.nontrivial_pairs >= 8);
+    CHECK(summary.maximum_projection_delta_mm <= 0.002);
+    CHECK(summary.maximum_offset_relation_error_mm <= 0.002);
+}
+
+void require_ripple_numeric_registration(const char *key, ConfigOptionType type,
+                                         double minimum, double nominal,
+                                         bool check_maximum, double maximum)
+{
+    const ConfigOptionDef *definition = print_config_def.get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->type == type);
+    CHECK_THAT(definition->min, Catch::Matchers::WithinAbs(minimum, 1e-6));
+    if (check_maximum)
+        CHECK_THAT(definition->max, Catch::Matchers::WithinAbs(maximum, 1e-6));
+    if (type == coInt)
+        CHECK(definition->get_default_value<ConfigOptionInt>()->value == int(nominal));
+    else if (type == coPercent)
+        CHECK_THAT(definition->get_default_value<ConfigOptionPercent>()->value,
+                   Catch::Matchers::WithinAbs(nominal, 1e-9));
+}
+
+} // namespace fuzzy_mode_pipeline_contracts
+
+TEST_CASE("Ripple fuzzy skin emits the configured number of contour cycles",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_ripples_per_layer", coInt, 1, 15, false, 0.);
+    const RipplePipelineSettings control_settings{15, 0., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, control_settings);
+    for (const int cycles : {1, 8, 15}) {
+        CAPTURE(cycles);
+        const RipplePipelinePrint actual = slice_ripple_pipeline_print(true, {cycles, 0., 1});
+        const std::vector<SignedRippleSample> samples =
+            signed_ripple_samples(actual.perimeters[1], control.perimeters[1]);
+        const size_t sign_changes = ripple_sign_changes(samples);
+        CAPTURE(samples.size(), sign_changes);
+        REQUIRE(samples.size() >= size_t(4 * cycles));
+        CHECK(sign_changes == size_t(2 * cycles));
+    }
+}
+
+TEST_CASE("Ripple fuzzy skin offset endpoints preserve and invert the printed phase",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_ripple_offset", coPercent, 0, 50, true, 100);
+    const RipplePipelineSettings settings{15, 50., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, settings);
+    const RipplePipelinePrint zero = slice_ripple_pipeline_print(true, {15, 0., 1});
+    const RipplePipelinePrint half = slice_ripple_pipeline_print(true, {15, 50., 1});
+    const RipplePipelinePrint full = slice_ripple_pipeline_print(true, {15, 100., 1});
+    const auto zero_layer1 = signed_ripple_samples(zero.perimeters[1], control.perimeters[1]);
+    const auto zero_layer2 = signed_ripple_samples(zero.perimeters[2], control.perimeters[2]);
+    const auto half_layer1 = signed_ripple_samples(half.perimeters[1], control.perimeters[1]);
+    const auto half_layer2 = signed_ripple_samples(half.perimeters[2], control.perimeters[2]);
+    const auto half_layer3 = signed_ripple_samples(half.perimeters[3], control.perimeters[3]);
+    const auto full_layer1 = signed_ripple_samples(full.perimeters[1], control.perimeters[1]);
+
+    require_ripple_relation(zero_layer1, zero_layer2, 1.);
+    require_ripple_relation(full_layer1, zero_layer1, 1.);
+    require_ripple_relation(half_layer1, half_layer2, -1.);
+    require_ripple_relation(half_layer1, half_layer3, 1.);
+}
+
+TEST_CASE("Ripple fuzzy skin applies offsets once per configured layer group",
+          "[FuzzySkinRippleSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_mode_pipeline_contracts;
+    require_ripple_numeric_registration("fuzzy_skin_layers_between_ripple_offset", coInt, 1, 1, false, 0.);
+    const RipplePipelineSettings settings{15, 50., 1};
+    const RipplePipelinePrint control = slice_ripple_pipeline_print(false, settings);
+    const RipplePipelinePrint every_layer = slice_ripple_pipeline_print(true, {15, 50., 1});
+    const RipplePipelinePrint every_three_layers = slice_ripple_pipeline_print(true, {15, 50., 3});
+    const auto group3_layer1 = signed_ripple_samples(every_three_layers.perimeters[1], control.perimeters[1]);
+    const auto group3_layer2 = signed_ripple_samples(every_three_layers.perimeters[2], control.perimeters[2]);
+    const auto group3_layer3 = signed_ripple_samples(every_three_layers.perimeters[3], control.perimeters[3]);
+    const auto group3_layer4 = signed_ripple_samples(every_three_layers.perimeters[4], control.perimeters[4]);
+    const auto group3_layer5 = signed_ripple_samples(every_three_layers.perimeters[5], control.perimeters[5]);
+    const auto group3_layer6 = signed_ripple_samples(every_three_layers.perimeters[6], control.perimeters[6]);
+    const auto group3_layer8 = signed_ripple_samples(every_three_layers.perimeters[8], control.perimeters[8]);
+    const auto group1_layer1 = signed_ripple_samples(every_layer.perimeters[1], control.perimeters[1]);
+    const auto group1_layer2 = signed_ripple_samples(every_layer.perimeters[2], control.perimeters[2]);
+    const auto group1_layer3 = signed_ripple_samples(every_layer.perimeters[3], control.perimeters[3]);
+
+    require_ripple_relation(group3_layer1, group3_layer2, 1.);
+    require_ripple_relation(group3_layer3, group3_layer4, 1.);
+    require_ripple_relation(group3_layer4, group3_layer5, 1.);
+    require_ripple_relation(group3_layer1, group3_layer3, -1.);
+    require_ripple_relation(group3_layer1, group3_layer6, 1.);
+    require_ripple_relation(group3_layer6, group3_layer8, 1.);
+    require_ripple_relation(group1_layer1, group1_layer2, -1.);
+    require_ripple_relation(group1_layer1, group1_layer3, 1.);
+}
 
 
 namespace fuzzy_mode_pipeline_contracts {
@@ -1795,4 +2315,191 @@ TEST_CASE("Arachne displacement fuzzy skin applies a positive transverse offset"
         CHECK(width >= control_min_width - 0.002);
         CHECK(width <= control_max_width + 0.002);
     }
+}
+
+namespace fuzzy_skin_settings_pipeline {
+
+struct WallPoints {
+    Points contour_outer;
+    Points contour_inner;
+    Points hole_outer;
+    Points hole_inner;
+
+    bool operator==(const WallPoints &rhs) const
+    {
+        return contour_outer == rhs.contour_outer && contour_inner == rhs.contour_inner &&
+               hole_outer == rhs.hole_outer && hole_inner == rhs.hole_inner;
+    }
+};
+
+DynamicPrintConfig settings_config(const char *fuzzy_type, double thickness = 0.4, double point_distance = 0.75)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"wall_generator", "classic"},
+        {"layer_change_gcode", "G92 E0\n"},
+        {"wall_loops", 2},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"outer_wall_line_width", 0.45},
+        {"inner_wall_line_width", 0.45},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"fuzzy_skin", fuzzy_type},
+        {"fuzzy_skin_first_layer", true},
+        {"fuzzy_skin_noise_type", "ripple"},
+        {"fuzzy_skin_thickness", thickness},
+        {"fuzzy_skin_point_distance", point_distance},
+        {"fuzzy_skin_ripples_per_layer", 8},
+        {"fuzzy_skin_ripple_offset", 0},
+    });
+    return config;
+}
+
+WallPoints slice_tube(const DynamicPrintConfig &config)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "fuzzy_skin_settings_tube.stl";
+    object->add_volume(make_cube(8., 8., 0.8), ModelVolumeType::MODEL_PART, false);
+    TriangleMesh cavity = make_cube(4., 4., 0.8);
+    cavity.translate(2.f, 2.f, 0.f);
+    object->add_volume(std::move(cavity), ModelVolumeType::NEGATIVE_VOLUME, false);
+    object->add_instance();
+    object->ensure_on_bed();
+
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.validate().string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->layers().size() == 4);
+
+    const Layer *layer = print.objects().front()->layers()[1];
+    REQUIRE(layer != nullptr);
+    WallPoints result;
+    for (const LayerRegion *region : layer->regions()) {
+        for (const ExtrusionEntity *entity : region->perimeters.flatten().entities) {
+            const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity);
+            if (loop == nullptr || !is_perimeter(loop->role()))
+                continue;
+
+            const bool is_hole = (loop->loop_role() & elrHole) != 0;
+            const bool is_inner = loop->inset_idx > 0;
+            Points *bucket = is_hole ? (is_inner ? &result.hole_inner : &result.hole_outer)
+                                     : (is_inner ? &result.contour_inner : &result.contour_outer);
+            for (const ExtrusionPath &path : loop->paths)
+                for (const Point3 &point : path.polyline.points)
+                    bucket->push_back(point.to_point());
+        }
+    }
+    REQUIRE_FALSE(result.contour_outer.empty());
+    REQUIRE_FALSE(result.hole_outer.empty());
+    return result;
+}
+
+double longest_axis_span_mm(const Points &points)
+{
+    REQUIRE_FALSE(points.empty());
+    coord_t min_x = points.front().x(), max_x = min_x;
+    coord_t min_y = points.front().y(), max_y = min_y;
+    for (const Point &point : points) {
+        min_x = std::min(min_x, point.x());
+        max_x = std::max(max_x, point.x());
+        min_y = std::min(min_y, point.y());
+        max_y = std::max(max_y, point.y());
+    }
+    return unscale<double>(std::max(max_x - min_x, max_y - min_y));
+}
+
+void require_style_registry()
+{
+    const ConfigOptionDef *style = print_config_def.get("fuzzy_skin");
+    REQUIRE(style != nullptr);
+    REQUIRE(style->type == coEnum);
+    REQUIRE((style->enum_values ==
+             std::vector<std::string>{"none", "external", "hole", "all", "allwalls", "disabled_fuzzy"}));
+}
+
+void require_numeric_registry()
+{
+    const ConfigOptionDef *thickness = print_config_def.get("fuzzy_skin_thickness");
+    REQUIRE(thickness != nullptr);
+    REQUIRE(thickness->type == coFloat);
+    CHECK_THAT(thickness->min, Catch::Matchers::WithinAbs(0., 1e-12));
+    CHECK_THAT(thickness->max, Catch::Matchers::WithinAbs(2., 1e-12));
+
+    const ConfigOptionDef *point_distance = print_config_def.get("fuzzy_skin_point_distance");
+    REQUIRE(point_distance != nullptr);
+    REQUIRE(point_distance->type == coFloat);
+    CHECK_THAT(point_distance->min, Catch::Matchers::WithinAbs(0.01, 1e-6));
+    CHECK_THAT(point_distance->max, Catch::Matchers::WithinAbs(5., 1e-12));
+}
+
+} // namespace fuzzy_skin_settings_pipeline
+
+TEST_CASE("Registered fuzzy skin styles route to their public perimeter classes",
+          "[FuzzySkinSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_skin_settings_pipeline;
+    require_style_registry();
+
+    const WallPoints none = slice_tube(settings_config("none"));
+    const WallPoints disabled = slice_tube(settings_config("disabled_fuzzy"));
+    CHECK(disabled == none);
+
+    const WallPoints external = slice_tube(settings_config("external"));
+    CHECK(external.contour_outer.size() > none.contour_outer.size());
+    CHECK(external.contour_inner == none.contour_inner);
+    CHECK(external.hole_outer == none.hole_outer);
+    CHECK(external.hole_inner == none.hole_inner);
+
+    const WallPoints hole = slice_tube(settings_config("hole"));
+    CHECK(hole.contour_outer == none.contour_outer);
+    CHECK(hole.contour_inner == none.contour_inner);
+    CHECK(hole.hole_outer.size() > none.hole_outer.size());
+    CHECK(hole.hole_inner == none.hole_inner);
+
+    const WallPoints all = slice_tube(settings_config("all"));
+    CHECK(all.contour_outer.size() > none.contour_outer.size());
+    CHECK(all.contour_inner == none.contour_inner);
+    CHECK(all.hole_outer.size() > none.hole_outer.size());
+    CHECK(all.hole_inner == none.hole_inner);
+
+    const WallPoints all_walls = slice_tube(settings_config("allwalls"));
+    CHECK(all_walls.contour_outer.size() > none.contour_outer.size());
+    CHECK(all_walls.contour_inner.size() > none.contour_inner.size());
+    CHECK(all_walls.hole_outer.size() > none.hole_outer.size());
+    CHECK(all_walls.hole_inner.size() > none.hole_inner.size());
+}
+
+TEST_CASE("Fuzzy skin numeric endpoints reach sampled public perimeter geometry",
+          "[FuzzySkinSettingsPipeline][Perimeters]")
+{
+    using namespace fuzzy_skin_settings_pipeline;
+    require_numeric_registry();
+
+    // The registered zero-thickness endpoint is accepted but the Print pipeline
+    // intentionally normalizes sub-0.001 mm fuzz to the no-fuzz path.
+    const WallPoints no_fuzzy_skin = slice_tube(settings_config("none"));
+    const WallPoints zero_thickness = slice_tube(settings_config("external", 0., 0.75));
+    CHECK(zero_thickness == no_fuzzy_skin);
+    const WallPoints maximum_thickness = slice_tube(settings_config("external", 2., 0.75));
+    CHECK(maximum_thickness.contour_outer.size() > no_fuzzy_skin.contour_outer.size());
+    CHECK(longest_axis_span_mm(maximum_thickness.contour_outer) >
+          longest_axis_span_mm(no_fuzzy_skin.contour_outer) + 0.5);
+    CHECK(maximum_thickness.hole_outer == no_fuzzy_skin.hole_outer);
+
+    const WallPoints minimum_spacing = slice_tube(settings_config("external", 0.4, 0.01));
+    const WallPoints near_minimum_spacing = slice_tube(settings_config("external", 0.4, 0.02));
+    const WallPoints nominal_spacing = slice_tube(settings_config("external", 0.4, 0.75));
+    const WallPoints maximum_spacing = slice_tube(settings_config("external", 0.4, 5.));
+    CHECK(minimum_spacing.contour_outer.size() != near_minimum_spacing.contour_outer.size());
+    CHECK(near_minimum_spacing.contour_outer.size() > nominal_spacing.contour_outer.size());
+    CHECK(nominal_spacing.contour_outer.size() > maximum_spacing.contour_outer.size());
+    CHECK(minimum_spacing.hole_outer == no_fuzzy_skin.hole_outer);
+    CHECK(maximum_spacing.hole_outer == no_fuzzy_skin.hole_outer);
 }
