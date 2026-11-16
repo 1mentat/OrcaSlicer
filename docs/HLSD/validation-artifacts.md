@@ -133,6 +133,60 @@ it writes are payload files and disappear with the lease unless a report is prom
 as described below. A run's result is a summary on the PR or CI job, not a retained
 tree.
 
+### GCC/gcov coverage with Catch batches
+
+`slicer_coverage.py run --backend gcov` runs the CTest selection test by test. With
+`--gcov-catch-batch`, `slicer_catch_batch.py` instead discovers the live CTest selection
+and runs it as Catch2 batches, so one executable start covers many cases. CTest remains
+the source of the selection. This is an opt-in speed path for the `gcov` backend only;
+it supports only CTest registrations that invoke one Catch executable with exactly one
+test name, and fails closed (`incomplete_preflight`) otherwise. The option is rejected
+without `--backend gcov`. `--gcov-catch-batch-timeout SECONDS` bounds the whole batch
+(default: `--timeout`). `--gcov-catch-batch-fff-shards 2` splits the single-CPU
+`fff_print_tests` cohort into two concurrent shards and requires `--gcov-tool`. The
+`--gcov-data-dir` must not already exist, so name a fresh child of the payload:
+
+```sh
+python scripts/validation_runner.py ...runner options as above... -- \
+  python scripts/slicer_coverage.py run --backend gcov --gcov-catch-batch \
+  --root /absolute/source/checkout --gcov-data-dir /absolute/payload/gcov-data \
+  --test-command 'ctest --test-dir build/tests -C Release -LE "NotWorking|RequiresApp" --no-tests=error' ...
+```
+
+### PR-validation evidence gates
+
+`slicer_pr_validation.py` applies a test-only harness overlay to each PR head and to its
+base. All of these options keep their meaning under the runner; its `--output-dir`,
+`--work-root`, `--build-dir` and worktree-reuse rules above still apply.
+
+- **Tracked-diff binding.** The tracked state of a worktree is hashed from
+  `git diff --binary --full-index`, and overlay patches are generated the same way, so
+  the recorded digest binds full 40-character blob IDs. An abbreviated ID changes as
+  the object database grows, which would change the digest without any file changing.
+  `--reuse-worktree-from-report` (standalone use only; the runner rejects it) accepts
+  an older report's abbreviated-ID digest only when every other tree and status binding
+  matches.
+- **`--overlay-resolution-manifest FILE`.** The overlay is applied with
+  `git apply --3way --index`; a conflict is never auto-resolved. The manifest (JSON,
+  `schema_version` 1) supplies a resolution for exactly one base, head and overlay
+  patch SHA-256 row. Each conflicting path pins `stage_blobs` for index stages `"1"`
+  (merge base), `"2"` (ours) and `"3"` (theirs) as full blob IDs, plus a
+  `resolved_path` payload with its `resolved_sha256` and `resolved_blob_sha1`. For an
+  add/add conflict there is no merge base, so stage `"1"` is `null`; stages 2 and 3
+  must still match. The conflict paths and stages seen in the index must equal the
+  manifest exactly, the resolved bytes must hash to the pinned blob, and no unmerged
+  path may remain; otherwise the run reports `overlay_resolution_invalid`.
+- **`--minimum-tests N`** (default 1, must be positive). A run is comparable evidence
+  only when its JUnit testcase count is at least `N`; otherwise a passing or failing
+  result becomes `test_evidence_incomplete`. Infrastructure failures are not masked.
+- **`--baseline-expectation-manifest FILE`.** Requires reference-baseline execution
+  (the default). A source-pinned manifest lets comparison proceed after a harness
+  baseline that fails ordinary assertions. It pins `harness_ref_sha`,
+  `harness_ref_tree_sha`, `tracked_source_index_sha256` and `testcase_statuses`
+  (`passed` or `failed`, at least one `failed`). The baseline qualifies only when its
+  JUnit identities and statuses equal the manifest exactly. Raw baseline failures stay
+  visible and the overall status stays nonzero.
+
 ## Promotion and hosted CI
 
 Promotion selects individual relative regular files, with an explicit retention
