@@ -196,7 +196,7 @@ TEST_CASE("A raft is still generated under tree support", "[TreeSupport]")
 // drop_nodes() decides the node merges and spawns the next layer's nodes in parallel. Every one of
 // those decisions has to be applied in a fixed order, or the same model gives different branches on
 // each slice.
-TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression]")
+TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression][TreeSupportScheduling][Parallel]")
 {
     // Scaled up so that a layer holds enough nodes for the parallel range to be split. At stock
     // size it stays in one chunk and the order never varies.
@@ -215,7 +215,7 @@ TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSup
 // Prim breaks equal-distance ties by heap address. A 1 mm branch diameter puts neighbours close
 // enough to tie, and an explicit line width pins max_move_dist, so the moved tie winner reaches
 // the support toolpaths.
-TEST_CASE("Tree support toolpaths do not depend on the MST tie order", "[TreeSupport][Regression]")
+TEST_CASE("Tree support toolpaths do not depend on the MST tie order", "[TreeSupport][Regression][Parallel]")
 {
     sliced_twice_matches(two_tier_mesh(), 0, "tree_hybrid", {
         { "tree_support_branch_diameter", 1.0 },
@@ -223,6 +223,24 @@ TEST_CASE("Tree support toolpaths do not depend on the MST tie order", "[TreeSup
         { "tree_support_branch_angle",    40 },
         { "support_line_width",           0.4 },
     });
+}
+
+// scaled_z is defined below with the other fixtures; the cases here use it before that point.
+namespace {
+TriangleMesh scaled_z(TestMesh id, float xy_scale, float z_scale);
+} // namespace
+
+// Same scheduling check as above on the source's flattened fixtures (z kept at 1x), which keep a
+// dense XY node field without repeating the geometry over extra layers.
+TEST_CASE("Tree support toolpaths do not depend on thread scheduling for flattened fixtures",
+          "[TreeSupport][TreeSupportScheduling][Regression][Parallel]")
+{
+    // Scaled up so that a layer holds enough nodes for the parallel range to be split. At stock
+    // size it stays in one chunk and the order never varies.
+    SECTION("overhang")            { sliced_twice_matches(scaled_z(TestMesh::overhang, 2.f, 1.f), 0); }
+    SECTION("bridge with hole")    { sliced_twice_matches(scaled_z(TestMesh::bridge_with_hole, 3.f, 1.f), 0); }
+    // Build-plate-only filtering retains enough support points to keep the parallel work substantial.
+    SECTION("on the build plate")  { sliced_twice_matches(scaled_z(TestMesh::overhang, 4.f, 1.f), 1); }
 }
 
 namespace {
