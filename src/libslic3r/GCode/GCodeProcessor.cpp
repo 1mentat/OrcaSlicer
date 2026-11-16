@@ -951,7 +951,10 @@ public:
             return ascii_iequals(curr_cmd, "G28") || ascii_iequals(curr_cmd, "G29") || ascii_iequals(curr_cmd, "PRINT_START") ||
                    ascii_iequals(curr_cmd, "START_PRINT");
         };
-        assert(!m_lines.empty());
+        // A tool change can be the first exported line. With no earlier lines to
+        // backtrace into, leave it in place without touching the empty cache.
+        if (m_lines.empty())
+            return;
         const float time_step           = backtrace.time_step();
         size_t      rev_it_dist         = 0;    // distance from the end of the cache of the starting point of the backtrace
         float       last_time_insertion = 0.0f; // used to avoid inserting two lines at the same time
@@ -982,14 +985,25 @@ public:
                 if (!m_machines[Stealth].g1_times_cache.empty())
                     time_diffs.push_back(m_times[Stealth] - rev_it->times[Stealth]);
                 const std::string out_line = line_inserter(i + 1, time_diffs);
-                rev_it_dist                = std::distance(m_lines.rbegin(), rev_it) + 1;
+                const size_t lines_after_insertion_point =
+                    static_cast<size_t>(std::distance(m_lines.rbegin(), rev_it));
+                const size_t inserted_after_line = m_added_lines_counter - lines_after_insertion_point;
+                rev_it_dist = lines_after_insertion_point + 1;
                 m_lines.insert(rev_it.base(), {out_line, rev_it->times});
 #ifndef NDEBUG
                 m_statistics.add_line(out_line.length());
 #endif // NDEBUG
                 m_size += out_line.length();
-                // synchronize gcode lines map
-                for (auto map_it = m_gcode_lines_map.rbegin(); map_it != m_gcode_lines_map.rbegin() + rev_it_dist - 1; ++map_it) {
+                // Synchronize original-line mappings after this inserted output line. The
+                // deque also contains earlier inserted commands, so its reverse distance is
+                // not an original-line count; compare in the output-line-id domain instead.
+                // Nonzero mapped output IDs stay ordered with their original records; zero
+                // marks suppressed lines and must be skipped rather than shifted into a false ID.
+                for (auto map_it = m_gcode_lines_map.rbegin(); map_it != m_gcode_lines_map.rend(); ++map_it) {
+                    if (map_it->second == 0)
+                        continue;
+                    if (map_it->second <= inserted_after_line)
+                        break;
                     ++map_it->second;
                 }
 
