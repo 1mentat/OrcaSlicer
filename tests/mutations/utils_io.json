@@ -1,0 +1,173 @@
+{
+  "scope": "File content verification, recursive copy failure propagation, bounded UTF8 spans, layer selection patterns, and memory formatting.",
+  "mutants": [
+    {
+      "id": "layer-one-based-origin",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "layer_id++;",
+      "new": "layer_id += 2;",
+      "description": "The first and repeated selected layers use exactly one-based indexing.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "layer-range-exclusive-end",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "layer_id < base_layer + local_count",
+      "new": "layer_id <= base_layer + local_count",
+      "description": "Explicit ranges stop immediately after their declared count.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "layer-period-count-boundary",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "return mod >= 0 && mod < count;",
+      "new": "return mod >= 0 && mod <= count;",
+      "description": "Periodic spans do not add a layer at their exclusive end.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "layer-interval-start",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (layer_id < interval)\n        return false;",
+      "new": "if (layer_id < interval)\n        return true;",
+      "description": "An interval does not select layers before the first start.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "layer-invalid-list-abort",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "// Ignore invalid tokens",
+      "new": "return false; // Mutant aborts the rest of the explicit list.",
+      "description": "A malformed token does not prevent a later valid selection.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "layer-nonpositive-interval",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (interval <= 0 || count <= 0)\n        return false;",
+      "new": "if (interval <= 0 || count <= 0)\n        return true;",
+      "description": "Nonpositive intervals and counts select no layers.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "memory-rounding-half-mb",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "n +=  500000;",
+      "new": "n +=  0;",
+      "description": "Decimal MB rounds to the nearest whole MB.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "memory-group-zero-padding",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "sprintf(buf, \",%03d\", (int)n);",
+      "new": "sprintf(buf, \",%d\", (int)n);",
+      "description": "Low comma-separated groups retain their three digits.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "memory-kib-unit-boundary",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (f_bytes < kb)",
+      "new": "if (f_bytes <= kb)",
+      "description": "Exactly 1024 bytes receives the KB representation.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "utf8-truncated-four-byte-span",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (4 > size) {\n\t\t\treturn size;",
+      "new": "if (4 > size) {\n\t\t\treturn 4;",
+      "description": "Truncated four-byte characters never claim bytes beyond the available span.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "utf8-continuation-boundary",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (c < 0x80 || c >= 0xC0) {",
+      "new": "if (c < 0x80) {",
+      "description": "A continuation run stops at a subsequent multibyte header.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "utf8-three-byte-width",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "length += 3;",
+      "new": "length += 2;",
+      "description": "A complete three-byte UTF8 character consumes all three bytes.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "copy-content-comparison",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "std::memcmp(buffer_origin.data(), buffer_copy.data(), origin_cnt) != 0",
+      "new": "false",
+      "description": "Equal file sizes do not hide changed content.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "copy-later-chunk-comparison",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "(origin_cnt > 0 && std::memcmp(buffer_origin.data(), buffer_copy.data(), origin_cnt) != 0)",
+      "new": "(origin_cnt == std::streampos(buffer_size) && std::memcmp(buffer_origin.data(), buffer_copy.data(), origin_cnt) != 0)",
+      "description": "The final partial buffer participates in content verification.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "directory-filter-inverted",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if(filter && filter(name))",
+      "new": "if(filter && !filter(name))",
+      "description": "The recursive-copy predicate excludes matching filenames only.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "directory-merge-preservation",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (!merge_mode && boost::filesystem::exists(target))",
+      "new": "if (boost::filesystem::exists(target))",
+      "description": "Merge preserves pre-existing descendants absent from the source.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "md5-full-buffer-only",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "MD5_Update(&ctx, (unsigned char *) buf.data(), read_bytes);",
+      "new": "if (read_bytes == int(buf.size())) MD5_Update(&ctx, (unsigned char *) buf.data(), read_bytes);",
+      "description": "The final partial MD5 block contributes to the standard digest.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "var-existing-path-priority",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "if (boost::filesystem::exists(file_name, ec)) {",
+      "new": "if (!boost::filesystem::exists(file_name, ec)) {",
+      "description": "Existing explicit paths are preserved and missing relative resources resolve under var_dir.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "gallery-directory-rejection",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "return is_plain_file(dir_entry) && strcasecmp(dir_entry.path().extension().string().c_str(), type) == 0;",
+      "new": "return strcasecmp(dir_entry.path().extension().string().c_str(), type) == 0;",
+      "description": "A directory whose suffix looks like a model is not a gallery file.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "shapes-handy-root",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "dir == sys_shapes_dir() || dir == custom_shapes_dir() || dir == handy_models_dir()",
+      "new": "dir == sys_shapes_dir() || dir == custom_shapes_dir()",
+      "description": "The handy model resource root is a recognized shapes directory.",
+      "test_filter": "UtilsIOContracts"
+    },
+    {
+      "id": "framework-recursive-failure-ignored",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "                if (!copy_framework(it->path().string(), dest_path.string()))\n                    return false;",
+      "new": "                copy_framework(it->path().string(), dest_path.string());",
+      "description": "A nested copy error must propagate to the caller instead of reporting success.",
+      "test_filter": "UtilsFrameworkFailure"
+    }
+  ]
+}

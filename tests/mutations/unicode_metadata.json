@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Unicode ZIP metadata decoding and integrity mutants.",
+  "mutants": [
+    {
+      "id": "unicode-final-field-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (len > extra.size() - offset - 4)",
+      "new": "if (len >= extra.size() - offset - 4)",
+      "description": "Reject a valid extra field that exactly fills the remaining metadata bytes.",
+      "test_filter": "AuxiliaryUnicodeMetadata"
+    },
+    {
+      "id": "unicode-name-checksum-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (crc == mz_crc32(0, reinterpret_cast<const unsigned char *>(path.data()), path.size()))",
+      "new": "if (crc != mz_crc32(0, reinterpret_cast<const unsigned char *>(path.data()), path.size()))",
+      "description": "Invert filename checksum validation; valid names must decode and stale metadata must fall back.",
+      "test_filter": "AuxiliaryUnicodeMetadata"
+    },
+    {
+      "id": "unicode-length-low-byte-signed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "const size_t len = size_t(p[2]) | (size_t(p[3]) << 8);",
+      "new": "const size_t len = size_t(static_cast<signed char>(p[2])) | (size_t(p[3]) << 8);",
+      "description": "Read the low length byte as signed, incorrectly rejecting long Unicode names.",
+      "test_filter": "AuxiliaryUnicodeMetadata"
+    },
+    {
+      "id": "unicode-version-check-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "len >= 5 && p[4] == 1",
+      "new": "len >= 5 && p[4] != 1",
+      "description": "Accept the wrong Unicode extra-field version while rejecting the supported version.",
+      "test_filter": "AuxiliaryUnicodeMetadata"
+    },
+    {
+      "id": "unicode-extra-read-capped-at-1024",
+      "old": "const mz_uint reported_size = mz_zip_reader_get_extra(&archive, file_index, nullptr, 0);",
+      "new": "const mz_uint reported_size = std::min<mz_uint>(mz_zip_reader_get_extra(&archive, file_index, nullptr, 0), 1024);",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "test_filter": "AuxiliaryUnicodeMetadata",
+      "description": "unicode extra read capped at 1024"
+    },
+    {
+      "id": "unicode-extra-drops-two-bytes",
+      "old": "extra.resize(std::min<size_t>(extra.size(), static_cast<size_t>(returned_size - 1)));",
+      "new": "extra.resize(std::min<size_t>(extra.size(), static_cast<size_t>(returned_size - 2)));",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "test_filter": "AuxiliaryUnicodeMetadata",
+      "description": "unicode extra drops two bytes"
+    }
+  ]
+}

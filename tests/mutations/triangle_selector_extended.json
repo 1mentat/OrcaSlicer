@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed TriangleSelectorExtended mutation candidates. Run results are recorded separately by the mutation harness.",
+  "mutants": [
+    {
+      "id": "triangle-selector-full-inside-branch",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (num_of_inside_vertices == 3) {",
+      "new": "if (num_of_inside_vertices == 2) {",
+      "description": "Treat a fully covered triangle as a partial brush case, breaking whole-face selection and area conservation.",
+      "test_filter": "TriangleSelectorExtended"
+    },
+    {
+      "id": "triangle-selector-seed-fill-clipping",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (neighbor_idx >= 0 && !visited[neighbor_idx] && !is_facet_clipped(neighbor_idx, clp)) {",
+      "new": "if (neighbor_idx >= 0 && !visited[neighbor_idx] && is_facet_clipped(neighbor_idx, clp)) {",
+      "description": "Propagate seed fill into clipped neighbors instead of excluding them.",
+      "test_filter": "TriangleSelectorExtended"
+    },
+    {
+      "id": "triangle-selector-bucket-propagation-gate",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (!propagate) {",
+      "new": "if (propagate) {",
+      "description": "Invert bucket fill's local-versus-propagated selection gate.",
+      "test_filter": "TriangleSelectorExtended"
+    },
+    {
+      "id": "triangle-selector-shift-threshold-inclusive",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (s >= threshold && s != EnforcerBlockerType::NONE) {",
+      "new": "if (s > threshold && s != EnforcerBlockerType::NONE) {",
+      "description": "Exclude a state exactly at the insertion threshold from state shifting.",
+      "test_filter": "TriangleSelectorExtended"
+    },
+    {
+      "id": "triangle-selector-seed-apply-state",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "triangle.set_state(new_state);",
+      "new": "triangle.set_state(EnforcerBlockerType::NONE);",
+      "description": "Discard the pending seed-fill state instead of applying the requested paint state.",
+      "test_filter": "TriangleSelectorExtended"
+    },
+    {
+      "id": "triangle-selector-remap-existing-painting",
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "old": "if (existing_painting) {\n        // Restore existing painting first, if given",
+      "new": "if (false) {\n        // Restore existing painting first, if given",
+      "description": "Drop existing target painting before applying the remapped source face.",
+      "test_filter": "TriangleSelectorExtended"
+    }
+  ]
+}

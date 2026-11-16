@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Recursive paint-bucket adjacency, paint-state boundaries, and contour geometry.",
+  "mutants": [
+    {
+      "description": "Clear the propagated child neighbor instead of carrying the same-state parent adjacency. The split-tree bucket-fill and contour cases must lose the unpainted connected region or its boundary while remaining safe.",
+      "expected_matches": 1,
+      "id": "triangle-selector-recursive-neighbor-propagation-cleared",
+      "new": "            out(index_to_replace) = -1;",
+      "old": "            out(index_to_replace) = neighbors_propagated(neighbor_idx);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "test_filter": "^TriangleSelectorRecursive$"
+    },
+    {
+      "description": "Force bucket-fill traversal to seek ENFORCER rather than the clicked leaf state. The recursive same-state and different-state cases must leave the NONE region unfilled and fail their area or boundary contracts.",
+      "expected_matches": 1,
+      "id": "triangle-selector-bucket-fill-start-state-forced-enforcer",
+      "new": "    EnforcerBlockerType start_facet_state = EnforcerBlockerType::ENFORCER;",
+      "old": "    EnforcerBlockerType start_facet_state = m_triangles[start_facet_idx].get_state();",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/TriangleSelector.cpp",
+      "test_filter": "^TriangleSelectorRecursive$"
+    }
+  ]
+}
