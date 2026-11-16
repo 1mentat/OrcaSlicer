@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Public Surface pointer-extents and SVG-opacity probes detect loss of union bounds or requested export opacity. These are proposed one-match ordinary assertion probes; no mutation has been run.",
+  "mutants": [
+    {
+      "id": "surface-pointer-extents-ignore-later-surfaces",
+      "path": "src/libslic3r/Surface.cpp",
+      "old": "        for (size_t i = 1; i < surfaces.size(); ++ i)\n            bbox.merge(get_extents(*surfaces[i]));",
+      "new": "        for (size_t i = 1; i < surfaces.size(); ++ i)\n            bbox.merge(get_extents(*surfaces.front()));",
+      "expected_matches": 1,
+      "test_filter": "Surface extents include negative and disjoint contours and define empty results",
+      "description": "Ignore every pointer after the first in extent aggregation. The reversed pointer fixture contains disjoint negative and positive surfaces and expects their full union."
+    },
+    {
+      "id": "surface-svg-export-ignores-requested-opacity",
+      "path": "src/libslic3r/Surface.cpp",
+      "old": "        svg.draw(surface->expolygon, surface_type_to_color_name(surface->surface_type), transparency);",
+      "new": "        svg.draw(surface->expolygon, surface_type_to_color_name(surface->surface_type), 1.f);",
+      "expected_matches": 1,
+      "test_filter": "Surface SVG export preserves holes colors and requested opacity",
+      "description": "Force fully opaque SVG output. The public exporter requests 0.35 opacity and parses emitted numeric values while checking hole counts and surface colors."
+    }
+  ]
+}

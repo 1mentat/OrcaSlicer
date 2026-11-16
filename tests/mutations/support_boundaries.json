@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Two assertion-killed probes for support boundary behavior on a bounded 120-layer 45-degree ramp. The tests exercise registered endpoints and selected threshold classes; they do not sweep the numeric domains.",
+  "test_source": "tests/fff_print/test_support_material.cpp",
+  "test_source_sha256": "b2ae61529cfd6d69b32f779a608b3c32792b9d5d742ddb7adff3904cf496c47f",
+  "mutants": [
+    {
+      "id": "zero-threshold-skips-overlap-fallback",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "source_sha256": "b81e49a134c44ea0f576c290fa5c6a8f1680359b2f6771375f4cb820e11ca679",
+      "old": "object_config.support_threshold_angle.value > 0 ?",
+      "new": "object_config.support_threshold_angle.value >= 0 ?",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^(SupportThresholdAngle|EnforceSupportLayers|SupportObjectXYDistance)$",
+      "description": "Route a zero threshold around the overlap fallback; the threshold case must fail its ordinary CHECK on support extrusion."
+    },
+    {
+      "id": "enforce-support-layer-limit-truncated-at-100",
+      "path": "src/libslic3r/Support/SupportMaterial.cpp",
+      "source_sha256": "b81e49a134c44ea0f576c290fa5c6a8f1680359b2f6771375f4cb820e11ca679",
+      "old": "(layer_id < (size_t)object_config.enforce_support_layers.value) ?",
+      "new": "(layer_id < std::min<size_t>(100, (size_t)object_config.enforce_support_layers.value)) ?",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^(SupportThresholdAngle|EnforceSupportLayers|SupportObjectXYDistance)$",
+      "description": "Cap forced support at 100 layers; the 5000 endpoint must fail its ordinary CHECK that exported support reaches above z=21 mm."
+    }
+  ]
+}
