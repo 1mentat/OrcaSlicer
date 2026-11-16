@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Targeted mutation for PR #11's ConflictChecker candidate bounding-box filter. This mutation applies only after PR #11's production patch adds the candidate overlap predicate; the predicate is absent from the f11331c base.",
+  "mutants": [
+    {
+      "id": "pr11-conflict-checker-rejects-all-cross-object-bbox-candidates",
+      "path": "src/libslic3r/GCode/ConflictChecker.cpp",
+      "old": "return id_bbox.first != l._id && id_bbox.second.overlap(bbox);",
+      "new": "return id_bbox.first != l._id && id_bbox.second.overlap(bbox) && false;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Conflict checker matches pairwise results for overlap and separation",
+      "expected_test_count": 1,
+      "description": "After PR #11 adds bbox-based candidates, force its cross-object overlap predicate to reject every line. The deterministic overlapping pair must still be found by the pairwise reference, while the optimized checker must report the same distinct object-ID pair; the positive result assertion should fail under this mutant."
+    }
+  ]
+}

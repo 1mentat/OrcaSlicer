@@ -43,6 +43,12 @@
 #include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include <array>
+#include <optional>
+#include "libslic3r/SLA/IndexedMesh.hpp"
+#include "libslic3r/SLA/SupportPointGenerator.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/SLA/SupportTreeMesher.hpp"
 
 using namespace Slic3r;
 
@@ -174,10 +180,12 @@ DynamicPrintConfig sla_statistics_config(double initial_exposure,
                                          double regular_exposure,
                                          double area_fill,
                                          double fast_tilt,
-                                         double slow_tilt)
+                                         double slow_tilt,
+                                         std::optional<int> faded_layers = 3)
 {
     DynamicPrintConfig config = sla_config(0.5);
-    config.set_key_value("faded_layers", new ConfigOptionInt(3));
+    if (faded_layers.has_value())
+        config.set_key_value("faded_layers", new ConfigOptionInt(*faded_layers));
     config.set_key_value("initial_exposure_time", new ConfigOptionFloat(initial_exposure));
     config.set_key_value("exposure_time", new ConfigOptionFloat(regular_exposure));
     config.set_key_value("area_fill", new ConfigOptionFloat(area_fill));
@@ -190,7 +198,9 @@ SlaStatisticsRun run_sla_statistics(DynamicPrintConfig config)
 {
     SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 3.0));
     REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
-    REQUIRE(fixture.print.validate().string.empty());
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
     fixture.print.process();
     REQUIRE(fixture.print.finished());
     REQUIRE(fixture.print.objects().size() == 1);
@@ -261,15 +271,19 @@ struct PillarConnectionRun
     std::size_t support_faces = 0;
     std::size_t separated_support_slices = 0;
     double max_support_centroid_spacing_mm = 0.0;
+    std::size_t linked_pillars = 0;
 };
 
-DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode)
+DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode,
+                                            const std::optional<double> max_pillar_link_distance = 10.0,
+                                            const double object_elevation = 15.0,
+                                            const std::optional<double> max_bridge_length = 2.5)
 {
     DynamicPrintConfig config = sla_config(1.0);
     config.set_deserialize_strict({
         { "supports_enable",                 true },
         { "support_buildplate_only",         false },
-        { "support_object_elevation",        15.0 },
+        { "support_object_elevation",        object_elevation },
         { "support_head_front_diameter",     1.0 },
         { "support_head_penetration",        0.2 },
         { "support_head_width",              1.0 },
@@ -278,23 +292,29 @@ DynamicPrintConfig pillar_connection_config(const SLAPillarConnectionMode mode)
         { "support_base_height",             1.0 },
         { "support_base_safety_distance",    0.5 },
         { "support_critical_angle",          45.0 },
-        // Keep the two manually supplied heads out of one ground cluster: their 3 mm
-        // 3D separation must exceed this clustering limit, while interconnect() still
-        // accepts the pair through support_max_pillar_link_distance below.
-        { "support_max_bridge_length",       2.5 },
-        { "support_max_pillar_link_distance", 10.0 },
         { "support_max_bridges_on_pillar",   8 },
         { "support_pillar_widening_factor",  0.0 },
     });
+    // Keep the existing pillar-mode fixture below the 3 mm cluster threshold;
+    // the bridge-length contract can omit this key to exercise the registered default.
+    if (max_bridge_length.has_value())
+        config.set_key_value("support_max_bridge_length",
+                             new ConfigOptionFloat(*max_bridge_length));
+    if (max_pillar_link_distance.has_value())
+        config.set_key_value("support_max_pillar_link_distance",
+                             new ConfigOptionFloat(*max_pillar_link_distance));
     config.set_key_value("support_pillar_connection_mode",
                          new ConfigOptionEnum<SLAPillarConnectionMode>(mode));
     return config;
 }
 
 PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode,
-                                               const double                    spacing)
+                                               const double                    spacing,
+                                               const std::optional<double>     max_pillar_link_distance = 10.0,
+                                               const double                    object_elevation = 15.0,
+                                               const bool                      rebuild_tree_for_link_count = false)
 {
-    DynamicPrintConfig config = pillar_connection_config(mode);
+    DynamicPrintConfig config = pillar_connection_config(mode, max_pillar_link_distance, object_elevation);
     sla::SupportPoints points{
         sla::SupportPoint(float(5.0 - spacing / 2.0), 5.f, 0.f, 0.5f, true),
         sla::SupportPoint(float(5.0 + spacing / 2.0), 5.f, 0.f, 0.5f, false),
@@ -317,6 +337,25 @@ PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode
     REQUIRE(std::isfinite(model_volume));
     REQUIRE(support_volume > 0.0);
     REQUIRE(model_volume > 0.0);
+
+    std::size_t linked_pillars = 0;
+    if (rebuild_tree_for_link_count) {
+        // Rebuild from the public SLAPrint object's transformed mesh and resolved config.
+        // This makes the link count an oracle for PrintConfig-to-SupportTreeConfig mapping
+        // and for SupportTreeBuildsteps::interconnect_pillars(), not for config storage.
+        const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+        const sla::SupportableMesh tree_input(object->transformed_mesh().its,
+                                              object->get_support_points(), tree_config);
+        sla::SupportTreeBuilder tree;
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, tree_input));
+        for (const sla::Pillar &pillar : tree.pillars())
+            if (pillar.links > 0)
+                ++linked_pillars;
+        TriangleMesh rebuilt_support{tree.retrieve_mesh(sla::MeshType::Support)};
+        REQUIRE_FALSE(rebuilt_support.empty());
+        CHECK_THAT(std::abs(static_cast<double>(rebuilt_support.volume())),
+                   Catch::Matchers::WithinRel(support_volume, 1e-5));
+    }
 
     // A public slice-level witness that the two heads stayed separate.  Base polygons
     // may overlap at the bottom, so search every support slice and use the largest
@@ -343,7 +382,7 @@ PillarConnectionRun process_pillar_connection(const SLAPillarConnectionMode mode
     REQUIRE(separated_support_slices > 0);
     REQUIRE(max_support_centroid_spacing_mm > 2.0);
     return {support_volume, model_volume, support.its.vertices.size(), support.its.indices.size(),
-            separated_support_slices, max_support_centroid_spacing_mm};
+            separated_support_slices, max_support_centroid_spacing_mm, linked_pillars};
 }
 
 } // namespace
@@ -977,6 +1016,31 @@ TEST_CASE("SLA relative correction rebuilds transformed geometry", "[SLAPrint][S
     CHECK_THAT(model_slice_area_mm2(*fixture.print.objects().front()), Catch::Matchers::WithinRel(150.0, 0.01));
 }
 
+TEST_CASE("SLA correction vectors shorter than two values retain the unity fallback",
+          "[SLAPrint][SLACorrectionValidation][SLACorrectionShortVector]")
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("relative_correction", new ConfigOptionFloats({1.5}));
+    config.set_key_value("material_correction", new ConfigOptionFloats({0.5}));
+    config.set_deserialize_strict({
+        {"relative_correction_x", 2.0},
+        {"relative_correction_y", 3.0},
+        {"relative_correction_z", 4.0},
+        {"material_correction_x", 5.0},
+        {"material_correction_y", 6.0},
+        {"material_correction_z", 7.0},
+    });
+
+    Model empty_model;
+    SLAPrint print;
+    print.apply(empty_model, std::move(config));
+
+    const Vec3d correction = print.relative_correction();
+    CHECK_THAT(correction.x(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.y(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+    CHECK_THAT(correction.z(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+}
+
 TEST_CASE("SLA model extension and deletion synchronize print objects by ID", "[SLAPrint][SLALifecycle]")
 {
     LifecycleFixture fixture;
@@ -1300,6 +1364,126 @@ TEST_CASE("SLA empty models remain empty through processing", "[SLAPrint][SLALif
     CHECK(print.print_layers().empty());
 }
 
+TEST_CASE("SLA bottle metadata changes retain completed geometry and statistics", "[SLAPrint][SLALifecycle][SLABottleMetadata]")
+{
+    LifecycleFixture fixture;
+    const auto print_step_done = [&fixture](SLAPrintStep step) {
+        using SLAPrintState = PrintBaseWithState<SLAPrintStep, slapsCount>;
+        return static_cast<const SLAPrintState &>(fixture.print).is_step_done(step);
+    };
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.print.objects().size() == 1);
+    REQUIRE(fixture.config.option("bottle_cost") != nullptr);
+    REQUIRE(fixture.config.option("bottle_volume") != nullptr);
+    REQUIRE(fixture.config.option("bottle_weight") != nullptr);
+    CHECK_THAT(fixture.config.option("bottle_cost")->getFloat(), Catch::Matchers::WithinAbs(0.0, 1e-9));
+    CHECK_THAT(fixture.config.option("bottle_volume")->getFloat(), Catch::Matchers::WithinAbs(1000.0, 1e-9));
+    CHECK_THAT(fixture.config.option("bottle_weight")->getFloat(), Catch::Matchers::WithinAbs(1.0, 1e-9));
+
+    const std::string validation_message = fixture.print.validate().string;
+    INFO("SLAPrint validation: " << validation_message);
+    REQUIRE(validation_message.empty());
+
+    fixture.process_all();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(print_step_done(slapsMergeSlicesAndEval));
+    REQUIRE(print_step_done(slapsRasterize));
+    REQUIRE(fixture.print.is_step_done(slaposObjectSlice));
+    REQUIRE(fixture.print.is_step_done(slaposSliceSupports));
+
+    const SLAPrintStatistics baseline_stats = fixture.print.print_statistics();
+    CHECK(baseline_stats.objects_used_material > 0.0);
+    CHECK(baseline_stats.estimated_print_time > 0.0);
+
+    std::vector<ExPolygons> baseline_model_slices;
+    const SLAPrintObject *baseline_object = fixture.print.objects().front();
+    const ObjectID baseline_object_id = baseline_object->id();
+    baseline_model_slices.reserve(baseline_object->get_slice_index().size());
+    for (const SLAPrintObject::SliceRecord &record : baseline_object->get_slice_index()) {
+        REQUIRE(record.is_valid());
+        CHECK(record.get_slice(soSupport).empty());
+        const ExPolygons &model_slices = record.get_slice(soModel);
+        REQUIRE(!model_slices.empty());
+        baseline_model_slices.push_back(model_slices);
+    }
+
+    std::vector<double> baseline_print_layer_levels;
+    std::vector<std::size_t> baseline_print_layer_slice_counts;
+    for (const auto &layer : fixture.print.print_layers()) {
+        baseline_print_layer_levels.push_back(layer.level());
+        baseline_print_layer_slice_counts.push_back(layer.slices().size());
+    }
+
+    const auto check_completed_output = [&]() {
+        CHECK(fixture.print.finished());
+        CHECK(print_step_done(slapsMergeSlicesAndEval));
+        CHECK(print_step_done(slapsRasterize));
+        CHECK(fixture.print.is_step_done(slaposObjectSlice));
+        CHECK(fixture.print.is_step_done(slaposSliceSupports));
+        REQUIRE(fixture.print.objects().size() == 1);
+
+        const SLAPrintObject *object = fixture.print.objects().front();
+        CHECK(object->id() == baseline_object_id);
+        const auto &slice_index = object->get_slice_index();
+        CHECK(slice_index.size() == baseline_model_slices.size());
+        if (slice_index.size() == baseline_model_slices.size()) {
+            for (std::size_t i = 0; i < slice_index.size(); ++i) {
+                const ExPolygons &model_slices = slice_index[i].get_slice(soModel);
+                CHECK(model_slices == baseline_model_slices[i]);
+                CHECK(slice_index[i].get_slice(soSupport).empty());
+            }
+        }
+
+        const auto &print_layers = fixture.print.print_layers();
+        CHECK(print_layers.size() == baseline_print_layer_levels.size());
+        if (print_layers.size() == baseline_print_layer_levels.size()) {
+            for (std::size_t i = 0; i < print_layers.size(); ++i) {
+                CHECK_THAT(print_layers[i].level(), Catch::Matchers::WithinAbs(baseline_print_layer_levels[i], 1e-9));
+                CHECK(print_layers[i].slices().size() == baseline_print_layer_slice_counts[i]);
+            }
+        }
+
+        const SLAPrintStatistics &stats = fixture.print.print_statistics();
+        CHECK_THAT(stats.objects_used_material, Catch::Matchers::WithinAbs(baseline_stats.objects_used_material, 1e-9));
+        CHECK_THAT(stats.support_used_material, Catch::Matchers::WithinAbs(baseline_stats.support_used_material, 1e-9));
+        CHECK_THAT(stats.estimated_print_time, Catch::Matchers::WithinAbs(baseline_stats.estimated_print_time, 1e-9));
+        CHECK(stats.fast_layers_count == baseline_stats.fast_layers_count);
+        CHECK(stats.slow_layers_count == baseline_stats.slow_layers_count);
+        CHECK(stats.layers_times.size() == baseline_stats.layers_times.size());
+        if (stats.layers_times.size() == baseline_stats.layers_times.size()) {
+            for (std::size_t i = 0; i < stats.layers_times.size(); ++i)
+                CHECK_THAT(stats.layers_times[i], Catch::Matchers::WithinAbs(baseline_stats.layers_times[i], 1e-9));
+        }
+    };
+
+    DynamicPrintConfig accepted_config = fixture.config;
+    const auto apply_metadata = [&](const char *key, double value, SLAPrint::ApplyStatus expected_status) {
+        DynamicPrintConfig updated_config = accepted_config;
+        updated_config.set_deserialize_strict({{key, value}});
+
+        const SLAPrint::ApplyStatus status = fixture.print.apply(fixture.model, updated_config);
+        CHECK(status == expected_status);
+        check_completed_output();
+
+        const SLAPrint::ApplyStatus repeated_status = fixture.print.apply(fixture.model, updated_config);
+        CHECK(repeated_status == SLAPrint::APPLY_STATUS_UNCHANGED);
+        check_completed_output();
+        accepted_config = std::move(updated_config);
+    };
+
+    // bottle_cost has the same registered minimum and default: zero.
+    apply_metadata("bottle_cost", 0.0, SLAPrint::APPLY_STATUS_UNCHANGED);
+    apply_metadata("bottle_cost", 2.5, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_cost", 0.0, SLAPrint::APPLY_STATUS_CHANGED);
+
+    apply_metadata("bottle_volume", 50.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_volume", 500.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_volume", 1000.0, SLAPrint::APPLY_STATUS_CHANGED);
+
+    apply_metadata("bottle_weight", 0.0, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_weight", 2.5, SLAPrint::APPLY_STATUS_CHANGED);
+    apply_metadata("bottle_weight", 1.0, SLAPrint::APPLY_STATUS_CHANGED);
+}
 } // namespace sla_lifecycle_contracts
 
 namespace sla_drain_transform_contracts {
@@ -1867,10 +2051,79 @@ TEST_CASE("SLA overlapping objects are unioned before material statistics",
 namespace sla_hollowing_thickness_followup_contracts {
 
 struct HollowRun {
+    bool empty = true;
     double volume = 0.;
     double width = 0.;
     double depth = 0.;
+    std::size_t vertex_count = 0;
+    double radial_rms_error = 0.;
 };
+
+HollowRun run_hollowing_config(DynamicPrintConfig config,
+                               TriangleMesh mesh,
+                               double expected_sphere_radius = 0.)
+{
+    config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
+
+    SlaCubeFixture fixture(std::move(config), std::move(mesh));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.model.objects.size() == 1);
+    const ModelObject *source = fixture.model.objects.front();
+    REQUIRE(source != nullptr);
+    REQUIRE(std::abs(static_cast<double>(source->raw_mesh().volume())) > 0.);
+    INFO("hollowing validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+
+    PrintBase::TaskParams task;
+    task.to_object_step = slaposHollowing;
+    fixture.print.set_task(task);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->is_step_done(slaposHollowing));
+    // Compare in the same public print-object coordinate frame.
+    const auto source_bbox = object->transformed_mesh().bounding_box();
+    REQUIRE(source_bbox.defined);
+    const indexed_triangle_set &interior = object->hollowed_interior_mesh();
+    HollowRun result;
+    result.empty = interior.empty();
+    if (result.empty)
+        return result;
+    REQUIRE_FALSE(interior.vertices.empty());
+
+    TriangleMesh interior_mesh(interior);
+    const auto bbox = interior_mesh.bounding_box();
+    const double bounds_tolerance = 0.05;
+    CHECK(bbox.min.x() >= source_bbox.min.x() - bounds_tolerance);
+    CHECK(bbox.max.x() <= source_bbox.max.x() + bounds_tolerance);
+    CHECK(bbox.min.y() >= source_bbox.min.y() - bounds_tolerance);
+    CHECK(bbox.max.y() <= source_bbox.max.y() + bounds_tolerance);
+    CHECK(bbox.min.z() >= source_bbox.min.z() - bounds_tolerance);
+    CHECK(bbox.max.z() <= source_bbox.max.z() + bounds_tolerance);
+    result.vertex_count = interior.vertices.size();
+    result.volume = std::abs(static_cast<double>(interior_mesh.volume()));
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    REQUIRE(std::isfinite(result.volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(result.volume > 0.);
+    REQUIRE(result.width > 0.);
+    REQUIRE(result.depth > 0.);
+    if (expected_sphere_radius > 0.) {
+        const Vec3d source_center = (source_bbox.min + source_bbox.max) * 0.5;
+        double squared_error_sum = 0.;
+        for (const Vec3f &vertex : interior.vertices) {
+            const double radial_error =
+                std::abs((vertex.cast<double>() - source_center).norm() - expected_sphere_radius);
+            squared_error_sum += radial_error * radial_error;
+        }
+        result.radial_rms_error = std::sqrt(squared_error_sum / interior.vertices.size());
+    }
+    return result;
+}
 
 HollowRun run_hollowing(double min_thickness)
 {
@@ -1926,6 +2179,29 @@ HollowRun run_hollowing(double min_thickness)
     return result;
 }
 
+// Source-branch overload (used by the ported hollowing cases): permissive about an empty interior and
+// reports vertex data. Main's one-argument run_hollowing above keeps its original oracle unchanged.
+HollowRun run_hollowing(double min_thickness,
+                        double quality,
+                        double closing_distance,
+                        TriangleMesh mesh = {},
+                        double expected_sphere_radius = 0.)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(quality));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(closing_distance));
+    if (mesh.empty())
+        mesh = make_cube(20.0, 20.0, 10.0);
+    return run_hollowing_config(std::move(config), std::move(mesh), expected_sphere_radius);
+}
+
+HollowRun run_hollowing_with_defaults(TriangleMesh mesh, double expected_sphere_radius)
+{
+    // Keep the three registered SLA defaults intact: thickness 3 mm,
+    // quality 0.5, and closing distance 2 mm.
+    return run_hollowing_config(sla_config(1.0), std::move(mesh), expected_sphere_radius);
+}
 } // namespace sla_hollowing_thickness_followup_contracts
 
 TEST_CASE("SLA hollowing wall thickness contracts the public interior",
@@ -2403,6 +2679,10 @@ struct ExportProfile
     std::string printer_variant;
     std::string printer_profile;
     std::string print_profile;
+    double material_density = 1.0;
+    std::string material_colour = "#29B2B2";
+    std::string material_type = "Tough";
+    std::string material_vendor;
 };
 
 struct RasterRun
@@ -2410,6 +2690,7 @@ struct RasterRun
     std::vector<RasterLayerSummary> layers;
     std::vector<coord_t>             levels;
     std::string                      config_ini;
+    DynamicPrintConfig               imported_profile;
 };
 
 RasterRun run_raster_export(ExportProfile profile = {})
@@ -2500,6 +2781,102 @@ RasterRun run_raster_export(ExportProfile profile = {})
     return result;
 }
 
+// Source-branch variant: also imports the exported SLA archive so its stored profile can be checked.
+// Main's run_raster_export above is unchanged for its existing callers.
+RasterRun run_raster_export_with_archive_import(ExportProfile profile = {})
+{
+    DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
+    config.set_key_value("material_print_speed", new ConfigOptionEnum<SLAMaterialSpeed>(profile.material_speed));
+    config.set_key_value("sla_material_settings_id", new ConfigOptionString(profile.material_name));
+    config.set_key_value("printer_model", new ConfigOptionString(profile.printer_model));
+    config.set_key_value("printer_variant", new ConfigOptionString(profile.printer_variant));
+    config.set_key_value("printer_settings_id", new ConfigOptionString(profile.printer_profile));
+    config.set_key_value("sla_print_settings_id", new ConfigOptionString(profile.print_profile));
+    config.set_key_value("material_density", new ConfigOptionFloat(profile.material_density));
+    config.set_key_value("material_colour", new ConfigOptionString(profile.material_colour));
+    config.set_key_value("material_type", new ConfigOptionString(profile.material_type));
+    config.set_key_value("material_vendor", new ConfigOptionString(profile.material_vendor));
+    config.set_key_value("layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("initial_layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("display_width", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_height", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_pixels_x", new ConfigOptionInt(128));
+    config.set_key_value("display_pixels_y", new ConfigOptionInt(128));
+    config.set_key_value("display_orientation",
+                         new ConfigOptionEnum<SLADisplayOrientation>(sladoLandscape));
+    config.set_key_value("display_mirror_x", new ConfigOptionBool(false));
+    config.set_key_value("display_mirror_y", new ConfigOptionBool(false));
+    config.set_key_value("gamma_correction", new ConfigOptionFloat(0.0));
+
+    // SLAPrint::apply supplies the pinned display configuration to this default
+    // archive through SLAArchive::apply; no second printer-config copy is needed.
+    SL1Archive archive;
+    SLAPrint print;
+    // The archive is attached before apply so the public rasterize step is enabled
+    // by the same lifecycle used by BackgroundSlicingProcess.
+    print.set_printer(&archive);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    // make_cube() uses vertices from (0,0,0) to (size_x,size_y,size_z);
+    // the explicit upper-volume translation therefore keeps both tier centers
+    // at (4,4) while placing the union inside the 32 mm raster bed.
+    object->add_volume(make_cube(8.0, 8.0, 2.0));
+    TriangleMesh upper = make_cube(4.0, 4.0, 2.0);
+    upper.translate(Vec3f(2.f, 2.f, 1.99f));
+    object->add_volume(std::move(upper));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    const auto apply_status = print.apply(model, std::move(config));
+    REQUIRE(apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA raster validation: " << print.validate().string);
+    REQUIRE(print.validate().string.empty());
+
+    print.process();
+    REQUIRE(print.finished());
+    // minZ=0, maxZ=3.99, and 1 mm initial/layer heights produce the public
+    // slice centers 0.5, 1.5, and 2.5; the next center is above maxZ.
+    REQUIRE(print.print_layers().size() == 3);
+    for (std::size_t i = 1; i < print.print_layers().size(); ++i)
+        REQUIRE(print.print_layers()[i - 1].level() < print.print_layers()[i].level());
+
+    const auto transformed_box = print.objects().front()->transformed_mesh().bounding_box();
+    CHECK_THAT(transformed_box.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.z(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.max.x(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.y(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.z(), Catch::Matchers::WithinAbs(3.99, 1e-4));
+
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "raster-contract");
+
+    RasterRun result;
+    import_sla_archive(output.string(), result.imported_profile);
+
+    ArchiveReader reader(output.string());
+    REQUIRE(reader.is_open());
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "config.ini", nullptr, 0) >= 0);
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "prusaslicer.ini", nullptr, 0) >= 0);
+
+    const auto config_ini = read_entry(reader, "config.ini");
+    result.config_ini.assign(reinterpret_cast<const char *>(config_ini.data()), config_ini.size());
+    result.levels.reserve(print.print_layers().size());
+    result.layers.reserve(print.print_layers().size());
+    for (const auto &layer : print.print_layers())
+        result.levels.push_back(layer.level());
+
+    constexpr std::size_t pixels = 128;
+    constexpr double pixel_mm = 32.0 / double(pixels);
+    for (std::size_t i = 0; i < result.levels.size(); ++i) {
+        const std::string name = string_printf("raster-contract%.5d.png", int(i));
+        result.layers.emplace_back(summarize_png(read_entry(reader, name), pixels, pixel_mm));
+    }
+    return result;
+}
+
 } // namespace sla_raster_active_contracts
 
 TEST_CASE("SLA attached SL1 archive rasterizes stepped model layers",
@@ -2560,12 +2937,16 @@ struct AroundPadRun {
     double footprint_x = 0.;
     double footprint_y = 0.;
     double support_volume = 0.;
+    double support_max_x_mm = 0.;
+    double configured_base_safety_distance_mm = 0.;
+    double mapped_base_safety_distance_mm = 0.;
     double model_area = 0.;
 };
 
 AroundPadRun run_around_pad(double object_gap, double connector_stride,
                             double connector_width, double connector_penetration,
-                            double support_base_safety_distance)
+                            std::optional<double> support_base_safety_distance,
+                            double island_bottom_z = 5.0)
 {
     DynamicPrintConfig config = sla_config(1.0);
     config.set_key_value("supports_enable", new ConfigOptionBool(true));
@@ -2581,14 +2962,16 @@ AroundPadRun run_around_pad(double object_gap, double connector_stride,
     config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
     config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
     config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
-    config.set_key_value("support_base_safety_distance",
-                         new ConfigOptionFloat(support_base_safety_distance));
+    if (support_base_safety_distance.has_value())
+        config.set_key_value("support_base_safety_distance",
+                             new ConfigOptionFloat(*support_base_safety_distance));
 
     TriangleMesh model_mesh = make_cube(10.0, 10.0, 1.0);
     TriangleMesh elevated_island = make_cube(6.0, 6.0, 2.0);
-    elevated_island.translate(12.f, 2.f, 5.f);
+    elevated_island.translate(12.f, 2.f, float(island_bottom_z));
     model_mesh.merge(elevated_island);
-    sla::SupportPoints points{sla::SupportPoint(15.f, 5.f, 5.f, 0.5f, true)};
+    sla::SupportPoints points{
+        sla::SupportPoint(15.f, 5.f, float(island_bottom_z), 0.5f, true)};
 
     SlaCubeFixture fixture(std::move(config), std::move(model_mesh), std::move(points));
     REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
@@ -2612,6 +2995,12 @@ AroundPadRun run_around_pad(double object_gap, double connector_stride,
     result.support_volume = std::abs(static_cast<double>(support.volume()));
     REQUIRE(std::isfinite(result.support_volume));
     REQUIRE(result.support_volume > 0.);
+    const BoundingBoxf3 support_bounds = support.bounding_box();
+    result.support_max_x_mm = support_bounds.max.x();
+    result.configured_base_safety_distance_mm =
+        object->config().support_base_safety_distance.getFloat();
+    result.mapped_base_safety_distance_mm =
+        make_support_cfg(object->config()).pillar_base_safety_distance_mm;
     if (!result.empty) {
         result.volume = std::abs(static_cast<double>(pad.volume()));
         const auto bbox = pad.bounding_box();
@@ -2827,4 +3216,851 @@ TEST_CASE("SLA drain-hole getter preserves finite covectors at bounded uniform s
     REQUIRE(std::isfinite(hole.height));
     CHECK_THAT(hole.radius, Catch::Matchers::WithinAbs(2.0, 0.0));
     CHECK_THAT(hole.height, Catch::Matchers::WithinAbs(6.0, 0.0));
+}
+
+namespace {
+struct MaxBridgeLengthRun
+{
+    double support_volume = 0.0;
+    std::size_t pillar_count = 0;
+    std::size_t bridge_count = 0;
+    std::size_t linked_pillar_count = 0;
+};
+
+MaxBridgeLengthRun process_max_bridge_length(std::optional<double> max_bridge_length)
+{
+    constexpr double horizontal_spacing = 2.05;
+    const double vertical_spacing = std::sqrt(9.0 - horizontal_spacing * horizontal_spacing);
+
+    // Two separate one-millimeter islands expose manual support points exactly 3 mm
+    // apart in 3D. The lower point is first, so a joined pair uses it as the center
+    // pillar; the higher point reaches it through a clear downward 45-degree bridge.
+    TriangleMesh model = make_cube(1.0, 1.0, 1.0);
+    TriangleMesh upper_island = make_cube(1.0, 1.0, 1.0);
+    upper_island.translate(Vec3f(float(horizontal_spacing), 0.f, float(vertical_spacing)));
+    model.merge(upper_island);
+    sla::SupportPoints points{
+        sla::SupportPoint(0.5f, 0.5f, 0.f, 0.5f, true),
+        sla::SupportPoint(float(horizontal_spacing + 0.5), 0.5f, float(vertical_spacing), 0.5f, true),
+    };
+
+    DynamicPrintConfig config = pillar_connection_config(slapcmZigZag, 0.0, 8.0,
+                                                          max_bridge_length);
+    SlaCubeFixture fixture(std::move(config), std::move(model), std::move(points));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA max bridge length validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    TriangleMesh pipeline_support = object->support_mesh();
+    REQUIRE_FALSE(pipeline_support.empty());
+    const double pipeline_volume = std::abs(static_cast<double>(pipeline_support.volume()));
+    REQUIRE(std::isfinite(pipeline_volume));
+    REQUIRE(pipeline_volume > 0.0);
+
+    // Lock the adjacent setting so this test observes max_bridge_length's head
+    // clustering and routed head-to-pillar bridge, not inter-pillar links.
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.max_bridge_length_mm,
+               Catch::Matchers::WithinAbs(max_bridge_length.value_or(15.0), 1e-8));
+    CHECK_THAT(tree_config.max_pillar_link_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-8));
+    const sla::SupportableMesh tree_input(object->transformed_mesh().its,
+                                          object->get_support_points(), tree_config);
+    sla::SupportTreeBuilder tree;
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, tree_input));
+    REQUIRE(tree.heads().size() == 2);
+    for (const sla::Head &head : tree.heads())
+        CHECK(head.is_valid());
+
+    MaxBridgeLengthRun result;
+    result.support_volume = pipeline_volume;
+    result.pillar_count = tree.pillars().size();
+    result.bridge_count = tree.bridges().size();
+    for (const sla::Pillar &pillar : tree.pillars())
+        if (pillar.links > 0)
+            ++result.linked_pillar_count;
+    TriangleMesh rebuilt_support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(rebuilt_support.empty());
+    CHECK_THAT(std::abs(static_cast<double>(rebuilt_support.volume())),
+               Catch::Matchers::WithinRel(pipeline_volume, 1e-5));
+    return result;
+}
+
+std::size_t process_auto_support_point_count(std::optional<int> density_percent)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    if (density_percent.has_value())
+        config.set_key_value("support_points_density_relative", new ConfigOptionInt(*density_percent));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA automatic support validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+
+    if (density_percent == 0) {
+        REQUIRE_THROWS_AS(fixture.print.process(), Slic3r::SlicingError);
+        CHECK_FALSE(fixture.print.finished());
+        REQUIRE(fixture.print.objects().size() == 1);
+
+        const SLAPrintObject *object = fixture.print.objects().front();
+        CHECK(object->config().support_points_density_relative.getInt() == 0);
+        REQUIRE(object->is_step_done(slaposSupportPoints));
+        REQUIRE(object->is_step_done(slaposSupportTree));
+        REQUIRE(object->get_support_points().empty());
+        CHECK(object->support_mesh().empty());
+        return 0;
+    }
+
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    CHECK(object->config().support_points_density_relative.getInt() == density_percent.value_or(100));
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    const sla::SupportPoints &points = object->get_support_points();
+    REQUIRE_FALSE(points.empty());
+    CHECK(std::all_of(points.begin(), points.end(), [](const sla::SupportPoint &point) {
+        return point.pos.allFinite();
+    }));
+    CHECK(std::all_of(points.begin(), points.end(), [](const sla::SupportPoint &point) {
+        return point.is_new_island;
+    }));
+    const BoundingBoxf3 mesh_bounds = object->transformed_mesh().bounding_box();
+    for (const sla::SupportPoint &point : points) {
+        CHECK(point.pos.x() >= mesh_bounds.min.x() - 1e-4f);
+        CHECK(point.pos.x() <= mesh_bounds.max.x() + 1e-4f);
+        CHECK(point.pos.y() >= mesh_bounds.min.y() - 1e-4f);
+        CHECK(point.pos.y() <= mesh_bounds.max.y() + 1e-4f);
+        CHECK(point.pos.z() >= mesh_bounds.min.z() - 1e-4f);
+        CHECK(point.pos.z() <= mesh_bounds.max.z() + 1e-4f);
+        CHECK_THAT(point.head_front_radius, Catch::Matchers::WithinAbs(0.5, 1e-6));
+    }
+    return points.size();
+}
+
+struct SupportDimensionsRun
+{
+    sla::SupportPoints points;
+    indexed_triangle_set transformed_mesh;
+    sla::SupportTreeConfig tree_config;
+    double pipeline_support_volume = 0.0;
+};
+
+SupportDimensionsRun process_auto_support_dimensions(const double minimal_distance,
+                                                      const double head_diameter,
+                                                      const double head_width)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    config.set_key_value("support_object_elevation", new ConfigOptionFloat(5.0));
+    config.set_key_value("support_points_density_relative", new ConfigOptionInt(100));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(minimal_distance));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(head_diameter));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(head_width));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-dimension validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.head_front_radius_mm,
+               Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-6));
+    CHECK_THAT(tree_config.head_width_mm, Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportPoints &points = object->get_support_points();
+    REQUIRE(points.size() >= 2);
+    CHECK(std::all_of(points.begin(), points.end(), [](const sla::SupportPoint &point) {
+        return point.is_new_island;
+    }));
+
+    CHECK_THAT(object->config().support_points_minimal_distance.getFloat(),
+               Catch::Matchers::WithinAbs(minimal_distance, 1e-6));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    for (const sla::SupportPoint &point : points) {
+        REQUIRE(point.pos.allFinite());
+        CHECK_THAT(point.head_front_radius,
+                   Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-5));
+    }
+    for (std::size_t i = 0; i < points.size(); ++i)
+        for (std::size_t j = i + 1; j < points.size(); ++j)
+            CHECK((points[i].pos - points[j].pos).norm() >= minimal_distance - 1e-4);
+
+    TriangleMesh support = object->support_mesh();
+    REQUIRE_FALSE(support.empty());
+    const double support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(support_volume));
+    REQUIRE(support_volume > 0.0);
+
+    SupportDimensionsRun result;
+    result.points = points;
+    result.transformed_mesh = object->transformed_mesh().its;
+    result.tree_config = make_support_cfg(object->config());
+    result.pipeline_support_volume = support_volume;
+    return result;
+}
+
+struct SupportDimensionsTreeRun
+{
+    double support_volume = 0.0;
+    double head_volume = 0.0;
+    double widest_head = 0.0;
+    std::size_t valid_heads = 0;
+};
+
+SupportDimensionsTreeRun build_support_dimensions_tree(const SupportDimensionsRun &run,
+                                                        const sla::SupportTreeConfig &config)
+{
+    const sla::SupportableMesh input(run.transformed_mesh, run.points, config);
+    sla::SupportTreeBuilder tree;
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+    REQUIRE(tree.heads().size() == run.points.size());
+
+    SupportDimensionsTreeRun result;
+    for (const sla::Head &head : tree.heads()) {
+        if (!head.is_valid())
+            continue;
+        ++result.valid_heads;
+        CHECK(std::isfinite(head.width_mm));
+        result.widest_head = std::max(result.widest_head, head.width_mm);
+        TriangleMesh head_mesh{sla::get_mesh(head, 45)};
+        const double head_volume = std::abs(static_cast<double>(head_mesh.volume()));
+        CHECK(std::isfinite(head_volume));
+        CHECK(head_volume > 0.0);
+        result.head_volume += head_volume;
+    }
+    REQUIRE(result.valid_heads > 0);
+    TriangleMesh support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(support.empty());
+    result.support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(result.support_volume));
+    REQUIRE(result.support_volume > 0.0);
+    return result;
+}
+
+void process_support_dimension_boundary(const double head_diameter, const double head_width)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    // SLAPrint validates elevation against the full head width. Add 1 mm of
+    // clearance so the registered 20 mm width reaches support-tree processing.
+    const double head_width_elevation = head_width + head_diameter + 2.0 - 0.2 + 1.0;
+    config.set_key_value("support_object_elevation",
+                         new ConfigOptionFloat(std::max(5.0, head_width_elevation)));
+    config.set_key_value("support_points_density_relative", new ConfigOptionInt(100));
+    config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(head_diameter));
+    config.set_key_value("support_head_penetration", new ConfigOptionFloat(0.2));
+    config.set_key_value("support_head_width", new ConfigOptionFloat(head_width));
+    config.set_key_value("support_pillar_diameter", new ConfigOptionFloat(2.0));
+    config.set_key_value("support_base_diameter", new ConfigOptionFloat(4.0));
+    config.set_key_value("support_base_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("support_base_safety_distance", new ConfigOptionFloat(0.5));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA boundary head-dimension validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportPoints));
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    CHECK_THAT(object->config().support_head_front_diameter.getFloat(),
+               Catch::Matchers::WithinAbs(head_diameter, 1e-6));
+    CHECK_THAT(object->config().support_head_width.getFloat(),
+               Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    CHECK_THAT(tree_config.head_front_radius_mm,
+               Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-6));
+    CHECK_THAT(tree_config.head_width_mm, Catch::Matchers::WithinAbs(head_width, 1e-6));
+    const sla::SupportPoints &points = object->get_support_points();
+    REQUIRE_FALSE(points.empty());
+    for (const sla::SupportPoint &point : points) {
+        CHECK(point.pos.allFinite());
+        CHECK(std::isfinite(point.head_front_radius));
+        CHECK_THAT(point.head_front_radius,
+                   Catch::Matchers::WithinAbs(head_diameter / 2.0, 1e-5));
+    }
+
+    const TriangleMesh support = object->support_mesh();
+    for (const Vec3f &vertex : support.its.vertices)
+        CHECK(vertex.allFinite());
+}
+
+void check_support_point_projection_contract()
+{
+    SlaCubeFixture fixture(sla_config(1.0), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support projection validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    const auto &slice_index = object->get_slice_index();
+    std::vector<ExPolygons> slices;
+    std::vector<float> heights;
+    slices.reserve(slice_index.size());
+    heights.reserve(slice_index.size());
+    for (const SLAPrintObject::SliceRecord &record : slice_index) {
+        if (record.get_slice_idx(soModel) == SLAPrintObject::SliceRecord::NONE)
+            continue;
+        slices.emplace_back(record.get_slice(soModel));
+        heights.emplace_back(record.slice_level());
+    }
+    REQUIRE_FALSE(slices.empty());
+    REQUIRE(slices.size() >= 2);
+
+    const BoundingBoxf3 mesh_bounds = object->transformed_mesh().bounding_box();
+    const sla::IndexedMesh indexed_mesh(object->transformed_mesh());
+
+    const double mid_y = 0.5 * (mesh_bounds.min.y() + mesh_bounds.max.y());
+    const double mid_x = 0.5 * (mesh_bounds.min.x() + mesh_bounds.max.x());
+    const double below_z = mesh_bounds.min.z() - 1.0;
+    const double above_z = mesh_bounds.max.z() + 1.0;
+    const std::array<Vec3d, 2> upward_directions{
+        Vec3d(0.0, 0.0, 1.0), Vec3d(std::copysign(0.0, -1.0), 0.0, 1.0)};
+
+    for (double x : {double(mesh_bounds.min.x()), double(mesh_bounds.max.x())}) {
+        for (const Vec3d &direction : upward_directions) {
+            INFO("vertical hit from x-boundary " << x << " with x direction " << direction.x());
+            const auto hit = indexed_mesh.query_ray_hit(Vec3d(x, mid_y, below_z), direction);
+            REQUIRE(hit.is_hit());
+            CHECK_THAT(hit.position().z(), Catch::Matchers::WithinAbs(mesh_bounds.min.z(), 1e-6));
+        }
+        CHECK_FALSE(indexed_mesh.query_ray_hit(Vec3d(x, mid_y, below_z), Vec3d(0.0, 0.0, -1.0)).is_hit());
+    }
+    for (double x : {double(mesh_bounds.min.x()) - 1e-4, double(mesh_bounds.max.x()) + 1e-4})
+        CHECK_FALSE(indexed_mesh.query_ray_hit(Vec3d(x, mid_y, below_z), upward_directions.front()).is_hit());
+    for (double y : {double(mesh_bounds.min.y()) - 1e-4, double(mesh_bounds.max.y()) + 1e-4})
+        CHECK_FALSE(indexed_mesh.query_ray_hit(Vec3d(mid_x, y, below_z), upward_directions.front()).is_hit());
+    CHECK_FALSE(indexed_mesh.query_ray_hit(Vec3d(mid_x, mid_y, below_z), Vec3d(0.0, 0.0, -1.0)).is_hit());
+    CHECK_FALSE(indexed_mesh.query_ray_hit(Vec3d(mid_x, mid_y, above_z), Vec3d(0.0, 0.0, 1.0)).is_hit());
+    CHECK(indexed_mesh.query_ray_hit(Vec3d(mid_x, mid_y, above_z), Vec3d(0.0, 0.0, -1.0)).is_hit());
+
+    sla::SupportPointGenerator::Config config;
+    config.density_relative = 0.25f;
+    config.minimal_distance = 1.0f;
+    config.head_diameter = 1.0f;
+    sla::SupportPointGenerator generator(indexed_mesh, config, []() {}, [](int) {});
+    generator.seed(5);
+    generator.execute(slices, heights);
+
+    const auto &points = generator.output();
+    REQUIRE_FALSE(points.empty());
+    std::size_t boundary_points = 0;
+    std::size_t unprojected_points = 0;
+    for (const sla::SupportPoint &point : points) {
+        REQUIRE(point.pos.allFinite());
+        CHECK(point.pos.x() >= mesh_bounds.min.x() - 1e-4f);
+        CHECK(point.pos.x() <= mesh_bounds.max.x() + 1e-4f);
+        CHECK(point.pos.y() >= mesh_bounds.min.y() - 1e-4f);
+        CHECK(point.pos.y() <= mesh_bounds.max.y() + 1e-4f);
+        CHECK(point.pos.z() >= mesh_bounds.min.z() - 1e-4f);
+        CHECK(point.pos.z() <= mesh_bounds.max.z() + 1e-4f);
+        const double squared_distance = indexed_mesh.squared_distance(point.pos.cast<double>());
+        INFO("fixed-seed support point xyz=(" << point.pos.x() << ", " << point.pos.y() << ", "
+             << point.pos.z() << "), mesh squared distance=" << squared_distance);
+        if (std::abs(point.pos.x() - mesh_bounds.min.x()) <= 1e-4f ||
+            std::abs(point.pos.x() - mesh_bounds.max.x()) <= 1e-4f)
+            ++boundary_points;
+        if (squared_distance > 1e-8)
+            ++unprojected_points;
+    }
+    INFO("fixed-seed x-boundary support points: " << boundary_points);
+    CHECK(unprojected_points == 0);
+}
+
+struct MaxBridgesRun
+{
+    std::size_t head_pillars = 0;
+    std::size_t bridge_segments = 0;
+    unsigned pillar_bridges = 0;
+};
+
+MaxBridgesRun process_max_bridges(const int max_bridges)
+{
+    DynamicPrintConfig config = pillar_connection_config(slapcmDynamic);
+    config.set_key_value("support_max_bridges_on_pillar", new ConfigOptionInt(max_bridges));
+
+    const TriangleMesh model = make_cube(10.0, 10.0, 4.0);
+    sla::SupportPoints points{
+        sla::SupportPoint(3.9f, 4.0f, 0.f, 0.5f, true),
+        sla::SupportPoint(5.0f, 4.0f, 0.f, 0.5f, false),
+        sla::SupportPoint(6.1f, 4.0f, 0.f, 0.5f, false),
+        sla::SupportPoint(3.9f, 5.1f, 0.f, 0.5f, false),
+        sla::SupportPoint(5.0f, 5.1f, 0.f, 0.5f, false),
+        sla::SupportPoint(6.1f, 5.1f, 0.f, 0.5f, false),
+    };
+    SlaCubeFixture fixture(std::move(config), TriangleMesh{model}, points);
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA max bridges validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposSupportTree));
+    REQUIRE(object->get_support_points().size() == points.size());
+    TriangleMesh pipeline_support = object->support_mesh();
+    REQUIRE_FALSE(pipeline_support.empty());
+    const double pipeline_volume = std::abs(static_cast<double>(pipeline_support.volume()));
+    REQUIRE(std::isfinite(pipeline_volume));
+    REQUIRE(pipeline_volume > 0.0);
+
+    const sla::SupportTreeConfig tree_config = make_support_cfg(object->config());
+    REQUIRE(tree_config.max_bridges_on_pillar == static_cast<unsigned>(max_bridges));
+    const sla::SupportableMesh input(object->transformed_mesh().its,
+                                     object->get_support_points(), tree_config);
+    sla::SupportTreeBuilder tree;
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(tree, input));
+    REQUIRE(tree.heads().size() == points.size());
+    for (const sla::Head &head : tree.heads())
+        CHECK(head.is_valid());
+
+    MaxBridgesRun result;
+    for (const sla::Head &head : tree.heads())
+        if (head.pillar_id >= 0)
+            ++result.head_pillars;
+    for (const sla::Pillar &pillar : tree.pillars()) {
+        const unsigned bridge_count = tree.bridgecount(pillar);
+        result.pillar_bridges = std::max(result.pillar_bridges, bridge_count);
+        CHECK(bridge_count <= tree_config.max_bridges_on_pillar);
+    }
+    result.bridge_segments = tree.bridges().size();
+    TriangleMesh support{tree.retrieve_mesh(sla::MeshType::Support)};
+    REQUIRE_FALSE(support.empty());
+    const double support_volume = std::abs(static_cast<double>(support.volume()));
+    REQUIRE(std::isfinite(support_volume));
+    REQUIRE(support_volume > 0.0);
+    CHECK_THAT(pipeline_volume, Catch::Matchers::WithinRel(support_volume, 1e-4));
+    return result;
+}
+
+namespace sla_pad_merge_variance_contracts {
+
+struct PadMergeRun {
+    double configured_merge_distance_mm = 0.;
+    std::size_t cross_section_islands = 0;
+    double cross_section_area_mm2 = 0.;
+    double pad_volume_mm3 = 0.;
+};
+
+PadMergeRun run_pad_merge(std::optional<double> max_merge_distance)
+{
+    DynamicPrintConfig config = sla_config(0.5);
+    config.set_key_value("pad_enable", new ConfigOptionBool(true));
+    config.set_key_value("pad_wall_thickness", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_wall_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("pad_brim_size", new ConfigOptionFloat(4.0));
+    config.set_key_value("pad_wall_slope", new ConfigOptionFloat(45.0));
+    if (max_merge_distance.has_value())
+        config.set_key_value("pad_max_merge_distance",
+                             new ConfigOptionFloat(*max_merge_distance));
+
+    TriangleMesh model = make_cube(10.0, 10.0, 4.0);
+    TriangleMesh second_island = make_cube(10.0, 10.0, 4.0);
+    second_island.translate(Vec3f(40.f, 0.f, 0.f));
+    model.merge(second_island);
+
+    SlaCubeFixture fixture(std::move(config), std::move(model));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA pad max merge distance validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+    fixture.print.process();
+    REQUIRE(fixture.print.finished());
+    REQUIRE(fixture.print.objects().size() == 1);
+
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object->is_step_done(slaposPad));
+    TriangleMesh pad = object->pad_mesh();
+    REQUIRE_FALSE(pad.empty());
+    const BoundingBoxf3 bounds = pad.bounding_box();
+    const double sample_z = bounds.min.z() + 0.5 * (bounds.max.z() - bounds.min.z());
+    const std::vector<ExPolygons> sections = pad.slice({sample_z});
+    REQUIRE(sections.size() == 1);
+
+    PadMergeRun result;
+    result.configured_merge_distance_mm = object->config().pad_max_merge_distance.getFloat();
+    result.pad_volume_mm3 = std::abs(static_cast<double>(pad.volume()));
+    REQUIRE(std::isfinite(result.pad_volume_mm3));
+    REQUIRE(result.pad_volume_mm3 > 0.0);
+    for (const ExPolygon &region : sections.front()) {
+        if (region.empty() || region.area() <= 0.0)
+            continue;
+        ++result.cross_section_islands;
+        result.cross_section_area_mm2 += region.area() /
+            (scaled<double>(1.0) * scaled<double>(1.0));
+    }
+    REQUIRE(std::isfinite(result.cross_section_area_mm2));
+    REQUIRE(result.cross_section_islands > 0);
+    REQUIRE(result.cross_section_area_mm2 > 0.0);
+    return result;
+}
+
+}
+} // namespace
+
+TEST_CASE("SLA faded layer counts span registered endpoints in physical layer timings",
+          "[SLAPrint][SLAPipeline][SLAExposureStatistics][SLAFadedLayersBoundary]")
+{
+    // Omitted from this config, faded_layers retains its registered default of 10.
+    const SlaStatisticsRun default_count =
+        run_sla_statistics(sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0, std::nullopt));
+
+    DynamicPrintConfig minimum_config = sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0);
+    minimum_config.set_key_value("faded_layers", new ConfigOptionInt(3));
+    const SlaStatisticsRun minimum_count = run_sla_statistics(std::move(minimum_config));
+
+    DynamicPrintConfig maximum_config = sla_statistics_config(4.0, 2.0, 100.0, 0.0, 0.0);
+    maximum_config.set_key_value("faded_layers", new ConfigOptionInt(20));
+    const SlaStatisticsRun maximum_count = run_sla_statistics(std::move(maximum_config));
+
+    check_same_sla_geometry(default_count, minimum_count);
+    check_same_sla_geometry(default_count, maximum_count);
+    CHECK(default_count.fast_layers == 6);
+    CHECK(default_count.slow_layers == 0);
+    CHECK(minimum_count.fast_layers == 6);
+    CHECK(minimum_count.slow_layers == 0);
+    CHECK(maximum_count.fast_layers == 6);
+    CHECK(maximum_count.slow_layers == 0);
+
+    // The first three layers use 4 s; each later layer subtracts
+    // (4 - 2) / (faded_layers + 1) from the preceding exposure.
+    check_sla_layer_times(default_count, { 38.0 / 11.0, 40.0 / 11.0, 42.0 / 11.0, 4.0, 4.0, 4.0 });
+    check_sla_layer_times(minimum_count, { 2.5, 3.0, 3.5, 4.0, 4.0, 4.0 });
+    check_sla_layer_times(maximum_count, { 78.0 / 21.0, 80.0 / 21.0, 82.0 / 21.0, 4.0, 4.0, 4.0 });
+    CHECK_THAT(default_count.estimated_time, Catch::Matchers::WithinAbs(252.0 / 11.0, 1e-8));
+    CHECK_THAT(minimum_count.estimated_time, Catch::Matchers::WithinAbs(21.0, 1e-8));
+    CHECK_THAT(maximum_count.estimated_time, Catch::Matchers::WithinAbs(164.0 / 7.0, 1e-8));
+}
+
+TEST_CASE("SLA material correction Z scales transformed mesh height",
+          "[SLAPrint][SLAMaterialCorrection][SettingsVariance][MaterialCorrectionZ]")
+{
+    using namespace sla_correction_variance_contracts;
+    const Run baseline = process_cube(correction_config());
+
+    // A 10 x 10 x 4 mm cube makes the transformed Z extent a direct oracle for
+    // this scalar correction while the other correction axes stay at unity.
+    for (const double factor : {0.75, 1.0, 1.25}) {
+        CAPTURE(factor);
+        DynamicPrintConfig config = correction_config();
+        config.set_key_value("material_correction_z", new ConfigOptionFloat(factor));
+        const Run corrected = process_cube(std::move(config));
+
+        CHECK_THAT(corrected.bbox_x, Catch::Matchers::WithinRel(baseline.bbox_x, 1e-5));
+        CHECK_THAT(corrected.bbox_y, Catch::Matchers::WithinRel(baseline.bbox_y, 1e-5));
+        CHECK_THAT(corrected.bbox_z, Catch::Matchers::WithinRel(baseline.bbox_z * factor, 1e-5));
+    }
+}
+
+TEST_CASE("SLA maximum pillar link distance controls inter-pillar bridges",
+          "[SLAPrint][SLAPipeline][SettingsVariance][SLASupportMaxPillarLinkDistance]")
+{
+    constexpr double head_spacing = 3.0;
+    constexpr double short_elevation = 8.0;
+    const PillarConnectionRun disabled =
+        process_pillar_connection(slapcmZigZag, head_spacing, 0.0, short_elevation, true);
+    const PillarConnectionRun below_spacing =
+        process_pillar_connection(slapcmZigZag, head_spacing, 2.9, short_elevation, true);
+    const PillarConnectionRun above_spacing =
+        process_pillar_connection(slapcmZigZag, head_spacing, 3.1, short_elevation, true);
+    const PillarConnectionRun default_distance =
+        process_pillar_connection(slapcmZigZag, head_spacing, std::nullopt, short_elevation, true);
+
+    CHECK(disabled.linked_pillars == 0);
+    CHECK(below_spacing.linked_pillars == 0);
+    CHECK(above_spacing.linked_pillars == 2);
+    CHECK(default_distance.linked_pillars == 2);
+    CHECK(above_spacing.support_volume > below_spacing.support_volume + 1e-6);
+    CHECK_THAT(default_distance.support_volume,
+               Catch::Matchers::WithinRel(above_spacing.support_volume, 1e-6));
+}
+
+TEST_CASE("SLA support point density spans its minimum, representative, and default",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SettingsVariance][SLAAutoSupports][SLASupportPointDensity]")
+{
+    const std::size_t minimum_point_count = process_auto_support_point_count(0);
+    const std::size_t representative_point_count = process_auto_support_point_count(25);
+    const std::size_t default_point_count = process_auto_support_point_count(std::nullopt);
+
+    INFO("0% density support points: " << minimum_point_count);
+    INFO("25% density support points: " << representative_point_count);
+    INFO("default density support points: " << default_point_count);
+    CHECK(minimum_point_count == 0);
+    CHECK(default_point_count > representative_point_count);
+}
+
+TEST_CASE("SLA automatic point spacing and head dimensions reach generated tree geometry",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SettingsVariance][SLAAutoSupports][SLASupportDimensions]")
+{
+    const DynamicPrintConfig defaults = sla_config(1.0);
+    CHECK_THAT(defaults.option("support_points_minimal_distance")->getFloat(),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(defaults.option("support_head_front_diameter")->getFloat(),
+               Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(defaults.option("support_head_width")->getFloat(),
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+
+    const SupportDimensionsRun minimum_spacing =
+        process_auto_support_dimensions(0.0, 0.4, 1.0);
+    const SupportDimensionsRun default_spacing =
+        process_auto_support_dimensions(1.0, 0.4, 1.0);
+    REQUIRE(minimum_spacing.points.size() >= 2);
+    REQUIRE(default_spacing.points.size() >= 2);
+
+    DynamicPrintConfig minimum_config = sla_config(1.0);
+    minimum_config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    minimum_config.set_key_value("support_points_minimal_distance", new ConfigOptionFloat(0.0));
+    minimum_config.set_key_value("support_head_front_diameter", new ConfigOptionFloat(0.0));
+    minimum_config.set_key_value("support_head_width", new ConfigOptionFloat(0.0));
+    SlaCubeFixture minimum(std::move(minimum_config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(minimum.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-dimension minimum validation: " << minimum.print.validate().string);
+    REQUIRE(minimum.print.validate().string.empty());
+    REQUIRE(minimum.print.objects().size() == 1);
+    CHECK(minimum.print.objects().front()->config().support_points_minimal_distance.getFloat() == 0.0);
+    CHECK(minimum.print.objects().front()->config().support_head_front_diameter.getFloat() == 0.0);
+    CHECK(minimum.print.objects().front()->config().support_head_width.getFloat() == 0.0);
+
+    DynamicPrintConfig maximum_width_config = sla_config(1.0);
+    maximum_width_config.set_key_value("supports_enable", new ConfigOptionBool(true));
+    maximum_width_config.set_key_value("support_head_width", new ConfigOptionFloat(20.0));
+    SlaCubeFixture maximum_width(std::move(maximum_width_config), make_cube(10.0, 10.0, 4.0));
+    REQUIRE(maximum_width.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA support-head-width maximum validation: " << maximum_width.print.validate().string);
+    const StringObjectException low_elevation = maximum_width.print.validate();
+    CHECK(low_elevation.string.find("Elevation is too low for object.") != std::string::npos);
+    CHECK(maximum_width.print.objects().front()->config().support_head_width.getFloat() == 20.0);
+    process_support_dimension_boundary(0.4, 20.0);
+    process_support_dimension_boundary(0.0, 1.0);
+
+    // Eight millimeters activates the generator's spacing floor for this
+    // density. The wider head is observed separately below while holding these
+    // generated points and their front radii fixed.
+    const SupportDimensionsRun active = process_auto_support_dimensions(8.0, 1.2, 0.5);
+    CHECK_THAT(active.tree_config.head_front_radius_mm, Catch::Matchers::WithinAbs(0.6, 1e-6));
+    CHECK_THAT(active.tree_config.head_width_mm, Catch::Matchers::WithinAbs(0.5, 1e-6));
+
+    const SupportDimensionsTreeRun configured_tree =
+        build_support_dimensions_tree(active, active.tree_config);
+    CHECK_THAT(configured_tree.support_volume,
+               Catch::Matchers::WithinRel(active.pipeline_support_volume, 1e-4));
+
+    sla::SupportTreeConfig wider_config = active.tree_config;
+    wider_config.head_width_mm = 1.5;
+    const SupportDimensionsTreeRun wider_tree = build_support_dimensions_tree(active, wider_config);
+    CHECK(wider_tree.widest_head > configured_tree.widest_head + 0.5);
+    CHECK(wider_tree.head_volume > configured_tree.head_volume + 1e-6);
+
+    sla::SupportTreeConfig zero_width_config = active.tree_config;
+    zero_width_config.head_width_mm = 0.0;
+    const SupportDimensionsTreeRun zero_width_tree =
+        build_support_dimensions_tree(active, zero_width_config);
+    CHECK_THAT(zero_width_tree.widest_head, Catch::Matchers::WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("SLA generated support points project onto model surfaces",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SettingsVariance][SLASupportPointProjection]")
+{
+    check_support_point_projection_contract();
+}
+
+TEST_CASE("SLA maximum bridges per pillar bounds support head clustering",
+          "[SLAPrint][SLAFeatures][SLAActiveNext][SettingsVariance][SupportMaxBridges][SLASupportMaxBridges]")
+{
+    const MaxBridgesRun minimum = process_max_bridges(0);
+    const MaxBridgesRun default_value = process_max_bridges(3);
+    const MaxBridgesRun maximum = process_max_bridges(50);
+
+    INFO("max bridges 0: " << minimum.head_pillars << " head pillars, "
+         << minimum.bridge_segments << " bridges");
+    INFO("max bridges 3: " << default_value.head_pillars << " head pillars, "
+         << default_value.bridge_segments << " bridges");
+    INFO("max bridges 50: " << maximum.head_pillars << " head pillars, "
+         << maximum.bridge_segments << " bridges");
+    CHECK(minimum.head_pillars == 6);
+    CHECK(minimum.bridge_segments == 0);
+    CHECK(minimum.pillar_bridges == 0);
+    CHECK(default_value.head_pillars == 2);
+    CHECK(default_value.bridge_segments == 4);
+    CHECK(default_value.pillar_bridges == 2);
+    CHECK(maximum.head_pillars == 1);
+    CHECK(maximum.bridge_segments == 5);
+    CHECK(maximum.pillar_bridges == 5);
+}
+
+TEST_CASE("SLA hollowing settings span registered endpoints in public geometry",
+          "[SLAPrint][SLAHollowing][SettingsVariance][SLAHollowingVariance]")
+{
+    using namespace sla_hollowing_thickness_followup_contracts;
+
+    // The 20x20x10 mm box has a 5 mm inradius. A wall offset of 1 mm leaves
+    // an interior shell, while either endpoint pair below asks for an inward
+    // offset beyond the box's inradius, where no closed interior surface can
+    // remain.
+    const auto minimum_thickness = run_hollowing(1.0, 0.0, 0.0);
+    const auto maximum_thickness = run_hollowing(10.0, 0.0, 0.0);
+    REQUIRE_FALSE(minimum_thickness.empty);
+    CHECK(minimum_thickness.volume > 0.);
+    CHECK(maximum_thickness.empty);
+
+    const auto minimum_closing = run_hollowing(1.0, 0.0, 0.0);
+    const auto maximum_closing = run_hollowing(1.0, 0.0, 10.0);
+    REQUIRE_FALSE(minimum_closing.empty);
+    CHECK(minimum_closing.volume > 0.);
+    CHECK(maximum_closing.empty);
+
+    // A smooth sphere makes the sampling-quality contract observable in the
+    // emitted mesh. The analytic radius after the configured 1 mm inward
+    // offset is 9 mm; the higher voxel scale must retain more sampled surface
+    // vertices and both meshes must stay within two voxel widths plus a
+    // faceting allowance of that offset surface.
+    const TriangleMesh sphere = make_sphere(10.0, 2.0 * PI / 72.0);
+    const auto coarse = run_hollowing(1.0, 0.0, 0.0, sphere, 9.0);
+    const auto fine = run_hollowing(1.0, 1.0, 0.0, sphere, 9.0);
+    REQUIRE_FALSE(coarse.empty);
+    REQUIRE_FALSE(fine.empty);
+    CHECK(fine.vertex_count > coarse.vertex_count);
+    const double source_faceting_allowance = 0.08;
+    CHECK(coarse.radial_rms_error < 2.0 / 3.5 + source_faceting_allowance);
+    CHECK(fine.radial_rms_error < 2.0 / 8.0 + source_faceting_allowance);
+
+    // This sphere also exercises the registered defaults through SLAPrint:
+    // the default 3 mm thickness leaves a 7 mm radius interior.
+    const auto defaults = run_hollowing_with_defaults(sphere, 7.0);
+    REQUIRE_FALSE(defaults.empty);
+    const double default_voxel_scale = 3.5 + (8.0 - 3.5) * 0.5;
+    CHECK(defaults.radial_rms_error < 2.0 / default_voxel_scale + source_faceting_allowance);
+}
+
+TEST_CASE("SLA SL1 archive preserves material metadata through public config import",
+          "[SLAPrint][SLAPipeline][SLAMaterialArchive]")
+{
+    const auto check_imported_metadata = [](const sla_raster_active_contracts::RasterRun &run,
+                                            const sla_raster_active_contracts::ExportProfile &expected) {
+        const DynamicPrintConfig &imported = run.imported_profile;
+        REQUIRE(imported.option("material_density") != nullptr);
+        REQUIRE(imported.option("material_colour") != nullptr);
+        REQUIRE(imported.option("material_type") != nullptr);
+        REQUIRE(imported.option("material_vendor") != nullptr);
+        CHECK_THAT(imported.opt_float("material_density"),
+                   Catch::Matchers::WithinAbs(expected.material_density, 1e-12));
+        CHECK(imported.opt_string("material_colour") == expected.material_colour);
+        CHECK(imported.opt_string("material_type") == expected.material_type);
+        CHECK(imported.opt_string("material_vendor") == expected.material_vendor);
+    };
+
+    const sla_raster_active_contracts::ExportProfile defaults;
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(defaults), defaults);
+
+    auto density_minimum = defaults;
+    density_minimum.material_density = 0.0;
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(density_minimum),
+                            density_minimum);
+
+    auto representative = defaults;
+    representative.material_density = 1.25;
+    representative.material_colour = "#1673C9";
+    representative.material_type = "ToughFlex 93";
+    representative.material_vendor = "Résine 雪";
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(representative),
+                            representative);
+}
+
+TEST_CASE("SLA pad max merge distance joins nearby pad islands through the public pipeline",
+          "[SLAPrint][SLAFeatures][SLAPadMaxMergeDistance][SettingsVariance]")
+{
+    const auto minimum = sla_pad_merge_variance_contracts::run_pad_merge(0.0);
+    const auto representative = sla_pad_merge_variance_contracts::run_pad_merge(40.0);
+    const auto defaults = sla_pad_merge_variance_contracts::run_pad_merge(std::nullopt);
+
+    CHECK_THAT(minimum.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(representative.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(40.0, 1e-6));
+    CHECK_THAT(defaults.configured_merge_distance_mm,
+               Catch::Matchers::WithinAbs(50.0, 1e-6));
+    CHECK(minimum.cross_section_islands == 2);
+    CHECK(representative.cross_section_islands == 1);
+    CHECK(defaults.cross_section_islands == 1);
+    CHECK(representative.pad_volume_mm3 > minimum.pad_volume_mm3);
+    CHECK(defaults.pad_volume_mm3 > minimum.pad_volume_mm3);
+}
+
+TEST_CASE("SLA support base safety distance changes public support routing",
+          "[SLAPrint][SLAFeatures][SLASupportBaseSafetyDistance][SettingsVariance]")
+{
+    // The zero setting maps to the tree's 0.5 mm fallback. Keep pad gap below it
+    // so the public validator allows the registered minimum boundary.
+    const auto minimum = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 0.0, 20.0);
+    const auto defaults = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, std::nullopt, 20.0);
+    const auto representative = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 4.0, 20.0);
+    const auto maximum = sla_pad_geometry_boundary_contracts::run_around_pad(
+        0.25, 1.0, 1.0, 1.0, 10.0, 20.0);
+
+    CHECK_THAT(minimum.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(0.0, 1e-6));
+    CHECK_THAT(minimum.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(sla::SupportTreeConfig{}.safety_distance_mm, 1e-6));
+    CHECK_THAT(defaults.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(defaults.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(1.0, 1e-6));
+    CHECK_THAT(representative.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(4.0, 1e-6));
+    CHECK_THAT(representative.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(4.0, 1e-6));
+    CHECK_THAT(maximum.configured_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(10.0, 1e-6));
+    CHECK_THAT(maximum.mapped_base_safety_distance_mm,
+               Catch::Matchers::WithinAbs(10.0, 1e-6));
+
+    // The tree can select a different route direction as clearance changes.
+    // Compare the resulting geometry without requiring the X bound to be monotonic.
+    CHECK(std::abs(representative.support_max_x_mm - defaults.support_max_x_mm) > 0.5);
+    CHECK(std::abs(maximum.support_max_x_mm - representative.support_max_x_mm) > 0.5);
 }

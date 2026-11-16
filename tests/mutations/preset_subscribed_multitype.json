@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Subscribed reconciliation installs canonical typed presets and inheritance, skips invalid types, and prunes obsolete printer files.",
+  "mutants": [
+    {
+      "id": "presetbundle-subscribed-filament-dispatch",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            else if (type_iter->second == PRESET_IOT_FILAMENT_TYPE) {\n                preset_collection = &(this->filaments);\n                type_subdir = PRESET_FILAMENT_NAME;",
+      "new": "            else if (false && type_iter->second == PRESET_IOT_FILAMENT_TYPE) {\n                preset_collection = &(this->filaments);\n                type_subdir = PRESET_FILAMENT_NAME;",
+      "expected_matches": 1,
+      "test_filter": "^PresetBundleSubscribedMultiType$",
+      "description": "Skip the subscribed filament collection dispatch; the multi-type import must still install the filament and persist its typed metadata.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "presetbundle-subscribed-inheritance-canonicalization",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            inherits_iter->second = get_preset_canonical_name(inherits_iter->second, subscribed_origin);",
+      "new": "            inherits_iter->second = inherits_iter->second;",
+      "expected_matches": 1,
+      "test_filter": "^PresetBundleSubscribedMultiType$",
+      "description": "Retain the raw same-bundle inheritance label instead of rewriting it to the subscribed canonical identity; the child inheritance oracle must fail.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

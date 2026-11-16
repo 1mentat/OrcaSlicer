@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "Bounded source mutations for model extended. Outcomes are reported by the native mutation runner.",
+  "mutants": [
+    {
+      "id": "model-volume-split-single-component-guard",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (meshes.size() <= 1)",
+      "new": "if (meshes.size() <= 2)",
+      "description": "Treat a two-component mesh as already connected, preventing its split into two independently assigned volumes.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-volume-merge-transform",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "mesh_.transform(volume_matrix, true);",
+      "new": "mesh_.transform(Transform3d::Identity(), true);",
+      "description": "Drop the selected volume transformation while merging, moving the merged component away from its source placement.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-multipart-conversion-no-op",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (this->objects.size() < 2)",
+      "new": "if (this->objects.size() >= 2)",
+      "description": "Return before converting multiple valid objects into volumes, preserving the wrong object count and topology.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-bake-rotation-early-return",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (Geometry::is_rotation_ninety_degrees(reference_trafo.get_rotation()))",
+      "new": "if (!Geometry::is_rotation_ninety_degrees(reference_trafo.get_rotation()))",
+      "description": "Skip baking a non-right-angle instance rotation, leaving the unsupported transform in the instance.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-remap-filament-one-based",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "one_based_slots.emplace(from + 1, to + 1);",
+      "new": "one_based_slots.emplace(from, to);",
+      "description": "Apply zero-based relocation keys directly to one-based object and volume extruder settings.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-adjust-negative-z-guard",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (this->bounding_box_exact().min.z() < 0.0)",
+      "new": "if (this->bounding_box_exact().min.z() >= 0.0)",
+      "description": "Invert the negative-Z gate so a model already on the bed is translated and a sinking model is left in place.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-scale-to-fit-limiting-dimension",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "size.x() / orig_size.x(),",
+      "new": "size.x() * orig_size.x(),",
+      "description": "Use a product instead of the target-to-source scale ratio, violating the requested fit dimensions.",
+      "test_filter": "ModelExtended"
+    },
+    {
+      "id": "model-mesh-aggregate-instance-geometry",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "mesh.merge(o->mesh());",
+      "new": "mesh.merge(o->raw_mesh());",
+      "description": "Aggregate untransformed object geometry into the model mesh, losing instance placement.",
+      "test_filter": "ModelExtended"
+    }
+  ]
+}

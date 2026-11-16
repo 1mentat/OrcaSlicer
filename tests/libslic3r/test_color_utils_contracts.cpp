@@ -1081,3 +1081,254 @@ TEST_CASE("Remeshing with a smaller target edge ratio yields shorter edges and m
     CHECK(is_closed(coarse));
     CHECK(is_closed(fine));
 }
+
+TEST_CASE("Mesh color clustering assigns every face to a supplied center", "[ColorUtils]")
+{
+    const TriMesh mesh = cube_mesh();
+    std::vector<Color> input_face_colors;
+    input_face_colors.reserve(mesh.indices.size());
+    for (std::size_t i = 0; i < mesh.indices.size(); ++i)
+        input_face_colors.push_back(i % 2 == 0 ? red : blue);
+    std::vector<Color> face_colors = input_face_colors;
+
+    std::vector<std::size_t> face_ids;
+    REQUIRE(mesh_cluster(mesh, {red, blue}, face_colors, face_ids));
+    REQUIRE(face_colors.size() == mesh.indices.size());
+    REQUIRE(face_ids.size() == mesh.indices.size());
+    for (std::size_t i = 0; i < face_colors.size(); ++i) {
+        const std::size_t expected_id = input_face_colors[i] == red ? 0 : 1;
+        CHECK(face_ids[i] == expected_id);
+        CHECK(face_colors[i] == input_face_colors[i]);
+    }
+
+    std::vector<Color> one_center_colors(mesh.indices.size(), Color{{12, 34, 56}});
+    std::vector<std::size_t> one_center_ids;
+    REQUIRE(mesh_cluster(mesh, {Color{{12, 34, 56}}}, one_center_colors, one_center_ids));
+    for (const Color &color : one_center_colors)
+        CHECK(color == Color{{12, 34, 56}});
+
+    std::vector<Color> malformed_colors(1, red);
+    CHECK_FALSE(mesh_cluster(mesh, {red, blue}, malformed_colors, face_ids));
+    CHECK_FALSE(mesh_cluster(mesh, {}, one_center_colors, face_ids));
+}
+
+TEST_CASE("Color region smoothing preserves topology and legal labels", "[ColorUtils]")
+{
+    TriMesh mesh = cube_mesh();
+    const std::size_t face_count = mesh.indices.size();
+    std::vector<std::size_t> labels(face_count);
+    for (std::size_t i = 0; i < labels.size(); ++i)
+        labels[i] = i % 2;
+    const std::vector<std::size_t> original_labels = labels;
+
+    SmoothParameters no_smoothing;
+    no_smoothing.smooth_weight = 0.;
+    REQUIRE(smooth_region(mesh, labels, no_smoothing));
+    CHECK(mesh.indices.size() == face_count);
+    CHECK(labels.size() == face_count);
+    CHECK(labels == original_labels);
+    CHECK(is_closed(mesh));
+    check_finite_mesh(mesh);
+    for (std::size_t label : labels)
+        CHECK(label < 2);
+
+    TriMesh smoothed = cube_mesh();
+    std::vector<Color> colors(face_count);
+    for (std::size_t i = 0; i < colors.size(); ++i)
+        colors[i] = i % 2 == 0 ? red : blue;
+    SmoothParameters geometry_smoothing;
+    geometry_smoothing.smooth_weight = 0.8;
+    REQUIRE(smooth_region(smoothed, colors, geometry_smoothing));
+    CHECK(smoothed.indices.size() == face_count);
+    CHECK(is_closed(smoothed));
+    check_finite_mesh(smoothed);
+    const std::set<Color> allowed_colors{red, blue};
+    for (const Color &color : colors) {
+        CHECK(allowed_colors.count(color) == 1);
+    }
+
+    TriMesh malformed_mesh = cube_mesh();
+    std::vector<std::size_t> wrong_count(face_count - 1, 0);
+    CHECK_FALSE(smooth_region(malformed_mesh, wrong_count, geometry_smoothing));
+}
+
+TEST_CASE("K-means Lab mode returns bounded centers and exposes cancellation as a partial result", "[ColorUtils][ColorUtilsExtended]")
+{
+    ClusterParameters parameters;
+    parameters.color_difference_method = ColorDifferenceMethod::Lab;
+    parameters.cluster_k               = 2;
+    parameters.max_iter                = 20;
+    const std::vector<Color> input{red, red, blue, blue, green};
+    const std::vector<Color> centers = cluster_k_means(input, parameters);
+    REQUIRE(centers.size() == 2);
+    for (const Color& center : centers) {
+        CHECK(center[0] <= 255);
+        CHECK(center[1] <= 255);
+        CHECK(center[2] <= 255);
+    }
+    parameters.cluster_k                  = 3;
+    const std::vector<Color> fewer_unique = cluster_k_means({red, blue, red}, parameters);
+    REQUIRE(fewer_unique.size() == 2);
+    CHECK(contains_color(fewer_unique, red));
+    CHECK(contains_color(fewer_unique, blue));
+    parameters.cluster_k               = 2;
+    parameters.cancel_callback         = [] { return true; };
+    const std::vector<Color> cancelled = cluster_k_means(input, parameters);
+    REQUIRE(cancelled.size() == parameters.cluster_k);
+    for (const Color& center : cancelled) {
+        CHECK(center[0] <= 255);
+        CHECK(center[1] <= 255);
+        CHECK(center[2] <= 255);
+    }
+}
+
+TEST_CASE("K-means max-iteration zero still returns FPS input representatives", "[ColorUtils][ColorUtilsExtended]")
+{
+    ClusterParameters parameters;
+    parameters.color_difference_method = ColorDifferenceMethod::RGB;
+    parameters.cluster_k               = 3;
+    parameters.max_iter                = 0;
+    const std::vector<Color> input{Color{{0, 10, 20}}, Color{{90, 100, 110}}, Color{{240, 230, 220}}};
+    const std::vector<Color> centers = cluster_k_means(input, parameters);
+    REQUIRE(centers.size() == parameters.cluster_k);
+    CHECK(sorted_colors(centers) == sorted_colors(input));
+}
+
+TEST_CASE("Closed meshes and disconnected components retain geometric and UV invariants", "[ColorUtils][ColorUtilsExtended]")
+{
+    const TriMesh input = two_cubes_mesh();
+    std::vector<Vec2f> uvs;
+    for (const auto& v : input.vertices)
+        uvs.emplace_back(v.x() * 0.1f, v.y() * 0.2f + v.z() * 0.01f);
+    std::vector<TriMesh> components;
+    std::vector<std::vector<Vec2f>> component_uvs;
+    REQUIRE(get_components(input, uvs, components, component_uvs));
+    REQUIRE(component_uvs.size() == components.size());
+    REQUIRE(components.size() == 2);
+    std::size_t faces = 0;
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        REQUIRE(component_uvs[i].size() == components[i].vertices.size());
+        CHECK(is_closed(components[i]));
+        CHECK(its_num_open_edges(components[i]) == 0);
+        faces += components[i].indices.size();
+        for (std::size_t j = 0; j < components[i].vertices.size(); ++j) {
+            const auto& v = components[i].vertices[j];
+            CHECK_THAT(component_uvs[i][j].x(), Catch::Matchers::WithinAbs(v.x() * 0.1, 1e-5));
+            CHECK_THAT(component_uvs[i][j].y(), Catch::Matchers::WithinAbs(v.y() * 0.2 + v.z() * 0.01, 1e-5));
+        }
+    }
+    CHECK(faces == input.indices.size());
+}
+
+TEST_CASE("Mesh clustering assigns cluster ID zero to every face for a single center", "[ColorUtils][ColorUtilsExtended]")
+{
+    const TriMesh mesh = cube_mesh();
+    std::vector<Color> colors(mesh.indices.size(), Color{{12, 34, 56}});
+    std::vector<std::size_t> ids{99, 98};
+    REQUIRE(mesh_cluster(mesh, {Color{{9, 8, 7}}}, colors, ids));
+    REQUIRE(colors.size() == mesh.indices.size());
+    for (const Color& color : colors)
+        CHECK(color == Color{{9, 8, 7}});
+    REQUIRE(ids.size() == mesh.indices.size());
+    for (const std::size_t id : ids)
+        CHECK(id == 0);
+
+    std::vector<Color> two_center_colors(mesh.indices.size());
+    for (std::size_t i = 0; i < two_center_colors.size(); ++i)
+        two_center_colors[i] = i % 2 == 0 ? red : blue;
+    std::vector<std::size_t> two_center_ids;
+    REQUIRE(mesh_cluster(mesh, {red, blue}, two_center_colors, two_center_ids));
+    REQUIRE(two_center_ids.size() == mesh.indices.size());
+    for (std::size_t i = 0; i < two_center_ids.size(); ++i) {
+        CHECK(two_center_ids[i] == (i % 2 == 0 ? 0 : 1));
+        CHECK(two_center_colors[i] == (i % 2 == 0 ? red : blue));
+    }
+
+    // This face is perceptually close to both centers, but still nearest to
+    // the second one.  It shares an edge with a definitely seeded first face;
+    // the first-stage "or" criterion must retain that nearest assignment
+    // instead of deferring it to adjacency fallback.
+    const TriMesh adjacent = open_square_mesh();
+    const Color near_first{{49, 245, 71}};
+    const Color near_second{{24, 231, 52}};
+    const Color ambiguous{{17, 236, 2}};
+    std::vector<Color> ambiguous_colors{near_first, ambiguous};
+    std::vector<std::size_t> ambiguous_ids;
+    REQUIRE(mesh_cluster(adjacent, {near_first, near_second}, ambiguous_colors, ambiguous_ids));
+    REQUIRE(ambiguous_ids.size() == 2);
+    CHECK(ambiguous_ids[0] == 0);
+    CHECK(ambiguous_ids[1] == 1);
+    CHECK(ambiguous_colors[0] == near_first);
+    CHECK(ambiguous_colors[1] == near_second);
+}
+
+TEST_CASE("Smoothing at zero and below the topology threshold preserves labels and shape", "[ColorUtils][ColorUtilsExtended]")
+{
+    const TriMesh original = cube_mesh();
+    std::vector<std::size_t> initial(original.indices.size(), 0);
+    for (std::size_t i = 0; i < initial.size(); i += 3)
+        initial[i] = 1;
+    for (const double weight : {0., 0.2, 0.3}) {
+        TriMesh mesh                    = original;
+        std::vector<std::size_t> labels = initial;
+        const double before             = std::abs(signed_volume(mesh));
+        SmoothParameters parameters;
+        parameters.smooth_weight = weight;
+        REQUIRE(smooth_region(mesh, labels, parameters));
+        CHECK(labels.size() == mesh.indices.size());
+        CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(before, 1e-8));
+        CHECK(is_closed(mesh));
+        for (std::size_t label : labels)
+            CHECK(label <= 1);
+        if (weight == 0.)
+            CHECK(labels == initial);
+        if (weight == 0.3) {
+            const std::size_t initial_ones  = static_cast<std::size_t>(std::count(initial.begin(), initial.end(), 1));
+            const std::size_t smoothed_ones = static_cast<std::size_t>(std::count(labels.begin(), labels.end(), 1));
+            CHECK(smoothed_ones < initial_ones);
+        }
+    }
+}
+
+TEST_CASE("Remeshing rejects malformed labels before changing geometry", "[ColorUtils][ColorUtilsExtended]")
+{
+    TriMesh mesh           = cube_mesh();
+    const TriMesh original = mesh;
+    std::vector<std::size_t> labels(mesh.indices.size() - 1, 0);
+    CHECK_FALSE(remesh_mesh(mesh, labels, 1.0));
+    CHECK(mesh.vertices == original.vertices);
+    CHECK(mesh.indices == original.indices);
+}
+
+TEST_CASE("Remeshing a closed colored cube preserves volume, closure, and label cardinality", "[ColorUtils][ColorUtilsExtended]")
+{
+    TriMesh mesh        = cube_mesh(8.);
+    const double before = std::abs(signed_volume(mesh));
+    std::vector<std::size_t> labels(mesh.indices.size(), 0);
+    for (std::size_t i = 0; i < labels.size(); i += 4)
+        labels[i] = 1;
+    REQUIRE(remesh_mesh(mesh, labels, 1.4));
+    CHECK(mesh.indices.size() > 0);
+    CHECK(mesh.vertices.size() > 0);
+    CHECK(labels.size() == mesh.indices.size());
+    CHECK(is_closed(mesh));
+    CHECK_THAT(std::abs(signed_volume(mesh)), Catch::Matchers::WithinRel(before, 0.2));
+    for (std::size_t label : labels)
+        CHECK(label <= 1);
+    check_finite_mesh(mesh);
+}
+
+TEST_CASE("Remeshing target ratios order the resulting tessellation by edge scale", "[ColorUtils][ColorUtilsExtended]")
+{
+    TriMesh coarse = cube_mesh(8.);
+    TriMesh fine   = cube_mesh(8.);
+    std::vector<std::size_t> coarse_labels(coarse.indices.size(), 0);
+    std::vector<std::size_t> fine_labels(fine.indices.size(), 0);
+    REQUIRE(remesh_mesh(coarse, coarse_labels, 1.4));
+    REQUIRE(remesh_mesh(fine, fine_labels, 0.6));
+    REQUIRE(coarse.indices.size() > 0);
+    REQUIRE(fine.indices.size() > 0);
+    CHECK(fine.indices.size() > coarse.indices.size());
+    CHECK(is_closed(coarse));
+    CHECK(is_closed(fine));
+}

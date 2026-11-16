@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "description": "Arachne settings boundary and consumer probes. Native controls and ordinary assertion kills are validated separately; expected-failure diagnostics provide no positive coverage credit.",
+  "test_source": "tests/libslic3r/test_arachne_walls.cpp",
+  "mutants": [
+    {
+      "id": "arachne-angle-mapping-fixed-10",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "input_params.wall_transition_angle   = print_object_config.wall_transition_angle.value;",
+      "new": "input_params.wall_transition_angle   = 10.f;",
+      "test_filter": "^ArachneWallTransitionAngle$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Discard the configured transition-angle endpoints during parameter mapping; endpoint and tapered-wall geometry assertions must fail."
+    },
+    {
+      "id": "arachne-skeletal-angle-consumer-fixed-10",
+      "path": "src/libslic3r/Arachne/SkeletalTrapezoidation.cpp",
+      "old": "float cap = sin(beading_strategy.getTransitioningAngle() * 0.5);",
+      "new": "float cap = sin(10. * M_PI / 180. * 0.5);",
+      "test_filter": "^ArachneWallTransitionAngle$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the active transition angle in the skeletal consumer; the endpoint geometry signatures must differ."
+    },
+    {
+      "id": "arachne-transition-length-percent-omits-nozzle",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "input_params.wall_transition_length = wall_transition_length_opt.value * 0.01 * min_nozzle_diameter;",
+      "new": "input_params.wall_transition_length = wall_transition_length_opt.value * 0.01;",
+      "test_filter": "^ArachneWallTransitionLength$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Omit nozzle diameter in percent-to-length conversion; 100% of the explicit 0.4 mm nozzle must resolve to 0.4 mm."
+    },
+    {
+      "id": "arachne-maximum-deviation-fixed-005mm",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const coord_t allowed_distance = m_params.wall_maximum_deviation;",
+      "new": "const coord_t allowed_distance = scaled<coord_t>(0.05);",
+      "test_filter": "^ArachneWallResolution$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Force the permissive deviation at both endpoints; the shallow bump must remain distinct from the flat control under strict deviation."
+    },
+    {
+      "id": "arachne-maximum-resolution-fixed-05mm",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const coord_t smallest_segment = m_params.wall_maximum_resolution;",
+      "new": "const coord_t smallest_segment = scaled<coord_t>(0.5);",
+      "test_filter": "^ArachneWallResolution$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Force coarse resolution for both endpoints; fine rounded-wall sampling must retain more junctions."
+    },
+    {
+      "id": "arachne-distribution-count-fixed-1",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const int wall_distribution_count = this->m_params.wall_distribution_count;",
+      "new": "const int wall_distribution_count = 1;",
+      "test_filter": "^ArachneWallTransition$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Discard the configured distribution count; count-1 and count-3 plus-outline width signatures must differ."
+    }
+  ]
+}

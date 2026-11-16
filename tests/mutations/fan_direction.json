@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed fan-direction enum mutant. The [FanDirection] orientation contract rejects treating fdBoth as the fanless early-return case; both fans may choose either X-facing direction.",
+  "mutants": [
+    {
+      "id": "fan-direction-both-early-return",
+      "old": "if (fan_dir == FanDirection::fdUndefine)",
+      "new": "if (fan_dir == FanDirection::fdUndefine || fan_dir == FanDirection::fdBoth)",
+      "description": "Incorrectly treat the two-sided fan setting as no cooling fan and skip asymmetric cooling orientation.",
+      "path": "src/libslic3r/Orient.cpp",
+      "test_filter": "FanDirection"
+    }
+  ]
+}

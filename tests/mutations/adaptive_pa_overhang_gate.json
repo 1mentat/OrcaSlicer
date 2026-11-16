@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "The overhang-only pressure advance setting changes actual PA during conserved deposition.",
+  "mutants": [
+    {
+      "id": "adaptive-pa-overhang-gate-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const bool adaptive_pa_overhangs = adaptive_pa && m_config.adaptive_pressure_advance_overhangs.get_at(pa_config_index);",
+      "new": "const bool adaptive_pa_overhangs = adaptive_pa;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^AdaptivePressureAdvanceOverhangGate$",
+      "description": "Ignore the overhang-specific setting while keeping ordinary adaptive pressure advance enabled; the false control must reject overhang-only events."
+    }
+  ]
+}

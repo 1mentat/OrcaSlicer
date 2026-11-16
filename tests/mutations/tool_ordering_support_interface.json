@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public support-only tool selection honors interface-body exclusion and the interface filament flush costs.",
+  "mutants": [
+    {
+      "id": "support-interface-fallback-ignores-body-exclusion",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                bool interface_not_for_body = object.config().support_interface_not_for_body;\n                layer_tools.extruders.push_back(get_next_extruder(interface_not_for_body ? extruder_interface - 1 : -1, all_extruders) + 1);",
+      "new": "                bool interface_not_for_body = false && object.config().support_interface_not_for_body;\n                layer_tools.extruders.push_back(get_next_extruder(interface_not_for_body ? extruder_interface - 1 : -1, all_extruders) + 1);",
+      "test_filter": "ToolOrderingSupportInterface",
+      "description": "Force the body-exclusion setting false while preserving the original variable use. The true row must contain both the non-interface and interface tools, while the false row is pinned to the interface tool by the distinct interface flush row."
+    },
+    {
+      "id": "support-interface-fallback-uses-first-flush-row",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                        if (wipe_volumes[extruder_interface - 1][extruder_id] < min_flush)",
+      "new": "                        if (wipe_volumes[0][extruder_id] < min_flush)",
+      "test_filter": "ToolOrderingSupportInterface",
+      "description": "Use the first flush-matrix row instead of the interface filament row for fallback selection. The body-allowed row must then select tool 0 instead of the pinned interface destination."
+    }
+  ]
+}

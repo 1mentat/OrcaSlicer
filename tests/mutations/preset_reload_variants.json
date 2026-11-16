@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Subscribed bundle reload and vendor nozzle-variant validation contracts.",
+  "mutants": [
+    {
+      "id": "subscribed-reload-runtime-flag-removed",
+      "old": "            metadata.is_subscribed = true;",
+      "new": "            metadata.is_subscribed = false;",
+      "description": "Loading subscribed metadata must mark the runtime bundle as subscribed.",
+      "test_filter": "SubscribedBundleReload",
+      "path": "src/libslic3r/PresetBundle.cpp"
+    },
+    {
+      "id": "subscribed-reload-stale-memberships-kept",
+      "old": "            metadata.print_presets.clear();\n            metadata.filament_presets.clear();\n            metadata.printer_presets.clear();\n            metadata.is_subscribed = true;",
+      "new": "            metadata.is_subscribed = true;",
+      "description": "Disk discovery replaces stale cached names in all three preset collections.",
+      "test_filter": "SubscribedBundleReload",
+      "path": "src/libslic3r/PresetBundle.cpp"
+    },
+    {
+      "id": "vendor-variant-validation-always-enabled",
+      "old": "        if (validation_mode && entry.instantiation == \"true\") {",
+      "new": "        if (entry.instantiation == \"true\") {",
+      "description": "Normal loads preserve mismatched legacy profiles without validation-only diagnostics.",
+      "test_filter": "VendorVariantValidation",
+      "path": "src/libslic3r/PresetBundle.cpp"
+    },
+    {
+      "id": "vendor-variant-nozzle-match-inverted",
+      "old": "            if (!variant_ok || variant_nozzles != nozzles) {",
+      "new": "            if (!variant_ok || variant_nozzles == nozzles) {",
+      "description": "Valid scalar, suffixed and multiple-nozzle variants must not report mismatch, while unequal sets do.",
+      "test_filter": "VendorVariantValidation",
+      "path": "src/libslic3r/PresetBundle.cpp"
+    }
+  ]
+}

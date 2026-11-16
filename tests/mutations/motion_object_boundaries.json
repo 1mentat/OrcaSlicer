@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Role-specific zero acceleration fallback and nullable per-tool initial-layer speed selector contracts. Test filters select CTest labels.",
+  "mutants": [
+    {
+      "id": "zero-outer-wall-acceleration-wrong-default-source",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        } else {\n            acceleration = m_config.default_acceleration.get_at(nozzle);\n        }\n        acceleration_i",
+      "new": "        } else {\n            acceleration = is_external_perimeter(role) ? m_config.inner_wall_acceleration.get_at(nozzle) : m_config.default_acceleration.get_at(nozzle);\n        }\n        acceleration_i",
+      "expected_matches": 1,
+      "description": "Use inner-wall acceleration as the fallback for an outer-wall path whose outer-wall value is zero; the zero-role test expects the default acceleration instead.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "d0d36fc40729409158455308c1c104cb01aab0c07c4c9de9261036dbf3803bb9"
+    },
+    {
+      "id": "initial-layer-speed-fixed-slot0",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            speed = use_first_layer_speed ? NOZZLE_CONFIG(initial_layer_speed) :\n                                            NOZZLE_CONFIG(initial_layer_infill_speed);",
+      "new": "            speed = use_first_layer_speed ? m_config.initial_layer_speed.get_at(0) :\n                                            NOZZLE_CONFIG(initial_layer_infill_speed);",
+      "expected_matches": 1,
+      "description": "Read initial-layer perimeter speed from slot 0 instead of the selected tool slot; the nullable process test expects tool-specific inherited and explicit feeds.",
+      "test_filter": "^SettingsSpeedAccelVariance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "168b14ca3584402089522c19c92e9e1ff2231cc55baf77be797238c2908167e5"
+    }
+  ]
+}

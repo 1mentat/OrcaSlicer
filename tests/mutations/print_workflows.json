@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "Mutations for Print lifecycle, layer selection, coordinate conversion, support preview, collision and cache workflows.",
+  "mutants": [
+    {
+      "id": "print-max-layer-height-uses-minimum",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "nozzle_diameter_max = std::max(nozzle_diameter_max, m_config.nozzle_diameter.get_at(extruder_id));",
+      "new": "nozzle_diameter_max = std::min(nozzle_diameter_max, m_config.nozzle_diameter.get_at(extruder_id));",
+      "description": "Use the minimum configured nozzle when computing the safe maximum layer height; the dual-nozzle collection case expects the 0.8 mm maximum.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-layer-order-reversed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "boundingBox_for_objects[left].area() > boundingBox_for_objects[right].area()",
+      "new": "boundingBox_for_objects[left].area() < boundingBox_for_objects[right].area()",
+      "description": "Reverse the public object-layer ordering comparator; the multi-object case checks the returned order and area relation.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-space-translation-adds-origin",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "return Vec2d(point(0) - m_origin(0), point(1) - m_origin(1));",
+      "new": "return Vec2d(point(0) + m_origin(0), point(1) + m_origin(1));",
+      "description": "Apply the plate origin in the wrong direction for floating-point print-space conversion.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-space-scaled-translation-adds-origin",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "return Vec2d(unscaled(point.x()) - m_origin(0), unscaled(point.y()) - m_origin(1));",
+      "new": "return Vec2d(unscaled(point.x()) + m_origin(0), unscaled(point.y()) + m_origin(1));",
+      "description": "Apply the plate origin in the wrong direction for scaled-point print-space conversion.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-layer-range-reverses-start-filter",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "coordf_t limit = print_z - epsilon;\n    auto it = Slic3r::lower_bound_by_predicate(m_layers.begin(), m_layers.end(), [limit](const Layer *layer) { return layer->print_z < limit; });",
+      "new": "coordf_t limit = print_z - epsilon;\n    auto it = Slic3r::lower_bound_by_predicate(m_layers.begin(), m_layers.end(), [limit](const Layer *layer) { return layer->print_z > limit; });",
+      "description": "Reverse the lower-bound predicate used by approximate print-Z lookup; exact and epsilon lookups must still resolve the middle layer.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-layer-range-reverses-end-filter",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "return (it == m_layers.end() || (*it)->print_z > print_z + epsilon) ? nullptr : *it;",
+      "new": "return (it == m_layers.end() || (*it)->print_z < print_z + epsilon) ? nullptr : *it;",
+      "description": "Reverse the upper tolerance check for approximate print-Z lookup; the above-tolerance negative control must remain null.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-bottom-z-reverses-lower-bound",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->bottom_z() > limit_lower)",
+      "new": "if (layer->bottom_z() < limit_lower)",
+      "description": "Reverse the first candidate test in bottom-Z lookup; exact and above-tolerance bottom queries provide independent checks.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-certain-layers-reverses-start-filter",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->print_z < start) continue;",
+      "new": "if (layer->print_z > start) continue;",
+      "description": "Select layers below rather than within the requested range; every returned layer is required to stay inside the requested Z bounds.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-certain-layers-reverses-end-filter",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "if (layer->print_z > end + EPSILON) break;",
+      "new": "if (layer->print_z < end + EPSILON) break;",
+      "description": "Reverse the upper bound in get_certain_layers; the selected layer set must include only the requested in-range layers.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-support-preview-skips-support-generation",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "this->generate_support_material();",
+      "new": "this->slice();",
+      "description": "Skip support generation in the public preview workflow; the overhang fixture requires nonempty support layers and polygons.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-collision-skips-polygon-collection",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (!intersecting_idxs.empty()) {",
+      "new": "if (intersecting_idxs.empty()) {",
+      "description": "Suppress the colliding footprint output while leaving the collision message; the negative-control case requires both.",
+      "test_filter": "PrintPipelineWorkflows"
+    },
+    {
+      "id": "print-cache-export-directory-success-reversed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (!fs::create_directory(directory_path)) {",
+      "new": "if (fs::create_directory(directory_path)) {",
+      "description": "Treat successful cache-directory creation as failure; the export contract requires a zero return and nonempty object payload.",
+      "test_filter": "PrintPipelineWorkflows"
+    }
+  ]
+}

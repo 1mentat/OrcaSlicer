@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed TextureToColor mutants for validating low-poly vertex-color boundary splitting.",
+  "mutants": [
+    {
+      "id": "texture-to-color-boundary-case-selection",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "if (c[1] == c[2])      iso = 0;",
+      "new": "if (c[1] != c[2])      iso = 0;",
+      "description": "Misclassify the two-equal-cluster boundary case so a face with one isolated vertex takes the all-different split path.",
+      "test_filter": "TextureToColor"
+    },
+    {
+      "id": "texture-to-color-isolated-face-color",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "emit(v[i], m_ij, m_ki, c[i]);",
+      "new": "emit(v[i], m_ij, m_ki, c[j]);",
+      "description": "Assign the first sub-face to the shared-edge cluster instead of the isolated vertex cluster.",
+      "test_filter": "TextureToColor"
+    }
+  ]
+}

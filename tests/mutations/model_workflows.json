@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Mutations for Model ownership, geometry transformations, conversions, material assignments and arrangement.",
+  "mutants": [
+    {
+      "id": "model-multipart-zmin-threshold-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "else if (std::abs(zmin - zmin_this) > EPSILON)",
+      "new": "else if (std::abs(zmin - zmin_this) < EPSILON)",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model multipart zmin threshold reversed"
+    },
+    {
+      "id": "model-sort-precise-seam-strength-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "return vl_strong; // strong < weak \u2192 strong group appears first",
+      "new": "return vr_strong; // strong < weak \u2192 strong group appears first",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model sort precise seam strength reversed"
+    },
+    {
+      "id": "model-raw-winding-handness-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (v->is_left_handed()) {",
+      "new": "if (!v->is_left_handed()) {",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model raw winding handness reversed"
+    },
+    {
+      "id": "model-center-modifier-selection-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "const BoundingBoxf3 bb = include_modifiers ? full_raw_mesh_bounding_box() : raw_mesh_bounding_box();",
+      "new": "const BoundingBoxf3 bb = include_modifiers ? raw_mesh_bounding_box() : full_raw_mesh_bounding_box();",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model center modifier selection reversed"
+    },
+    {
+      "id": "model-partial-unit-selection-operator-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "(volume_idxs.empty() ||\n                 std::find(volume_idxs.begin(), volume_idxs.end(), vol_idx) != volume_idxs.end())",
+      "new": "(volume_idxs.empty() &&\n                 std::find(volume_idxs.begin(), volume_idxs.end(), vol_idx) != volume_idxs.end())",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model partial unit selection operator reversed"
+    },
+    {
+      "id": "model-filament-remap-boundary-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (remapped > extruder_count) {",
+      "new": "if (remapped < extruder_count) {",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model filament remap boundary reversed"
+    },
+    {
+      "id": "model-delete-connector-predicate-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (volumes[id]->is_cut_connector())",
+      "new": "if (!volumes[id]->is_cut_connector())",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model delete connector predicate reversed"
+    },
+    {
+      "id": "model-print-state-inside-predicate-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (state == BuildVolume::ObjectState::Inside)",
+      "new": "if (state != BuildVolume::ObjectState::Inside)",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model print state inside predicate reversed"
+    },
+    {
+      "id": "model-arrange-support-gate-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (is_support_enabled) {",
+      "new": "if (!is_support_enabled) {",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model arrange support gate reversed"
+    },
+    {
+      "id": "model-only-part-predicate-reversed",
+      "path": "src/libslic3r/Model.cpp",
+      "old": "if (m_type != ModelVolumeType::MODEL_PART)",
+      "new": "if (m_type == ModelVolumeType::MODEL_PART)",
+      "test_filter": "ModelExtendedVariance",
+      "description": "model only part predicate reversed"
+    }
+  ]
+}

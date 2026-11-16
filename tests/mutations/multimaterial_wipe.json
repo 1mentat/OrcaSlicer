@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "wt2-extra-flow-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_extra_flow(float(config.wipe_tower_extra_flow/100.)),",
+      "new": "m_extra_flow(1.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "extra-flow fixture must change extrusion count and length"
+    },
+    {
+      "id": "wt2-extra-spacing-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_extra_spacing_wipe(float(config.wipe_tower_extra_spacing/100. * config.wipe_tower_extra_flow/100.)),",
+      "new": "m_extra_spacing_wipe(1.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "extra-spacing fixture must increase generated depth"
+    },
+    {
+      "id": "wt2-width-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_wipe_tower_width(float(config.prime_tower_width)),",
+      "new": "m_wipe_tower_width(35.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "configured 32 mm width must reach direct width oracle"
+    },
+    {
+      "id": "wt2-brim-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_wipe_tower_brim_width(float(config.prime_tower_brim_width)),",
+      "new": "m_wipe_tower_brim_width(0.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "positive brim must exceed zero-brim geometry"
+    },
+    {
+      "id": "wt2-cone-angle-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_wipe_tower_cone_angle(float(config.wipe_tower_cone_angle)),",
+      "new": "m_wipe_tower_cone_angle(0.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "90-degree cone must widen the tall-plan bounding box"
+    },
+    {
+      "id": "wt2-fillet-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_used_fillet(config.wipe_tower_fillet_wall),",
+      "new": "m_used_fillet(false),",
+      "test_filter": "MultimaterialWipe",
+      "description": "fillet pair must change generated extrusion length"
+    },
+    {
+      "id": "wt2-rib-width-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_rib_width(config.wipe_tower_rib_width),",
+      "new": "m_rib_width(0.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "rib fixture must retain positive rib width"
+    },
+    {
+      "id": "wt2-extra-rib-length-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_extra_rib_length(config.wipe_tower_extra_rib_length),",
+      "new": "m_extra_rib_length(0.f),",
+      "test_filter": "MultimaterialWipe",
+      "description": "positive extra rib length must exceed plain rib length"
+    },
+    {
+      "id": "wt2-ramming-gate-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_enable_filament_ramming(config.enable_filament_ramming.value),",
+      "new": "m_enable_filament_ramming(false),",
+      "test_filter": "MultimaterialWipe",
+      "description": "enabled run must contain Ramming marker and greater unload extrusion"
+    },
+    {
+      "id": "wt2-cooling-moves-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_moves           = config.filament_cooling_moves.get_at(idx);",
+      "new": "m_filpar[idx].cooling_moves           = 0;",
+      "test_filter": "MultimaterialWipe",
+      "description": "cooling move pair must contain Cooling marker only when enabled"
+    },
+    {
+      "id": "wt2-cooling-initial-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_initial_speed   = float(config.filament_cooling_initial_speed.get_at(idx));",
+      "new": "m_filpar[idx].cooling_initial_speed   = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "active cooling fixture must retain its configured feed sequence"
+    },
+    {
+      "id": "wt2-cooling-final-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_final_speed     = float(config.filament_cooling_final_speed.get_at(idx));",
+      "new": "m_filpar[idx].cooling_final_speed     = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "active cooling fixture must retain its configured feed sequence"
+    },
+    {
+      "id": "wt2-stamping-distance-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].filament_stamping_distance          = float(config.filament_stamping_distance.get_at(idx));",
+      "new": "m_filpar[idx].filament_stamping_distance          = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "active cooling/ramming output must retain stamping branch"
+    },
+    {
+      "id": "wt2-stamping-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].filament_stamping_loading_speed     = float(config.filament_stamping_loading_speed.get_at(idx));",
+      "new": "m_filpar[idx].filament_stamping_loading_speed     = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "active cooling/ramming output must retain stamping feed behavior"
+    },
+    {
+      "id": "wt2-unload-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].unloading_speed         = float(config.filament_unloading_speed.get_at(idx));",
+      "new": "m_filpar[idx].unloading_speed         = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "optional-load fixture must contain configured F2100 unload feed"
+    },
+    {
+      "id": "wt2-unload-start-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].unloading_speed_start   = float(config.filament_unloading_speed_start.get_at(idx));",
+      "new": "m_filpar[idx].unloading_speed_start   = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "optional-load fixture must contain configured F3300 initial unload feed"
+    },
+    {
+      "id": "wt2-multitool-gate-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].multitool_ramming = config.filament_multitool_ramming.get_at(idx) && vol > 0.f && flow > 0.f;",
+      "new": "m_filpar[idx].multitool_ramming = false;",
+      "test_filter": "MultimaterialWipe",
+      "description": "high-volume multi-tool ramming must exceed low-volume extrusion"
+    },
+    {
+      "id": "wt2-multitool-volume-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "float vol  = config.filament_multitool_ramming_volume.get_at(idx);",
+      "new": "float vol  = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "multi-tool volume differential must remain positive"
+    },
+    {
+      "id": "wt2-multitool-flow-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "float flow = config.filament_multitool_ramming_flow.get_at(idx);",
+      "new": "float flow = 1.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "multi-tool flow/time differential must remain observable"
+    },
+    {
+      "id": "wt2-loading-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].loading_speed           = float(config.filament_loading_speed.get_at(idx));",
+      "new": "m_filpar[idx].loading_speed           = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "optional-load fixture must retain configured load feed"
+    },
+    {
+      "id": "wt2-loading-start-speed-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].loading_speed_start     = float(config.filament_loading_speed_start.get_at(idx));",
+      "new": "m_filpar[idx].loading_speed_start     = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "optional-load fixture must retain initial load feed"
+    },
+    {
+      "id": "wt2-delay-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].delay                   = float(config.filament_toolchange_delay.get_at(idx));",
+      "new": "m_filpar[idx].delay                   = 0.f;",
+      "test_filter": "MultimaterialWipe",
+      "description": "ramming/cooling elapsed time must retain configured delay"
+    }
+  ],
+  "scope": "Direct WipeTower2 settings contracts validate generated motion and geometry."
+}

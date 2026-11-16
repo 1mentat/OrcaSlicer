@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Public fuzzy-skin style routing and registered numeric endpoint pipeline contracts.",
+  "mutants": [
+    {
+      "id": "fuzzy-style-contour-loop-selection-inverted",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "    const bool fuzzify_contours = (loop_idx == 0 && fuzziy_type != FuzzySkinType::Hole) || fuzziy_type == FuzzySkinType::AllWalls;",
+      "new": "    const bool fuzzify_contours = (loop_idx != 0 && fuzziy_type != FuzzySkinType::Hole) || fuzziy_type == FuzzySkinType::AllWalls;",
+      "test_filter": "FuzzySkinSettingsPipeline",
+      "description": "Apply outer-contour styles to internal contour loops instead. The public type matrix must lose fuzzy points from its intended outer contour."
+    },
+    {
+      "id": "fuzzy-thickness-ripple-amplitude-zero",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = 0.;",
+      "test_filter": "FuzzySkinSettingsPipeline",
+      "description": "Drop classic polygon-ripple amplitude. The exact 2 mm Print endpoint must still expand emitted perimeter bounds."
+    },
+    {
+      "id": "fuzzy-point-distance-hardcoded",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = unscale_(cfg.point_distance);",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = 0.3;",
+      "test_filter": "FuzzySkinSettingsPipeline",
+      "description": "Ignore the configured sample interval. The 0.01/0.02 mm endpoint pair must produce distinct emitted junction counts."
+    }
+  ]
+}

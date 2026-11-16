@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Fan minimum/maximum endpoints and independent fan-cooling layer-time boundaries.",
+  "mutants": [
+    {
+      "id": "cooling-minimum-speed-read-ignored",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "        float fan_min_speed = m_config.fan_min_speed.get_at(config_index);",
+      "new": "        float fan_min_speed = 0.0f;",
+      "test_filter": "Cooling fan speed endpoints follow the selected layer-time branch",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Replacing fan_min_speed with zero breaks the 40 and 100 percent physical PWM checks in the minimum branch."
+    },
+    {
+      "id": "cooling-maximum-speed-routes-to-minimum",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "                    fan_speed_new = fan_max_speed;",
+      "new": "                    fan_speed_new = fan_min_speed;",
+      "test_filter": "Cooling fan speed endpoints follow the selected layer-time branch",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Routing the maximum-time branch to fan_min_speed breaks the 40 and 100 percent PWM checks when the minimum is held at zero."
+    },
+    {
+      "id": "cooling-layer-time-maximum-threshold-ignored",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "            float fan_cooling_layer_time      = float(EXTRUDER_CONFIG(fan_cooling_layer_time));",
+      "new": "            float fan_cooling_layer_time      = 0.0f;",
+      "test_filter": "Cooling layer-time boundary selects minimum or interpolated fan speed",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Forcing the cooling threshold to zero removes the independently selected 1000-second interpolation branch; deposition fan state must rise above 40 percent."
+    }
+  ]
+}

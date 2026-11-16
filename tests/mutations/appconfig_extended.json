@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed AppConfigExtended mutation candidates. Run results are recorded separately by the mutation harness.",
+  "mutants": [
+    {
+      "id": "appconfig-calibration-save-record",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "j[\"calis\"].push_back(cali_json);",
+      "new": "j[\"calis\"].push_back(json{});",
+      "description": "Discard the serialized calibration fields instead of persisting the selected calibration record.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-calibration-load-record",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "                    m_printer_cali_infos.emplace_back(cali_info);\n                }\n            } else if (it.key() == \"orca_presets\") {",
+      "new": "                    m_printer_cali_infos.clear();\n                }\n            } else if (it.key() == \"orca_presets\") {",
+      "description": "Drop loaded calibration records rather than retaining the parsed device and preset state.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-printer-snapshot-save",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "j[\"orca_presets\"].push_back(preset.second);",
+      "new": "j[\"orca_presets\"].push_back(json{});",
+      "description": "Write empty printer snapshots instead of preserving each complete machine-keyed selection record.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-vendor-variant-serialization",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "j_model[\"nozzle_diameter\"] = escaped;",
+      "new": "j_model[\"nozzle_diameter\"] = std::string();",
+      "description": "Drop escaped model-variant values when serializing enabled vendor records.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-cloud-provider-required-orca-order",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "result.insert(result.begin(), \"orca\");",
+      "new": "result.push_back(\"orca\");",
+      "description": "Append the mandatory Orca provider instead of keeping it at the front of the public provider list.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-reset-printer-selection",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "it->second.erase(PRESET_PRINTER_NAME);",
+      "new": "it->second.erase(PRESET_PRINT_NAME);",
+      "description": "Leave the selected printer in the presets section when reset_selections is requested.",
+      "test_filter": "AppConfigExtended"
+    },
+    {
+      "id": "appconfig-calibration-status-update-guard",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "if (need_change_status) {",
+      "new": "if (!need_change_status) {",
+      "description": "Invert the explicit status-update guard so an update with need_change_status=false changes the persisted completion state.",
+      "test_filter": "AppConfigExtended"
+    }
+  ]
+}

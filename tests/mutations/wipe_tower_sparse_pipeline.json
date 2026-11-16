@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "test_filter": "WipeTowerSparsePipeline",
+  "mutants": [
+    {
+      "id": "wipe-tower-no-sparse-gate-disabled",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "bool wipe_tower_sparse_layers_skipped(const PrintConfig &config)\n{\n    return config.wipe_tower_no_sparse_layers.value && config.timelapse_type.value != TimelapseType::tlSmooth &&\n           ! config.enable_wrapping_detection.value;\n}",
+      "new": "bool wipe_tower_sparse_layers_skipped(const PrintConfig &config)\n{\n    return false;\n}",
+      "expected_matches": 1,
+      "description": "Disable the shared public no-sparse gate. The two public Print/G-code rows must then lose the tower extrusion reduction while retaining lower and upper tool changes, so the reduction and compacted-plan assertions fail.",
+      "test_filter": "WipeTowerSparsePipeline"
+    },
+    {
+      "id": "gcode-type2-sparse-emission-branch-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);\n                    if (m_sparse_layers_skipped) {\n                        wipe_tower_z  = m_last_wipe_tower_print_z;\n                        ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;\n                        if (m_tool_change_idx == 0 && !ignore_sparse)\n                        wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;\n                    }",
+      "new": "                    bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);\n                    if (false) {\n                        wipe_tower_z  = m_last_wipe_tower_print_z;\n                        ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;\n                        if (m_tool_change_idx == 0 && !ignore_sparse)\n                        wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;\n                    }",
+      "expected_matches": 1,
+      "description": "Disable the type2 integration branch that omits sparse tool-change results. The public true row should then retain sparse tower G1 XY/E paths and fail the measured reduction while the source remains compile-safe.",
+      "test_filter": "WipeTowerSparsePipeline"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "print-order-as-object-list-falls-through-to-chain",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": ": sort_object_instances_by_model_order(print))));",
+      "new": ": chain_print_object_instances(print))));",
+      "line": 3527,
+      "expected_matches": 1,
+      "test_filter": "PrintOrder",
+      "description": "AsObjectList must preserve the explicitly assigned instance list order in public by-layer G-code; the seven-instance fixture checks every layer's copy permutation."
+    },
+    {
+      "id": "print-order-island-stop-dropped-from-public-visit-plan",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "node_points.emplace_back(node.pos);",
+      "new": "if (node_points.size() + 1 < nodes.size()) node_points.emplace_back(node.pos);",
+      "line": 6928,
+      "expected_matches": 1,
+      "test_filter": "PrintOrder",
+      "description": "By-layer island ordering must retain one tour node for every public island; dropping the final node produces an incomplete per-layer copy identity set and is caught before any cost comparison."
+    }
+  ]
+}

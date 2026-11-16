@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Semantic probes for TriangleMeshSlicer public contour repair with split facet vertices. Filters are exact Catch case names.",
+  "mutants": [
+    {
+      "id": "slice-contour-gap-repair-disabled",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "    const double max_gap = 2.; //mm",
+      "new": "    const double max_gap = 0.; //mm",
+      "expected_matches": 1,
+      "test_filter": "Single-plane slicing closes a box with coincident split triangle vertices",
+      "description": "A zero join radius cannot close the triangle-soup section because all triangle vertex indices are split; the public contour count and analytic rectangular area must fail."
+    },
+    {
+      "id": "slice-contour-reversed-gap-pass-disabled",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "    chain_open_polylines_close_gaps(open_polylines, loops, max_gap, true);",
+      "new": "    chain_open_polylines_close_gaps(open_polylines, loops, max_gap, false);",
+      "expected_matches": 1,
+      "test_filter": "Single-plane slicing joins reversed split facets into one contour",
+      "description": "The reversed right wall requires the public slicer\u2019s reversed-endpoint close-gap pass to join the rectangle. The test requires one contour with the analytic 20 by 14 footprint and normalized orientation."
+    }
+  ]
+}

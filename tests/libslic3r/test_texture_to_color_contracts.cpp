@@ -401,3 +401,161 @@ TEST_CASE("TextureToColor keeps local texture regions attached through subdivisi
     CHECK(left_seen);
     CHECK(right_seen);
 }
+
+// The ported cases keep the source helpers (their CHECK-based check_finite_and_valid differs from the
+// shared fixture header version); a named enclosing namespace makes them win over the file-wide
+// using-directive instead of being ambiguous with it.
+namespace gap_e_texture_to_color_cases {
+namespace {
+using Slic3r::tex2color::test::Color;
+
+using Slic3r::tex2color::test::matches_color;
+
+TextureToColorSettings bounded_settings()
+{
+    TextureToColorSettings settings;
+    settings.target_colors_num = 1;
+    settings.smooth_weight = 0.0;
+    settings.oversampling_iters = 0;
+    settings.oversampling_min_face_count = 4;
+    settings.oversampling_max_face_count = 32;
+    settings.mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
+    return settings;
+}
+
+void check_finite_and_valid(const TriMesh &mesh)
+{
+    for (const stl_vertex &vertex : mesh.vertices) {
+        for (std::size_t component = 0; component < 3; ++component)
+            CHECK(std::isfinite(vertex[component]));
+    }
+    for (const stl_triangle_vertex_indices &face : mesh.indices) {
+        for (std::size_t component = 0; component < 3; ++component) {
+            REQUIRE(face[component] >= 0);
+            const std::size_t index = static_cast<std::size_t>(face[component]);
+            REQUIRE(index < mesh.vertices.size());
+        }
+    }
+}
+
+TriMesh closed_tetrahedron()
+{
+    return TriMesh(
+        {
+            stl_triangle_vertex_indices(0, 2, 1),
+            stl_triangle_vertex_indices(0, 1, 3),
+            stl_triangle_vertex_indices(1, 2, 3),
+            stl_triangle_vertex_indices(2, 0, 3),
+        },
+        {
+            stl_vertex(0.f, 0.f, 0.f),
+            stl_vertex(1.f, 0.f, 0.f),
+            stl_vertex(0.f, 1.f, 0.f),
+            stl_vertex(0.f, 0.f, 1.f),
+        });
+}
+} // namespace
+
+
+TEST_CASE("TextureToColor samples a closed tetrahedron through the public route",
+          "[TextureToColor][TextureToColorPublic]")
+{
+    const TriMesh mesh = closed_tetrahedron();
+    const auto uv_coords = tetrahedron_uvs();
+    const Color expected_rgb{{233, 19, 7}};
+    // Weighted texture sampling and the Lab round trip quantize RGB channels.
+    constexpr double kColorQuantizationTolerance = 2.0;
+    cv::Mat texture(1, 1, CV_8UC3, cv::Scalar(7, 19, 233));
+
+    TriMesh color_mesh;
+    std::vector<Color> face_colors;
+    REQUIRE(TextureToColor(mesh, uv_coords, texture, color_mesh, face_colors, bounded_settings()));
+    REQUIRE_FALSE(color_mesh.indices.empty());
+    REQUIRE(face_colors.size() == color_mesh.indices.size());
+    for (const Color &color : face_colors) {
+        for (std::size_t channel = 0; channel < expected_rgb.size(); ++channel)
+            CHECK_THAT(static_cast<double>(color[channel]),
+                       WithinAbs(static_cast<double>(expected_rgb[channel]),
+                                 kColorQuantizationTolerance));
+    }
+    check_finite_and_valid(color_mesh);
+}
+
+TEST_CASE("ClusterAndSmooth preserves a fixed palette center after region smoothing",
+          "[TextureToColor][TextureToColorOptions]")
+{
+    const TriMesh input = closed_tetrahedron();
+    const Color minority{{0, 0, 0}};
+    const Color majority{{255, 255, 255}};
+    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 2;
+    settings.smooth_weight = 1.0;
+
+    TriMesh out_mesh;
+    std::vector<Color> out_colors;
+    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
+    REQUIRE(out_mesh.indices.size() == input.indices.size());
+    REQUIRE(out_colors.size() == out_mesh.indices.size());
+    CHECK(color_utils::is_closed(out_mesh));
+    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
+               WithinAbs(1.0 / 6.0, 1e-5));
+    check_finite_and_valid(out_mesh);
+
+    auto matches_color = [](const Color &actual, const Color &expected) {
+        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
+            if (std::abs(static_cast<double>(actual[channel]) -
+                         static_cast<double>(expected[channel])) > 2.0)
+                return false;
+        }
+        return true;
+    };
+    std::size_t majority_faces = 0;
+    std::size_t minority_faces = 0;
+    bool all_colors_in_fixed_palette = true;
+    for (const Color &color : out_colors) {
+        const bool is_majority = matches_color(color, majority);
+        const bool is_minority = matches_color(color, minority);
+        if (is_majority)
+            ++majority_faces;
+        if (is_minority)
+            ++minority_faces;
+        if (!is_majority && !is_minority)
+            all_colors_in_fixed_palette = false;
+    }
+    CHECK(all_colors_in_fixed_palette);
+    CHECK(majority_faces == 3);
+    CHECK(minority_faces == 1);
+}
+
+TEST_CASE("ClusterAndSmooth keeps the majority color after adaptive region smoothing",
+          "[TextureToColor][TextureToColorOptions]")
+{
+    const TriMesh input = closed_tetrahedron();
+    const Color minority{{0, 0, 0}};
+    const Color majority{{255, 255, 255}};
+    const std::vector<Color> input_face_colors{minority, majority, majority, majority};
+    TextureToColorSettings settings = bounded_settings();
+    settings.target_colors_num = 0;
+    settings.max_cluster_k = 2;
+    settings.max_color_distance = 0.0;
+    settings.smooth_weight = 1.0;
+
+    TriMesh out_mesh;
+    std::vector<Color> out_colors;
+    REQUIRE(ClusterAndSmooth(input, input_face_colors, out_mesh, out_colors, settings));
+    REQUIRE(out_mesh.indices.size() == input.indices.size());
+    REQUIRE(out_colors.size() == out_mesh.indices.size());
+    CHECK(color_utils::is_closed(out_mesh));
+    CHECK_THAT(static_cast<double>(std::abs(its_volume(out_mesh))),
+               WithinAbs(1.0 / 6.0, 1e-5));
+    check_finite_and_valid(out_mesh);
+
+    for (const Color &color : out_colors) {
+        for (std::size_t channel = 0; channel < majority.size(); ++channel)
+            CHECK_THAT(static_cast<double>(color[channel]),
+                       WithinAbs(static_cast<double>(majority[channel]), 2.0));
+    }
+}
+
+} // namespace gap_e_texture_to_color_cases

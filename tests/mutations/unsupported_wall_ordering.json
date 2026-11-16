@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Unsupported walls follow their supporting walls and defer isolated loops until infill.",
+  "mutants": [
+    {
+      "id": "unsupported-wall-ordering-config-gate-inverted",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "    if (!perimeter_generator.config->unsupported_wall_last)\n        return;",
+      "new": "    if (perimeter_generator.config->unsupported_wall_last)\n        return;",
+      "description": "Invert the configuration gate; positive unsupported-loop ordering and disabled controls must distinguish the two modes for both wall generators.",
+      "test_filter": "UnsupportedWallOrdering"
+    },
+    {
+      "id": "unsupported-wall-infill-deferral-dropped",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "            loop->print_after_infill = true;",
+      "new": "            loop->print_after_infill = false;",
+      "description": "Leave unattached unsupported loops in the ordinary perimeter pass; isolated hole loops and parsed perimeter/infill/perimeter ordering must detect lost infill deferral.",
+      "test_filter": "UnsupportedWallOrdering"
+    }
+  ]
+}

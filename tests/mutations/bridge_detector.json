@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed BridgeDetector mutation candidates. Run results are recorded separately by the mutation harness.",
+  "mutants": [
+    {
+      "id": "bridge-detector-automatic-angle-gate",
+      "path": "src/libslic3r/BridgeDetector.cpp",
+      "old": "if (bridge_direction_override == 0.) {",
+      "new": "if (bridge_direction_override != 0.) {",
+      "description": "Invert automatic candidate generation versus an explicit direction override; anchored coverage cases must still distinguish the two paths.",
+      "test_filter": "BridgeDetector"
+    },
+    {
+      "id": "bridge-detector-anchor-region-intersection",
+      "path": "src/libslic3r/BridgeDetector.cpp",
+      "old": "this->_anchor_regions = intersection_ex(grown, union_safety_offset(this->lower_slices));",
+      "new": "this->_anchor_regions = diff_ex(grown, union_safety_offset(this->lower_slices));",
+      "description": "Replace lower-slice anchor intersection with its complement, which should make valid two-sided support fail the detector contract.",
+      "test_filter": "BridgeDetector"
+    },
+    {
+      "id": "bridge-detector-no-coverage-result",
+      "path": "src/libslic3r/BridgeDetector.cpp",
+      "old": "if (! have_coverage)\n        return false;",
+      "new": "if (have_coverage)\n        return false;",
+      "description": "Invert the no-coverage guard; fully unsupported and one-sided bridge fixtures must remain rejected.",
+      "test_filter": "BridgeDetector"
+    },
+    {
+      "id": "bridge-detector-supported-trapezoid-threshold",
+      "path": "src/libslic3r/BridgeDetector.cpp",
+      "old": "if (n_supported >= 2) {\n                        //add it\n                        covered.push_back(std::move(trapezoid));",
+      "new": "if (n_supported >= 1) {\n                        //add it\n                        covered.push_back(std::move(trapezoid));",
+      "description": "Accept a trapezoid with one anchor intersection instead of requiring two anchored sides.",
+      "test_filter": "BridgeDetector"
+    },
+    {
+      "id": "bridge-detector-unsupported-edge-filter",
+      "path": "src/libslic3r/BridgeDetector.cpp",
+      "old": "if (! Slic3r::Geometry::directions_parallel(line.direction(), angle))",
+      "new": "if (Slic3r::Geometry::directions_parallel(line.direction(), angle))",
+      "description": "Reverse filtering of unsupported edges parallel to the selected bridge direction.",
+      "test_filter": "BridgeDetector"
+    }
+  ]
+}

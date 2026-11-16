@@ -1,0 +1,141 @@
+{
+  "scope": "Configuration value, ownership, nullable, environment, and strict ordering contracts. Inline mutations require recompiling consumers; private evidence additionally isolates exact integrated test-case bodies from archive weak definitions.",
+  "mutants": [
+    {
+      "id": "configbase-skip-inclusion",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (skipped_keys && (skipped_keys->count(opt_key) != 0))",
+      "new": "if (skipped_keys && (skipped_keys->count(opt_key) == 0))",
+      "test_filter": "ConfigContracts",
+      "description": "configbase skip inclusion"
+    },
+    {
+      "id": "configbase-equals-value",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (this_opt != nullptr && other_opt != nullptr && *this_opt != *other_opt)\n            return false;",
+      "new": "if (this_opt != nullptr && other_opt != nullptr && *this_opt == *other_opt)\n            return false;",
+      "test_filter": "ConfigContracts",
+      "description": "configbase equals value"
+    },
+    {
+      "id": "configbase-equal-membership",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (this_opt != nullptr && other_opt != nullptr && *this_opt == *other_opt)\n            equal.emplace_back(opt_key);",
+      "new": "if (this_opt != nullptr && other_opt != nullptr && *this_opt != *other_opt)\n            equal.emplace_back(opt_key);",
+      "test_filter": "ConfigContracts",
+      "description": "configbase equal membership"
+    },
+    {
+      "id": "setenv-lower-bound",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "envname[i] = (envname[i] <= 'z' && envname[i] >= 'a') ? envname[i]-('a'-'A') : envname[i];",
+      "new": "envname[i] = (envname[i] <= 'z' && envname[i] > 'a') ? envname[i]-('a'-'A') : envname[i];",
+      "test_filter": "ConfigContracts",
+      "description": "setenv lower bound"
+    },
+    {
+      "id": "null-nullables-guard",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (opt->nullable())\n        \topt->deserialize(\"nil\", ForwardCompatibilitySubstitutionRule::Disable);",
+      "new": "if (!opt->nullable())\n        \topt->deserialize(\"nil\", ForwardCompatibilitySubstitutionRule::Disable);",
+      "test_filter": "ConfigContracts",
+      "description": "null nullables guard"
+    },
+    {
+      "id": "remove-nil-guard",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (it->second->is_nil()) {",
+      "new": "if (!it->second->is_nil()) {",
+      "test_filter": "ConfigContracts",
+      "description": "remove nil guard"
+    },
+    {
+      "id": "dynamic-equals-negation",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "return ! dynamic_config_iterate(*this, other,",
+      "new": "return dynamic_config_iterate(*this, other,",
+      "test_filter": "ConfigContracts",
+      "description": "dynamic equals negation"
+    },
+    {
+      "id": "dynamic-equal-membership",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (*l == *r)\n                equal.emplace_back(key);",
+      "new": "if (*l != *r)\n                equal.emplace_back(key);",
+      "test_filter": "ConfigContracts",
+      "description": "dynamic equal membership"
+    },
+    {
+      "id": "diff-report-value-guard",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "if (*left_it->second != *right_it->second) {",
+      "new": "if (*left_it->second == *right_it->second) {",
+      "test_filter": "ConfigContracts",
+      "description": "diff report value guard"
+    },
+    {
+      "id": "dynamic-equality-final-return",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "return it1 == it1_end && it2 == it2_end;",
+      "new": "return it1 != it1_end || it2 != it2_end;",
+      "test_filter": "ConfigContracts",
+      "description": "dynamic equality final return"
+    },
+    {
+      "id": "float-or-percent-absolute",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "double get_abs_value(double ratio_over) const { return this->percent ? (ratio_over * this->value / 100) : this->value; }",
+      "new": "double get_abs_value(double ratio_over) const { return this->value; }",
+      "test_filter": "ConfigContracts",
+      "description": "float or percent absolute"
+    },
+    {
+      "id": "float-or-percent-kind",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "inline bool operator==(const FloatOrPercent& l, const FloatOrPercent& r) throw() { return is_approx(l.value, r.value) && l.percent == r.percent; }",
+      "new": "inline bool operator==(const FloatOrPercent& l, const FloatOrPercent& r) throw() { return is_approx(l.value, r.value) && l.percent != r.percent; }",
+      "test_filter": "ConfigContracts",
+      "description": "float or percent kind"
+    },
+    {
+      "id": "point3-separator",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "return sscanf(str.data(), \" %lf , %lf , %lf %c\", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3 ||\n               sscanf(str.data(), \" %lf x %lf x %lf %c\", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3;",
+      "new": "return sscanf(str.data(), \" %lf , %lf , %lf %c\", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3 &&\n               sscanf(str.data(), \" %lf x %lf x %lf %c\", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3;",
+      "test_filter": "ConfigContracts",
+      "description": "point3 separator"
+    },
+    {
+      "id": "points-groups-clear",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "if (!append)\n            this->values.clear();\n        std::istringstream is(str);\n        std::string group_str;\n        while (std::getline(is, group_str, '#')) {\n            Vec2ds group;",
+      "new": "if (append)\n            this->values.clear();\n        std::istringstream is(str);\n        std::string group_str;\n        while (std::getline(is, group_str, '#')) {\n            Vec2ds group;",
+      "test_filter": "ConfigContracts",
+      "description": "points groups clear"
+    },
+    {
+      "id": "ints-groups-clear",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "if (!append) this->values.clear();\n        std::istringstream is(str);\n        std::string        group_str;\n        while (std::getline(is, group_str, '#')) {\n            std::vector<int>   group_values;",
+      "new": "if (append) this->values.clear();\n        std::istringstream is(str);\n        std::string        group_str;\n        while (std::getline(is, group_str, '#')) {\n            std::vector<int>   group_values;",
+      "test_filter": "ConfigContracts",
+      "description": "ints groups clear"
+    },
+    {
+      "id": "vector-resize-front",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "T v = this->values./*back*/front();",
+      "new": "T v = this->values.back();",
+      "test_filter": "ConfigContracts",
+      "description": "vector resize front"
+    },
+    {
+      "id": "grouped-integer-order-is-not-strict",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "    bool operator<(const ConfigOptionIntsGroups &rhs) const throw() {\n        return this->values < rhs.values;\n    }\n",
+      "new": "    bool operator<(const ConfigOptionIntsGroups &rhs) const throw() {\n        bool is_lower = true;\n        for (size_t i = 0; i < values.size(); ++i) {\n            if (this->values[i] == rhs.values[i])\n                continue;\n\n            return (this->values[i] < rhs.values[i]);\n        }\n        return is_lower;\n    }\n",
+      "test_filter": "ConfigContracts",
+      "description": "grouped integer order is not strict"
+    }
+  ]
+}

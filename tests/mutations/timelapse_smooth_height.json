@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "smooth-nonliftable-picture-height-gap-not-enforced",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "height_gap = *m_extruder_height_gap;",
+      "new": "height_gap = 0;",
+      "expected_matches": 1,
+      "description": "Smooth all-layer snapshots from the non-liftable picture extruder remain unavailable until the current layer reaches the configured extruder height gap.",
+      "test_filter": "^TimelapsePosPickerGap$"
+    },
+    {
+      "id": "smooth-picture-rejects-exact-height-gap",
+      "path": "src/libslic3r/GCode/TimelapsePosPicker.cpp",
+      "old": "if (ctx.curr_layer->print_z < height_gap)",
+      "new": "if (ctx.curr_layer->print_z <= height_gap)",
+      "expected_matches": 1,
+      "description": "A non-liftable picture extruder becomes available exactly at its configured height gap; the boundary layer must not be rejected.",
+      "test_filter": "^TimelapsePosPickerGap$"
+    }
+  ]
+}

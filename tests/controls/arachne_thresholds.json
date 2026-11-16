@@ -1,0 +1,28 @@
+{
+  "names": [
+    "FocusedArachne::Arachne factory wrappers preserve nonlinear width thresholds",
+    "FocusedArachne::Arachne one millimeter transition keeps low-angle wedge widths positive",
+    "FocusedArachne::Arachne outer-central filtering loops sharp tapered walls",
+    "FocusedArachne::Arachne skeletal paths follow a concave variable-width outline",
+    "FocusedArachne::Arachne taper preserves the output-width floor at its analytic thickness",
+    "FocusedArachne::Arachne variable-width walls remain balanced through broad lobes and a narrow neck",
+    "FocusedArachne::Arachne wall deviation preserves a shallow boundary feature",
+    "FocusedArachne::Arachne wall generation - 50% min_bead_width",
+    "FocusedArachne::Arachne wall generation - 60% min_bead_width",
+    "FocusedArachne::Arachne wall resolution preserves a rounded wall while simplifying its sampling",
+    "FocusedArachne::Arachne wall settings map to the active wall-path controls",
+    "FocusedArachne::Arachne wall transition length honors its zero boundary",
+    "FocusedArachne::Arachne wall transition-angle boundaries change tapered-wall geometry",
+    "FocusedArachne::Arachne wall transitions preserve the scaled plus outline while changing wall geometry",
+    "FocusedArachne::Arachne widening keeps two beads in transition band (#14376)",
+    "FocusedArachne::Beading interpolation tolerates a thicker side with fewer insets",
+    "FocusedArachne::Fuzzy skin displacement mode leaves widths untouched",
+    "FocusedArachne::Fuzzy skin extrusion width is floored at the minimum the flow accepts",
+    "FocusedArachne::Arachne minimum feature threshold clips only the analytic taper tip",
+    "FocusedArachne::Arachne minimum bead percentage widens a thin output path",
+    "FocusedArachne::Arachne uses the initial-layer bead threshold only on layer zero",
+    "FocusedArachne::Arachne minimum wall length factor removes short open odd paths"
+  ],
+  "control_regex": "^FocusedArachne::",
+  "exclude_label_regex": "NotWorking|RequiresApp|KnownBaselineDefect|!shouldfail"
+}

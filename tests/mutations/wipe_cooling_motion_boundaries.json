@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Three ordinary-assertion cooling contracts: count boundary and independently derived initial/final filament-rate endpoints. Zero-speed defect is separate, unresolved evidence.",
+  "mutants": [
+    {
+      "id": "wipe-cooling-move-max-clamped",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_moves           = config.filament_cooling_moves.get_at(idx);",
+      "new": "m_filpar[idx].cooling_moves           = std::min(config.filament_cooling_moves.get_at(idx), 19);",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 1,
+      "test_filter": "WipeTower2 cooling move counts preserve balanced filament and wipe geometry",
+      "ordinary_assertion_only": true,
+      "description": "Clamp legal count 20 to 19; the 20-move row loses one positive/negative cooling E pair and 80 mm absolute filament path."
+    },
+    {
+      "id": "wipe-cooling-initial-representative-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_initial_speed   = float(config.filament_cooling_initial_speed.get_at(idx));",
+      "new": "m_filpar[idx].cooling_initial_speed   = 2.f;",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 1,
+      "test_filter": "WipeTower2 positive cooling speed representatives reach physical motion",
+      "ordinary_assertion_only": true,
+      "description": "Force initial rate to2mm/s instead of configured4mm/s; the independently derived first-stroke filament rate must fail the configured endpoint assertion."
+    },
+    {
+      "id": "wipe-cooling-final-representative-ignored",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "m_filpar[idx].cooling_final_speed     = float(config.filament_cooling_final_speed.get_at(idx));",
+      "new": "m_filpar[idx].cooling_final_speed     = 6.f;",
+      "expected_matches": 1,
+      "observed_match_count": 1,
+      "expected_test_count": 1,
+      "test_filter": "WipeTower2 positive cooling speed representatives reach physical motion",
+      "ordinary_assertion_only": true,
+      "description": "Force final rate to6mm/s instead of configured8mm/s; the independently derived final-stroke filament rate must fail the configured endpoint assertion."
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "filament-group-utils-color-alpha-reset",
+      "path": "src/libslic3r/FilamentGroupUtils.cpp",
+      "old": "if (hexstr.size() == 9)\n            a = hexToByte(hexstr.substr(7, 2));",
+      "new": "if (hexstr.size() == 9)\n            a = 0;",
+      "test_filter": "^FilamentGroupUtilsGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "filament-group-utils-group-size-external-gate",
+      "path": "src/libslic3r/FilamentGroupUtils.cpp",
+      "old": "if (!ignore_ext_filament && group_size[idx] == 0)\n                group_size[idx] = 1;",
+      "new": "if (ignore_ext_filament && group_size[idx] == 0)\n                group_size[idx] = 1;",
+      "test_filter": "^FilamentGroupUtilsGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "filament-group-utils-machine-external-fallback",
+      "path": "src/libslic3r/FilamentGroupUtils.cpp",
+      "old": "if (tmp.empty() && !ignore_ext_filament) {",
+      "new": "if (tmp.empty() && ignore_ext_filament) {",
+      "test_filter": "^FilamentGroupUtilsGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "filament-group-utils-printability-group-match",
+      "path": "src/libslic3r/FilamentGroupUtils.cpp",
+      "old": "if (auto iter = unprintable.find(filament); iter != unprintable.end() && i == iter->second)\n                    return false;",
+      "new": "if (auto iter = unprintable.find(filament); iter != unprintable.end() && i != iter->second)\n                    return false;",
+      "test_filter": "^FilamentGroupUtilsGap$",
+      "expected_matches": 1
+    }
+  ]
+}

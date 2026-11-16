@@ -601,6 +601,36 @@ TEST_CASE("Sub-unit spacing uses the smallest representable coordinate distance"
     }
 }
 
+namespace {
+void require_large_coordinate_spacing_progress()
+{
+    const coord_t magnitude = coord_t(1LL << 60);
+    for (const coord_t origin : {magnitude, -magnitude}) {
+        const Polyline source{Points{Point(origin, 37), Point(origin + 512, 37)}};
+        const auto pieces = source.equally_spaced_lines(300.);
+        REQUIRE(pieces.size() == 2);
+        REQUIRE(pieces.front().last_point() == Point(origin + 300, 37));
+    }
+}
+} // namespace
+
+TEST_CASE("Sub-unit spacing uses the smallest representable coordinate distance (source assertions)", "[Polyline][PolylineOperations]")
+{
+    require_large_coordinate_spacing_progress();
+    const Polyline source{Points{Point(0, 0), Point(10, 0), Point(10, 10)}};
+    for (double distance : {0.4, std::numeric_limits<double>::min()}) {
+        const auto pieces = source.equally_spaced_lines(distance);
+        REQUIRE(pieces.size() == 20);
+        CHECK(pieces.front().first_point() == source.first_point());
+        CHECK(pieces.back().last_point() == source.last_point());
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            CHECK_THAT(pieces[i].length(), WithinAbs(1., 0.));
+            if (i > 0)
+                CHECK(pieces[i - 1].last_point() == pieces[i].first_point());
+        }
+    }
+}
+
 TEST_CASE("Equally spaced pieces remain finite and exact near large positive and negative coordinates", "[Polyline][PolylineOperations]")
 {
     const coord_t magnitude = coord_t(1LL << 60);

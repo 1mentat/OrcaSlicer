@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Public GCodeProcessor build-volume validation over parsed in-memory G-code: plate bounds, physical-nozzle restrictions, filament restrictions, custom-path exclusion, and clean recheck state.",
+  "test_filter": "GCodeProcessorBuildVolume",
+  "mutants": [
+    {
+      "id": "gcp-build-volume-check-reset-omitted",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    m_result.gcode_check_result.reset();// including both single extruder machine printable area check result and multi extruder result",
+      "new": "    m_result.gcode_check_result.error_code = 0;// including both single extruder machine printable area check result and multi extruder result",
+      "test_filter": "GCodeProcessorBuildVolume",
+      "description": "Clearing only the error bits retains the first failing recheck's area and height metadata; the clean second check must expose empty maps."
+    },
+    {
+      "id": "gcp-build-volume-plate-area-guard-suppressed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (plate_printable_poly.is_valid()) {",
+      "new": "    if (false && plate_printable_poly.is_valid()) {",
+      "test_filter": "GCodeProcessorBuildVolume",
+      "description": "Suppress the public plate-area check; the ordinary extrusion outside the explicit plate must lose bit 2 and its <filament,object> area witness."
+    },
+    {
+      "id": "gcp-build-volume-plate-height-guard-suppressed",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if ( !m_belt_printer && iter->second.max_print_z > plate_printable_height ) { //over height",
+      "new": "            if ( false && !m_belt_printer && iter->second.max_print_z > plate_printable_height ) { //over height",
+      "test_filter": "GCodeProcessorBuildVolume",
+      "description": "Suppress the public plate-height check; the tagged Z_HEIGHT:5 extrusion must lose bit 3 and its height witness under the 4 mm limit."
+    },
+    {
+      "id": "gcp-build-volume-material-map-bit-source-wrong",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            m_result.limit_filament_maps[filament_id] |= (1 << extruder_id);",
+      "new": "            m_result.limit_filament_maps[filament_id] |= (1 << filament_id);",
+      "test_filter": "GCodeProcessorBuildVolume",
+      "description": "Use the filament ID as the restriction bit instead of the physical extruder ID; the mapped-filament row must distinguish map[1]=physical bit 0 from map[0]=physical bit 1."
+    }
+  ]
+}

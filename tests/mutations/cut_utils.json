@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Bounded CutUtils mutants intended to be validated by analytic plane and contour geometry contracts.",
+  "mutants": [
+    {
+      "id": "cut-utils-one-sided-selection-guard",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower))",
+      "new": "if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) || !m_attributes.has(ModelObjectCutAttribute::KeepLower))",
+      "description": "Treat a valid one-sided cut as an empty selection instead of retaining the requested half.",
+      "test_filter": "CutUtils"
+    },
+    {
+      "id": "cut-utils-plane-offset",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);",
+      "new": "cut_mesh(mesh.its, 1.0f, &upper_its, &lower_its);",
+      "description": "Move the plane away from the requested origin, changing the conserved half volumes and bounds.",
+      "test_filter": "CutUtils"
+    },
+    {
+      "id": "cut-utils-dowel-branch",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "if (volume->cut_info.connector_type != CutConnectorType::Dowel)",
+      "new": "if (volume->cut_info.connector_type == CutConnectorType::Dowel)",
+      "description": "Send an unprocessed Dowel through the non-Dowel branch so it is not geometrically split.",
+      "test_filter": "CutUtils"
+    },
+    {
+      "id": "cut-utils-modifier-intersection",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "if (obj1_bb.intersects(bb))",
+      "new": "if (!obj1_bb.intersects(bb))",
+      "description": "Invert modifier distribution at the contour-cut bounding-box intersection.",
+      "test_filter": "CutUtils"
+    },
+    {
+      "id": "cut-utils-contour-merge",
+      "path": "src/libslic3r/CutUtils.cpp",
+      "old": "        // Now merge all model parts together:\n        merge_solid_parts_inside_object(cut_object_ptrs);\n\n        // replace initial objects in model with cut object ",
+      "new": "        // Mutation: leave selected model parts unmerged.\n\n        // replace initial objects in model with cut object ",
+      "description": "Skip merging selected contour-cut model parts, leaving multiple solid volumes on the upper result.",
+      "test_filter": "CutUtils"
+    }
+  ]
+}

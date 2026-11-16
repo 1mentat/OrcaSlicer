@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Combined and per-object skirt grouping, geometry, and instance ownership across close and distant instances.",
+  "mutants": [
+    {
+      "id": "skirt-type-combined-group-seed-swapped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (m_config.skirt_type == stCombined && !group_items.empty())",
+      "new": "if (m_config.skirt_type == stPerObject && !group_items.empty())",
+      "description": "Seed the union-find for per-object instead of combined grouping; group counts and instance ownership must fail in the four-row public matrix.",
+      "test_filter": "SkirtType"
+    },
+    {
+      "id": "skirt-type-perobject-regrouping-disabled",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "bool groups_changed = m_config.skirt_type == stPerObject;",
+      "new": "bool groups_changed = false;",
+      "description": "Disable the public per-object overlap regrouping; the close per-object row must retain two groups instead of merging to one.",
+      "test_filter": "SkirtType"
+    }
+  ]
+}

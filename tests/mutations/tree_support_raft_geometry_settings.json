@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Physical raft contact clearance and first-layer support expansion, including the no-raft and zero-top-gap controls.",
+  "mutants": [
+    {
+      "id": "raft-positive-contact-distance-ignored",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "params.gap_raft_object = raft_z_gap;",
+      "new": "params.gap_raft_object = 0.0;",
+      "expected_matches": 1,
+      "description": "Ignore the positive raft contact distance. The measured physical object-to-raft clearance must remain 0.4 mm.",
+      "test_filter": "^TreeSupportRaftContactDistance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "23654859110e38a940a4e8f3215c72b73ee14304a1978106da3d0bcc05cc9fc9"
+    },
+    {
+      "id": "raft-zero-top-gap-gate-bypassed",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "raft_z_gap == 0.0 || zero_topZ_contact;",
+      "new": "raft_z_gap == 0.0;",
+      "expected_matches": 1,
+      "description": "Ignore the zero support-top-distance gate. The measured physical object-to-raft clearance must remain zero even when raft contact distance is positive.",
+      "test_filter": "^TreeSupportRaftContactDistance$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "82db5759d245f07d0392d773b90567519f812379503faa17a61532f5ad3e6d74"
+    },
+    {
+      "id": "raft-first-layer-expansion-ignored",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "float(scale_(object.config().raft_first_layer_expansion))",
+      "new": "0.f",
+      "expected_matches": 1,
+      "description": "Ignore the configured first-layer expansion. Both no-raft and four-layer physical extrusion footprints must grow from the 0 mm minimum to the 1 mm representative.",
+      "test_filter": "^TreeSupportRaftFirstLayerExpansion$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "9a6c283ced98b76e2ac9dc1f830a1ce27d9878983b2c8b47bbf293c6265b3138"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "Four unique source mutations for the exact ExPolygonGap public-contract cases. Anchors are matched byte-for-byte against ExPolygon.cpp; the source file has CRLF, and these single-line anchors do not normalize or rewrite line endings.",
+  "mutants": [
+    {
+      "id": "expolygon-polyline-containment-inverted",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "return pl_out.empty();",
+      "new": "return ! pl_out.empty();",
+      "expected_matches": 1,
+      "test_filter": "^ExPolygonGap$",
+      "description": "Invert the public polyline-containment result; filled-area paths and hole/exterior rejection controls distinguish it."
+    },
+    {
+      "id": "expolygon-match-ignores-hole-geometry",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "for (size_t hole_idx = 0; hole_idx < l.holes.size(); ++ hole_idx)",
+      "new": "for (size_t hole_idx = l.holes.size(); hole_idx < l.holes.size(); ++ hole_idx)",
+      "expected_matches": 1,
+      "test_filter": "^ExPolygonGap$",
+      "description": "Skip every per-hole comparison; a changed hole with an unchanged outer contour must remain non-equivalent."
+    },
+    {
+      "id": "expolygon-collection-overlap-checks-only-first-component",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "for (const ExPolygon& el : expolys) {",
+      "new": "for (const ExPolygon& el : expolys) if (&el == &expolys.front()) {",
+      "expected_matches": 1,
+      "test_filter": "^ExPolygonGap$",
+      "description": "Restrict collection overlap to its first member; the later-element positive control must fail."
+    },
+    {
+      "id": "expolygon-largest-contour-selects-by-net-area",
+      "path": "src/libslic3r/ExPolygon.cpp",
+      "old": "double a = p.contour.area();",
+      "new": "double a = p.area();",
+      "expected_matches": 1,
+      "test_filter": "^ExPolygonGap$",
+      "description": "Select by filled net area instead of outer contour area; the 100x100 hollow region must win over a 90x90 solid region."
+    }
+  ]
+}

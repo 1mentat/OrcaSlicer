@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion-only archive value corruption probes for public Config option round trips.",
+  "mutants": [
+    {
+      "id": "config-nullable-floats-archive-value-overwritten",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "            case coFloats: {\n                auto opt = new ConfigOptionFloatsNullable();\n                archive(*opt);\n                return opt;\n            }",
+      "new": "            case coFloats: {\n                auto opt = new ConfigOptionFloatsNullable();\n                archive(*opt);\n                opt->values.assign(1, 987654321.0);\n                return opt;\n            }",
+      "test_filter": "Registered print options round-trip through binary option archives",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "25f14e30ce2384cfe3498b62cc9da5fa124b8eb5db29f6a1d781ba405d307284",
+      "new_sha256": "1a11e6571f2f0d8ab92f527c67cf29ad3c161e92f77dbb88d81580c11b6ebc4b",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    },
+    {
+      "id": "config-nullable-floats-or-percents-archive-value-overwritten",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "            case coFloatsOrPercents: {\n                auto opt = new ConfigOptionFloatsOrPercentsNullable();\n                archive(*opt);\n                return opt;\n            }",
+      "new": "            case coFloatsOrPercents: {\n                auto opt = new ConfigOptionFloatsOrPercentsNullable();\n                archive(*opt);\n                opt->values.assign(1, FloatOrPercent(987654321.0, false));\n                return opt;\n            }",
+      "test_filter": "Registered print options round-trip through binary option archives",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "0fb2ca54182aee4505b3df54145948011b3b2c615daacba59b44cb225ee82264",
+      "new_sha256": "dfdd9905354e263395a365f717aa7a2e64f3d48461186aa221341c795d56b230",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    },
+    {
+      "id": "config-point3-archive-value-overwritten",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "            case coPoint3: {\n                auto opt = new ConfigOptionPoint3();\n                archive(*opt);\n                return opt;\n            }",
+      "new": "            case coPoint3: {\n                auto opt = new ConfigOptionPoint3();\n                archive(*opt);\n                opt->value = Vec3d(0., 0., 0.);\n                return opt;\n            }",
+      "test_filter": "Declared point and grouped integer option types round-trip through binary archives",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "f41db3d483a875bde678ad9a1b6199d78a6786fd3ff2acf4ccfdb3bf83383090",
+      "new_sha256": "4892d42c45341c28170348a06133a1bc1793c0ed5c13eafbc076aeef6c5c11e7",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    },
+    {
+      "id": "config-int-groups-archive-values-overwritten",
+      "path": "src/libslic3r/Config.hpp",
+      "old": "            case coIntsGroups: {\n                auto opt = new ConfigOptionIntsGroups();\n                archive(*opt);\n                return opt;\n            }",
+      "new": "            case coIntsGroups: {\n                auto opt = new ConfigOptionIntsGroups();\n                archive(*opt);\n                opt->values.assign(1, std::vector<int>{987654321});\n                return opt;\n            }",
+      "test_filter": "Declared point and grouped integer option types round-trip through binary archives",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "4d8cd38e0c435ac86c1552bb43217b9f6e03eee716ea14fa64bcda0ede019424",
+      "new_sha256": "392712cada7c4cf4298eea8f0999938c27f21a45c566057b7e5bfbe96b1746aa",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    }
+  ]
+}

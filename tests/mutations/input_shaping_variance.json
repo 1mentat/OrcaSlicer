@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "description": "Semantic mutation candidates for input-shaping settings through the public Print/export path.",
+  "mutants": [
+    {
+      "id": "input-shaping-marlin-disable-y-axis-guard-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (flavor != gcfRepRapFirmware && !input_shaping_disable) {",
+      "new": "if (flavor != gcfRepRapFirmware) {",
+      "line": 5130,
+      "expected_matches": 1,
+      "test_filter": "InputShaping",
+      "description": "Marlin 2 Disable is the single zero-valued command with no axis token and must not append a Y command; the Disable row checks this directly."
+    },
+    {
+      "id": "input-shaping-rrf-uses-y-frequency-for-shared-x-command",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "print.config().input_shaping_freq_x.value",
+      "new": "print.config().input_shaping_freq_y.value",
+      "line": 5129,
+      "expected_matches": 1,
+      "test_filter": "InputShaping",
+      "description": "RRF uses the X frequency as its shared F value; the RRF row supplies distinct X/Y values and rejects the Y value."
+    },
+    {
+      "id": "input-shaping-marlin-zero-frequency-emits-an-explicit-f-zero",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "case gcfMarlinFirmware: {\n        if (axis != 'A') {\n            params << \" \" << axis;\n        }\n        if (freq > 0.0f || disable) {",
+      "new": "case gcfMarlinFirmware: {\n        if (axis != 'A') {\n            params << \" \" << axis;\n        }\n        if (freq >= 0.0f || disable) {",
+      "line": 664,
+      "expected_matches": 1,
+      "test_filter": "InputShaping",
+      "description": "A zero endpoint suppresses the Marlin F token while retaining the axis command; the two endpoint rows reject an unsolicited F0.00 token."
+    },
+    {
+      "id": "input-shaping-marlin-y-damping-routed-from-x",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "print.config().input_shaping_damp_y.value",
+      "new": "print.config().input_shaping_damp_x.value",
+      "line": 5131,
+      "expected_matches": 1,
+      "test_filter": "InputShaping",
+      "description": "Marlin 2 must preserve the independent Y damping value; the representative row supplies distinct X/Y damping and checks the Y token."
+    },
+    {
+      "id": "input-shaping-rrf-supported-type-token-routed",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "params << \" P\\\"\" << type << \"\\\"\";",
+      "new": "params << \" P\\\"MZV\\\"\";",
+      "line": 651,
+      "expected_matches": 1,
+      "test_filter": "InputShaping",
+      "description": "Documented modern RRF shaper names must reach their own P token; the six-value subset checks exact token routing while the other registry choices remain partial characterization."
+    }
+  ]
+}

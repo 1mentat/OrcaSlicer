@@ -522,3 +522,35 @@ TEST_CASE("Eigen conversion and self-union preserve a disjoint cuboid pair (orig
 }
 
 } // namespace meshboolean_contracts
+
+namespace meshboolean_contracts {
+namespace cuboid_face_repair {
+
+#ifdef ORCASLICER_TEST_HAS_MESHBOOLEAN_CGAL_REPAIR
+void check_repaired_mesh(TriangleMesh open)
+{
+    RepairedMeshErrors errors;
+    std::string error;
+    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    CHECK(error.empty());
+    CHECK_FALSE(open.empty());
+    CHECK(its_num_open_edges(open.its) == 0);
+    CHECK_THAT(mesh_volume(open), WithinRel(1000.f, 1e-3f));
+    CHECK_THAT(its_volume(open.its), WithinRel(1000.f, 1e-3f));
+    CHECK_FALSE(MeshBoolean::cgal::does_self_intersect(open));
+    const auto repaired_cgal = MeshBoolean::cgal::triangle_mesh_to_cgal(open);
+    REQUIRE(repaired_cgal != nullptr);
+    CHECK(MeshBoolean::cgal::does_bound_a_volume(*repaired_cgal));
+}
+
+TEST_CASE("CGAL repair closes a single missing cuboid face", "[MeshBoolean][MeshBooleanContracts]")
+{
+    TriangleMesh open = shifted_cube(0.f);
+    REQUIRE(open.its.indices.size() > 1);
+    open.its.indices.pop_back();
+    check_repaired_mesh(std::move(open));
+}
+#endif
+
+} // namespace cuboid_face_repair
+} // namespace meshboolean_contracts

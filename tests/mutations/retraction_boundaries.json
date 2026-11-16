@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary assertion probes for minimum retraction travel equality and inclusive lazy Z-hop lower/upper boundaries. CTest label ^Wipe$ selects the retraction fixtures.",
+  "mutants": [
+    {
+      "id": "retraction-minimum-travel-equality-excluded",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (travel.length() < scale_(FILAMENT_CONFIG(retraction_minimum_travel))) {",
+      "new": "if (travel.length() <= scale_(FILAMENT_CONFIG(retraction_minimum_travel))) {",
+      "expected_matches": 1,
+      "description": "Make a travel exactly equal to the configured machine or filament minimum too short to retract; the public 5 mm equality case expects a retraction, with adjacent below/above controls.",
+      "test_filter": "^Wipe$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "246047e62161d8f2fdcfb08e661d76143df7d66366f52f0bd953f59394455866"
+    },
+    {
+      "id": "lazy-z-hop-lower-bound-equality-excluded",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        if (m_pos.z() >= above && (m_pos.z() <= below || below == 0.))\n            target_lift = this->config.z_hop.get_at(filament_id);\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "new": "        if (m_pos.z() > above && (m_pos.z() <= below || below == 0.))\n            target_lift = this->config.z_hop.get_at(filament_id);\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "expected_matches": 1,
+      "description": "Exclude a current Z exactly equal to retract_lift_above in lazy_lift; the 0.4 mm lower-bound equality case expects the boundary hop, with adjacent above controls. The context anchor targets lazy_lift only, not eager_lift.",
+      "test_filter": "^Wipe$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "cb9cf575028a0cd642a8766e1667d65a37fdfcb23d6a7d43975d60534fc3fa4c"
+    },
+    {
+      "id": "lazy-z-hop-upper-bound-equality-excluded",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        if (m_pos.z() >= above && (m_pos.z() <= below || below == 0.))\n            target_lift = this->config.z_hop.get_at(filament_id);\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "new": "        if (m_pos.z() >= above && (m_pos.z() < below || below == 0.))\n            target_lift = this->config.z_hop.get_at(filament_id);\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "expected_matches": 1,
+      "description": "Exclude a current Z exactly equal to retract_lift_below in lazy_lift; the 0.4 mm upper-bound equality case expects the boundary hop, with adjacent below controls. The context anchor targets lazy_lift only, not eager_lift.",
+      "test_filter": "^Wipe$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "cb9cf575028a0cd642a8766e1667d65a37fdfcb23d6a7d43975d60534fc3fa4c"
+    }
+  ]
+}

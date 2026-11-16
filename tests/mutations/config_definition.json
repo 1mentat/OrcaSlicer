@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "CLI help formatting and public custom-G-code placeholder schema contracts.",
+  "mutants": [
+    {
+      "id": "help-short-alias-prefix",
+      "old": "(arg.size() == 1) ? \"-\" : \"--\"",
+      "new": "(arg.size() == 1) ? \"--\" : \"--\"",
+      "description": "Single-letter aliases require one leading dash.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-explicit-parameter-label",
+      "old": "if (!def.cli_params.empty())",
+      "new": "if (false)",
+      "description": "Each alias must display the explicit caller-supplied parameter label.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-category-filter",
+      "old": "if (filter(def))\n            categories.insert(def.category);",
+      "new": "if (true)\n            categories.insert(def.category);",
+      "description": "An excluded category must not leave an empty category header.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-defaults-policy",
+      "old": "bool show_defaults_this = show_defaults || def.opt_key == \"config_compatibility\";",
+      "new": "bool show_defaults_this = true;",
+      "description": "Ordinary numeric defaults obey the requested help policy.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-boolean-default",
+      "old": "show_defaults_this && def.default_value && def.type != coBool",
+      "new": "show_defaults_this && def.default_value",
+      "description": "Boolean flags do not render a value default.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-compatibility-default",
+      "old": "bool show_defaults_this = show_defaults || def.opt_key == \"config_compatibility\";",
+      "new": "bool show_defaults_this = show_defaults;",
+      "description": "Compatibility behavior remains discoverable even when ordinary defaults are hidden.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-enum-choices",
+      "old": "boost::algorithm::join(def.enum_values, \", \") + \"; \"",
+      "new": "std::string()",
+      "description": "Help includes legal enumerated choices, not just the selected default.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "help-description-wrapping",
+      "old": "descr = wrap(descr, 80);",
+      "new": "descr = wrap(descr, 800);",
+      "description": "Long descriptions preserve the documented bounded line width.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/Config.cpp"
+    },
+    {
+      "id": "schema-zhop-type",
+      "old": "def = this->add(\"zhop\", coFloat);",
+      "new": "def = this->add(\"zhop\", coString);",
+      "description": "Current Z-hop is numeric for custom G-code expressions.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/PrintConfig.cpp"
+    },
+    {
+      "id": "schema-temperature-aggregate",
+      "old": "new_def(\"overall_chamber_temperature\", coInt,",
+      "new": "new_def(\"overall_chamber_temperature\", coInts,",
+      "description": "The maximum chamber temperature is scalar, unlike per-filament temperatures.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/PrintConfig.cpp"
+    },
+    {
+      "id": "schema-extruded-volume-vector",
+      "old": "def = this->add(\"extruded_volume\", coFloats);",
+      "new": "def = this->add(\"extruded_volume\", coFloat);",
+      "description": "Per-extruder volume remains indexable independently of the total volume.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/PrintConfig.cpp"
+    },
+    {
+      "id": "schema-convex-hull-points",
+      "old": "def = this->add(\"first_layer_print_convex_hull\", coPoints);",
+      "new": "def = this->add(\"first_layer_print_convex_hull\", coFloats);",
+      "description": "The first-layer hull stores points, distinct from the size and center vectors.",
+      "test_filter": "ConfigDefinition",
+      "path": "src/libslic3r/PrintConfig.cpp"
+    }
+  ]
+}

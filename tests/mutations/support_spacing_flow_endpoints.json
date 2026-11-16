@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Normal support spacing at zero and support flow ratios at both registered endpoints, observed through emitted paths and role-isolated extrusion.",
+  "mutants": [
+    {
+      "id": "normal-support-density-forced-solid",
+      "path": "src/libslic3r/Support/SupportCommon.cpp",
+      "old": "float density = float(support_params.support_density);",
+      "new": "float density = 1.0f;",
+      "expected_matches": 1,
+      "description": "Force non-first-layer base deposition solid so zero and sparse spacing no longer control path density.",
+      "test_filter": "^SupportBasePatternSpacing$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "a18f5756e99afa638f76fcec8e7df723d0ad9907588d429e890804a763bf4589"
+    },
+    {
+      "id": "support-base-flow-ratio-forced-neutral",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.support_flow_ratio;",
+      "new": "_mm3_per_mm *= 1.0;",
+      "expected_matches": 1,
+      "description": "Ignore the selected support-role flow ratio; both its zero and maximum endpoint must still control extrusion while unrelated roles retain their material.",
+      "test_filter": "^SupportFlowRatio$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "3ec161083de7be5ce8ac34e1ed934a190667d636c00a4b4e53dd6c140659ebc7"
+    },
+    {
+      "id": "support-interface-flow-ratio-forced-neutral",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "_mm3_per_mm *= m_config.support_interface_flow_ratio;",
+      "new": "_mm3_per_mm *= 1.0;",
+      "expected_matches": 1,
+      "description": "Ignore the selected support-role flow ratio; both its zero and maximum endpoint must still control extrusion while unrelated roles retain their material.",
+      "test_filter": "^SupportFlowRatio$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "d95ed3ac51eab3a81812e62b05d71c885fb8f5e1d2f551c26685d2dbbd121124"
+    }
+  ]
+}

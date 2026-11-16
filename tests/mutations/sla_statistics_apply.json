@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "SLAPrint timing settings must invalidate completed statistics.",
+  "mutants": [
+    {
+      "id": "fast-tilt-time-remains-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",",
+      "new": "        \"display_orientation\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"fast_tilt_time\",",
+      "expected_matches": 1,
+      "test_filter": "^SLAStatisticsApply$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Move fast_tilt_time back into the ignored classification; cached statistics must diverge from a fresh print after reapply."
+    },
+    {
+      "id": "slow-tilt-time-remains-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",",
+      "new": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"slow_tilt_time\",",
+      "expected_matches": 1,
+      "test_filter": "^SLAStatisticsApply$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Move slow_tilt_time back into the ignored classification; cached statistics must diverge from a fresh print after reapply."
+    },
+    {
+      "id": "area-fill-remains-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\",\n        \"area_fill\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",",
+      "new": "        \"display_orientation\",\n        \"fast_tilt_time\",\n        \"slow_tilt_time\"\n    };\n\n    static std::unordered_set<std::string> steps_ignore = {\n        \"printable_area\",\n        \"printable_height\",\n        \"printer_technology\",\n        \"filename_format\",\n        \"area_fill\",",
+      "expected_matches": 1,
+      "test_filter": "^SLAStatisticsApply$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Move area_fill back into the ignored classification; cached statistics must diverge from a fresh print after reapply."
+    }
+  ]
+}

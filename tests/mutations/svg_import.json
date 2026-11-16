@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Bounded behavioral mutations; native outcomes are recorded separately.",
+  "mutants": [
+    {
+      "id": "svg-parser-unit-scale",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "svg_data            = nsvgParseFromFile(path, \"mm\", 96.0f);",
+      "new": "svg_data            = nsvgParseFromFile(path, \"mm\", 72.0f);",
+      "description": "Use the wrong SVG DPI and change every physical bounding-box contract.",
+      "test_filter": "SvgFormat"
+    },
+    {
+      "id": "svg-parser-open-file-error",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "if (svg_data == nullptr) {",
+      "new": "if (false) {",
+      "description": "Suppress missing-file rejection; the missing-file error contract must fail the mutant.",
+      "test_filter": "SvgFormat"
+    },
+    {
+      "id": "svg-parser-empty-shape-error",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "if (svg_data->shapes == nullptr) {",
+      "new": "if (false) {",
+      "description": "Treat an SVG with no parsed shapes as a valid import instead of reporting parse failure.",
+      "test_filter": "SvgFormat"
+    },
+    {
+      "id": "svg-gradient-path-closure",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "if (shape->fill.gradient != nullptr)",
+      "new": "if (shape->fill.gradient == nullptr)",
+      "description": "Reverse gradient contour closure; the gradient-backed rectangle should keep its nonzero geometry.",
+      "test_filter": "SvgFormat"
+    },
+    {
+      "id": "svg-open-stroke-offset-gate",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "if (stroke_width > 0)",
+      "new": "if (stroke_width <= 0)",
+      "description": "Skip the open-stroke offset operation; the stroked-line bounds contract must expose the missing solid.",
+      "test_filter": "SvgFormat"
+    },
+    {
+      "id": "svg-triangulation-empty-guard",
+      "path": "src/libslic3r/Format/svg.cpp",
+      "old": "if (aNbTriangles == 0 || aNbNodes == 0)",
+      "new": "if (aNbTriangles != 0 && aNbNodes != 0)",
+      "description": "Invert the no-triangulation guard so valid imported solids lose their mesh volumes.",
+      "test_filter": "SvgFormat"
+    }
+  ]
+}

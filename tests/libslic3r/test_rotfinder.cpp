@@ -303,3 +303,41 @@ TEST_CASE("Canceled minimum Z search stops before evaluating any rotation", "[Ro
     CHECK(saw_cancellation);
     CHECK(std::none_of(status.values.begin(), status.values.end(), [](int value) { return value >= 0; }));
 }
+
+TEST_CASE("Elevated least-support rotation does not increase independent slope score", "[Rotfinder]")
+{
+    RotObject fixture = asymmetric_prism();
+    fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(4.0));
+    StatusLog status;
+    const sla::RotOptimizeParams params = sla::RotOptimizeParams{}
+        .accuracy(0.1f)
+        .statucb([&status](int value) { return status(value); });
+
+    const Vec2d rotation = sla::find_least_supports_rotation(*fixture.object, params);
+    check_rotation_range(rotation);
+    check_status_values(status);
+    const double identity_score = elevated_support_score(fixture.object->raw_mesh(), Vec2d::Zero());
+    const double result_score = elevated_support_score(fixture.object->raw_mesh(), rotation);
+    CHECK(result_score <= identity_score + 1e-3);
+}
+
+TEST_CASE("Floor least-support rotation chooses a substantial analytic contact face", "[Rotfinder]")
+{
+    RotObject fixture = asymmetric_prism();
+    const bool pad_around = GENERATE(false, true);
+    fixture.object->config.set_key_value("support_object_elevation", new ConfigOptionFloat(pad_around ? 4.0 : 0.0));
+    fixture.object->config.set_key_value("pad_around_object", new ConfigOptionBool(pad_around));
+    StatusLog status;
+    const sla::RotOptimizeParams params = sla::RotOptimizeParams{}
+        .accuracy(0.1f)
+        .statucb([&status](int value) { return status(value); });
+
+    const Vec2d rotation = sla::find_least_supports_rotation(*fixture.object, params);
+    check_rotation_range(rotation);
+    check_status_values(status);
+    const TriangleMesh &mesh = fixture.object->raw_mesh();
+    const double result_contact = floor_contact_area(mesh, Vec2d::Zero());
+    const double optimized_contact = floor_contact_area(mesh, rotation);
+    CHECK(result_contact > 0.);
+    CHECK(optimized_contact >= 70.);
+}

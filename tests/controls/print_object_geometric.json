@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "names": [
+    "PrintObject applies printable-height limits independently per nozzle",
+    "PrintObject marks filaments above each nozzle printable height",
+    "PrintObject marks filaments blocked by restricted printable area",
+    "PrintObject marks wall filaments when only perimeters meet restricted area",
+    "PrintObject treats a layer at the printable-height limit as printable"
+  ],
+  "control_regex": "^(PrintObject applies printable-height limits independently per nozzle|PrintObject marks filaments above each nozzle printable height|PrintObject marks filaments blocked by restricted printable area|PrintObject marks wall filaments when only perimeters meet restricted area|PrintObject treats a layer at the printable-height limit as printable)$"
+}

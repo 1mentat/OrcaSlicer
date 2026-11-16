@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Support ironing follows the configured process feedrate while preserving geometry and material use.",
+  "mutants": [
+    {
+      "id": "support-ironing-speed-halved",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            speed = m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx);",
+      "new": "            speed = m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? 0.5 * m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx);",
+      "description": "Halve the process ironing feedrate while retaining the filament override branch.",
+      "test_filter": "SupportIroningSpeedSettings"
+    }
+  ]
+}

@@ -1678,7 +1678,7 @@ TEST_CASE("datum plane: offset + tilt resolution and sketching on it", "[CadDocu
     REQUIRE(only_plane.bodies.empty());
 }
 
-TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][datum]")
+TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][CadDocumentDatumPlaneAdvanced][datum]")
 {
     CadDocument doc;
     const int sketch = doc.add_sketch(SketchShape::Circle, SketchPlane::XY(),
@@ -6102,7 +6102,7 @@ TEST_CASE("thicken surface fills the corners of a closed-loop wall", "[CadDocume
     }
 }
 
-TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][surface]")
+TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][CadDocumentThickenSurface][surface]")
 {
     auto make_plate = [](bool flip) {
         CadDocument d;
@@ -10336,6 +10336,64 @@ TEST_CASE("CadDocument keeps a boolean tool body when requested", "[CadDocument]
 TEST_CASE("CadDocument rejects a New-mode Boolean between two bodies", "[CadDocument][boolean]")
 {
     using cad_boolean_contracts::add_overlapping_pair;
+    CadDocument invalid;
+    add_overlapping_pair(invalid);
+    REQUIRE(invalid.recompute());
+    REQUIRE(invalid.error.empty());
+    invalid.add_boolean(BooleanMode::New, 0, 1, false, 0.0, -1, -1, "InvalidNewBoolean");
+    REQUIRE_FALSE(invalid.recompute());
+    REQUIRE_CONTAINS(invalid.error, "choose Union");
+}
+
+TEST_CASE("CadDocument keeps a boolean tool when requested and rejects a new-mode pair",
+          "[CadDocument][CadDocumentBooleanKeepTool]")
+{
+    auto add_overlapping_pair = [](CadDocument& d) {
+        const int base_sketch = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                             10.0, 10.0, 0.0, "BaseSketch");
+        REQUIRE(base_sketch >= 0);
+        REQUIRE(d.add_extrude(base_sketch, 10.0, false, BooleanMode::New, "Base") >= 0);
+
+        SketchPlane shifted = SketchPlane::XY();
+        shifted.origin = Vec3d(5.0, 0.0, 0.0);
+        const int tool_sketch = d.add_sketch(SketchShape::Rectangle, shifted,
+                                             10.0, 10.0, 0.0, "ToolSketch");
+        REQUIRE(tool_sketch >= 0);
+        REQUIRE(d.add_extrude(tool_sketch, 10.0, false, BooleanMode::New, "Tool") >= 0);
+    };
+
+    CadDocument kept;
+    add_overlapping_pair(kept);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+
+    const int fuse = kept.add_boolean(BooleanMode::Add, 0, 1, true, 0.0, -1, -1, "KeepToolFuse");
+    REQUIRE(fuse >= 0);
+    REQUIRE(kept.recompute());
+    REQUIRE(kept.error.empty());
+    REQUIRE(kept.bodies.size() == 2);
+    REQUIRE(kept.features.at(fuse).type == CadFeatureType::Boolean);
+    REQUIRE(kept.features.at(fuse).bool_keep_tool);
+
+    const auto target = kept.body_mass_properties(0);
+    const auto tool = kept.body_mass_properties(1);
+    REQUIRE(target.valid);
+    REQUIRE(target.is_solid);
+    REQUIRE(tool.valid);
+    REQUIRE(tool.is_solid);
+    REQUIRE_THAT(target.volume, Catch::Matchers::WithinRel(1500.0, 1e-6));
+    REQUIRE_THAT(tool.volume, Catch::Matchers::WithinRel(1000.0, 1e-6));
+
+    Bnd_Box target_box;
+    BRepBndLib::Add(kept.bodies.at(0).shape, target_box);
+    double tx0, ty0, tz0, tx1, ty1, tz1;
+    target_box.Get(tx0, ty0, tz0, tx1, ty1, tz1);
+    REQUIRE_THAT(tx0, Catch::Matchers::WithinAbs(-5.0, 1e-6));
+    REQUIRE_THAT(tx1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+    REQUIRE_THAT(tz0, Catch::Matchers::WithinAbs(0.0, 1e-6));
+    REQUIRE_THAT(tz1, Catch::Matchers::WithinAbs(10.0, 1e-6));
+
     CadDocument invalid;
     add_overlapping_pair(invalid);
     REQUIRE(invalid.recompute());

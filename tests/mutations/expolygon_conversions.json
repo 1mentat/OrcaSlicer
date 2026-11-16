@@ -1,0 +1,46 @@
+{
+  "description": "Three exact, single-case private-header mutation probes for public ExPolygon conversion contracts. Apply one replacement to a private overlay per run; never edit the canonical header.",
+  "mutants": [
+    {
+      "description": "For each hole output slot in to_polylines(const ExPolygons&), copy that region contour and close the copied ring using its own first point. Output count, ring length, and closure stay valid; the ordinary exact point-sequence CHECK fails at the hole slot.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "failure_assertion": "CHECK(polylines[i].points == expected);",
+      "id": "expolygon-bulk-polylines-copy-contour-into-hole-slot",
+      "new": "        for (Polygons::const_iterator ith = it->holes.begin(); ith != it->holes.end(); ++ith) {\n            Polyline &pl = polylines[idx ++];\n            pl.points = it->contour.points;\n            pl.points.push_back(pl.points.front());\n        }",
+      "old": "        for (Polygons::const_iterator ith = it->holes.begin(); ith != it->holes.end(); ++ith) {\n            Polyline &pl = polylines[idx ++];\n            pl.points = ith->points;\n            pl.points.push_back(ith->points.front());\n        }",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExPolygon.hpp",
+      "test_filter": "ExPolygon collection polyline conversions preserve ring order"
+    },
+    {
+      "description": "Retain one pointer per hole but direct each hole slot to the owning ExPolygon contour. The vector size and lifetime remain valid; pointer identity checks distinguish the wrong ring address.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "failure_assertion": "CHECK(collection_view[1] == &regions[0].holes.front());",
+      "id": "expolygon-collection-polygon-ptrs-repeat-contour",
+      "new": "        for (std::size_t hole_idx = 0; hole_idx < expoly.holes.size(); ++hole_idx)\n            polygons.emplace_back(&expoly.contour);",
+      "old": "        for (const Polygon &hole : expoly.holes)\n            polygons.emplace_back(&hole);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExPolygon.hpp",
+      "test_filter": "ExPolygon polygon pointer views refer to the original rings"
+    },
+    {
+      "description": "Move only each contour into polygons_append(Polygons&, ExPolygons&&), omitting holes. The destination is still a valid Polygons value; the ordinary output-count REQUIRE exposes the missing rings. The test does not inspect moved-from source contents.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "failure_assertion": "REQUIRE(appended.size() == expected_rings.size() + 1);",
+      "id": "expolygon-move-append-drops-hole-polygons",
+      "new": "    for (ExPolygon& expoly: src) {\n        dst.push_back(std::move(expoly.contour));\n    }",
+      "old": "    for (ExPolygon& expoly: src) {\n        dst.push_back(std::move(expoly.contour));\n        dst.insert(dst.end(), \n            std::make_move_iterator(expoly.holes.begin()),\n            std::make_move_iterator(expoly.holes.end()));\n    }",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/ExPolygon.hpp",
+      "test_filter": "Appending ExPolygon rings preserves destination prefix and source order"
+    }
+  ],
+  "production_header": "src/libslic3r/ExPolygon.hpp",
+  "production_header_sha256": "0895dc673548fe08a66ae068bd1d6fcc4b3d196798ab1e0b9a490caa0721806e",
+  "schema_version": 1,
+  "test_source": "tests/libslic3r/test_expolygon_contracts.cpp",
+  "test_tag": "[ExPolygonConversions]"
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "compile-safe source mutants for the public WipeTower2 prime() route; each old block is exact-once in the bound source.",
+  "mutants": [
+    {
+      "id": "wipetower2-prime-final-wipe-volume-dropped",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "            toolchange_Wipe(writer, cleaning_box, wipe_volumes[tools[idx_tool-1]][tool], false, true);",
+      "new": "            toolchange_Wipe(writer, cleaning_box, 0.f, false, true);",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerPrimePublic",
+      "description": "The final requested tool has a nonzero pairwise wipe volume; the test checks positive G1 E motion specifically inside the final result's WIPE section."
+    },
+    {
+      "id": "wipetower2-prime-toolchange-counter-dropped",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "        ++ m_num_tool_changes;\n\n\n        // Ask our writer about how much material was consumed:\n        if (m_current_tool < m_used_filament_length.size())",
+      "new": "        m_num_tool_changes += 0;\n\n\n        // Ask our writer about how much material was consumed:\n        if (m_current_tool < m_used_filament_length.size())",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerPrimePublic",
+      "description": "The contextual counter block is exact-once and dropping the increment makes the public result count differ from the requested tool sequence."
+    },
+    {
+      "id": "wipetower2-prime-mk4-monitoring-disable-inverted",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "        writer.switch_filament_monitoring(false);",
+      "new": "        writer.switch_filament_monitoring(true);",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerPrimePublic",
+      "description": "The MK4 MMU unload stage must emit M591 S0 before its paired M591 R; the test pairs stage-local commands."
+    },
+    {
+      "id": "wipetower2-prime-circular-cleaning-box-disabled",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    if (m_bed_shape == CircularBed) {\n        cleaning_box = WipeTower::box_coordinates(Vec2f(0.f, 0.f), prime_section_width, 100.f);\n        float total_width_half = tools.size() * prime_section_width / 2.f;\n        cleaning_box.translate(-total_width_half, -std::sqrt(std::max(0.f, std::pow(m_bed_width/2, 2.f) - std::pow(1.05f * total_width_half, 2.f))));\n    }",
+      "new": "    if (false) {\n        cleaning_box = WipeTower::box_coordinates(Vec2f(0.f, 0.f), prime_section_width, 100.f);\n        float total_width_half = tools.size() * prime_section_width / 2.f;\n        cleaning_box.translate(-total_width_half, -std::sqrt(std::max(0.f, std::pow(m_bed_width/2, 2.f) - std::pow(1.05f * total_width_half, 2.f))));\n    }",
+      "expected_matches": 1,
+      "test_filter": "WipeTowerPrimePublic",
+      "description": "Disable the prime() CircularBed cleaning-box placement; the circular fixture must fail its finite radius-bound oracle rather than accepting rectangular-bed translation."
+    }
+  ]
+}

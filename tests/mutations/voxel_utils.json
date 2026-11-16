@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed VoxelUtils mutation candidates. Run results are recorded separately by the mutation harness.",
+  "mutants": [
+    {
+      "id": "voxel-utils-single-cell-line-gate",
+      "path": "src/libslic3r/Feature/Interlocking/VoxelUtils.cpp",
+      "old": "if (start_cell == end_cell)",
+      "new": "if (start_cell != end_cell)",
+      "description": "Invert the zero-length/single-cell fast path, which must emit exactly one cell for the degenerate segment.",
+      "test_filter": "VoxelUtils"
+    },
+    {
+      "id": "voxel-utils-line-crossing-direction",
+      "path": "src/libslic3r/Feature/Interlocking/VoxelUtils.cpp",
+      "old": "current_cell[stepping_dim] += (diff[stepping_dim] > 0) ? 1 : -1;",
+      "new": "current_cell[stepping_dim] += (diff[stepping_dim] < 0) ? 1 : -1;",
+      "description": "Reverse grid traversal direction so a positive X segment no longer visits increasing cells.",
+      "test_filter": "VoxelUtils"
+    },
+    {
+      "id": "voxel-utils-cube-kernel-selection",
+      "path": "src/libslic3r/Feature/Interlocking/VoxelUtils.cpp",
+      "old": "if (type != Type::CUBE)",
+      "new": "if (type == Type::CUBE)",
+      "description": "Apply diamond/prism filtering to cube kernels, changing the documented full 3x3x3 neighborhood.",
+      "test_filter": "VoxelUtils"
+    },
+    {
+      "id": "voxel-utils-diamond-boundary-test",
+      "path": "src/libslic3r/Feature/Interlocking/VoxelUtils.cpp",
+      "old": "rel_dists.x() + rel_dists.y() + rel_dists.z() > mult",
+      "new": "rel_dists.x() + rel_dists.y() + rel_dists.z() < mult",
+      "description": "Invert the diamond boundary predicate, retaining the wrong cells and dropping the center-neighborhood contract.",
+      "test_filter": "VoxelUtils"
+    },
+    {
+      "id": "voxel-utils-dilation-stop-propagation",
+      "path": "src/libslic3r/Feature/Interlocking/VoxelUtils.cpp",
+      "old": "if (! continue_)\n                return false;",
+      "new": "if (continue_)\n                return false;",
+      "description": "Reverse callback propagation in dilation so successful processing stops and a requested stop continues.",
+      "test_filter": "VoxelUtils"
+    }
+  ]
+}

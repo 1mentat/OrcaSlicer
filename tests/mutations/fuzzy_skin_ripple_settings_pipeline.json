@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source-local ignored-setting probes for the validated classic external ripple Print pipeline.",
+  "mutants": [
+    {
+      "id": "ripple-count-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = 15.;",
+      "test_filter": "FuzzySkinRippleSettingsPipeline",
+      "description": "Ignore fuzzy_skin_ripples_per_layer in the classic ripple consumer. The cycle-count testcase must fail at the registered minimum and representative count while phase and group cases pass."
+    },
+    {
+      "id": "ripple-offset-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "const double raw_shift       = period_index * (cfg.ripple_offset/100) * (2.0 * M_PI);",
+      "new": "const double raw_shift       = 0.;",
+      "test_filter": "FuzzySkinRippleSettingsPipeline",
+      "description": "Ignore fuzzy_skin_ripple_offset when computing layer phase. The offset and group tests must lose their expected half-cycle inversion while the cycle-count case passes."
+    },
+    {
+      "id": "ripple-group-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "const int    period_index    = effective_layer / std::max(cfg.layers_between_ripple_offset, 1);",
+      "new": "const int    period_index    = effective_layer;",
+      "test_filter": "FuzzySkinRippleSettingsPipeline",
+      "description": "Ignore fuzzy_skin_layers_between_ripple_offset by applying the phase on every layer. The three-layer group case must fail its same-phase group assertions while the one-layer phase case passes."
+    }
+  ]
+}

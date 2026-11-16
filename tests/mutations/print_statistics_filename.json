@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "print-statistics-filament-unit-conversion-lost",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    config.set_key_value(\"used_filament\",             new ConfigOptionFloat(this->total_used_filament / 1000.));",
+      "new": "    config.set_key_value(\"used_filament\",             new ConfigOptionFloat(this->total_used_filament));",
+      "description": "Remove the mm-to-m conversion used by the user-facing used_filament placeholder; the final filename must render 1250 mm as 1.25.",
+      "test_filter": "PrintStatisticsFilename"
+    },
+    {
+      "id": "print-statistics-initial-extruder-alias-misrouted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    config.set_key_value(\"initial_extruder\",          new ConfigOptionInt(static_cast<int>(this->initial_tool)));",
+      "new": "    config.set_key_value(\"initial_extruder\",          new ConfigOptionInt(static_cast<int>(this->initial_no_support_tool)));",
+      "description": "Route the initial_extruder alias to the no-support tool; the output contract keeps initial_tool and initial_extruder at 3 while initial_no_support_extruder is 5.",
+      "test_filter": "PrintStatisticsFilename"
+    },
+    {
+      "id": "print-statistics-error-fallback-cleared",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "        final_path = path_in;",
+      "new": "        final_path.clear();",
+      "description": "Drop the unchanged-input fallback after a placeholder parse error; the malformed filename row requires the original path to be returned.",
+      "test_filter": "PrintStatisticsFilename"
+    }
+  ]
+}

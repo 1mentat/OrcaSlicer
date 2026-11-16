@@ -14,8 +14,42 @@ on:
       - 'scripts/tests/test_slicer_pr_validation.py'
       - 'scripts/settings_inventory.py'
       - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/focused_targets.py'
+      - 'scripts/focused_targets.txt'
+      - 'scripts/tests/test_focused_targets.py'
+      - 'tests/fff_print/CMakeLists.txt'
+      - 'tests/libslic3r/CMakeLists.txt'
+      - 'tests/sla_print/CMakeLists.txt'
+      - 'scripts/slicer_coverage.py'
+      - 'scripts/tests/test_slicer_coverage.py'
+      - 'scripts/slicer_coverage_pair_collector.py'
+      - 'scripts/tests/test_slicer_coverage_pair_collector.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/slicer_coverage_reconcile.py'
+      - 'scripts/coverage_replay/**'
+      - 'scripts/tests/test_coverage_replay.py'
+      - 'scripts/slicer_gcov_coverage.py'
+      - 'scripts/slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_coverage.py'
+      - 'scripts/tests/test_slicer_catch_batch.py'
+      - 'scripts/tests/test_coverage_producers_managed.py'
+      - 'scripts/validation_artifact_lint.py'
+      - '.github/validation-producers.json'
+      - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'scripts/tests/test_gcov_native_fixture.py'
+      - 'cmake/SlicerCoverage.cmake'
+      - 'CMakeLists.txt'
+      - 'tests/filament_group/CMakeLists.txt'
+      - 'scripts/tests/test_slicer_coverage_cmake.py'
+      - 'tests/catch2/extras/CatchAddTests.cmake'
+      - 'tests/catch2/extras/CatchAddTestsPreprocess.py'
+      - 'scripts/tests/test_catch_preprocessor.py'
+      - 'scripts/tests/test_catch_discovery_isolation.py'
+      - 'scripts/validation_*.py'
+      - 'scripts/tests/test_validation_*.py'
+      - '.github/validation-producers.json'
+      - '.github/actions/validation-upload/**'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -30,8 +64,42 @@ on:
       - 'scripts/tests/test_slicer_pr_validation.py'
       - 'scripts/settings_inventory.py'
       - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/focused_targets.py'
+      - 'scripts/focused_targets.txt'
+      - 'scripts/tests/test_focused_targets.py'
+      - 'tests/fff_print/CMakeLists.txt'
+      - 'tests/libslic3r/CMakeLists.txt'
+      - 'tests/sla_print/CMakeLists.txt'
+      - 'scripts/slicer_coverage.py'
+      - 'scripts/tests/test_slicer_coverage.py'
+      - 'scripts/slicer_coverage_pair_collector.py'
+      - 'scripts/tests/test_slicer_coverage_pair_collector.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/slicer_coverage_reconcile.py'
+      - 'scripts/coverage_replay/**'
+      - 'scripts/tests/test_coverage_replay.py'
+      - 'scripts/slicer_gcov_coverage.py'
+      - 'scripts/slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_coverage.py'
+      - 'scripts/tests/test_slicer_catch_batch.py'
+      - 'scripts/tests/test_coverage_producers_managed.py'
+      - 'scripts/validation_artifact_lint.py'
+      - '.github/validation-producers.json'
+      - 'scripts/tests/test_slicer_gcov_batch_integration.py'
+      - 'scripts/tests/test_gcov_native_fixture.py'
+      - 'cmake/SlicerCoverage.cmake'
+      - 'CMakeLists.txt'
+      - 'tests/filament_group/CMakeLists.txt'
+      - 'scripts/tests/test_slicer_coverage_cmake.py'
+      - 'tests/catch2/extras/CatchAddTests.cmake'
+      - 'tests/catch2/extras/CatchAddTestsPreprocess.py'
+      - 'scripts/tests/test_catch_preprocessor.py'
+      - 'scripts/tests/test_catch_discovery_isolation.py'
+      - 'scripts/validation_*.py'
+      - 'scripts/tests/test_validation_*.py'
+      - '.github/validation-producers.json'
+      - '.github/actions/validation-upload/**'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -60,6 +128,18 @@ jobs:
           python -m pip install --only-binary=:all: --no-deps ninja==1.13.0
       - name: Require Ninja for build-reuse fixtures
         run: python -c "import shutil; assert shutil.which('ninja'), 'Ninja is required for real build-reuse controls'"
+      - name: Install YAML parser for producer registry lint
+        run: >-
+          python -m pip install --disable-pip-version-check --only-binary=:all:
+          -r scripts/requirements-validation-artifacts.txt
+      - name: Test artifact ownership, leases and expiry
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_artifacts.py -v
+      - name: Test scheduled artifact collection and installer contracts
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_sweeper.py -v
+      - name: Test artifact runner cleanup and budget cancellation
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_runner.py -v
+      - name: Test bounded validation uploads
+        run: python -B -m unittest discover -s scripts/tests -p test_validation_upload.py -v
       - name: Test scoped process handling
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_process.py -v
       - name: Test clang-tidy diff handling
@@ -75,3 +155,91 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_mutation.py -v
       - name: Test settings inventory declarations and metadata
         run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
+      - name: Test focused target inventory
+        run: python -B -m unittest discover -s scripts/tests -p test_focused_targets.py -v
+      - name: Test coverage report boundary
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_coverage.py -v
+      - name: Test coverage pair collector
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_coverage_pair_collector.py -v
+      - name: Test coverage replay reconciliation
+        run: python -B -m unittest discover -s scripts/tests -p test_coverage_replay.py -v
+      - name: Test GCOV physical-line backend
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_gcov_coverage.py -v
+      - name: Test coverage producers managed entrypoints
+        run: python -B -m unittest discover -s scripts/tests -p test_coverage_producers_managed.py -v
+      - name: Test Catch batch runner
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_catch_batch.py -v
+      - name: Test GCOV and Catch batch integration
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_gcov_batch_integration.py -v
+      - name: Test coverage CMake default-OFF controls
+        run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeDefaultOffTests -v
+      - name: Require GNU tools for coverage CMake instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -B - <<'PY'
+          import re
+          import shutil
+          import subprocess
+
+          tools = {name: shutil.which(name) for name in ("cmake", "ninja", "gcc", "g++")}
+          missing = [name for name, path in tools.items() if path is None]
+          assert not missing, "missing required GNU/Linux instrumentation tools: " + ", ".join(missing)
+          for name in ("gcc", "g++"):
+              version = subprocess.run(
+                  [tools[name], "--version"], capture_output=True, text=True,
+                  timeout=10, check=False,
+              )
+              assert version.returncode == 0, name + " --version failed"
+              assert re.search(r"\bGCC\b|\bgcc\b|Free Software Foundation",
+                               version.stdout, re.IGNORECASE), name + " is not GNU"
+          print("GNU/Linux CMake instrumentation requirements verified")
+          PY
+      - name: Test GCC coverage CMake instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        run: python -B scripts/tests/test_slicer_coverage_cmake.py SlicerCoverageCMakeLauncherTests -v
+      - name: Test tiny real GNU gcov fixture
+        if: matrix.os == 'ubuntu-latest'
+        run: python -B -m unittest discover -s scripts/tests -p test_gcov_native_fixture.py -v
+      - name: Test Catch discovery preprocessor
+        run: python -B -m unittest discover -s scripts/tests -p test_catch_preprocessor.py -v
+      - name: Test Catch discovery profile isolation
+        run: python -B -m unittest discover -s scripts/tests -p test_catch_discovery_isolation.py -v
+
+  validation-upload-smoke:
+    name: Validation upload round trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Write small owned upload fixture
+        shell: python
+        run: |
+          from pathlib import Path
+          Path('upload-smoke').mkdir()
+          Path('upload-smoke/result.txt').write_bytes(b'validation\n')
+      - uses: ./.github/actions/validation-upload
+        with:
+          name: validation-upload-smoke-${{ matrix.os }}
+          path: upload-smoke/*.txt
+          retention-days: 1
+          max-bytes: 32
+          if-no-files-found: error
+      - uses: actions/download-artifact@v8
+        with:
+          name: validation-upload-smoke-${{ matrix.os }}
+          path: download-smoke
+      - name: Verify original download layout and bytes
+        shell: python
+        run: |
+          from pathlib import Path
+          assert Path('download-smoke/result.txt').read_bytes() == b'validation\n'
+          assert len(list(Path('download-smoke').rglob('*'))) == 1

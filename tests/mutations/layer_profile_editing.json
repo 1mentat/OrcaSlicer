@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Layer profile decrease, reduction, smoothing and endpoint edits respect thickness bounds and fixed samples.",
+  "mutants": [
+    {
+      "id": "layer-profile-decrease-direction-removed",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "layer_thickness_delta = - layer_thickness_delta;",
+      "new": "layer_thickness_delta = layer_thickness_delta;",
+      "expected_matches": 1,
+      "test_filter": "^LayerProfileEditing$",
+      "ordinary_assertion_only": true,
+      "description": "Decrease must reach the minimum thickness, not the maximum."
+    },
+    {
+      "id": "layer-profile-reduction-direction-reversed",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "(delta > 0) ? -step : step :",
+      "new": "(delta > 0) ? step : -step :",
+      "expected_matches": 1,
+      "test_filter": "^LayerProfileEditing$",
+      "ordinary_assertion_only": true,
+      "description": "Both above- and below-nominal rows must approach the nominal thickness without crossing it."
+    },
+    {
+      "id": "layer-profile-smoothing-disabled",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "if (action == LAYER_HEIGHT_EDIT_ACTION_SMOOTH) {",
+      "new": "if (false) {",
+      "expected_matches": 1,
+      "test_filter": "^LayerProfileEditing$",
+      "ordinary_assertion_only": true,
+      "description": "Resampling alone preserves the sharp peak; smoothing must lower it while retaining distant samples."
+    }
+  ]
+}

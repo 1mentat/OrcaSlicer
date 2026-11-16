@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Exact Fill.cpp mutations for the body-origin and bounding-box semantics observed by the compact surface-centering matrix. The earlier PrintObject invalidation/body-analysis candidates were observationally equivalent for this fixture and remain documented in their separate report.",
+  "mutants": [
+    {
+      "id": "surface-fill-per-model-gate",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "const bool per_model = (params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface) &&\n                           params.center_of_surface_pattern == CenterOfSurfacePattern::Each_Model &&\n                           (params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral);",
+      "new": "const bool per_model = false;",
+      "description": "Removing the each-model surface gate must alter the center-mode matrix's parsed path sequences.",
+      "test_filter": "SurfaceCenteringMatrix"
+    },
+    {
+      "id": "surface-fill-body-selection-gate",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "if (per_model || params.separated_infills || is_octree_infill_pattern(params.pattern)) {",
+      "new": "if (false || params.separated_infills || is_octree_infill_pattern(params.pattern)) {",
+      "description": "Skipping per-model body selection must alter each-model centered top/bottom paths.",
+      "test_filter": "SurfaceCenteringMatrix"
+    },
+    {
+      "id": "surface-fill-pattern-center-gate",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "(params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral);",
+      "new": "(params.pattern == ipArchimedeanChords || params.pattern == ipRectilinear);",
+      "description": "Replacing octagram-spiral eligibility with rectilinear disables per-body centering for one of the tested surface patterns.",
+      "test_filter": "SurfaceCenteringMatrix"
+    },
+    {
+      "id": "surface-fill-centered-bounding-box",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "            // Orca: Reuse the body box and octree used for bridge anchoring, resetting them for each surface.\n            const int body = infill_body(*this, surface_fill, expoly);\n            f->set_bounding_box(body >= 0 ? this->object()->separated_body_bboxes()[body] : bbox);",
+      "new": "            // Orca: Reuse the body box and octree used for bridge anchoring, resetting them for each surface.\n            const int body = infill_body(*this, surface_fill, expoly);\n            f->set_bounding_box(bbox);",
+      "description": "Discarding the selected body bounding box must change the compact surface path sequences.",
+      "test_filter": "SurfaceCenteringMatrix"
+    }
+  ]
+}

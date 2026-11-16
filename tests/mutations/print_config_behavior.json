@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "Bounded behavioral mutations; native outcomes are recorded separately.",
+  "mutants": [
+    {
+      "id": "printconfig-legacy-enable-wipe-tower",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        opt_key = \"enable_prime_tower\";",
+      "new": "        opt_key = \"enable_wipe_tower\";",
+      "description": "PrintConfig legacy aliases preserve their exact key and value contract/enable_wipe_tower -> enable_prime_tower",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-legacy-filament-map-auto",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        if (value == \"Auto\") value = \"Auto For Flush\";",
+      "new": "        if (value == \"Auto\") value = \"Auto For Match\";",
+      "description": "PrintConfig legacy enum spellings become current canonical values/filament_map_mode = Auto",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-legacy-percent-not-discarded",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        //Reset to default value by erasing these key to avoid parsing error.\n        opt_key = \"\";",
+      "new": "        // Reset to default value by erasing these key to avoid parsing error.\n        opt_key = \"initial_layer_speed\";",
+      "description": "PrintConfig legacy values that cannot be represented are discarded/initial_layer_speed",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-legacy-sla-z-uses-y",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                opt->value = config.opt<ConfigOptionFloats>(corr)->values[1];",
+      "new": "                opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];",
+      "description": "Legacy SLA vector corrections are expanded into axis options",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-wiping-matrix-default-is-custom",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        bool custom = false;",
+      "new": "        bool custom = true;",
+      "description": "Legacy composite wiping matrix detects whether custom entries exist",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-validation-allows-teacup-firmware-retraction",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        cfg.gcode_flavor.value != gcfKlipper &&",
+      "new": "        cfg.gcode_flavor.value != gcfTeacup &&",
+      "description": "PrintConfig validation enforces firmware retraction and wipe compatibility",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-normalize-spiral-keeps-four-walls",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "            this->opt<ConfigOptionInt>(\"wall_loops\", true)->value       = 1;\n            this->opt<ConfigOptionBool>(\"alternate_extra_wall\", true)->value = false;\n            this->opt<ConfigOptionInt>(\"top_shell_layers\", true)->value = 0;\n            this->opt<ConfigOptionPercent>(\"sparse_infill_density\", true)->value = 0;\n        }\n    }\n\n    if (auto *opt_gcode_resolution = this->opt<ConfigOptionFloat>(\"resolution\", false); opt_gcode_resolution)\n        // Resolution will be above 1um.\n        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);\n\n    // BBS",
+      "new": "            this->opt<ConfigOptionInt>(\"wall_loops\", true)->value       = 2;\n            this->opt<ConfigOptionBool>(\"alternate_extra_wall\", true)->value = false;\n            this->opt<ConfigOptionInt>(\"top_shell_layers\", true)->value = 0;\n            this->opt<ConfigOptionPercent>(\"sparse_infill_density\", true)->value = 0;\n        }\n    }\n\n    if (auto *opt_gcode_resolution = this->opt<ConfigOptionFloat>(\"resolution\", false); opt_gcode_resolution)\n        // Resolution will be above 1um.\n        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);\n\n    // BBS",
+      "description": "normalize_fdm clamps spiral process values and the resolution floor",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-normalize-resolution-floor-changed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);\n\n    // BBS",
+      "new": "        opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.01);\n\n    // BBS",
+      "description": "normalize_fdm clamps spiral process values and the resolution floor",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-normalize-prime-tower-single-not-disabled",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                ept_opt->value = false;",
+      "new": "                ept_opt->value = true;",
+      "description": "normalize_fdm_2 records prime tower changes for one filament and keeps two-filament tower rules",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-nozzle-stats-stops-on-malformed-token",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "                BOOST_LOG_TRIVIAL(warning) << \"get_extruder_nozzle_stats: skipping malformed token '\" << nozzle_info << \"'\";\n                continue;",
+      "new": "                BOOST_LOG_TRIVIAL(warning) << \"get_extruder_nozzle_stats: skipping malformed token '\" << nozzle_info << \"'\";\n                break;",
+      "description": "Nozzle statistics skip malformed tokens while retaining valid inventory",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-validation-permits-unsupported-flavor",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "        cfg.gcode_flavor.value != gcfKlipper &&",
+      "new": "        cfg.gcode_flavor.value != gcfKlipper && cfg.gcode_flavor.value != gcfTeacup &&",
+      "description": "Permit Teacup firmware retraction even with wipe disabled; the independent compatibility matrix must reject it.",
+      "test_filter": "PrintConfigBehavior"
+    },
+    {
+      "id": "printconfig-validation-ignores-firmware-wipe",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "             if (wipe)\n                error_message.emplace(\"use_firmware_retraction\", \"--use-firmware-retraction is not compatible with --wipe\");",
+      "new": "             if (!wipe)\n                error_message.emplace(\"use_firmware_retraction\", \"--use-firmware-retraction is not compatible with --wipe\");",
+      "description": "Invert wipe compatibility for an otherwise supported firmware; the independent boolean/flavor matrix must reject it.",
+      "test_filter": "PrintConfigBehavior"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Continuous rising outer-wall seam tracking through the public processor API.",
+  "mutants": [
+    {
+      "id": "gcp-layer-tag-seam-gate-inverted",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            } else if (m_detect_layer_based_on_tag) {",
+      "new": "            } else if (!m_detect_layer_based_on_tag) {",
+      "description": "Invert the public layer-tag seam reset gate; the tagged rising path must add the sole seam while the disabled mode must retain the original first vertex.",
+      "test_filter": "GCodeProcessorLayerTags"
+    },
+    {
+      "id": "gcp-layer-tag-seam-rising-direction-inverted",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            if (new_pos.z() > first_vertex->z()) {",
+      "new": "            if (new_pos.z() < first_vertex->z()) {",
+      "description": "Reverse the rising-Z seam-origin test; the later emitted outer endpoint at Z0.4 must reset the origin only when tag-based detection is enabled.",
+      "test_filter": "GCodeProcessorLayerTags"
+    }
+  ]
+}

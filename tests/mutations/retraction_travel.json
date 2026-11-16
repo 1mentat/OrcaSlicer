@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "Retraction feedrates, wipe placement and speed, layer-change gating, and surface-dependent Z-hop contracts.",
+  "mutants": [
+    {
+      "id": "extruder-deretract-fallback",
+      "path": "src/libslic3r/Extruder.cpp",
+      "old": "    return (speed > 0) ? speed : this->retract_speed();",
+      "new": "    return this->retract_speed();",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "explicit positive deretraction speeds are emitted, and zero falls back to retraction speed"
+    },
+    {
+      "id": "extruder-before-wipe-factor",
+      "path": "src/libslic3r/Extruder.cpp",
+      "old": "    return std::clamp(m_config->retract_before_wipe.get_at(m_config_index) * 0.01, 0., 1.);",
+      "new": "    return 1.;",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "zero and full retract_before_wipe percentages select distinct emitted placement"
+    },
+    {
+      "id": "extruder-after-wipe-factor",
+      "path": "src/libslic3r/Extruder.cpp",
+      "old": "    return std::min(std::clamp(m_config->retract_after_wipe.get_at(m_config_index) * 0.01, 0., 1.), 1. - retract_before_wipe());",
+      "new": "    return 0.;",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "full retract_after_wipe emits post-wipe retraction while zero does not"
+    },
+    {
+      "id": "writer-retract-speed",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "            w.emit_f(filament()->retract_speed() * 60.);",
+      "new": "            w.emit_f(filament()->deretract_speed() * 60.);",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "retract motion feedrate follows retraction_speed"
+    },
+    {
+      "id": "writer-deretract-speed",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "            w.emit_f(filament()->deretract_speed() * 60.);",
+      "new": "            w.emit_f(filament()->retract_speed() * 60.);",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "unretract motion feedrate follows deretraction_speed"
+    },
+    {
+      "id": "writer-lazy-lift-boundary",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)\n{\n    if (m_force_normal_lift)\n        lift_type = LiftType::NormalLift;\n    // check whether the above/below conditions are met\n    double target_lift = 0;\n    {\n        //BBS\n        int extruder_id = filament()->extruder_id();\n        int filament_id = filament()->id();\n        double above = this->config.retract_lift_above.get_at(extruder_id);\n        double below = this->config.retract_lift_below.get_at(extruder_id);\n        if (m_pos.z() >= above && (m_pos.z() <= below || below == 0.))",
+      "new": "std::string GCodeWriter::lazy_lift(LiftType lift_type, bool spiral_vase)\n{\n    if (m_force_normal_lift)\n        lift_type = LiftType::NormalLift;\n    // check whether the above/below conditions are met\n    double target_lift = 0;\n    {\n        //BBS\n        int extruder_id = filament()->extruder_id();\n        int filament_id = filament()->id();\n        double above = this->config.retract_lift_above.get_at(extruder_id);\n        double below = this->config.retract_lift_below.get_at(extruder_id);\n        if (false)",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "retract_lift_above and retract_lift_below gate lazy lift Z moves"
+    },
+    {
+      "id": "gcode-layer-retract-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (FILAMENT_CONFIG(retract_when_changing_layer) && m_writer.will_move_z(z)) {",
+      "new": "    if (m_writer.will_move_z(z)) {",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "retract_when_changing_layer disables layer-change retractions"
+    },
+    {
+      "id": "gcode-wipe-distance",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        double wipe_dist = scale_(config.wipe_distance.get_at(extruder->config_index()));",
+      "new": "        double wipe_dist = scale_(config.wipe_distance.get_at(extruder->config_index()) + 1.);",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "wipe path length follows wipe_distance"
+    },
+    {
+      "id": "gcode-wipe-percent-during",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        retraction_length_before_wipe += retraction_length_remaining - retraction_length_during_wipe;",
+      "new": "        retraction_length_before_wipe += retraction_length_remaining;",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "wipe-time retraction remains in the during-wipe bucket when configured"
+    },
+    {
+      "id": "gcode-lift-policy-all",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (retract_lift_type == RetractLiftEnforceType::rletAllSurfaces) {",
+      "new": "    if (false) {",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "all-surfaces retract lift policy permits lifts on the fixture"
+    },
+    {
+      "id": "gcode-role-wipe-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if(gcodegen.config().role_based_wipe_speed)\n            _wipe_speed = gcodegen.writer().get_current_speed() / 60.0;",
+      "new": "if(false)\n            _wipe_speed = gcodegen.writer().get_current_speed() / 60.0;",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "Each role-based wipe uses the matching extrusion speed, rather than the independent wipe speed."
+    },
+    {
+      "id": "gcode-top-policy-intermediate-lifts",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (retract_lift_type == RetractLiftEnforceType::rletAllSurfaces) {",
+      "new": "if (retract_lift_type == RetractLiftEnforceType::rletAllSurfaces || retract_lift_type == RetractLiftEnforceType::rletTopOnly) {",
+      "test_filter": "SettingsRetractionVariance",
+      "description": "Top-only lifts cannot occur on intermediate or bottom layers."
+    }
+  ]
+}

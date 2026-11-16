@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "transformation-svd-axis-aligned-classification-inverted",
+      "path": "src/libslic3r/Geometry.cpp",
+      "old": "if (num_zeros != 2 || num_ones != 1) {",
+      "new": "if (num_zeros != 2 || num_ones == 1) {",
+      "test_filter": "^GeometryGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "transformation-vector-mirror-zero-default-inverted",
+      "path": "src/libslic3r/Geometry.cpp",
+      "old": "if (abs_mirror(i) == 0.0)\n            copy(i) = 1.0;",
+      "new": "if (abs_mirror(i) == 0.0)\n            copy(i) = -1.0;",
+      "test_filter": "^GeometryGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "polygon-first-intersection-keeps-farthest-crossing",
+      "path": "src/libslic3r/Polygon.cpp",
+      "old": "double d = (line.a - ip).cast<double>().squaredNorm();\n                if (d < dmin) {",
+      "new": "double d = (line.a - ip).cast<double>().squaredNorm();\n                if (d > dmin) {",
+      "test_filter": "^PolygonGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "point3-nearest-query-drops-query-z",
+      "path": "src/libslic3r/Point.cpp",
+      "old": "*point = Point3(pt2d, this->z());",
+      "new": "*point = Point3(pt2d, 0);",
+      "test_filter": "^GeometryGap$",
+      "expected_matches": 1
+    }
+  ]
+}

@@ -131,6 +131,28 @@ TEST_CASE("SVG importer ends an open stroke flush with its endpoints by default"
     check_open_stroke("", 10., 20.);
 }
 
+// Reviewed adaptation of the source case "SVG importer turns an open stroke into a solid":
+// identical SVG (no width/height, path "M0 0 L10 0", stroke-width 2) and identical assertions
+// except the length. The source expected 11 px because the importer then always offset open
+// strokes with square ends; main honors stroke-linecap and defaults to butt (commit 599ef293fc),
+// so the same input now spans 10 px. The width stays 1 px (a zero-height drawing halves the stroke
+// width, see check_open_stroke) and the extrusion height is unchanged.
+TEST_CASE("SVG importer turns an open stroke into a solid (adapted to default butt caps)", "[SVGImport]")
+{
+    ScopedTemporaryFile file(".svg");
+    write_svg(file,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+        "<path fill=\"none\" stroke=\"#000000\" stroke-width=\"2\" "
+        "d=\"M0 0 L10 0\"/></svg>");
+    Model model;
+    std::string message;
+    REQUIRE(load_svg(file.string().c_str(), &model, message));
+    const Vec3d size = single_mesh(model).size();
+    CHECK_THAT(size.x(), WithinAbs(10. * PX_TO_MM, 0.15));
+    CHECK_THAT(size.y(), WithinAbs(1. * PX_TO_MM, 0.15));
+    CHECK_THAT(size.z(), WithinAbs(HEIGHT, 0.15));
+}
+
 TEST_CASE("SVG importer honors an explicit butt cap on an open stroke", "[SVGImport]")
 {
     check_open_stroke("stroke-linecap=\"butt\"", 10., 20.);

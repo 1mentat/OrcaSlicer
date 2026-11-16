@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "circle_arc_filter_leaks_second_crossing",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "            Vec2d P2 = mid - h * perp;\n            if (on_other(P2)) add(P2);",
+      "new": "            Vec2d P2 = mid - h * perp;\n            if (other.type == SketchEntity::Type::Arc || on_other(P2)) add(P2);",
+      "test_filter": "Circle trim ignores an arc cutter with only one crossing",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "circle_intersection_drops_second_crossing",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "        if (h > 1e-12) {\n            Vec2d P2 = mid - h * perp;",
+      "new": "        if (h < -1e-12) {\n            Vec2d P2 = mid - h * perp;",
+      "test_filter": "Circle trim keeps the complement of the pick gap for full circular cutters",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "arc_extension_selects_farthest_crossing",
+      "path": "src/libslic3r/CAD/SketchEngine.cpp",
+      "old": "        double best = std::numeric_limits<double>::max();\n        for (const auto& other : others) {\n            for (double phi : circle_cross_angles(e.center, e.radius, other)) {\n                double adv = extend_end ? wrap_2pi(sgn * (phi - e.end_angle))\n                                        : wrap_2pi(sgn * (e.start_angle - phi));\n                if (adv > 1e-9 && adv <= room + 1e-9 && adv < best) best = adv;\n            }\n        }",
+      "new": "        double best = 0.0;\n        for (const auto& other : others) {\n            for (double phi : circle_cross_angles(e.center, e.radius, other)) {\n                double adv = extend_end ? wrap_2pi(sgn * (phi - e.end_angle))\n                                        : wrap_2pi(sgn * (e.start_angle - phi));\n                if (adv > 1e-9 && adv <= room + 1e-9 && adv > best) best = adv;\n            }\n        }",
+      "test_filter": "Arc extension selects the nearest forward circle intersection",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

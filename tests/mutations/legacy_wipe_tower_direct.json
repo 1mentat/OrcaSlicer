@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Direct legacy wipe tower planning, geometry and transition contracts.",
+  "mutants": [
+    {
+      "id": "legacy-wipe-tower-final-height-source",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    m_wipe_tower_height = m_plan.back().z;//real wipe_tower_height",
+      "new": "    m_wipe_tower_height = m_plan.front().z;//real wipe_tower_height",
+      "test_filter": "WipeTowerLegacyExtended"
+    },
+    {
+      "id": "legacy-wipe-tower-rib-replan-width",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        m_wipe_tower_width = square_width;",
+      "new": "        m_wipe_tower_width = std::max(m_wipe_tower_width, square_width);",
+      "test_filter": "WipeTowerLegacyExtended"
+    },
+    {
+      "id": "legacy-wipe-tower-nozzle-ramming-gate",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    float nozzle_change_length = 0;\n    if (is_need_ramming(old_tool, new_tool, layer_id)) {\n        double e_flow                   = nozzle_change_extrusion_flow(layer_height);",
+      "new": "    float nozzle_change_length = 0;\n    if (!is_need_ramming(old_tool, new_tool, layer_id)) {\n        double e_flow                   = nozzle_change_extrusion_flow(layer_height);",
+      "test_filter": "WipeTowerLegacyExtended"
+    },
+    {
+      "id": "legacy-wipe-tower-purge-depth-line-count",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    depth += std::ceil(length_to_extrude / width) * toolchange_gap_width;",
+      "new": "    depth += std::floor(length_to_extrude / width) * toolchange_gap_width;",
+      "test_filter": "WipeTowerLegacyExtended"
+    },
+    {
+      "id": "legacy-wipe-tower-transition-current-tool",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "    for (const auto &layer : m_plan) {\n        if (!layer.tool_changes.empty()) {\n            m_current_tool = layer.tool_changes.front().old_tool;",
+      "new": "    for (const auto &layer : m_plan) {\n        if (!layer.tool_changes.empty()) {\n            m_current_tool = layer.tool_changes.front().new_tool;",
+      "test_filter": "WipeTowerLegacyExtended"
+    },
+    {
+      "id": "legacy-wipe-tower-plan-layer-order",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "\tif (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par) // if we moved to a new layer, we'll add it to m_plan first",
+      "new": "\tif (m_plan.empty() || m_plan.back().z + WT_EPSILON > z_par) // if we moved to a new layer, we'll add it to m_plan first",
+      "test_filter": "WipeTowerLegacyExtended"
+    }
+  ]
+}

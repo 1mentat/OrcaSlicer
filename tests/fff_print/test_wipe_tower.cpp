@@ -4163,6 +4163,13 @@ TEST_CASE("Legacy direct tower preserves changing tool and purge records", "[Wip
     CHECK_THAT(change.purge_volume, WithinAbs(40.f, 1e-5f));
     CHECK_FALSE(change.gcode.empty());
 }
+
+TEST_CASE("ToolOrdering cyclic parser remains strict and 1-based", "[WipeTower][ToolOrderingLegacy][WipeTowerBroad]")
+{
+    CHECK(parse_cyclic_order("4, 2, 2, 0, 9, abc, 1x, 3", 4) == std::vector<unsigned int>{3, 1, 2});
+    CHECK(parse_cyclic_order("", 4).empty());
+    CHECK(parse_cyclic_order("-1,0,5", 4).empty());
+}
 } // namespace legacy_wipe_toolordering_contracts
 
 namespace toolordering_public_routes_contracts {

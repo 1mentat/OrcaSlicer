@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Auxiliary and exhaust fan endpoints preserve phase order, deposition and material while each speed varies independently from 0% to 100%.",
+  "mutants": [
+    {
+      "id": "additional-cooling-fan-100-clamped-to-99",
+      "description": "Clamp the 100% auxiliary fan endpoint to 99%; the endpoint row must observe P2 PWM 255 during every positive-XY deposition move.",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "int additional_fan_speed_new = m_config.additional_cooling_fan_speed.get_at(config_index);",
+      "new": "int additional_fan_speed_new = m_config.additional_cooling_fan_speed.get_at(config_index) == 100 ? 99 : m_config.additional_cooling_fan_speed.get_at(config_index);",
+      "test_filter": "Auxiliary and exhaust fan speed endpoints reach physical fan commands during deposition",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "during-exhaust-100-clamped-to-99",
+      "description": "Clamp the 100% during-print exhaust endpoint to 99%; the first P3 command must preserve PWM 255 before deposition.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "during_print_exhaust_fan_speed = std::max(during_print_exhaust_fan_speed,\n                                                        m_config.during_print_exhaust_fan_speed.get_at(fi));",
+      "new": "during_print_exhaust_fan_speed = std::max(during_print_exhaust_fan_speed,\n                                                        m_config.during_print_exhaust_fan_speed.get_at(fi) == 100 ? 99 : m_config.during_print_exhaust_fan_speed.get_at(fi));",
+      "test_filter": "Auxiliary and exhaust fan speed endpoints reach physical fan commands during deposition",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "completion-exhaust-100-clamped-to-99",
+      "description": "Clamp the 100% completion exhaust endpoint to 99%; the final P3 command must preserve PWM 255 after the last deposition move.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "complete_print_exhaust_fan_speed = std::max(complete_print_exhaust_fan_speed, m_config.complete_print_exhaust_fan_speed.get_at(fi));",
+      "new": "complete_print_exhaust_fan_speed = std::max(complete_print_exhaust_fan_speed, m_config.complete_print_exhaust_fan_speed.get_at(fi) == 100 ? 99 : m_config.complete_print_exhaust_fan_speed.get_at(fi));",
+      "test_filter": "Auxiliary and exhaust fan speed endpoints reach physical fan commands during deposition",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

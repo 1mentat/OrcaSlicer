@@ -1,0 +1,18 @@
+{
+  "description": "Public organic tree support must preserve a painted vertical enforcer at the selected facet.",
+  "mutants": [
+    {
+      "description": "Skip vertical-enforcer insertion in organic support generation. The Organic painted-enforcer support-path REQUIRE must fail; the legacy Slim case and six existing ProfileOptions roots survive this mutant.",
+      "expected_matches": 1,
+      "expected_test_count": 2,
+      "id": "tree-support-organic-painted-enforcer-insertion-skipped",
+      "new": "        for (auto &pt_and_normal :tree_support->m_vertical_enforcer_points) {\n            continue;",
+      "old": "        for (auto &pt_and_normal :tree_support->m_vertical_enforcer_points) {",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Support/TreeSupport3D.cpp",
+      "test_filter": "^TreeSupportPaintedEnforcer$",
+      "source_anchor_sha256": "d41a72041aa52d2bdc5a1c732b34ae8c7618d2abd031ac981bf1e39c1459ea0a"
+    }
+  ],
+  "schema_version": 1
+}

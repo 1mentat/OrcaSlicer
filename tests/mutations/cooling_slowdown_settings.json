@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Layer cooling slowdown gate, threshold, and minimum-feed behavior with conserved extrusion geometry.",
+  "mutants": [
+    {
+      "id": "cooling-slowdown-gate-inverted",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "adj.cooling_slow_down_enabled = m_config.slow_down_for_layer_cooling.get_at(extruder_id);",
+      "new": "adj.cooling_slow_down_enabled = !m_config.slow_down_for_layer_cooling.get_at(extruder_id);",
+      "description": "Invert the public slowdown enable gate; disabled and enabled rows must swap behavior.",
+      "test_filter": "SlowDownSettings"
+    },
+    {
+      "id": "cooling-slowdown-min-feed-ignored",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "adj.slow_down_min_speed           = float(m_config.slow_down_min_speed.get_at(extruder_id));",
+      "new": "adj.slow_down_min_speed           = FLT_MAX;",
+      "description": "Ignore the configured minimum feed; the 1 and 5 mm/s rows must no longer separate.",
+      "test_filter": "SlowDownSettings"
+    }
+  ]
+}

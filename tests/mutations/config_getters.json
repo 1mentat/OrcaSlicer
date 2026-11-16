@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "CPP-only ConfigBase semantic probes for indexed relative values and coPercent ratio resolution. Adapted to main's refactored Config.cpp: the anchors target main's checked dispatch and the unit-base probe, selected by the ConfigGetter label; the original source mutant ids are preserved for API compatibility and the original source anchors are recorded in the train receipts.",
+  "mutants": [
+    {
+      "id": "config-indexed-relative-getter-uses-matching-ratio-slot",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "static_cast<const ConfigOptionFloatsNullable *>(ratio_opt)->get_at(index)",
+      "new": "static_cast<const ConfigOptionFloatsNullable *>(ratio_opt)->get_at(0)",
+      "expected_matches": 1,
+      "test_filter": "ConfigGetter",
+      "description": "Read the base travel-speed ratio from slot zero instead of the matching slot for nullable indexed percentages; the second-slot result becomes 75% of 40 = 30 instead of 45."
+    },
+    {
+      "id": "config-co-percent-ratio-uses-invalid-float-or-percent-downcast",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "static_cast<const ConfigOptionPercent*>(raw_opt)->get_abs_value(ratio_base)",
+      "new": "static_cast<const ConfigOptionPercent*>(raw_opt)->get_abs_value(1.)",
+      "expected_matches": 1,
+      "test_filter": "ConfigGetter",
+      "description": "Adapted main mutant (legacy source id kept; the id's downcast wording describes the source mutant, not this one): resolve a coPercent option against a base of 1 instead of its ratio_over base (layer height) in main's checked dispatch; the generated ironing-flow settings give 0.5 instead of 0.1 for a 50% ratio over layer height 0.2."
+    }
+  ]
+}

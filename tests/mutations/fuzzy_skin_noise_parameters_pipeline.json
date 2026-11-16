@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source-local ignored-parameter probes for the classic external Perlin fuzzy-skin Print pipeline observer.",
+  "mutants": [
+    {
+      "id": "perlin-fuzzy-scale-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "perlin_noise.SetFrequency(1 / cfg.noise_scale);",
+      "new": "perlin_noise.SetFrequency(1.0);",
+      "test_filter": "FuzzySkinNoiseParametersPipeline",
+      "description": "Ignore fuzzy_skin_scale for Perlin sampling. The scale testcase must fail its emitted-offset residual assertions while the octave and persistence cases pass."
+    },
+    {
+      "id": "perlin-fuzzy-octaves-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "perlin_noise.SetOctaveCount(cfg.noise_octaves);",
+      "new": "perlin_noise.SetOctaveCount(4);",
+      "test_filter": "FuzzySkinNoiseParametersPipeline",
+      "description": "Ignore fuzzy_skin_octaves for Perlin sampling. The octave testcase must fail its emitted-offset residual assertions while the scale and persistence cases pass."
+    },
+    {
+      "id": "perlin-fuzzy-persistence-ignored",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "old": "perlin_noise.SetPersistence(cfg.noise_persistence);",
+      "new": "perlin_noise.SetPersistence(0.5);",
+      "test_filter": "FuzzySkinNoiseParametersPipeline",
+      "description": "Ignore fuzzy_skin_persistence for Perlin sampling. The persistence testcase must fail its emitted-offset residual assertions while the scale and octave cases pass."
+    }
+  ]
+}

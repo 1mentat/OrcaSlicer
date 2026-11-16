@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Polyhole setting consumers: edge cap, margin gate, and percent radius resolution.",
+  "mutants": [
+    {
+      "id": "polyhole-edge-limit-is-ignored",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                                int max_edges = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_max_edges.value;",
+      "new": "                                int max_edges = 50;",
+      "description": "Ignore configured edge limit; minimum and six-edge output checks must fail.",
+      "test_filter": "^PolyholeSettings$"
+    },
+    {
+      "id": "polyhole-detection-margin-is-zero",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                                coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.get_abs_value(unscaled(diameter_sum / hole.points.size()))));",
+      "new": "                                coord_t max_variation = SCALED_EPSILON;",
+      "description": "Discard explicit tolerance so the elliptical hole fails to convert.",
+      "test_filter": "^PolyholeSettings$"
+    },
+    {
+      "id": "polyhole-percent-margin-is-absolute",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "                                coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.get_abs_value(unscaled(diameter_sum / hole.points.size()))));",
+      "new": "                                coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.value));",
+      "description": "Interpret percent literal as millimeters, incorrectly converting the one-percent ellipse.",
+      "test_filter": "^PolyholeSettings$"
+    }
+  ]
+}

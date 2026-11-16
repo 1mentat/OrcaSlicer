@@ -759,7 +759,7 @@ TEST_CASE("Recursive directory copies exclude selected filenames and distinguish
     CHECK(file_contents(dst / "ignore.png") == "image");
 }
 
-TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils][UtilsIOContracts]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
     boost::filesystem::create_directories(src);
@@ -768,7 +768,7 @@ TEST_CASE("Recursive directory copying throws when a directory occupies a file's
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
 
-TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils]") {
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
@@ -780,7 +780,7 @@ TEST_CASE("ScopeGuard move construction transfers the callback to the new guard"
     CHECK(calls == 1);
 }
 
-TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils]") {
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         ScopeGuard guard;
@@ -792,7 +792,7 @@ TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[u
     CHECK(calls == 1);
 }
 
-TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils]") {
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         ScopeGuard destination([&calls] { calls += 10; });
@@ -834,7 +834,7 @@ TEST_CASE("File classification checks case-insensitive extensions and regular-fi
     CHECK_FALSE(is_img_file("image.svg.json"));
 }
 
-TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils][UtilsIOContracts]") {
     namespace fs = boost::filesystem;
     ScopedTemporaryDir d;
     ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
@@ -881,7 +881,7 @@ TEST_CASE("Configured resource directories resolve against the roots they were g
     CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
 }
 
-TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils][UtilsIOContracts]") {
     const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
     const auto s = p.string();
     CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
@@ -890,7 +890,7 @@ TEST_CASE("Perl-compatible path helpers split a path into parent, file name, ste
     CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
 }
 
-TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils][VendorInstall]") {
     namespace fs = boost::filesystem;
     ScopedTemporaryDir temporary;
     ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
@@ -952,7 +952,7 @@ TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]"
     }
 }
 
-TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils][UtilsContracts]") {
     // Under an hour the seconds stay and nothing is rounded.
     CHECK(short_time("0s") == "0s");
     CHECK(short_time("0.5s") == "<1s");
@@ -969,7 +969,7 @@ TEST_CASE("Short time formatting drops seconds and rounds to the minute once hou
     CHECK(short_time("23h 59m 30s") == "1d0h0m");
 }
 
-TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils][UtilsContracts]") {
     const CNumericLocalesSetter numeric_locale;
     CHECK(get_time_dhms(0.f) == "0.000000s");
     CHECK(get_time_dhms(61.f) == "1m 1s");
@@ -1022,6 +1022,24 @@ TEST_CASE("Published model links accept the canonical site roots over http and h
     CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
 }
 
+namespace utils_contracts {
+TEST_CASE("Published model links accept only their canonical URL forms", "[Utils][UtilsContracts]")
+{
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    // Adapted: the source asserted CHECK_FALSE(is_makerworld_link("https://makerworld.com/model/1")) when only the bare
+    // site root matched. Main (85b3335002, Utils.hpp:323-335) classifies the HTTP(S) origin and accepts resource paths;
+    // alternate hosts stay rejected (see "MakerWorld links reject alternate authorities and malformed HTTP origins").
+    // Every other assertion is the source's, unchanged.
+    CHECK(is_makerworld_link("https://makerworld.com/model/1"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
+}
+} // namespace utils_contracts
+
+
 TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_printables_link("https://printablesXcom"));
 }
@@ -1065,4 +1083,36 @@ TEST_CASE("MakerWorld links reject alternate authorities and malformed HTTP orig
         CAPTURE(url);
         CHECK_FALSE(is_makerworld_link(url));
     }
+}
+
+TEST_CASE("write_file_atomically rejects a directory target and preserves its contents", "[Utils][UtilsIOContracts][UtilsAtomicTarget]") {
+    ScopedTemporaryDir dir;
+    const boost::filesystem::path target = dir.path() / "preset.json";
+    boost::filesystem::create_directory(target);
+    const boost::filesystem::path existing = target / "keep.json";
+    std::ofstream(existing.string()) << "keep";
+
+    std::string content;
+    load_string_file(existing, content);
+    REQUIRE(content == "keep");
+
+    const std::error_code ec = write_file_atomically(target.string(), "replacement");
+    REQUIRE(static_cast<bool>(ec));
+    REQUIRE(boost::filesystem::is_directory(target));
+    load_string_file(existing, content);
+    CHECK(content == "keep");
+}
+
+TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "[Utils][UtilsLoggingContracts]")
+{
+    const unsigned previous_level = get_logging_level();
+    ScopeGuard restore_level([previous_level] { set_logging_level(previous_level); });
+    set_logging_level(2); // warning suppresses informational memory diagnostics.
+
+    CHECK(log_memory_info(false).empty());
+    const std::string forced = log_memory_info(true);
+    CHECK_FALSE(forced.empty());
+#ifndef WIN32
+    CHECK(forced.find("Peak memory usage:") != std::string::npos);
+#endif
 }

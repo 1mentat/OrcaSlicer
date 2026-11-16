@@ -1,0 +1,17 @@
+{
+  "description": "A single TreeSupport.cpp production mutation for the explicit first-support-footprint brim-width oracle. This validates the new test oracle; existing tree-brim cases may also detect the same forced-zero behavior, so it is not claimed as unique detection of a pre-existing gap.",
+  "mutants": [
+    {
+      "description": "Force the configured tree brim width to zero; the exact new case must lose the asserted first-support-footprint area increase under a 16 mm explicit brim.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "tree-support-brim-width-forced-zero",
+      "new": "    const float tree_brim_width = 0.f;",
+      "old": "    const float tree_brim_width = config.tree_support_brim_width.value;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "test_filter": "Tree support brim width changes the first support footprint"
+    }
+  ],
+  "schema_version": 1
+}

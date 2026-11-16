@@ -61,14 +61,32 @@ jobs:
           # lose their labels and report "Not Run".
           scripts/run_unit_tests.sh "${{ inputs.test-dir }}" Release
       - name: Upload Test Logs
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v7
+        if: ${{ (failure()) && runner.environment == 'github-hosted' }}
+        uses: ./.github/actions/validation-upload
         with:
           name: unit-test-logs-${{ inputs.artifact }}
           path: ${{ inputs.test-dir }}/**/*.log
+          retention-days: 14
+
+      - name: Upload Test Logs (self-hosted, no artifact manager)
+        if: ${{ (failure()) && runner.environment != 'github-hosted' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unit-test-logs-${{ inputs.artifact }}
+          path: ${{ inputs.test-dir }}/**/*.log
+          retention-days: 14
       - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v7
+        if: ${{ (always()) && runner.environment == 'github-hosted' }}
+        uses: ./.github/actions/validation-upload
+        with:
+          name: test-results-${{ inputs.artifact }}
+          path: ctest_results.xml
+          retention-days: 5
+          if-no-files-found: warn
+
+      - name: Upload Test Results (self-hosted, no artifact manager)
+        if: ${{ (always()) && runner.environment != 'github-hosted' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: test-results-${{ inputs.artifact }}
           path: ctest_results.xml

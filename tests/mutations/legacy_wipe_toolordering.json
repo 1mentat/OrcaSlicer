@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "wipe-interpolation-offset",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "min_wipe_tower_depth = min_depth_base + (max_height - curr_height_to_depth.first) / height_diff * depth_diff;",
+      "new": "min_wipe_tower_depth = min_depth_base + (max_height - curr_height_to_depth.first + 1.f) / height_diff * depth_diff;",
+      "test_filter": "WipeTowerBroad",
+      "description": "the analytic 50 mm interpolation contract must reject an offset interpolation"
+    },
+    {
+      "id": "wipe-brim-type2-offset",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "return loops_num * spacing + (type2 ? 0.f : spacing / 2.f);",
+      "new": "return loops_num * spacing + (type2 ? spacing : spacing / 2.f);",
+      "test_filter": "WipeTowerBroad",
+      "description": "type 2 omits the half-spacing overhang"
+    },
+    {
+      "id": "wipe-block-rounding",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "const float purge_depth = std::ceil(purge.prime_volume / line_area(pw) / line_width) * gap;",
+      "new": "const float purge_depth = std::floor(purge.prime_volume / line_area(pw) / line_width) * gap;",
+      "test_filter": "WipeTowerBroad",
+      "description": "purge depth must round up to contain the requested volume"
+    },
+    {
+      "id": "wipe-gap-empty-branch",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (skip_points.empty()) {",
+      "new": "if (!skip_points.empty()) {",
+      "test_filter": "WipeTowerBroad",
+      "description": "skip-point gap construction must distinguish empty and populated skip sets"
+    },
+    {
+      "id": "wipe-sparse-cap-gate",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (next_takes_it) {",
+      "new": "if (false) {",
+      "test_filter": "WipeTowerBroad",
+      "description": "sparse layers are folded only when the following layer can take their height"
+    },
+    {
+      "id": "tool-order-comparator",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (extruder == a)",
+      "new": "if (extruder == b)",
+      "test_filter": "WipeTowerBroad",
+      "description": "the explicit extruder order must distinguish the first and second query ids"
+    },
+    {
+      "id": "tool-wall-zero-based",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "unsigned int result = ((this->extruder_override == 0) ? region.config().outer_wall_filament_id.value : this->extruder_override) - 1;",
+      "new": "unsigned int result = ((this->extruder_override == 0) ? region.config().outer_wall_filament_id.value : this->extruder_override);",
+      "test_filter": "WipeTowerBroad",
+      "description": "region filament ids are one-based while LayerTools returns zero-based ids"
+    },
+    {
+      "id": "tool-perimeter-role-branch",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (role == erPerimeter)\n                extruder = region.config().inner_wall_filament_id.value;",
+      "new": "if (role != erPerimeter)\n                extruder = region.config().inner_wall_filament_id.value;",
+      "test_filter": "WipeTowerBroad",
+      "description": "perimeter and outer-wall roles select distinct configured filament ids"
+    },
+    {
+      "id": "tool-cyclic-token-boundary",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (token.find_first_not_of(\" \\t\\r\\n\", pos) != std::string::npos)",
+      "new": "if (token.find_first_not_of(\" \\t\\r\\n\", pos) == std::string::npos)",
+      "test_filter": "WipeTowerBroad",
+      "description": "cyclic order rejects tokens with trailing non-whitespace characters"
+    },
+    {
+      "id": "tool-object-wiping-gate",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "if (object.config().flush_into_objects)",
+      "new": "if (false)",
+      "test_filter": "WipeTowerBroad",
+      "description": "object wiping is controlled by the object-level flush_into_objects setting"
+    }
+  ],
+  "scope": "WipeTower estimators, sparse layers, role selection, and tool-order contracts."
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Physical-printer deletion updates sole/shared preset membership, persistent files, typed host settings, and selection state.",
+  "mutants": [
+    {
+      "id": "physical-printer-delete-sole-removal-suppressed",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    for (PhysicalPrinter& printer : m_printers) {\n        if (printer.preset_names.size() == 1 && *printer.preset_names.begin() == preset_name)\n            printers_for_delete.emplace_back(printer.name);",
+      "new": "    for (PhysicalPrinter& printer : m_printers) {\n        if (false && (printer.preset_names.size() == 1 && *printer.preset_names.begin() == preset_name))\n            printers_for_delete.emplace_back(printer.name);",
+      "test_filter": "PhysicalPrinterDeletion",
+      "description": "Suppress sole-membership removal safely; the sole printer object and JSON file must be removed."
+    },
+    {
+      "id": "physical-printer-delete-shared-membership-skipped",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "else if (printer.delete_preset(preset_name))",
+      "new": "else if (printer.delete_preset(\"\"))",
+      "test_filter": "PhysicalPrinterDeletion",
+      "description": "A shared physical printer must remove the requested preset from its membership before saving the updated config."
+    },
+    {
+      "id": "physical-printer-delete-selection-not-cleared",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    if (!printers_for_delete.empty())\n        for (const std::string& printer_name : printers_for_delete)\n            delete_printer(printer_name);\n\n    unselect_printer();\n    return true;",
+      "new": "    if (!printers_for_delete.empty())\n        for (const std::string& printer_name : printers_for_delete)\n            delete_printer(printer_name);\n\n    return true;",
+      "test_filter": "PhysicalPrinterDeletion",
+      "description": "Deleting a preset from all physical printers must clear an active physical-printer selection."
+    },
+    {
+      "id": "physical-printer-save-self-move-restored",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        // Membership updates may save the collection element itself.\n        if (&*it != &edited_printer) {",
+      "new": "        // Membership updates may save the collection element itself.\n        if (true) {",
+      "test_filter": "PhysicalPrinterDeletion",
+      "description": "Restore the in-place self-move that clears typed printer settings. The shared printer must retain its membership and host options in memory and on disk."
+    }
+  ]
+}

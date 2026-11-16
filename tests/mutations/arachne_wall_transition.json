@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Private ordinary-assertion probes for the active Arachne wall configuration, transition placement, and resolution paths; native validation is pending.",
+  "base_commit": "71854be25a9b2d2861ee19c6d37f7a53a95ad220",
+  "test_source": "tests/libslic3r/test_arachne_walls.cpp",
+  "mutants": [
+    {
+      "id": "arachne-wall-transition-length-config-scale",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "input_params.wall_transition_length = wall_transition_length_opt.value * 0.01 * min_nozzle_diameter;",
+      "new": "input_params.wall_transition_length = wall_transition_length_opt.value * 0.02 * min_nozzle_diameter;",
+      "test_filter": "^ArachneWallTransitionMapping$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Use the wrong percent-to-nozzle conversion for transition length; the mapping case's independent 250% -> 1.0 mm oracle must fail as an ordinary assertion."
+    },
+    {
+      "id": "arachne-wall-transition-length-generation-ignored",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const coord_t wall_transition_length = scaled<coord_t>(this->m_params.wall_transition_length);",
+      "new": "const coord_t wall_transition_length = 0;",
+      "test_filter": "^ArachneWallTransition$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Drop the active transition length in SkeletalTrapezoidation; the scaled plus fixture requires the 100% and 300% rows to produce distinct transition geometry."
+    },
+    {
+      "id": "arachne-wall-distribution-generation-ignored",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const int wall_distribution_count = this->m_params.wall_distribution_count;",
+      "new": "const int wall_distribution_count = 1;",
+      "test_filter": "^ArachneWallTransition$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Discard the active distribution radius at WallToolPaths generation; the scaled plus fixture requires the count-1 and count-3 width signatures to differ while preserving the footprint and length."
+    },
+    {
+      "id": "arachne-wall-resolution-generation-ignored",
+      "path": "src/libslic3r/Arachne/WallToolPaths.cpp",
+      "old": "const coord_t smallest_segment = m_params.wall_maximum_resolution;",
+      "new": "const coord_t smallest_segment = meshfix_maximum_resolution();",
+      "test_filter": "^ArachneWallResolution$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the configured maximum resolution during outline preparation; the rounded 256-vertex fixture requires fine resolution to retain more junctions than the coarse resolution control."
+    }
+  ]
+}

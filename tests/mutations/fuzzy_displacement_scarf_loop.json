@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Positive fuzzy displacement with stochastic point placement and full-loop versus bounded scarf distance.",
+  "mutants": [
+    {
+      "description": "Remove the displacement mode transverse offset. The deterministic Perlin displacement case requires a positive interior offset while preserving the reference width envelope.",
+      "expected_matches": 1,
+      "id": "fuzzy-displacement-transverse-offset-removed",
+      "new": "                    out.emplace_back(pa, p1.w, p1.perimeter_index);",
+      "old": "                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * r).cast<coord_t>(), p1.w, p1.perimeter_index);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "test_filter": "FuzzySkinModePipeline"
+    },
+    {
+      "description": "Ignore seam_slope_entire_loop. The full-loop row must report a scarf distance strictly longer than the bounded 4 mm row.",
+      "expected_matches": 1,
+      "id": "seam-entire-loop-flag-ignored",
+      "new": "        const bool   slope_entire_loop        = false;",
+      "old": "        const bool   slope_entire_loop        = m_config.seam_slope_entire_loop;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "SeamSlopeSettings"
+    },
+    {
+      "description": "Always cap the scarf to seam_slope_min_length. The true entire-loop row then collapses to the bounded row and fails its public statistics oracle.",
+      "expected_matches": 1,
+      "id": "seam-entire-loop-length-branch-removed",
+      "new": "        const double slope_min_length         = std::min(m_config.seam_slope_min_length.value, loop_length);",
+      "old": "        const double slope_min_length         = slope_entire_loop ? loop_length : std::min(m_config.seam_slope_min_length.value, loop_length);",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/GCode.cpp",
+      "test_filter": "SeamSlopeSettings"
+    }
+  ]
+}

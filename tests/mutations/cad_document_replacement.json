@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Source mutations for the public CadDocument replacement APIs. The two tests assert analytic rectangular-solid volumes, preserve names/types/structural sketch links, and guard feature indices before public-vector reads.",
+  "mutants": [
+    {
+      "id": "cad-replace-feature-name-identity-lost",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "f.name            = features[index].name;",
+      "new": "f.name            = edited.name;",
+      "description": "Replacing a feature with an edited payload name must retain the existing timeline identity; the test asserts the original name after the replacement.",
+      "test_filter": "CadDocumentReplacement"
+    },
+    {
+      "id": "cad-replace-feature-type-identity-lost",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "f.type            = features[index].type;",
+      "new": "f.type            = edited.type;",
+      "description": "Replacing an Extrude must retain its existing feature type even when the valid edited payload deliberately says Sketch; the type and 800 mm^3 recompute witnesses must reject the mutation.",
+      "test_filter": "CadDocumentReplacement"
+    },
+    {
+      "id": "cad-replace-feature-sketch-link-lost",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "f.sketch_ref  = features[index].sketch_ref;",
+      "new": "f.sketch_ref  = edited.sketch_ref;",
+      "description": "An edited Extrude must retain its original sketch link; the test supplies an invalid payload link and requires the edited volume to recompute successfully.",
+      "test_filter": "CadDocumentReplacement"
+    },
+    {
+      "id": "cad-replace-sketch-extrude-distance-ignored",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "ex.distance  = edited.distance;",
+      "new": "ex.distance  = features[extrude_idx].distance;",
+      "description": "The split replacement must transfer the edited extrusion distance to the Extrude slot; the test changes a 10x10x5 box to a 12x8x4 box and checks its analytic volume.",
+      "test_filter": "CadDocumentReplacement"
+    }
+  ]
+}

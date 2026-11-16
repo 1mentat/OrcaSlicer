@@ -1,0 +1,109 @@
+{
+  "scope": "Color, clustering, topology, smoothing, and remeshing behavioral contracts.",
+  "mutants": [
+    {
+      "id": "colorutils-extended-specified-nearest-direction",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (d < min_dist) {\n                    min_dist = d;\n                    best_cluster = j;",
+      "new": "if (d > min_dist) {\n                    min_dist = d;\n                    best_cluster = j;",
+      "description": "A projection must choose the nearest specified RGB center, including the blue sample and first tie.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-adaptive-max-k-bound",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "best_k = std::min<std::size_t>(max_k, unique_colors.size());",
+      "new": "best_k = std::max<std::size_t>(max_k, unique_colors.size());",
+      "description": "Adaptive fallback must respect the configured maximum cluster count.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-adaptive-bound-inclusive",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (max_radius <= max_color_distance) {",
+      "new": "if (max_radius < max_color_distance) {",
+      "description": "The configured adaptive distance limit is inclusive; an exact radius boundary must be accepted without increasing the cluster count.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-remesh-label-cardinality",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (face_labels.size() != bbs_mesh.indices.size()) {",
+      "new": "if (face_labels.size() == bbs_mesh.indices.size()) {",
+      "description": "Remeshing must reject a label array that cannot be indexed per input face.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-closed-result-inversion",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "return CGAL::is_closed(cgal_mesh);",
+      "new": "return !CGAL::is_closed(cgal_mesh);",
+      "description": "The public closure predicate must report watertight cubes as closed and open squares as open.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-topology-threshold",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (smooth_parameters.smooth_weight >= TOPO_SMOOTH_WEIGHT_THRESHOLD) {",
+      "new": "if (smooth_parameters.smooth_weight > TOPO_SMOOTH_WEIGHT_THRESHOLD) {",
+      "description": "The configured 0.3 threshold is part of the smoothing contract and must activate at equality.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-components-output-clear",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "component_meshes.clear();\n    component_vertex_uvs.clear();",
+      "new": "component_meshes.clear();",
+      "description": "Failed UV validation must clear both output collections so callers cannot observe stale component UVs.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-cluster-final-color-map",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "map_face_to_rgb[fid] = cluster_centers[map_face_to_cluster_id[fid]];",
+      "new": "map_face_to_rgb[fid] = cluster_centers[0];",
+      "description": "Every face must receive the center selected by its computed cluster ID, not the first center unconditionally.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-nearest-id-direction",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (dist < min_dist) {\n            min_dist = dist;\n            nearest_color_id = i;",
+      "new": "if (dist > min_dist) {\n            min_dist = dist;\n            nearest_color_id = i;",
+      "description": "Nearest-color lookup must retain the smallest CIEDE2000 distance and select the exact blue center.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-adaptive-empty-guard",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "std::vector<Color> cluster_adaptive(const std::vector<Color>& colors, const ClusterParameters& cluster_parameters) {\n    if (colors.empty()) {",
+      "new": "std::vector<Color> cluster_adaptive(const std::vector<Color>& colors, const ClusterParameters& cluster_parameters) {\n    if (!colors.empty()) {",
+      "description": "Adaptive clustering must reject only the empty input and produce a nonempty result for a nonempty palette.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-kmeans-unique-cardinality",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (unique_colors.size() < k) {",
+      "new": "if (unique_colors.size() > k) {",
+      "description": "K-means must reduce an overlarge requested K to the number of distinct input colors.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-mesh-cluster-seed-or",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (dist_and_cid_vec[0].first < difference_epsilon || dist_and_cid_vec[0].first * absolute_difference_times < dist_and_cid_vec[1].first) {",
+      "new": "if (dist_and_cid_vec[0].first < difference_epsilon && dist_and_cid_vec[0].first * absolute_difference_times < dist_and_cid_vec[1].first) {",
+      "description": "Either documented seed criterion must be sufficient to seed a face; requiring both leaves close but ambiguous colors unassigned.",
+      "test_filter": "ColorUtilsExtended"
+    },
+    {
+      "id": "colorutils-extended-color-label-roundtrip",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "face_colors[fid] = map_label_to_color[face_labels[fid]];",
+      "new": "face_colors[fid] = map_label_to_color[0];",
+      "description": "RGB smoothing must convert the retained integer labels back to their corresponding original palette entries.",
+      "test_filter": "ColorUtilsExtended"
+    }
+  ]
+}

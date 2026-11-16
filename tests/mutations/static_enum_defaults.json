@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Static and dynamic print defaults preserve named enum-list values through public serialization and deserialization.",
+  "mutants": [
+    {
+      "id": "static-enum-default-definition-map-omitted",
+      "path": "src/libslic3r/PrintConfig.hpp",
+      "old": "                    ConfigOptionUniquePtr default_option(def->create_default_option());\n                    opt->set(default_option.get());",
+      "new": "                    opt->set(def->default_value.get());",
+      "test_filter": "StaticEnumDefaults",
+      "description": "Restore copying raw defaults without enum-name metadata; the serialized-default assertions fail before any named-value parsing can crash."
+    }
+  ]
+}

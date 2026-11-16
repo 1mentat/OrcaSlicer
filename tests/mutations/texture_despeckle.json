@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Public color despeckling removes isolated per-face noise while preserving ties, uncoloured boundaries, pass-zero control, and face-order independence.",
+  "test_filter": "TextureColorDespeckle",
+  "mutants": [
+    {
+      "id": "texture-despeckle-tie-recolors-on-equality",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "if (count[k] > count[best])\n                        best = k;\n                if (count[best] > count[0])",
+      "new": "if (count[k] >= count[best])\n                        best = k;\n                if (count[best] >= count[0])",
+      "test_filter": "TextureColorDespeckle",
+      "description": "A tied blue self vote and red neighbour must retain blue; selecting a tied neighbour and accepting equality would recolour the centre."
+    },
+    {
+      "id": "texture-despeckle-zero-pass-forced-filter",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "despeckle_triangle_colors(mesh, triangle_palette, color->despeckle_passes);",
+      "new": "despeckle_triangle_colors(mesh, triangle_palette, std::max(1, color->despeckle_passes));",
+      "test_filter": "TextureColorDespeckle",
+      "description": "The public classic path must honor an explicit zero-pass request; forcing one pass erases the isolated blue control. The helper's own passes <= 0 guard makes this a meaningful call-site mutation."
+    },
+    {
+      "id": "texture-despeckle-uncoloured-neighbours-vote",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "if (nb < 0 || size_t(nb) >= prev.size() || prev[size_t(nb)] < 0)\n                        continue;",
+      "new": "if (nb < 0 || size_t(nb) >= prev.size())\n                        continue;",
+      "test_filter": "TextureColorDespeckle",
+      "description": "Uncoloured boundary triangles are not votes; allowing -1 into the candidate counts would erase the tied centre."
+    },
+    {
+      "id": "texture-despeckle-snapshot-initialized-from-first-face",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "prev = color;",
+      "new": "prev.assign(color.size(), color.empty() ? -1 : color.front());",
+      "test_filter": "TextureColorDespeckle",
+      "description": "The filter must snapshot every face's prior colour. Initializing all faces from the first face breaks both the expected palette and reordered-face comparison."
+    }
+  ]
+}

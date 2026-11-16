@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Both processor config consumers must combine scarf and spiral flags for seam tracking while preserving extrusion moves.",
+  "mutants": [
+    {
+      "id": "gcp-full-config-scarf-flag-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;\n\n    const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>(\"manual_filament_change\");",
+      "new": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || false;\n\n    const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>(\"manual_filament_change\");",
+      "description": "Ignore the scarf-seam boolean in the PrintConfig overload; the full-config true/spiral-false case must still emit the seam.",
+      "test_filter": "^GCodeProcessorScarfSeam$"
+    },
+    {
+      "id": "gcp-dynamic-config-scarf-flag-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;\n\n    const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>(\"curr_bed_type\");",
+      "new": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || false;\n\n    const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>(\"curr_bed_type\");",
+      "description": "Ignore the scarf-seam boolean in the DynamicPrintConfig overload; the dynamic true/spiral-false case must still emit the seam.",
+      "test_filter": "^GCodeProcessorScarfSeam$"
+    },
+    {
+      "id": "gcp-full-config-scarf-or-loses-spiral",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;\n\n    const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>(\"manual_filament_change\");",
+      "new": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = has_scarf_joint_seam->value;\n\n    const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>(\"manual_filament_change\");",
+      "description": "Replace the PrintConfig overload OR with scarf assignment; the false/true row must retain the seam because spiral mode is enabled.",
+      "test_filter": "^GCodeProcessorScarfSeam$"
+    },
+    {
+      "id": "gcp-dynamic-config-scarf-or-loses-spiral",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;\n\n    const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>(\"curr_bed_type\");",
+      "new": "    const ConfigOptionBool* has_scarf_joint_seam = config.option<ConfigOptionBool>(\"has_scarf_joint_seam\");\n    if (has_scarf_joint_seam != nullptr)\n        m_detect_layer_based_on_tag = has_scarf_joint_seam->value;\n\n    const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>(\"curr_bed_type\");",
+      "description": "Replace the DynamicPrintConfig overload OR with scarf assignment; the false/true row must retain the seam because spiral mode is enabled.",
+      "test_filter": "^GCodeProcessorScarfSeam$"
+    }
+  ]
+}

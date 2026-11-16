@@ -275,7 +275,7 @@ def validate_junit(path: Path, expected_names: set[str]) -> dict[str, int]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     for name in ("root", "build", "binary", "test-source", "production-source", "out",
                  "cmake", "llvm-profdata", "llvm-cov"):
         parser.add_argument(f"--{name}", required=True)
@@ -534,4 +534,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from validation_runner import managed_main
+    raise SystemExit(managed_main(main, output_option='--out',
+                                  default_name='build/module-feedback', readonly_actions=()))

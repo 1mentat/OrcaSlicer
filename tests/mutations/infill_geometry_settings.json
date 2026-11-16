@@ -1,0 +1,42 @@
+{
+  "description": "Public Print and Fill geometry mutation probes for registered infill overhang angle and crosszag shift-step behavior.",
+  "mutants": [
+    {
+      "description": "Hardwire the lateral honeycomb ridge slope to 60 degrees. The public Fill geometry fixture at the registered 15 and 75 degree endpoints must move from the lower-angle single-family lattice phase to the upper-angle two-family phase.",
+      "expected_matches": 1,
+      "id": "infill-lateral-honeycomb-overhang-angle-ignored",
+      "new": "    const float vertical_period = 3 * half_horizontal_period / tanf(degree * 60.f);",
+      "old": "    const float vertical_period = 3 * half_horizontal_period / tanf(degree * float(params.infill_overhang_angle));",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "test_filter": "InfillOverhangAngle"
+    },
+    {
+      "description": "Hardwire the PrintRegionConfig overhang angle at the real Print-to-Fill forwarding site. The sliced 20 x 20 x 1.6 mm lateral-honeycomb fixture retains its 15/75 degree region-config checks and requires the 75 degree print to emit at least three more long vertical infill tracks than the 15 degree print on layers 1 (Z=0.4 mm) and 4 (Z=1.0 mm).",
+      "expected_matches": 1,
+      "id": "infill-overhang-angle-print-forwarding-ignored",
+      "new": "                params.infill_overhang_angle = 60.f;",
+      "old": "                params.infill_overhang_angle = region_config.infill_overhang_angle;",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "test_filter": "InfillOverhangForwarding"
+    },
+    {
+      "description": "Drop the configured shift on even crosszag layer pairs. The maximum 10 mm setting must change the measured emitted phase on layer 2 by the configured amount modulo measured line pitch.",
+      "expected_matches": 1,
+      "id": "infill-crosszag-shift-step-even-layer-pairs-ignored",
+      "new": "                params.horiz_move -= 0;",
+      "old": "                params.horiz_move -= scale_(region_config.infill_shift_step) * (f->layer_id / 2);",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "test_filter": "InfillShiftStep"
+    },
+    {
+      "description": "Drop the configured shift on odd crosszag layer pairs. The maximum 10 mm setting must change the measured emitted phase on layer 3 by the opposite local-normal amount modulo measured line pitch.",
+      "expected_matches": 1,
+      "id": "infill-crosszag-shift-step-odd-layer-pairs-ignored",
+      "new": "                params.horiz_move += 0;",
+      "old": "                params.horiz_move += scale_(region_config.infill_shift_step) * (f->layer_id / 2);",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "test_filter": "InfillShiftStep"
+    }
+  ],
+  "schema_version": 1
+}

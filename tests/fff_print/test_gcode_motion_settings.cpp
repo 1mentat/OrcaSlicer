@@ -2550,4 +2550,248 @@ TEST_CASE("Nullable object motion overrides inherit parent values on exported ro
                       [](double value) { return std::abs(value - 756.) < 1e-3; }));
 }
 
+namespace gap_e_motion_source_cases {
+
+struct ParsedMotion
+{
+    struct RoleFeedSample
+    {
+        double z;
+        double feed;
+    };
+
+    struct RoleMotionEvent
+    {
+        std::string role;
+        int         acceleration;
+        double      jerk;
+        int         prior_acceleration_update;
+        double      prior_jerk_update;
+    };
+
+    std::map<std::string, std::vector<double>> first_layer_feeds;
+    std::map<std::string, std::vector<RoleFeedSample>> role_feed_samples;
+    std::map<std::string, std::map<int, std::vector<int>>> role_accelerations;
+    std::map<std::string, std::map<int, std::vector<double>>> role_jerks;
+    std::vector<RoleMotionEvent> role_motion_events;
+    std::vector<double> first_layer_xy_travel_feeds;
+    std::vector<double> first_layer_z_travel_feeds;
+    std::vector<int> first_layer_xy_travel_accelerations;
+    std::vector<double> first_layer_xy_travel_jerks;
+    std::vector<int> travel_accelerations;
+    std::vector<double> travel_jerks;
+    std::vector<double> bridge_feeds;
+    std::vector<double> internal_bridge_feeds;
+    size_t extrusions = 0;
+    size_t travels    = 0;
+};
+
+ParsedMotion parse_motion(const std::string& output, const DynamicPrintConfig& config)
+{
+    ParsedMotion parsed;
+    GCodeReader reader;
+    reader.apply_config(config);
+    const double layer_height = config.opt_float("layer_height");
+    std::string role;
+    int layer_index         = -1;
+    int print_acceleration  = 0;
+    int travel_acceleration = 0;
+    int prior_acceleration_update = 0;
+    double jerk             = 0;
+    double prior_jerk_update = 0;
+    reader.parse_buffer(output, [&parsed, &role, &layer_index, &print_acceleration, &travel_acceleration,
+                                 &prior_acceleration_update, &jerk, &prior_jerk_update,
+                                 layer_height](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("LAYER_CHANGE") != std::string_view::npos) {
+            ++layer_index;
+            // Feature comments only appear when the active extrusion role changes.
+        }
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos) {
+            if (comment.find("Outer wall") != std::string_view::npos)
+                role = "Outer wall";
+            else if (comment.find("Inner wall") != std::string_view::npos)
+                role = "Inner wall";
+            else if (comment.find("Top surface") != std::string_view::npos)
+                role = "Top surface";
+            else if (comment.find("Bottom surface") != std::string_view::npos)
+                role = "Bottom surface";
+            else if (comment.find("Internal solid infill") != std::string_view::npos)
+                role = "Internal solid infill";
+            else if (comment.find("Sparse infill") != std::string_view::npos)
+                role = "Sparse infill";
+            else if (comment.find("Internal Bridge") != std::string_view::npos ||
+                     comment.find("Internal bridge") != std::string_view::npos)
+                role = "Internal bridge";
+            else if (comment.find("Bridge") != std::string_view::npos)
+                role = "Bridge";
+            else
+                role.clear();
+        }
+
+        float value = 0;
+        if (line.cmd_is("M204")) {
+            if (line.has_value('S', value) || line.has_value('P', value)) {
+                prior_acceleration_update = print_acceleration;
+                print_acceleration = int(std::lround(value));
+            }
+            if (line.has_value('T', value))
+                travel_acceleration = int(std::lround(value));
+        } else if (line.cmd_is("M205") && line.has_value('X', value)) {
+            prior_jerk_update = jerk;
+            jerk = value;
+        }
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        const bool first     = first_layer(layer_index);
+        const double xy      = line.dist_XY(self);
+        const double dz      = std::abs(line.dist_Z(self));
+        const bool extrusion = line.extruding(self) && xy > EPSILON;
+        const bool travel    = !extrusion && (xy > EPSILON || dz > EPSILON);
+        if (extrusion) {
+            ++parsed.extrusions;
+            if (first && !role.empty())
+                parsed.first_layer_feeds[role].push_back(line.new_F(self));
+            if (role == "Bridge")
+                parsed.bridge_feeds.push_back(line.new_F(self));
+            else if (role == "Internal bridge")
+                parsed.internal_bridge_feeds.push_back(line.new_F(self));
+            if (layer_index >= 0 && !role.empty()) {
+                parsed.role_feed_samples[role].push_back({line.new_Z(self), line.new_F(self)});
+                parsed.role_motion_events.push_back(
+                    {role, print_acceleration, jerk, prior_acceleration_update, prior_jerk_update});
+                parsed.role_accelerations[role][layer_index].push_back(print_acceleration);
+                parsed.role_jerks[role][layer_index].push_back(jerk);
+            }
+        } else if (travel) {
+            ++parsed.travels;
+            if (first && xy > EPSILON && dz <= EPSILON) {
+                parsed.first_layer_xy_travel_feeds.push_back(line.new_F(self));
+                parsed.first_layer_xy_travel_accelerations.push_back(travel_acceleration);
+                parsed.first_layer_xy_travel_jerks.push_back(jerk);
+            }
+            if (first && xy <= EPSILON && dz > EPSILON && line.new_Z(self) > layer_height + EPSILON)
+                parsed.first_layer_z_travel_feeds.push_back(line.new_F(self));
+            if (travel_acceleration > 0)
+                parsed.travel_accelerations.push_back(travel_acceleration);
+            if (jerk > 0)
+                parsed.travel_jerks.push_back(jerk);
+        }
+    });
+    return parsed;
+}
+
+TEST_CASE("Walls after raft layers follow the configured speed ramp", "[GCode][SettingsSpeedAccelVariance][GCodeRaftSpeed]")
+{
+    constexpr int raft_layers = 2;
+    constexpr int slow_down_layers = 3;
+    constexpr double initial_wall_speed = 20.0;
+    constexpr double nominal_wall_speed = 60.0;
+
+    DynamicPrintConfig config = motion_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"raft_layers", raft_layers},
+        {"slow_down_layers", slow_down_layers},
+        {"z_offset", 0.0},
+        {"initial_layer_speed", initial_wall_speed},
+        {"outer_wall_speed", nominal_wall_speed},
+        {"inner_wall_speed", nominal_wall_speed},
+        {"wall_loops", 1},
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"sparse_infill_density", "0%"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"fan_cooling_layer_time", 0.0},
+        {"filament_max_volumetric_speed", "200"},
+    });
+
+    Model model;
+    Print print;
+    init_print({make_cube(12.0, 12.0, 1.2)}, print, model, config);
+    const auto validation = print.validate();
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+
+    const ParsedMotion motion = parse_motion(gcode(print), config);
+    const auto found = motion.role_feed_samples.find("Outer wall");
+    REQUIRE(found != motion.role_feed_samples.end());
+
+    // The first object layer sits on the raft. Each following object layer advances
+    // the configured interpolation by one step until the nominal wall speed is reached.
+    // Match by the object layer's print Z: G-code layer numbers count emitted support
+    // layers and need not equal Layer::id() when some support layers are empty.
+    constexpr double z_match_tolerance_mm = 0.002;
+    const auto &object_layers = print.objects().front()->layers();
+    for (const ParsedMotion::RoleFeedSample &sample : found->second) {
+        const size_t matching_layers = static_cast<size_t>(std::count_if(
+            object_layers.begin(), object_layers.end(), [sample](const Layer *candidate) {
+                return std::abs(sample.z - candidate->print_z) <= z_match_tolerance_mm;
+            }));
+        REQUIRE(matching_layers == 1);
+    }
+
+    for (int offset = 0; offset <= slow_down_layers; ++offset) {
+        const int layer_id = raft_layers + offset;
+        const Layer *object_layer = nullptr;
+        for (const Layer *candidate : print.objects().front()->layers())
+            if (candidate->id() == layer_id) {
+                object_layer = candidate;
+                break;
+            }
+        REQUIRE(object_layer != nullptr);
+
+        std::vector<double> layer_feeds;
+        for (const ParsedMotion::RoleFeedSample &sample : found->second)
+            if (std::abs(sample.z - object_layer->print_z) <= z_match_tolerance_mm)
+                layer_feeds.push_back(sample.feed);
+        INFO("object layer id=" << layer_id << " print_z=" << object_layer->print_z);
+        REQUIRE_FALSE(layer_feeds.empty());
+
+        const double expected_speed = offset == 0
+            ? initial_wall_speed
+            : initial_wall_speed + (nominal_wall_speed - initial_wall_speed) *
+                                      static_cast<double>(std::min(offset, slow_down_layers)) / slow_down_layers;
+        for (const double feed : layer_feeds)
+            CHECK_THAT(feed, Catch::Matchers::WithinAbs(expected_speed * 60.0, 1.0));
+    }
+}
+
+TEST_CASE("Small support perimeter speed scales exported base and interface support",
+          "[GCode][SettingsSpeedAccelVariance][SmallSupportPerimeterSpeed]")
+{
+    DynamicPrintConfig config = support_motion_config(18.0, 31.0);
+    config.set_deserialize_strict({
+        {"small_support_perimeter_speed", "25%"},
+        {"small_support_perimeter_threshold", 1000.0},
+    });
+    REQUIRE(config.validate().empty());
+
+    const SupportFeedEvidence evidence =
+        export_support_with_object_override(config, SupportObjectOverride::None);
+    require_support_role_feeds(evidence.base, 18.0 * 0.25 * 60.0, evidence.first_layer_z, 3000.0);
+    require_support_role_feeds(evidence.interface, 31.0 * 0.25 * 60.0, evidence.first_layer_z, 3000.0);
+
+    DynamicPrintConfig threshold_disabled = config;
+    threshold_disabled.set_deserialize_strict({{"small_support_perimeter_threshold", 0.0}});
+    const SupportFeedEvidence disabled_evidence =
+        export_support_with_object_override(threshold_disabled, SupportObjectOverride::None);
+    require_support_role_feeds(disabled_evidence.base, 18.0 * 60.0, disabled_evidence.first_layer_z, 3000.0);
+    require_support_role_feeds(disabled_evidence.interface, 31.0 * 60.0, disabled_evidence.first_layer_z, 3000.0);
+    const auto require_same_support_geometry = [](const auto &expected, const auto &actual) {
+        REQUIRE_FALSE(expected.empty());
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            CHECK_THAT(actual[i].z, Catch::Matchers::WithinAbs(expected[i].z, EPSILON));
+            CHECK_THAT(actual[i].xy, Catch::Matchers::WithinAbs(expected[i].xy, EPSILON));
+        }
+    };
+    require_same_support_geometry(evidence.base, disabled_evidence.base);
+    require_same_support_geometry(evidence.interface, disabled_evidence.interface);
+}
+
+} // namespace gap_e_motion_source_cases
+
 } // namespace settings_speed_accel_contracts

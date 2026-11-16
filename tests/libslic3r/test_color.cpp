@@ -6,6 +6,7 @@
 
 #include "libslic3r/Color.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
@@ -186,6 +187,17 @@ TEST_CASE("RGBA hexadecimal decoding preserves explicit alpha", "[Color]")
     require_rgba(color, 16.0f / 255.0f, 32.0f / 255.0f, 48.0f / 255.0f, 128.0f / 255.0f);
 }
 
+TEST_CASE("Structural decode failure preserves RGB and resets RGBA", "[Color]")
+{
+    ColorRGB rgb(0.2f, 0.3f, 0.4f);
+    CHECK_FALSE(decode_color("red", rgb));
+    require_rgb(rgb, 0.2f, 0.3f, 0.4f);
+
+    ColorRGBA rgba(0.2f, 0.3f, 0.4f, 0.5f);
+    CHECK_FALSE(decode_color("#12345", rgba));
+    require_rgba(rgba, 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
 TEST_CASE("Decoding rejects strings without a leading # or with the wrong length", "[Color]")
 {
     // Only the result is the contract here: what is left in the output on failure differs
@@ -210,6 +222,17 @@ TEST_CASE("RGB vector decoding is all-successful and preserves order", "[Color]"
     CHECK(output[2] == ColorRGB::BLUE());
 }
 
+TEST_CASE("RGBA vector decoding reports the first invalid entry without reordering", "[Color]")
+{
+    const std::vector<std::string> input{"#11223344", "invalid", "#AABBCCDD"};
+    std::vector<ColorRGBA> output;
+    CHECK_FALSE(decode_colors(input, output));
+    REQUIRE(output.size() == input.size());
+    require_rgba(output[0], 17.0f / 255.0f, 34.0f / 255.0f, 51.0f / 255.0f, 68.0f / 255.0f);
+    require_rgba(output[1], 0.0f, 0.0f, 0.0f, 1.0f);
+    require_rgba(output[2], 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
 TEST_CASE("RGBA vector decoding fails on an invalid entry and keeps the entries before it", "[Color]")
 {
     const std::vector<std::string> input{"#11223344", "invalid", "#AABBCCDD"};
@@ -223,6 +246,12 @@ TEST_CASE("RGB encoding uses uppercase bytes and exact padding", "[Color]")
 {
     CHECK(encode_color(ColorRGB(1.0f, 64.0f / 255.0f, 0.0f)) == "#FF4000");
     CHECK(encode_color(ColorRGB(0.0f, 0.0f, 0.0f)) == "#000000");
+}
+
+TEST_CASE("RGBA encoding intentionally serializes only RGB", "[Color]")
+{
+    CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.1f)) == "#FF4000");
+    CHECK(encode_color(ColorRGBA(1.0f, 64.0f / 255.0f, 0.0f, 0.9f)) == "#FF4000");
 }
 
 TEST_CASE("RGBA encoding writes only the RGB bytes", "[Color]")
@@ -254,6 +283,23 @@ TEST_CASE("Picking IDs round-trip the three packed byte channels", "[Color]")
     }
 }
 
+TEST_CASE("Picking checksum has stable known vectors", "[Color]")
+{
+    CHECK(picking_checksum_alpha_channel(0, 0, 0) == 85);
+    CHECK(picking_checksum_alpha_channel(1, 2, 3) == 48);
+    CHECK(picking_checksum_alpha_channel(255, 0, 0) == 176);
+    CHECK(picking_checksum_alpha_channel(12, 34, 56) == 39);
+}
+
+TEST_CASE("Color equality uses the documented component tolerance", "[Color]")
+{
+    const RGBA base{0.2f, 0.4f, 0.6f, 0.8f};
+    const RGBA near{0.205f, 0.395f, 0.605f, 0.795f};
+    const RGBA far{0.3f, 0.4f, 0.6f, 0.8f};
+    CHECK(color_is_equal(base, near));
+    CHECK_FALSE(color_is_equal(base, far));
+}
+
 TEST_CASE("Picking checksum changes when any single RGB byte changes", "[Color]")
 {
     // The alpha checksum exists to reject picking colours altered by blending or multisampling
@@ -282,6 +328,7 @@ TEST_CASE("Color equality allows 0.01 per component, alpha included", "[Color]")
     CHECK_FALSE(color_is_equal(base, RGBA{0.212f, 0.4f, 0.6f, 0.8f}));
     CHECK_FALSE(color_is_equal(base, RGBA{0.2f, 0.4f, 0.6f, 0.812f}));
 }
+
 
 TEST_CASE("Named color constants expose their documented channels", "[Color]")
 {

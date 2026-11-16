@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "description": "WipeTower consumer-boundary mutations for zero scaling, ramming, ironing area, and minimum prime volume. The separate interface purge baseline defect receives no coverage credit.",
+  "selection": {
+    "healthy_test_filter": "^WipeTowerTransitionBoundaries$",
+    "healthy_expected_test_count": 4
+  },
+  "mutants": [
+    {
+      "id": "wipe-tower-zero-flush-multiplier-uses-default-one",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "wipe_volumes[i][j] = std::max<float>(wipe_volumes[i][j], float(block[size_t(i) * number_of_extruders + j]) * scale);",
+      "new": "wipe_volumes[i][j] = std::max<float>(wipe_volumes[i][j], float(block[size_t(i) * number_of_extruders + j]) * (scale == 0. ? 1. : scale));",
+      "expected_matches": 1,
+      "test_filter": "^WipeTowerTransitionBoundaries$",
+      "expected_test_count": 4,
+      "intended_failed_case": "Zero purge scaling and destination floor follow the tower volume rules",
+      "ordinary_assertion_only": true,
+      "description": "Treat a zero per-nozzle scale as the default scale of one while preserving all positive-scale behavior. The zero-scale matrix row must remain zero when destination floors are zero."
+    },
+    {
+      "id": "wipe-tower-zero-ramming-volume-clamped-positive",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "float vol  = config.filament_multitool_ramming_volume.get_at(idx);",
+      "new": "float vol  = std::max(1.f, float(config.filament_multitool_ramming_volume.get_at(idx)));",
+      "expected_matches": 1,
+      "test_filter": "^WipeTowerTransitionBoundaries$",
+      "expected_test_count": 4,
+      "intended_failed_case": "Zero multi-tool ramming inputs suppress the ramming move",
+      "ordinary_assertion_only": true,
+      "description": "Mistake the documented zero-volume disable value for a positive minimum of 1 cubic millimeter. Positive configured volumes remain unchanged; zero-volume output must match explicitly disabled ramming."
+    },
+    {
+      "id": "wipe-tower-prime-volume-consumer-ignored",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "float volume_to_wipe = m_config.prime_volume;",
+      "new": "float volume_to_wipe = 0.f;",
+      "expected_matches": 1,
+      "test_filter": "^WipeTowerTransitionBoundaries$",
+      "expected_test_count": 4,
+      "intended_failed_case": "Minimum prime volume preserves a positive tower transition",
+      "ordinary_assertion_only": true,
+      "description": "Drop the configured Type2 purge volume at its Print consumer. The public Print pair at the registered minimum and a meaningful positive control must retain equal transition identities and show the configured volume effect."
+    },
+    {
+      "id": "wipe-tower-zero-ironing-area-uses-default-area",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "m_filpar[idx].flat_iron_area = config.filament_tower_ironing_area.get_at(idx);",
+      "new": "m_filpar[idx].flat_iron_area = std::max(4.f, float(config.filament_tower_ironing_area.get_at(idx)));",
+      "expected_matches": 1,
+      "test_filter": "^WipeTowerTransitionBoundaries$",
+      "expected_test_count": 4,
+      "intended_failed_case": "Zero tower ironing area removes the public ironing travel",
+      "ordinary_assertion_only": true,
+      "description": "Treat a zero Type1 ironing area as the default 4 square millimeters while preserving the positive-area row. The zero-area output must match the same-area control with flat ironing disabled."
+    }
+  ]
+}

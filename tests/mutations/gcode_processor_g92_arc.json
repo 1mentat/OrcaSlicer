@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public GCodeProcessor contracts for unknown-axis G92 and radius-form arc geometry.",
+  "mutants": [
+    {
+      "id": "gcp-g92-unknown-axis-resets-origins",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (!any_found && !line.has_unknown_axis()) {",
+      "new": "if (!any_found) {",
+      "description": "Make a G92 containing only unknown axes reset all processor origins; the public unknown-axis compatibility contract should keep following XYZ positions unchanged.",
+      "test_filter": "GCodeProcessorUnknownAxis"
+    },
+    {
+      "id": "gcp-r-arc-fitting-disabled",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "if (line.has('R')) {\n        fitting = EFitting::R;",
+      "new": "if (line.has('R') && false) {\n        fitting = EFitting::R;",
+      "description": "Disable R-form fitting while leaving IJ fitting available; the public clockwise R arc endpoint/radius contract should fail.",
+      "test_filter": "GCodeProcessorArcR"
+    }
+  ]
+}

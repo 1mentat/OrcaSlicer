@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion probes for zero-force Y acceleration fallback and the reported scarf-length cap.",
+  "mutants": [
+    {
+      "id": "machine-y-zero-force-fallback-gate-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (machine_max_force_Y > EPSILON && machine_bed_mass_Y > EPSILON) {",
+      "new": "if (machine_bed_mass_Y > EPSILON) {",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^GCodeBroad$",
+      "expected_control_cases": [
+        "GCode mass load acceleration falls back to configured limit without force",
+        "GCode mass load acceleration is capped by machine force and bed mass"
+      ],
+      "expected_failure_case": "GCode zero Y force keeps the configured acceleration with printed mass",
+      "description": "Remove the positive-force gate. With 100 g bed mass, 100 g printed mass, and 777 configured Y acceleration, the 0 N row must retain 777 while 0.001 N yields the 5 mm/s^2 cap. The shared positive-mass zero-force assertion is the causal detector.",
+      "source_anchor_sha256": "1da17f627f7e5a3481333312f398c24c86a6034ffcbc2be42b67376be19bdf38"
+    },
+    {
+      "id": "seam-slope-reported-length-loop-cap-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        const double slope_min_length         = slope_entire_loop ? loop_length : std::min(m_config.seam_slope_min_length.value, loop_length);",
+      "new": "        const double slope_min_length         = slope_entire_loop ? loop_length : m_config.seam_slope_min_length.value;",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^SeamSlopeSettings$",
+      "expected_failure_case": "Scarf length and steps have independent geometric witnesses",
+      "description": "Remove the caller-side cap for non-entire-loop scarf length. The test measures the active external loop and compares reported scarf distance below, at, and above it; the above-loop distance statistic must stay capped. This is a reported-statistic oracle: the caller value also affects slope subdivision before ExtrusionLoopSloped clamps local geometry, so emitted segmentation is not claimed invariant.",
+      "source_anchor_sha256": "3c3d3ae7bc36a3c84cab1409c10ecd367f5c2c51fc3144355ac7e6ac0869273a"
+    }
+  ]
+}

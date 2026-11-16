@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "names": [
+    "FocusedMotionSettings::Walls after raft layers follow the configured speed ramp"
+  ],
+  "control_regex": "^FocusedMotionSettings::Walls after raft layers follow the configured speed ramp$"
+}

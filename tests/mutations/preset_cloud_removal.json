@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "description": "Mutations for cloud-preset retention and configured fallback after selected-preset removal.",
+  "mutants": [
+    {
+      "id": "remove_users_cloud_listed_erased",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (my_presets->find(preset.name) != my_presets->end()) return false;",
+      "new": "        if (my_presets->find(preset.name) != my_presets->end()) return true;",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudRemoval",
+      "description": "A preset still present in the cloud listing must be retained with its file and setting id; returning true would erase it."
+    },
+    {
+      "id": "remove_users_syncing_branch_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (!preset.sync_info.empty()) return false; // syncing, not remove",
+      "new": "        if (preset.sync_info.empty()) return false; // syncing, not remove",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudRemoval",
+      "description": "A nonempty sync marker retains the syncing preset while an ordinary empty-sync preset is removed; inverting this gate reverses those observable outcomes."
+    },
+    {
+      "id": "remove_users_missing_setting_id_branch_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (preset.setting_id.empty()) return false; // no id, not remove",
+      "new": "        if (!preset.setting_id.empty()) return false; // no id, not remove",
+      "expected_matches": 1,
+      "test_filter": "PresetCloudRemoval",
+      "description": "A preset without a setting id is retained, while a deleted cloud preset with an id is removed; inverting the predicate keeps the wrong population."
+    },
+    {
+      "id": "remove-users-default-printer-fallback-mismatched",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "std::string default_printer_model = ORCA_DEFAULT_PRINTER_MODEL;",
+      "new": "std::string default_printer_model = \"missing-cloud-removal-fallback-model\";",
+      "test_filter": "PresetCloudRemoval",
+      "description": "Removing the selected printer must select the remaining printer with the configured default model; an unmatched model falls back to the wrong preset."
+    }
+  ]
+}

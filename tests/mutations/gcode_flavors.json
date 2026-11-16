@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed behavioral mutation candidates; native outcomes are reported separately.",
+  "mutants": [
+    {
+      "id": "gcode-flavor-relative-preamble",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "gcode << \"M83 ; use relative distances for extrusion\\n\";",
+      "new": "gcode << \"M82 ; use relative distances for extrusion\\n\";",
+      "description": "Expected to be detected by the relative and absolute deposition contract.",
+      "test_filter": "GCodeFlavorVariance"
+    },
+    {
+      "id": "gcode-flavor-reprap-temperature-command",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "code = \"G10\";",
+      "new": "code = \"M104\";",
+      "description": "Expected to be detected by the RepRapFirmware thermal command contract.",
+      "test_filter": "GCodeFlavorVariance"
+    },
+    {
+      "id": "gcode-flavor-reprap-temperature-tool-axis",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "gcode << \" P\" << tool;",
+      "new": "gcode << \" T\" << tool;",
+      "description": "Expected to be detected by the RepRapFirmware tool-address contract.",
+      "test_filter": "GCodeFlavorVariance"
+    },
+    {
+      "id": "gcode-flavor-fan-pwm-range",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "gcode << \"M106 S\" << static_cast<unsigned int>(255.5 * speed / 100.0);",
+      "new": "gcode << \"M106 S\" << static_cast<unsigned int>(127.5 * speed / 100.0);",
+      "description": "Halve the fan PWM range; expected to be detected by the midpoint and full-speed command contracts.",
+      "test_filter": "GCodeFlavorVariance"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Physical fan layer gates, ramp endpoints and zero first-layer override preserve deposition while changing part-cooling output.",
+  "mutants": [
+    {
+      "id": "fan-close-layer-upper-bound-clamped",
+      "description": "Clamp the registered close-fan maximum to 999; the layer-1000 endpoint test must keep layer 999 off and turn cooling on only at layer 1000.",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "int close_fan_the_first_x_layers = EXTRUDER_CONFIG(close_fan_the_first_x_layers);",
+      "new": "int close_fan_the_first_x_layers = std::min(EXTRUDER_CONFIG(close_fan_the_first_x_layers), 999);",
+      "test_filter": "Cooling layer settings honor their upper registered endpoints in the public filter",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "fan-full-layer-upper-bound-disabled",
+      "description": "Disable the maximum full-fan layer value; the 1000-layer endpoint ramp must begin at zero, pass through the midpoint PWM, and reach full PWM at layer 1000.",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);",
+      "new": "int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer) >= 1000 ? 0 : EXTRUDER_CONFIG(full_fan_speed_layer);",
+      "test_filter": "Cooling layer settings honor their upper registered endpoints in the public filter",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "fan-first-layer-zero-override-ignored",
+      "description": "Treat zero as disabled; the boundary row requires first-layer P0 to be off while the following anchored ramp reaches 33, 67, and 100 percent.",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "const bool has_initial_layer_override = initial_layer_fan_speed >= 0 && close_fan_the_first_x_layers <= 0;",
+      "new": "const bool has_initial_layer_override = initial_layer_fan_speed > 0 && close_fan_the_first_x_layers <= 0;",
+      "test_filter": "Cooling layer gates and first-layer override control physical P0 output",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

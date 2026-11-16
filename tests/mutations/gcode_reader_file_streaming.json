@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "gcode-reader-drops-unterminated-file-line",
+      "path": "src/libslic3r/GCodeReader.cpp",
+      "old": "                    parse_line_callback(gcode_line.c_str(), gcode_line.c_str() + gcode_line.size());",
+      "new": "                    if (!eof) parse_line_callback(gcode_line.c_str(), gcode_line.c_str() + gcode_line.size());",
+      "expected_matches": 1,
+      "test_filter": "^GCodeReaderFileStreaming$",
+      "description": "Drop the buffered final line at EOF; raw line preservation and final movement/extrusion assertions detect the lost command."
+    },
+    {
+      "id": "gcode-reader-ignores-file-callback-stop",
+      "path": "src/libslic3r/GCodeReader.cpp",
+      "old": "                if (! m_parsing)\n                    // The callback wishes to exit.",
+      "new": "                if (false)\n                    // The callback wishes to exit.",
+      "expected_matches": 1,
+      "test_filter": "^GCodeReaderFileStreaming$",
+      "description": "Continue after a callback requests cancellation; the ordinary callback-count and final-position assertions detect extra processed moves."
+    }
+  ]
+}

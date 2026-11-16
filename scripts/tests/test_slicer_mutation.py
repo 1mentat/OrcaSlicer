@@ -728,6 +728,15 @@ class MutationResultTests(unittest.TestCase):
                 command = slicer_mutation._test_command([executable], mutant)
                 self.assertIn("--output-on-failure", command)
 
+    def test_target_mode_filters_ctest_even_when_executable_is_a_wrapper(self):
+        mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "CADRecipePrecedence")
+        argv = ["/tmp/gcov-phase-tool.sh", "--test-dir", "/tmp/build", "-R", "^Control$",
+                "-LE", "NotWorking|RequiresApp", "--output-on-failure"]
+        command = slicer_mutation._test_command(argv, mutant, ctest_target_mode=True)
+        self.assertEqual(command, [*argv, "-L", "CADRecipePrecedence"])
+        self.assertEqual(command.count("--output-on-failure"), 1)
+        self.assertEqual(slicer_mutation._test_command(argv, mutant), argv)
+
     def test_ctest_preserves_existing_label_options(self):
         mutant = slicer_mutation.Mutant("one", "source.cpp", "before", "after", "", "Flow")
         for options in (["-L", "Other"], ["-LOther"], ["--label-regex", "Other"],
@@ -1845,7 +1854,12 @@ class MutationTargetModeTests(unittest.TestCase):
                 slicer_mutation._verify_ctest_executables(
                     tests, {"other_NOT_BUILT"}, build, other)
 
-    def _fixture(self, root, *, first_control_fails=False, failed_restore_build=False):
+    def _fixture(self, root, *, first_control_fails=False, failed_baseline_build=False,
+                 failed_restore_build=False, control_names=None, discovered_names=None,
+                 control_regex="^Focused::", smoke_names=None, smoke_failure=False,
+                 smoke_missing_identity=False, invalid_smoke=False):
+        control_names = control_names or ["Focused::one"]
+        discovered_names = discovered_names or control_names
         repo = root / "repo"
         repo.mkdir()
         build = repo / "build"
@@ -1854,10 +1868,14 @@ class MutationTargetModeTests(unittest.TestCase):
             f"CMAKE_HOME_DIRECTORY:INTERNAL={repo}\nCMAKE_BUILD_TYPE:STRING=Release\n",
             encoding="utf-8")
         source = repo / "source.cpp"
-        source.write_text("before\n", encoding="utf-8")
+        source.write_bytes(b"before\n")
         output = root / "evidence"
         expected = root / "expected.json"
-        expected.write_text(json.dumps(["Focused::one"]), encoding="utf-8")
+        expected.write_text(json.dumps(control_names), encoding="utf-8")
+        smoke = root / "smoke.json"
+        if smoke_names is not None or invalid_smoke:
+            smoke.write_text(json.dumps(["Focused::unknown"] if invalid_smoke else smoke_names),
+                             encoding="utf-8")
         first = root / "first.json"
         second = root / "second.json"
         for path, ident in ((first, "first"), (second, "second")):
@@ -1871,8 +1889,10 @@ class MutationTargetModeTests(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import json,os,pathlib,sys\n"
             "args=sys.argv[1:]; repo=pathlib.Path(os.environ['TARGET_REPO']); build=pathlib.Path(args[args.index('-B')+1]) if '-B' in args else pathlib.Path(args[args.index('--build')+1])\n"
+            "events=build/'cmake-invocations.jsonl'; events.parent.mkdir(parents=True,exist_ok=True); events.open('a').write(json.dumps(args)+'\\n')\n"
             "if '--build' in args:\n"
             " c=build/'build-count'; n=int(c.read_text())+1 if c.exists() else 1; c.write_text(str(n))\n"
+            " if os.environ.get('FAIL_BASELINE_BUILD')=='1' and n==1: print('baseline build failed'); sys.exit(16)\n"
             " if os.environ.get('FAIL_RESTORE_BUILD')=='1' and n==4: print('restore build failed'); sys.exit(17)\n"
             " artifact=build/'Release'/'fake_tests'; artifact.parent.mkdir(parents=True,exist_ok=True); artifact.write_text('mutant' if (repo/'source.cpp').read_text()=='after\\n' else 'normal'); artifact.chmod(0o755)\n"
             " reply=build/'.cmake/api/v1/reply'; reply.mkdir(parents=True,exist_ok=True)\n"
@@ -1882,33 +1902,59 @@ class MutationTargetModeTests(unittest.TestCase):
             "print('cmake ok')\n", encoding="utf-8")
         ctest.write_text(
             "#!/usr/bin/env python3\n"
-            "import json,os,pathlib,sys\n"
+            "import json,os,pathlib,re,sys\n"
             "args=sys.argv[1:]; build=pathlib.Path(args[args.index('--test-dir')+1]); artifact=build/'Release'/'fake_tests'\n"
+            "names=json.loads(os.environ['TARGET_TEST_NAMES']); smoke=json.loads(os.environ.get('SMOKE_TEST_NAMES','[]'))\n"
             "record=pathlib.Path(os.environ['TARGET_ENV_LOG']); record.parent.mkdir(parents=True,exist_ok=True)\n"
             "with record.open('a') as f: f.write(json.dumps({k:os.environ.get(k) for k in ['PATH','LC_ALL','LD_LIBRARY_PATH','KEEP_ENV','GIT_DIR','GIT_WORK_TREE','TMPDIR','TEMP','TEMPDIR','LLVM_PROFILE_FILE']})+'\\n')\n"
             "if '--show-only=json-v1' in args:\n"
-            " print(json.dumps({'tests':[{'name':'Focused::one','command':[str(artifact)],'properties':[{'name':'LABELS','value':['MutationLabel']},{'name':'WORKING_DIRECTORY','value':str(build)}]}]})); sys.exit(0)\n"
+            " print(json.dumps({'tests':[{'name':name,'command':[str(artifact)],'properties':[{'name':'LABELS','value':['MutationLabel']},{'name':'WORKING_DIRECTORY','value':str(build)}]} for name in names]})); sys.exit(0)\n"
+            "selector=args[args.index('-R')+1]; selected=[name for name in names if re.search(selector,name)]\n"
+            "if '-L' in args: selected=[name for name in selected if re.search(args[args.index('-L')+1],'MutationLabel')]\n"
+            "events=pathlib.Path(os.environ['TARGET_CTEST_LOG']); events.parent.mkdir(parents=True,exist_ok=True)\n"
+            "with events.open('a') as f: f.write(json.dumps({'names':selected,'has_label':'-L' in args,'source':pathlib.Path(os.environ['TARGET_SOURCE']).read_text()})+'\\n')\n"
             "junit=pathlib.Path(args[args.index('--output-junit')+1]); junit.parent.mkdir(parents=True,exist_ok=True)\n"
-            "has_label='-L' in args; countfile=record.with_suffix('.controls'); count=int(countfile.read_text())+1 if countfile.exists() else 1\n"
-            "if not has_label: countfile.write_text(str(count))\n"
-            "fail=(has_label and pathlib.Path(os.environ['TARGET_SOURCE']).read_text()=='after\\n') or (os.environ.get('FAIL_FIRST_CONTROL')=='1' and not has_label and count==1)\n"
-            "failure='<failure message=\"assertion\" type=\"ASSERTION\">ordinary failed assertion</failure>' if fail else ''\n"
-            "junit.write_text(f'<testsuite name=\"Focused::one\" tests=\"1\" failures=\"{int(fail)}\" errors=\"0\" skipped=\"0\"><testcase classname=\"Focused::one\" name=\"Focused::one\">{failure}</testcase></testsuite>')\n"
-            "print('assertions: 1 | 1 failed\\n0% tests passed, 1 tests failed out of 1' if fail else '100% tests passed, 0 tests failed out of 1')\n"
+            "has_label='-L' in args; is_smoke=bool(smoke) and selected==smoke\n"
+            "fail=(has_label and pathlib.Path(os.environ['TARGET_SOURCE']).read_text()=='after\\n') or (os.environ.get('FAIL_FIRST_CONTROL')=='1' and not has_label and not smoke and selected==names) or (is_smoke and os.environ.get('FAIL_SMOKE')=='1')\n"
+            "omit_last=is_smoke and os.environ.get('MISSING_SMOKE_IDENTITY')=='1'\n"
+            "cases=[]\n"
+            "for index,name in enumerate(selected):\n"
+            " if omit_last and index==len(selected)-1: continue\n"
+            " failure='<failure message=\"assertion\" type=\"ASSERTION\">ordinary failed assertion</failure>' if fail and index==0 else ''\n"
+            " cases.append(f'<testcase classname=\"{name}\" name=\"{name}\">{failure}</testcase>')\n"
+            "junit.write_text(f'<testsuite name=\"fake\" tests=\"{len(cases)}\" failures=\"{int(fail)}\" errors=\"0\" skipped=\"0\">'+''.join(cases)+'</testsuite>')\n"
+            "count=len(selected); print(f'assertions: 1 | {int(fail)} failed\\n'+(f'0% tests passed, {count} tests failed out of {count}' if fail else f'{count} tests passed\\n100% tests passed, 0 tests failed out of {count}'))\n"
             "sys.exit(8 if fail else 0)\n", encoding="utf-8")
         cmake.chmod(0o755)
         ctest.chmod(0o755)
-        args = slicer_mutation._parser().parse_args([
+        target_args = [
             "run", "--root", str(repo), "--build-dir", "build", "--target", "fake_tests",
             "--config", "Release", "--jobs", "2", "--cmake", str(cmake), "--ctest", str(ctest),
-            "--control-regex", "^Focused::", "--expected-control-inventory", str(expected),
+        ]
+        if control_regex is not None:
+            target_args.extend(["--control-regex", control_regex])
+        target_args.extend([
+            "--expected-control-inventory", str(expected),
             "--mutants", str(first), "--mutants", str(second), "--max-mutants", "2",
             "--timeout", "30", "--out", str(output),
         ])
+        if smoke_names is not None or invalid_smoke:
+            target_args.extend(["--smoke-control-inventory", str(smoke)])
+        args = slicer_mutation._parser().parse_args(target_args)
         env = {"TARGET_REPO": str(repo), "TARGET_SOURCE": str(source),
-               "TARGET_ENV_LOG": str(root / "child-env.jsonl")}
+               "TARGET_ENV_LOG": str(root / "child-env.jsonl"),
+               "TARGET_CTEST_LOG": str(root / "ctest-events.jsonl"),
+               "TARGET_TEST_NAMES": json.dumps(discovered_names)}
+        if smoke_names is not None and not invalid_smoke:
+            env["SMOKE_TEST_NAMES"] = json.dumps(smoke_names)
+        if smoke_failure:
+            env["FAIL_SMOKE"] = "1"
+        if smoke_missing_identity:
+            env["MISSING_SMOKE_IDENTITY"] = "1"
         if first_control_fails:
             env["FAIL_FIRST_CONTROL"] = "1"
+        if failed_baseline_build:
+            env["FAIL_BASELINE_BUILD"] = "1"
         if failed_restore_build:
             env["FAIL_RESTORE_BUILD"] = "1"
         return repo, source, output, args, env
@@ -1935,14 +1981,16 @@ class MutationTargetModeTests(unittest.TestCase):
         inherited = {"TARGET_REPO": child_env["TARGET_REPO"],
                      "TARGET_SOURCE": child_env["TARGET_SOURCE"],
                      "TARGET_ENV_LOG": child_env["TARGET_ENV_LOG"],
+                     "TARGET_CTEST_LOG": child_env["TARGET_CTEST_LOG"],
+                     "TARGET_TEST_NAMES": child_env["TARGET_TEST_NAMES"],
                      "PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8",
                      "KEEP_ENV": "preserved", "GIT_DIR": "/external/snapshot.git",
                      "GIT_WORK_TREE": "/external/worktree", "TMPDIR": str(root),
                      "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root)}
-        if "FAIL_FIRST_CONTROL" in child_env:
-            inherited["FAIL_FIRST_CONTROL"] = child_env["FAIL_FIRST_CONTROL"]
-        if "FAIL_RESTORE_BUILD" in child_env:
-            inherited["FAIL_RESTORE_BUILD"] = child_env["FAIL_RESTORE_BUILD"]
+        for name in ("SMOKE_TEST_NAMES", "FAIL_SMOKE", "MISSING_SMOKE_IDENTITY",
+                     "FAIL_FIRST_CONTROL", "FAIL_BASELINE_BUILD", "FAIL_RESTORE_BUILD"):
+            if name in child_env:
+                inherited[name] = child_env[name]
         inherited["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "/usr/lib")
         with mock.patch.dict(os.environ, inherited), \
                 mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
@@ -1959,6 +2007,7 @@ class MutationTargetModeTests(unittest.TestCase):
             self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
             report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["target_mode"]["control_regex"], "^Focused::")
             self.assertEqual(report["focused_control"]["test_evidence"], 1)
             self.assertEqual([row["status"] for row in report["mutants"]], ["killed", "killed"])
             self.assertTrue(all(row["log_evidence"]["assertion_failure"]
@@ -1989,10 +2038,185 @@ class MutationTargetModeTests(unittest.TestCase):
                                 for row in child_rows))
             self.assertGreater(len({row["TMPDIR"] for row in child_rows}), 1)
 
-    def test_failed_focused_control_stops_before_any_mutant_and_runs_restore_control(self):
+    def test_target_mode_derives_exact_escaped_regex_from_inventory_when_omitted(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            names = ["Focused::variant[1]", "Focused::value+2"]
+            decoys = ["Focused::variant1", "Focused::value2"]
             code, _repo, source, output, _env_log = self._run_fake_target(
+                root, control_names=names, discovered_names=names + decoys,
+                control_regex=None)
+            self.assertEqual(code, 0)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "pass")
+            expected_regex = slicer_mutation._ctest_exact_names_regex(names)
+            self.assertEqual(report["target_mode"]["control_regex"], expected_regex)
+            self.assertEqual(report["target_mode"]["control_test_names"], names)
+            events = [json.loads(line) for line in
+                      (root / "ctest-events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(events)
+            self.assertTrue(all(event["names"] == names for event in events))
+
+    def test_target_mode_rejects_invalid_inventory_before_default_regex_derivation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            inventory = root / "expected.json"
+            inventory.write_text(json.dumps(["Focused::one", "Focused::one"]),
+                                 encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--target", "fake_tests",
+                "--config", "Release", "--jobs", "1", "--cmake", "cmake",
+                "--ctest", "ctest", "--expected-control-inventory", str(inventory),
+                "--out", str(root / "evidence"),
+            ])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "duplicate test names"):
+                slicer_mutation.run_mutation(args)
+            self.assertFalse((root / "evidence").exists())
+
+    def test_target_mode_rejects_empty_explicit_control_regex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            inventory = root / "expected.json"
+            inventory.write_text(json.dumps(["Focused::one"]), encoding="utf-8")
+            args = slicer_mutation._parser().parse_args([
+                "run", "--root", str(repo), "--target", "fake_tests",
+                "--config", "Release", "--jobs", "1", "--cmake", "cmake",
+                "--ctest", "ctest", "--control-regex", "",
+                "--expected-control-inventory", str(inventory),
+                "--out", str(root / "evidence"),
+            ])
+            with self.assertRaisesRegex(slicer_mutation.MutationError, "must not be empty"):
+                slicer_mutation.run_mutation(args)
+            self.assertFalse((root / "evidence").exists())
+
+    def test_target_mode_runs_exact_smoke_subset_before_full_controls_and_mutants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = ["Focused::one", "Focused::two", "Focused::three"]
+            smoke = ["Focused::one", "Focused::three"]
+            code, repo, source, output, _env_log = self._run_fake_target(
+                root, control_names=names, smoke_names=smoke)
+            self.assertEqual(code, 0)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["focused_smoke"]["status"], "passed")
+            self.assertEqual(report["focused_smoke"]["expected_test_names"], smoke)
+            self.assertEqual(report["focused_control"]["expected_test_names"], names)
+            self.assertEqual([row["status"] for row in report["mutants"]], ["killed", "killed"])
+            self.assertEqual(report["normal_restore"]["status"], "passed")
+            events = [json.loads(line) for line in (root / "ctest-events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[0]["names"], smoke)
+            self.assertFalse(events[0]["has_label"])
+            self.assertEqual(events[1]["names"], names)
+            self.assertFalse(events[1]["has_label"])
+            self.assertTrue(all(row["has_label"] for row in events[2:5]))
+            self.assertEqual(events[-1]["names"], names)
+            self.assertFalse(events[-1]["has_label"])
+            self.assertEqual(events[0]["source"], "before\n")
+            self.assertEqual(events[1]["source"], "before\n")
+            self.assertEqual((repo / "build" / "build-count").read_text(), "4")
+
+    def test_smoke_ordinary_failure_stops_before_full_controls_and_skips_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = ["Focused::one", "Focused::two", "Focused::three"]
+            smoke = ["Focused::one", "Focused::three"]
+            code, _repo, source, output, _env_log = self._run_fake_target(
+                root, control_names=names, smoke_names=smoke, smoke_failure=True)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "focused_smoke_failed")
+            self.assertEqual(report["focused_smoke"]["classification"], "killed")
+            self.assertNotIn("focused_control", report)
+            self.assertNotIn("baseline_tests", report)
+            self.assertEqual(report["mutants"], [])
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            events = [json.loads(line) for line in (root / "ctest-events.jsonl").read_text().splitlines()]
+            self.assertEqual([row["names"] for row in events], [smoke])
+            self.assertEqual(sorted(path.name for path in (output / "artifacts").iterdir()),
+                             ["normal-baseline-fake_tests"])
+
+    def test_smoke_missing_identity_stops_before_full_controls_and_skips_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = ["Focused::one", "Focused::two", "Focused::three"]
+            smoke = ["Focused::one", "Focused::three"]
+            code, _repo, source, output, _env_log = self._run_fake_target(
+                root, control_names=names, smoke_names=smoke, smoke_missing_identity=True)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "focused_smoke_failed")
+            self.assertEqual(report["focused_smoke"]["classification"],
+                             "test_junit_evidence_incomplete")
+            self.assertIn("JUnit identity set differs",
+                          " ".join(report["focused_smoke"]["junit_evidence"]["errors"]))
+            self.assertNotIn("focused_control", report)
+            self.assertEqual(report["mutants"], [])
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            events = [json.loads(line) for line in (root / "ctest-events.jsonl").read_text().splitlines()]
+            self.assertEqual([row["names"] for row in events], [smoke])
+
+    def test_invalid_smoke_subset_is_rejected_before_build_or_source_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, source, output, args, _child_env = self._fixture(root, invalid_smoke=True)
+            with mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40):
+                with self.assertRaisesRegex(slicer_mutation.MutationError,
+                                            "must be a subset of the expected control inventory"):
+                    slicer_mutation.run_mutation(args)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            self.assertFalse((repo / "build" / "build-count").exists())
+            self.assertFalse((repo / "build" / "cmake-invocations.jsonl").exists())
+            self.assertFalse((root / "ctest-events.jsonl").exists())
+            self.assertFalse(output.exists())
+
+    def test_target_mode_readonly_mutant_source_fails_before_configure_build_or_test(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, source, output, args, child_env = self._fixture(root)
+
+            @contextmanager
+            def use_repo(*_args, **_kwargs):
+                yield repo
+
+            real_open = os.open
+
+            def deny_selected_source(path, flags, *open_args, **open_kwargs):
+                if Path(path).resolve() == source.resolve() and flags & os.O_WRONLY:
+                    raise PermissionError("read-only test source")
+                return real_open(path, flags, *open_args, **open_kwargs)
+
+            inherited = {**child_env, "PATH": os.environ["PATH"], "TMPDIR": str(root),
+                         "TMP": str(root), "TEMP": str(root), "TEMPDIR": str(root),
+                         "LC_ALL": "C.UTF-8"}
+            with mock.patch.dict(os.environ, inherited), \
+                    mock.patch.object(slicer_mutation, "validate_clean_repo", return_value="a" * 40), \
+                    mock.patch.object(slicer_mutation, "_mutation_worktree_with_report", side_effect=use_repo), \
+                    mock.patch.object(slicer_mutation.os, "open", side_effect=deny_selected_source):
+                code = slicer_mutation.run_mutation(args)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_bytes(), b"before\n")
+            self.assertFalse((repo / "build" / "build-count").exists())
+            self.assertFalse((repo / "build" / "cmake-invocations.jsonl").exists())
+            self.assertFalse((root / "ctest-events.jsonl").exists())
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "infrastructure_error")
+            self.assertEqual(report["preflight"]["mutant_source_writability"]["status"], "failed")
+            self.assertIn("not writable by this process", report["error"])
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            self.assertEqual(report["mutants"], [])
+
+    def test_failed_focused_control_stops_before_mutation_and_skips_restore_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, repo, source, output, _env_log = self._run_fake_target(
                 root, first_control_fails=True)
             self.assertEqual(code, 2)
             self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
@@ -2000,7 +2224,28 @@ class MutationTargetModeTests(unittest.TestCase):
             self.assertEqual(report["status"], "focused_control_failed")
             self.assertEqual(report["focused_control"]["classification"], "killed")
             self.assertEqual(report["mutants"], [])
-            self.assertEqual(report["normal_restore"]["status"], "passed")
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            self.assertEqual((repo / "build" / "build-count").read_text(), "1")
+            self.assertIn("artifacts", report["normal_restore"]["reason"])
+
+    def test_baseline_build_failure_preserves_diagnostics_without_rebuilding_untouched_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            code, repo, source, output, _env_log = self._run_fake_target(
+                root, failed_baseline_build=True)
+            self.assertEqual(code, 2)
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+            report = json.loads((output / "mutation-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "build_error")
+            self.assertEqual(report["baseline_build"]["returncode"], 16)
+            baseline_log = Path(report["baseline_build"]["log"]["path"])
+            self.assertIn("baseline build failed", baseline_log.read_text(encoding="utf-8"))
+            self.assertEqual(report["mutants"], [])
+            self.assertEqual(report["normal_restore"]["status"], "skipped")
+            self.assertIn("no mutant source application was attempted",
+                          report["normal_restore"]["reason"])
+            self.assertIn("artifacts", report["normal_restore"]["reason"])
+            self.assertEqual((repo / "build" / "build-count").read_text(), "1")
 
     def test_normal_restore_build_failure_is_recorded_and_fails_the_run(self):
         with tempfile.TemporaryDirectory() as temp:

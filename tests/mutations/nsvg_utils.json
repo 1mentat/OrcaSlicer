@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "SVG geometry import with independent area, bounds, stroke and dash-period oracles.",
+  "mutants": [
+    {
+      "id": "visible-create",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        if (!(shape.flags & NSVG_FLAGS_VISIBLE))\n            continue;\n\n        bool is_fill_used",
+      "new": "        if (shape.flags & NSVG_FLAGS_VISIBLE)\n            continue;\n\n        bool is_fill_used",
+      "description": "create_shape_with_ids must ignore hidden shapes while retaining visible painted geometry",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "visible-polygons",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        if (!(shape->flags & NSVG_FLAGS_VISIBLE))\n            continue;\n        if (shape->fill.type == NSVG_PAINT_NONE)",
+      "new": "        if (shape->flags & NSVG_FLAGS_VISIBLE)\n            continue;\n        if (shape->fill.type == NSVG_PAINT_NONE)",
+      "description": "to_polygons must ignore hidden filled paths",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "fill-none",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        if (shape->fill.type == NSVG_PAINT_NONE)\n            continue;",
+      "new": "        if (shape->fill.type != NSVG_PAINT_NONE)\n            continue;",
+      "description": "filled paths must be converted while paintless strokes are excluded from fill polygons",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "center",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "    center(result);",
+      "new": "    // center(result);",
+      "description": "create_shape_with_ids returns the SVG group centered in its aggregate bounds",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "fill-rule",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "if (shape.fillRule == NSVGfillRule::NSVG_FILLRULE_EVENODD)\n        is_non_zero = false;",
+      "new": "if (shape.fillRule != NSVGfillRule::NSVG_FILLRULE_EVENODD)\n        is_non_zero = false;",
+      "description": "even-odd compound paths must preserve their inner hole",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "fill-id",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "            unsigned unique_id = static_cast<unsigned>(2 * shape_id);",
+      "new": "            unsigned unique_id = static_cast<unsigned>(2 * shape_id + 1);",
+      "description": "filled and stroked outputs use disjoint stable IDs",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "stroke-id",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "            unsigned unique_id = static_cast<unsigned>(2 * shape_id + 1);",
+      "new": "            unsigned unique_id = static_cast<unsigned>(2 * shape_id);",
+      "description": "stroke output IDs must not collide with the fill ID",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "closed-branch",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        if (path->closed) {\n            polygons.emplace_back(points);\n        } else {\n            polylines.emplace_back(points);",
+      "new": "        if (!path->closed) {\n            polygons.emplace_back(points);\n        } else {\n            polylines.emplace_back(points);",
+      "description": "closed paths are polygons and open filled paths are explicitly closed for area conversion",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "y-flip",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        if (param.is_y_negative)\n            for (Point &p : points)",
+      "new": "        if (!param.is_y_negative)\n            for (Point &p : points)",
+      "description": "the public orientation option controls Y reflection",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "dash-branch",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "    if (shape.strokeDashCount > 0) {",
+      "new": "    if (shape.strokeDashCount == 0) {",
+      "description": "dashed strokes must use the dash decomposition path",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "dash-odd",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "if (dash_count%2 == 1) // (shape.strokeDashCount & 1)\n            all_dash_length *= 2.0f;",
+      "new": "if (dash_count%2 == 0) // (shape.strokeDashCount & 1)\n            all_dash_length *= 2.0f;",
+      "description": "odd-length dash arrays repeat as alternating line and gap pairs",
+      "test_filter": "NSVGUtils"
+    },
+    {
+      "id": "stroke-half",
+      "path": "src/libslic3r/NSVGUtils.cpp",
+      "old": "        result = offset(dashes, stroke_width / 2, join_type, mitter, end_type);",
+      "new": "        result = offset(dashes, stroke_width, join_type, mitter, end_type);",
+      "description": "stroke width is centered around the path and therefore offsets by half width",
+      "test_filter": "NSVGUtils"
+    }
+  ]
+}

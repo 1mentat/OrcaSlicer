@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Two safe malformed-plate recovery policy mutations. Each preserves guards against invalid iterators and instance storage.",
+  "mutants": [
+    {
+      "id": "bbs-unbuilt-plate-resource-recovery-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                if (object_item == m_objects.end()) {\n                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \":\" << __LINE__\n                        << boost::format(\", can not find object from plate's obj_map, ID <%1%, %2%>, skip this object\")%index_iter->second %index_iter->first;\n                    map_it++;\n                    continue;\n                }\n",
+      "new": "                if (object_item == m_objects.end()) {\n                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << \":\" << __LINE__\n                        << boost::format(\", can not find object from plate's obj_map, ID <%1%, %2%>, skip this object\")%index_iter->second %index_iter->first;\n                    return false;\n                }\n",
+      "expected_matches": 1,
+      "test_filter": "BBS 3MF skips a plate mapping for a resource without a build instance",
+      "expected_test_count": 1,
+      "description": "Reject rather than skip an unbuilt resource plate row. The public load-success and valid-sibling contract must fail ordinarily without an invalid dereference."
+    },
+    {
+      "id": "bbs-incomplete-plate-instance-recovery-rejected",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if ((m_curr_instance.object_id == -1) || (m_curr_instance.instance_id == -1))\n        {\n            //add_error(\"invalid object id/instance id\");\n            //skip this instance\n            m_curr_instance.object_id = m_curr_instance.instance_id = -1;\n            m_curr_instance.identify_id = 0;\n            return true;\n        }\n\n",
+      "new": "        if ((m_curr_instance.object_id == -1) || (m_curr_instance.instance_id == -1))\n        {\n            //add_error(\"invalid object id/instance id\");\n            //skip this instance\n            m_curr_instance.object_id = m_curr_instance.instance_id = -1;\n            m_curr_instance.identify_id = 0;\n            return false;\n        }\n\n",
+      "expected_matches": 1,
+      "test_filter": "BBS 3MF drops a plate row without an instance id",
+      "expected_test_count": 1,
+      "description": "Reject rather than tolerate an incomplete plate-instance row. Public load success with preserved valid siblings must fail through the ordinary load-success assertion."
+    }
+  ]
+}

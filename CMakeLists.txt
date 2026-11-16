@@ -707,8 +707,16 @@ set(LIBDIR_BIN ${CMAKE_CURRENT_BINARY_DIR}/src)
 message(STATUS "LIBDIR: ${LIBDIR}")
 message(STATUS "LIBDIR_BIN: ${LIBDIR_BIN}")
 
-# For the bundled boost libraries (boost::nowide)
-include_directories(SYSTEM ${LIBDIR})
+include(cmake/SlicerCoverage.cmake)
+# Coverage instrumentation can omit or inconsistently map system headers.
+# Keep our own inline definitions non-system in coverage builds so their
+# mappings stay consistent between the libraries and tests.
+if(SLICER_ENABLE_LLVM_SOURCE_COVERAGE OR SLICER_ENABLE_GCC_GCOV_COVERAGE)
+    include_directories(${LIBDIR})
+else()
+    # For the bundled boost libraries (boost::nowide)
+    include_directories(SYSTEM ${LIBDIR})
+endif()
 # For generated header files
 include_directories(SYSTEM ${LIBDIR_BIN}/dev-utils/platform)
 # For ligigl
@@ -1279,6 +1287,8 @@ elseif (MSVC AND NOT IS_CLANG_CL)
 endif ()
 
 add_subdirectory(src)
+slicer_enable_llvm_source_coverage(libslic3r)
+slicer_enable_llvm_source_coverage(libslic3r_cgal)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT OrcaSlicer_app_gui)
 
 add_dependencies(gettext_make_pot hintsToPot)
@@ -1289,6 +1299,15 @@ endif()
 
 if(BUILD_TESTS)
     add_subdirectory(tests)
+    foreach(_slicer_test IN ITEMS libslic3r_tests fff_print_tests sla_print_tests libnest2d_tests filament_group_tests)
+        slicer_enable_llvm_source_coverage(${_slicer_test})
+        if(_slicer_test STREQUAL "libslic3r_tests")
+            # One complete image retains the zero-hit denominator. Other suites
+            # contribute runtime hits through the coverage runner's object list.
+            slicer_force_link_static_library(${_slicer_test} libslic3r)
+            slicer_force_link_static_library(${_slicer_test} libslic3r_cgal)
+        endif()
+    endforeach()
     if (NOT SLIC3R_BUNDLED_WARNINGS)
         # Catch2 is vendored under tests/ and sets its own warning flags too.
         orcaslicer_silence_third_party_warnings("${CMAKE_CURRENT_SOURCE_DIR}/tests/catch2")

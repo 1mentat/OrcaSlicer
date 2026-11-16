@@ -22,7 +22,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <fstream>
 #include <ios>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <string>
@@ -549,4 +551,53 @@ TEST_CASE("SVG preserves the same polygon reversed alongside primitive annotatio
     REQUIRE(cw_paths.size() == 1);
     CHECK(style(cw_paths.front()).at("fill") == "white");
     CHECK_FALSE(style(cw_paths.front()).at("fill") == "red");
+}
+
+namespace {
+
+std::string read_text(const std::string &path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+} // namespace
+
+TEST_CASE("SVG handles polygon winding and primitive annotations", "[SVG][SLASVGFormatExtended]")
+{
+    const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
+    Polygon ccw = square(1., 1., 8., 8.).contour;
+    if (!ccw.is_counter_clockwise())
+        ccw.reverse();
+    Polygon cw = ccw;
+    cw.reverse();
+
+    ScopedTemporaryFile ccw_output(".svg");
+    {
+        SVG svg(ccw_output.string(), box, scaled(1.), false);
+        svg.arrows = true;
+        svg.draw(Polygons{ccw}, "red");
+        svg.draw(Line(Point(scaled(2.), scaled(2.)), Point(scaled(6.), scaled(2.))), "orange", scaled(.1));
+        svg.draw_text(Point(scaled(2.), scaled(4.)), "text", "purple", 3);
+        svg.draw_legend(Point(scaled(2.), scaled(6.)), "legend", "teal");
+        svg.add_comment("metadata");
+        svg.Close();
+    }
+
+    const std::string ccw_text = read_text(ccw_output.string());
+    CHECK(ccw_text.find("fill: red") != std::string::npos);
+    CHECK(ccw_text.find("fill: white") == std::string::npos);
+    CHECK(ccw_text.find("marker-end=\"url(#endArrow)\"") != std::string::npos);
+    CHECK(ccw_text.find("font-size=\"30px\"") != std::string::npos);
+    CHECK(ccw_text.find("legend") != std::string::npos);
+    CHECK(ccw_text.find("<!-- metadata -->") != std::string::npos);
+
+    ScopedTemporaryFile cw_output(".svg");
+    {
+        SVG svg(cw_output.string(), box, scaled(1.), false);
+        svg.draw(Polygons{cw}, "red");
+        svg.Close();
+    }
+    const std::string cw_text = read_text(cw_output.string());
+    CHECK(cw_text.find("fill: white") != std::string::npos);
+    CHECK(cw_text.find("fill: red") == std::string::npos);
 }

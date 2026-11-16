@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Bounded semantic mutations for recursive BBS auxiliary export, archive path mapping, and SkipAuxiliary behavior.",
+  "mutants": [
+    {
+      "id": "bbs-auxiliary-directory-recursion-disabled",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (boost::filesystem::is_directory(dir_entry.path(), ec))",
+      "new": "if (!boost::filesystem::is_directory(dir_entry.path(), ec))",
+      "description": "Directory entries must be queued for traversal; treating them as files skips the nested auxiliary payloads without introducing an unbounded loop.",
+      "test_filter": "BbsAuxiliaryExport"
+    },
+    {
+      "id": "bbs-auxiliary-regular-file-gate-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (boost::filesystem::is_regular_file(dir_entry.path(), ec) && !m_skip_auxiliary)",
+      "new": "if (boost::filesystem::is_regular_file(dir_entry.path(), ec) && m_skip_auxiliary)",
+      "description": "Normal auxiliary files are exported when SkipAuxiliary is absent; inverting the gate must remove both exact payloads while leaving the sibling control outside the root.",
+      "test_filter": "BbsAuxiliaryExport"
+    },
+    {
+      "id": "bbs-auxiliary-archive-prefix-wrong",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "dst_in_3mf.replace(0, root_dir_len, AUXILIARY_DIR);",
+      "new": "dst_in_3mf.replace(0, root_dir_len, \"Metadata/\");",
+      "description": "Files rooted in the model auxiliary directory must retain the Auxiliaries/ archive prefix; a wrong prefix makes both exact archive-path checks fail.",
+      "test_filter": "BbsAuxiliaryExport"
+    }
+  ]
+}
