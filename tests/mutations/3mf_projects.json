@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Bounded BBS 3MF project metadata mutants intended to be validated by semantic object, custom-G-code, and cut round-trip contracts.",
+  "mutants": [
+    {
+      "id": "3mf-layer-profile-parity-guard",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 == 0)",
+      "new": "if (layer_height_profile.size() >= 4 && layer_height_profile.size() % 2 != 0)",
+      "description": "Reject valid even-length layer-height profiles instead of exporting them for round-trip.",
+      "test_filter": "3MFModelMetadata"
+    },
+    {
+      "id": "3mf-layer-range-min-z-source",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "range_tree.put(\"<xmlattr>.min_z\", range.first.first);",
+      "new": "range_tree.put(\"<xmlattr>.min_z\", range.first.second);",
+      "description": "Serialize the upper bound as the lower bound of a per-object layer configuration range.",
+      "test_filter": "3MFModelMetadata"
+    },
+    {
+      "id": "3mf-brim-point-radius-source",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "sprintf(buffer, (i==0 ? \"%f %f %f %f\" : \" %f %f %f %f\"),  brim_points[i].pos(0), brim_points[i].pos(1), brim_points[i].pos(2), brim_points[i].head_front_radius);",
+      "new": "sprintf(buffer, (i==0 ? \"%f %f %f %f\" : \" %f %f %f %f\"),  brim_points[i].pos(0), brim_points[i].pos(1), brim_points[i].pos(2), brim_points[i].pos(0));",
+      "description": "Write the brim point X coordinate in place of its head radius.",
+      "test_filter": "3MFModelMetadata"
+    },
+    {
+      "id": "3mf-cut-connector-type-offset",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "connectors_tree.put(\"<xmlattr>.type\",        int(volume->cut_info.connector_type));",
+      "new": "connectors_tree.put(\"<xmlattr>.type\",        int(volume->cut_info.connector_type) + 1);",
+      "description": "Shift the persisted cut connector enum so a Dowel reloads as a different connector type.",
+      "test_filter": "3MFCutMetadata"
+    },
+    {
+      "id": "3mf-custom-gcode-mode-order",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "m_model->plates_custom_gcodes[plate_id - 1].mode = mode == CustomGCode::SingleExtruderMode ? CustomGCode::Mode::SingleExtruder :\n                            mode == CustomGCode::MultiAsSingleMode ? CustomGCode::Mode::MultiAsSingle :\n                            CustomGCode::Mode::MultiExtruder;",
+      "new": "m_model->plates_custom_gcodes[plate_id - 1].mode = mode == CustomGCode::SingleExtruderMode ? CustomGCode::Mode::SingleExtruder :\n                            mode == CustomGCode::MultiAsSingleMode ? CustomGCode::Mode::MultiAsSingle :\n                            mode == CustomGCode::MultiExtruderMode ? CustomGCode::Mode::SingleExtruder :\n                            CustomGCode::Mode::MultiExtruder;",
+      "description": "Decode a serialized MultiExtruder project as SingleExtruder while retaining a fallback for unknown mode strings.",
+      "test_filter": "3MFCustomGCode"
+    }
+  ]
+}

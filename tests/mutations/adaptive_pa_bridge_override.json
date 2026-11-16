@@ -1,0 +1,33 @@
+{
+  "description": "Adaptive pressure-advance bridge override contracts: bridge role, zero-as-inherit behavior, and configured override value.",
+  "mutants": [
+    {
+      "description": "Remove the bridge-role condition while retaining the positive override gate. BR=0 with a configured bridge value of 2.0 must continue using the model PA of 0.2.",
+      "expected_matches": 1,
+      "id": "remove_bridge_role_guard",
+      "new": "                    if(m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index) > EPSILON)\n                        predicted_pa = m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index);",
+      "old": "                    if(isBridge && m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index) > EPSILON)\n                        predicted_pa = m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index);",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "test_filter": "AdaptivePABridgeOverride"
+    },
+    {
+      "description": "Remove the positive-value guard while retaining bridge-role gating. BR=1 with a zero bridge override must continue using the model PA of 0.2.",
+      "expected_matches": 1,
+      "id": "remove_positive_zero_guard",
+      "new": "                    if(isBridge)\n                        predicted_pa = m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index);",
+      "old": "                    if(isBridge && m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index) > EPSILON)\n                        predicted_pa = m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index);",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "test_filter": "AdaptivePABridgeOverride"
+    },
+    {
+      "description": "Replace the selected bridge override assignment with zero. BR=1 with a configured bridge value of 2.0 must emit PA 2.0.",
+      "expected_matches": 1,
+      "id": "zero_bridge_override_assignment",
+      "new": "                    if(isBridge && m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index) > EPSILON)\n                        predicted_pa = 0;",
+      "old": "                    if(isBridge && m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index) > EPSILON)\n                        predicted_pa = m_config.adaptive_pressure_advance_bridges.get_at(m_last_config_index);",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "test_filter": "AdaptivePABridgeOverride"
+    }
+  ],
+  "schema_version": 1
+}

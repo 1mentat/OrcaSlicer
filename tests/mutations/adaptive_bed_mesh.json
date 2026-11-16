@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Two assertion-only semantic probes for adaptive bed-mesh min expansion and zero-spacing floor; expected coordinates derive from the analytic first-layer island envelope, not emitted centerline extents.",
+  "mutants": [
+    {
+      "id": "adaptive-bed-mesh-minimum-margin-expansion-regresses",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "mesh_bbox.min            = mesh_bbox.min.cwiseMax((bbox.min.array() - mesh_margin).matrix());",
+      "new": "mesh_bbox.min            = mesh_bbox.min.cwiseMin((bbox.min.array() - mesh_margin).matrix());",
+      "expected_matches": 1,
+      "test_filter": "Adaptive bed mesh margins follow the analytic first-layer island envelope",
+      "description": "Use the wrong min operation for the lower adaptive extent. The unarranged cube analytic island envelope is [0,0]-[12,8], so zero margin must preserve it and 2 mm margin must expand it by two millimeters."
+    },
+    {
+      "id": "adaptive-bed-mesh-zero-probe-distance-skips-one-millimeter-floor",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "auto probe_dist_x  = std::max(1., m_config.bed_mesh_probe_distance.value.x());",
+      "new": "auto probe_dist_x  = std::max(0.5, m_config.bed_mesh_probe_distance.value.x());",
+      "expected_matches": 1,
+      "test_filter": "Adaptive bed mesh limits clip the analytic island envelope and zero probe spacing uses the minimum",
+      "description": "Lower the per-axis effective-distance floor. With the analytic envelope, 100 mm expansion, and explicit [1,2]-[10,6] clipping, zero spacing must use the 1 mm floor, producing 10 x 5 points."
+    }
+  ]
+}
