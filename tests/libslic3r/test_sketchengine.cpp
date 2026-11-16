@@ -30,7 +30,7 @@
 
 using namespace Slic3r;
 
-TEST_CASE("SketchPlane projects forward rays in its local frame and rejects rays missing ahead", "[SketchEngine]")
+TEST_CASE("SketchPlane projects forward rays in its local frame and rejects rays missing ahead", "[SketchEngine][SketchPlaneGap]")
 {
     SketchPlane plane;
     plane.origin = Vec3d(5., 6., 4.);
@@ -54,7 +54,7 @@ TEST_CASE("SketchPlane projects forward rays in its local frame and rejects rays
     CHECK_THAT(behind.y(), Catch::Matchers::WithinAbs(0., 1e-12));
 }
 
-TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine]")
+TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine][SketchPlaneGap]")
 {
     const gp_Ax2 axis(gp_Pnt(3., -2., 7.), gp_Dir(0., 0., 1.));
     TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(axis, 10., 20.).Shape();
@@ -112,7 +112,7 @@ TEST_CASE("SketchPlane derives a local frame from a curved face", "[SketchEngine
     CHECK_THAT(plane.y_axis.dot(analytic_axis), Catch::Matchers::WithinAbs(1., 1e-9));
 }
 
-TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[SketchEngine]")
+TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[SketchEngine][SketchPlaneGap]")
 {
     SketchProfile profile;
     REQUIRE_THROWS_AS(profile.to_occt_wire(SketchPlane::XY()), std::runtime_error);
@@ -120,7 +120,7 @@ TEST_CASE("SketchProfile rejects a profile with fewer than two points", "[Sketch
     REQUIRE_THROWS_AS(profile.to_occt_wire(SketchPlane::XY()), std::runtime_error);
 }
 
-TEST_CASE("SketchEngine::make_prism rejects a zero vector and extrudes a face to area times depth", "[SketchEngine]")
+TEST_CASE("SketchEngine::make_prism rejects a zero vector and extrudes a face to area times depth", "[SketchEngine][SketchPlaneGap]")
 {
     SketchProfile profile;
     profile.points = {Vec2d(0., 0.), Vec2d(4., 0.), Vec2d(4., 3.), Vec2d(0., 3.)};
