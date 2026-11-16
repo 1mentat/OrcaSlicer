@@ -768,7 +768,7 @@ TEST_CASE("Recursive directory copying throws when a directory occupies a file's
     CHECK_THROWS_AS(copy_directory_recursively(src, dst, {}, true), CriticalException);
 }
 
-TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils]") {
+TEST_CASE("ScopeGuard move construction transfers the callback to the new guard", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         std::optional<ScopeGuard> source(std::in_place, [&calls] { ++calls; });
@@ -780,7 +780,7 @@ TEST_CASE("ScopeGuard move construction transfers the callback to the new guard"
     CHECK(calls == 1);
 }
 
-TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils]") {
+TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         ScopeGuard guard;
@@ -792,7 +792,7 @@ TEST_CASE("Move assigning into a default ScopeGuard transfers the callback", "[u
     CHECK(calls == 1);
 }
 
-TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils]") {
+TEST_CASE("ScopeGuard move assignment replaces the destination callback without running it", "[utils][UtilsContracts]") {
     size_t calls = 0;
     {
         ScopeGuard destination([&calls] { calls += 10; });
@@ -952,7 +952,7 @@ TEST_CASE("Binary memory formatting switches units at powers of 1024", "[utils]"
     }
 }
 
-TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils]") {
+TEST_CASE("Short time formatting drops seconds and rounds to the minute once hours are shown", "[utils][UtilsContracts]") {
     // Under an hour the seconds stay and nothing is rounded.
     CHECK(short_time("0s") == "0s");
     CHECK(short_time("0.5s") == "<1s");
@@ -969,7 +969,7 @@ TEST_CASE("Short time formatting drops seconds and rounds to the minute once hou
     CHECK(short_time("23h 59m 30s") == "1d0h0m");
 }
 
-TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils]") {
+TEST_CASE("Second-resolution time formatters show day, hour, minute and second units", "[utils][UtilsContracts]") {
     const CNumericLocalesSetter numeric_locale;
     CHECK(get_time_dhms(0.f) == "0.000000s");
     CHECK(get_time_dhms(61.f) == "1m 1s");
