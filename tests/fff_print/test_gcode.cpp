@@ -14,6 +14,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
+#include "nlohmann/json.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeWriter.hpp"
@@ -681,6 +682,50 @@ TEST_CASE("Machine envelope serializes registered numeric boundaries and preserv
     CHECK_THAT(upper_junction.junction_deviation.front(), Catch::Matchers::WithinAbs(0.3f, 1e-5f));
 }
 
+TEST_CASE("Printed mass limit follows its configured threshold without changing deposited motion",
+          "[GCodePrintVariance][MachinePrintedMass]")
+{
+    constexpr int printed_mass_limit_error = 1 << 11;
+    struct LimitRow {
+        const char *name;
+        double      limit_grams;
+        bool        expect_error;
+    };
+    const std::array<LimitRow, 3> rows = {{
+        { "zero disables the printed-mass check", 0.0, false },
+        { "a low positive limit flags the print", 0.001, true },
+        { "a high positive limit permits the print", 2000.0, false },
+    }};
+
+    std::optional<MotionEvidence> baseline_motion;
+    for (const LimitRow &row : rows) {
+        INFO(row.name);
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({ { "filament_density", 1.24 }, { "machine_max_printed_mass", row.limit_grams } });
+
+        Print print;
+        Model model;
+        initialize(print, model, config, false);
+        GCodeProcessorResult result;
+        const std::string output = Test::gcode(print, &result);
+        REQUIRE_FALSE(output.empty());
+
+        const double printed_mass = print.print_statistics().total_weight;
+        REQUIRE(printed_mass > 0.001);
+        REQUIRE(printed_mass < 2000.0);
+        const bool has_limit_error =
+            (result.gcode_check_result.error_code & printed_mass_limit_error) != 0;
+        CHECK(has_limit_error == row.expect_error);
+
+        const MotionEvidence motion = motion_evidence(output, config);
+        REQUIRE(motion.extrusion_moves > 0);
+        if (baseline_motion.has_value())
+            require_same_material(*baseline_motion, motion);
+        else
+            baseline_motion = motion;
+    }
+}
+
 TEST_CASE("Z hop changes travel height while preserving material paths", "[GCodePrintVariance]")
 {
     DynamicPrintConfig no_hop = base_config();
@@ -717,6 +762,7 @@ struct ZHopMotionEvidence
     size_t same_layer_diagonal_lift_moves = 0;
     size_t same_layer_maximum_diagonal_run = 0;
     size_t same_layer_overhang_spiral_excursions = 0;
+    std::vector<double> same_layer_lift_deltas;
     bool   finite = true;
 };
 
@@ -757,12 +803,14 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
     size_t excursion_diagonal = 0;
     size_t excursion_max_diagonal_run = 0;
     size_t diagonal_run = 0;
+    std::vector<double> excursion_lift_deltas;
     std::string active_role;
     GCodeReader reader;
     reader.apply_config(config);
     reader.parse_buffer(text, [&evidence, &retracted, &crossed_layer, &overhang_role_before_retraction,
                                &start_plane, &excursion_z_only, &excursion_diagonal,
-                               &excursion_max_diagonal_run, &diagonal_run, &active_role](GCodeReader &self,
+                               &excursion_max_diagonal_run, &diagonal_run, &excursion_lift_deltas,
+                               &active_role](GCodeReader &self,
                                    const GCodeReader::GCodeLine &line) {
         const std::string_view comment = zhop_trim_comment(line.comment());
         if (zhop_is_layer_marker(comment)) {
@@ -803,6 +851,7 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
                     excursion_diagonal = 0;
                     excursion_max_diagonal_run = 0;
                     diagonal_run = 0;
+                    excursion_lift_deltas.clear();
                 }
                 return;
             }
@@ -814,6 +863,9 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
                                             std::isfinite(end_plane) &&
                                             std::abs(end_plane - start_plane) <= plane_tolerance;
                     if (same_layer) {
+                        evidence.same_layer_lift_deltas.insert(evidence.same_layer_lift_deltas.end(),
+                                                               excursion_lift_deltas.begin(),
+                                                               excursion_lift_deltas.end());
                         ++evidence.same_layer_excursions;
                         evidence.same_layer_z_only_lift_moves += excursion_z_only;
                         evidence.same_layer_diagonal_lift_moves += excursion_diagonal;
@@ -844,6 +896,7 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
             diagonal_run = 0;
             return;
         }
+        excursion_lift_deltas.push_back(dz);
         if (xy <= EPSILON) {
             ++excursion_z_only;
             diagonal_run = 0;
@@ -855,6 +908,157 @@ ZHopMotionEvidence zhop_motion_evidence(const std::string &text, const DynamicPr
     });
     REQUIRE(evidence.finite);
     return evidence;
+}
+
+struct DepositionEndpoint
+{
+    int    layer = -1;
+    double x = 0.;
+    double y = 0.;
+    double z = 0.;
+    double e = 0.;
+};
+
+std::vector<DepositionEndpoint> deposition_endpoints(const std::string &text,
+                                                      const DynamicPrintConfig &config)
+{
+    std::vector<DepositionEndpoint> endpoints;
+    int current_layer = -1;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(text, [&endpoints, &current_layer](GCodeReader &self,
+                                                           const GCodeReader::GCodeLine &line) {
+        if (zhop_is_layer_marker(line.comment()))
+            ++current_layer;
+        const bool motion = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+        if (!motion || !line.extruding(self) || line.dist_XY(self) <= EPSILON || line.dist_E(self) <= EPSILON)
+            return;
+        endpoints.push_back({current_layer, line.new_X(self), line.new_Y(self),
+                             line.new_Z(self), line.dist_E(self)});
+    });
+    return endpoints;
+}
+
+struct InfillPath
+{
+    std::string role;
+    double      length = 0.;
+};
+
+void collect_infill_paths(const ExtrusionEntity &entity, std::vector<InfillPath> &paths)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            collect_infill_paths(*child, paths);
+    } else if (is_infill(entity.role()) && entity.role() != erIroning) {
+        paths.push_back({ExtrusionEntity::role_to_string(entity.role()), unscale<double>(entity.length())});
+    }
+}
+
+std::vector<InfillPath> source_infill_paths(const Print &print, size_t &multi_path_no_sort_collections)
+{
+    std::vector<InfillPath> paths;
+    multi_path_no_sort_collections = 0;
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for (const ExtrusionEntity *entity : region->fills.entities) {
+                    const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+                    if (collection != nullptr && collection->no_sort && collection->entities.size() > 1)
+                        ++multi_path_no_sort_collections;
+                    collect_infill_paths(*entity, paths);
+                }
+    return paths;
+}
+
+std::vector<InfillPath> emitted_infill_paths(const std::string &gcode, const DynamicPrintConfig &config,
+                                             const std::set<std::string> &infill_roles)
+{
+    std::vector<InfillPath> paths;
+    std::string active_role;
+    std::string path_role;
+    double      path_length = 0.;
+    const auto flush_path = [&]() {
+        if (path_length > 0.)
+            paths.push_back({path_role, path_length});
+        path_role = {};
+        path_length = 0.;
+    };
+
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = zhop_trim_comment(line.comment());
+        if (zhop_is_layer_marker(comment))
+            flush_path();
+        if (comment.rfind("TYPE:", 0) == 0) {
+            const std::string next_role(zhop_trim_comment(comment.substr(5)));
+            if (next_role != active_role)
+                flush_path();
+            active_role = next_role;
+        } else if (comment.rfind("FEATURE:", 0) == 0) {
+            const std::string next_role(zhop_trim_comment(comment.substr(8)));
+            if (next_role != active_role)
+                flush_path();
+            active_role = next_role;
+        }
+
+        if (!(line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")))
+            return;
+        const double xy = line.dist_XY(self);
+        if (infill_roles.count(active_role) != 0 && line.extruding(self) && xy > EPSILON) {
+            if (path_length == 0.)
+                path_role = active_role;
+            path_length += xy;
+        } else if (path_length > 0. && xy > EPSILON) {
+            flush_path();
+        }
+    });
+    flush_path();
+    return paths;
+}
+
+TEST_CASE("Concentric infill preserves collection path order and length in exported G-code",
+          "[GCode][InfillCollections]")
+{
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({
+        {"top_shell_layers", 0},
+        {"bottom_shell_layers", 0},
+        {"top_shell_thickness", 0.0},
+        {"bottom_shell_thickness", 0.0},
+        {"sparse_infill_pattern", "concentric"},
+        {"sparse_infill_density", "20%"},
+        {"wipe", false},
+        {"enable_arc_fitting", false},
+        {"resolution", 0.0},
+    });
+
+    Print print;
+    Model model;
+    std::vector<TriangleMesh> meshes;
+    meshes.emplace_back(make_cube(12., 12., 0.6));
+    Test::init_print(std::move(meshes), print, model, config, nullptr, false);
+    require_valid(print);
+    print.set_status_silent();
+    print.process();
+
+    size_t multi_path_no_sort_collections = 0;
+    const std::vector<InfillPath> expected = source_infill_paths(print, multi_path_no_sort_collections);
+    REQUIRE(multi_path_no_sort_collections > 0);
+    REQUIRE(expected.size() > 1);
+
+    std::set<std::string> infill_roles;
+    for (const InfillPath &path : expected)
+        infill_roles.insert(path.role);
+    const ExportedPrint exported = export_print(print);
+    const std::vector<InfillPath> actual = emitted_infill_paths(exported.text, config, infill_roles);
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        INFO("infill path " << i << " role " << expected[i].role);
+        CHECK(actual[i].role == expected[i].role);
+        CHECK_THAT(actual[i].length, Catch::Matchers::WithinAbs(expected[i].length, 0.02));
+    }
 }
 
 DynamicPrintConfig zhop_type_config(const ZHopType type)
@@ -876,6 +1080,114 @@ DynamicPrintConfig zhop_type_config(const ZHopType type)
     });
     config.set_key_value("z_hop_types", new ConfigOptionEnumsGeneric{type});
     return config;
+}
+
+TEST_CASE("Signed Z offset shifts deposited machine coordinates without changing paths",
+          "[GCode][ZOffsetPipeline][ZCoordinateSettingsPipeline]")
+{
+    const auto configured = [](double offset) {
+        DynamicPrintConfig config = base_config();
+        config.set_deserialize_strict({
+            {"gcode_flavor", "marlin2"},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"file_start_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"use_relative_e_distances", true},
+            {"z_offset", offset},
+            {"z_hop", 0.0},
+            {"retract_lift_above", 0.0},
+            {"retract_lift_below", 0.0},
+            {"retract_when_changing_layer", false},
+        });
+        return config;
+    };
+
+    const DynamicPrintConfig reference_config = configured(0.0);
+    const ExportedPrint reference_output = fresh_export(reference_config);
+    const MotionEvidence reference_motion = motion_evidence(reference_output.text, reference_config);
+    const std::vector<DepositionEndpoint> reference =
+        deposition_endpoints(reference_output.text, reference_config);
+    REQUIRE(reference_motion.extrusion_moves > 0);
+    REQUIRE(reference.size() == reference_motion.extrusion_moves);
+    REQUIRE(reference.size() > 1);
+    const int first_layer = reference.front().layer;
+    REQUIRE(first_layer >= 0);
+    const auto later_layer_point = std::find_if(reference.begin(), reference.end(), [first_layer](const auto &point) {
+        return point.layer > first_layer;
+    });
+    REQUIRE(later_layer_point != reference.end());
+    const size_t later_layer_index = static_cast<size_t>(std::distance(reference.begin(), later_layer_point));
+    CHECK_THAT(reference.front().z, Catch::Matchers::WithinAbs(0.2, 0.0011));
+    CHECK(later_layer_point->z > reference.front().z);
+
+    for (const double offset : {0.1, -0.1}) {
+        CAPTURE(offset);
+        const DynamicPrintConfig config = configured(offset);
+        const ExportedPrint output = fresh_export(config);
+        const MotionEvidence observed_motion = motion_evidence(output.text, config);
+        const std::vector<DepositionEndpoint> observed = deposition_endpoints(output.text, config);
+        require_same_material(reference_motion, observed_motion);
+        REQUIRE(observed.size() == reference.size());
+        for (size_t i = 0; i < reference.size(); ++i) {
+            CAPTURE(i, reference[i].layer);
+            CHECK(observed[i].layer == reference[i].layer);
+            CHECK_THAT(observed[i].x, Catch::Matchers::WithinAbs(reference[i].x, 0.0011));
+            CHECK_THAT(observed[i].y, Catch::Matchers::WithinAbs(reference[i].y, 0.0011));
+            CHECK_THAT(observed[i].z, Catch::Matchers::WithinAbs(reference[i].z + offset, 0.0011));
+            CHECK_THAT(observed[i].e, Catch::Matchers::WithinAbs(reference[i].e, 0.0011));
+        }
+        CHECK_THAT(observed.front().z, Catch::Matchers::WithinAbs(reference.front().z + offset, 0.0011));
+        CHECK_THAT(observed[later_layer_index].z,
+                   Catch::Matchers::WithinAbs(reference[later_layer_index].z + offset, 0.0011));
+    }
+}
+
+TEST_CASE("Normal Z-hop emits its configured zero, nominal, and maximum lift heights",
+          "[GCode][ZHopType][ZCoordinateSettingsPipeline]")
+{
+    MotionEvidence reference_motion;
+    bool have_reference = false;
+    for (const double height : {0.0, 0.4, 5.0}) {
+        CAPTURE(height);
+        DynamicPrintConfig config = zhop_type_config(ZHopType::zhtNormal);
+        config.set_deserialize_strict({
+            {"gcode_flavor", "marlin2"},
+            {"machine_start_gcode", ""},
+            {"machine_end_gcode", ""},
+            {"file_start_gcode", ""},
+            {"layer_change_gcode", "G92 E0\n"},
+            {"use_relative_e_distances", true},
+            {"z_offset", 0.0},
+            {"z_hop", height},
+            {"retraction_minimum_travel", 0.0},
+            {"retract_when_changing_layer", false},
+            {"retract_lift_above", 0.0},
+            {"retract_lift_below", 0.0},
+            {"wipe", false},
+        });
+        const ExportedPrint output = fresh_export(config);
+        const MotionEvidence material = motion_evidence(output.text, config);
+        REQUIRE(material.extrusion_moves > 0);
+        if (!have_reference) {
+            reference_motion = material;
+            have_reference = true;
+        } else {
+            require_same_material(reference_motion, material);
+        }
+
+        const ZHopMotionEvidence lift = zhop_motion_evidence(output.text, config);
+        REQUIRE(lift.retractions > 0);
+        if (height == 0.0) {
+            CHECK(lift.same_layer_lift_deltas.empty());
+            CHECK(lift.same_layer_z_only_lift_moves == 0);
+        } else {
+            REQUIRE_FALSE(lift.same_layer_lift_deltas.empty());
+            REQUIRE(lift.same_layer_z_only_lift_moves > 0);
+            for (const double delta : lift.same_layer_lift_deltas)
+                CHECK_THAT(delta, Catch::Matchers::WithinAbs(height, 0.0011));
+        }
+    }
 }
 
 TEST_CASE("Public Z-hop modes preserve deposition while changing lift motion",
@@ -5749,6 +6061,680 @@ TEST_CASE("Filament change route responds to endpoint configuration",
     CHECK_THAT(route->p3_y, Catch::Matchers::WithinAbs(160., 1e-6));
 }
 
+namespace x2d_filament_flush_contracts {
+
+struct ChangeRow {
+    int current = -1;
+    int next = -1;
+    int layer = -1;
+    int contact = -1;
+    int physical_next = -1;
+    std::array<std::optional<double>, 2> flush_f;
+    std::array<std::optional<double>, 2> flush_t;
+    std::optional<double> cooling_c;
+    std::optional<double> mapped_retract;
+    std::vector<double> pressure_retracts;
+};
+
+struct ObjectDeposition {
+    size_t moves = 0;
+    double xy_mm = 0.0;
+    double filament_mm = 0.0;
+};
+
+std::optional<int> marker_integer(std::string_view marker, std::string_view field)
+{
+    const std::string key = std::string(field) + "=";
+    const size_t key_pos = marker.find(key);
+    if (key_pos == std::string_view::npos)
+        return std::nullopt;
+    const size_t begin = key_pos + key.size();
+    size_t end = begin;
+    while (end < marker.size() && !std::isspace(static_cast<unsigned char>(marker[end])))
+        ++end;
+    if (begin == end)
+        return std::nullopt;
+    std::istringstream input(std::string(marker.substr(begin, end - begin)));
+    int value = 0;
+    char trailing = 0;
+    if (!(input >> value) || (input >> trailing))
+        return std::nullopt;
+    return value;
+}
+
+std::string read_shipped_x2d_change_template()
+{
+    const std::string machine_dir = std::string(PROFILES_DIR) + "/BBL/machine/";
+    const std::string template_name = "Bambu Lab X2D 0.4 nozzle template change_filament_gcode";
+    const std::string machine_path = machine_dir + "Bambu Lab X2D 0.4 nozzle.json";
+    const std::string template_path = machine_dir + template_name + ".json";
+    REQUIRE(boost::filesystem::exists(machine_path));
+    REQUIRE(boost::filesystem::exists(template_path));
+
+    std::ifstream machine_input(machine_path);
+    REQUIRE(machine_input.good());
+    const nlohmann::json machine = nlohmann::json::parse(machine_input);
+    REQUIRE(machine.contains("include"));
+    REQUIRE(machine.at("include").is_array());
+    CHECK(std::find(machine.at("include").begin(), machine.at("include").end(), template_name) !=
+          machine.at("include").end());
+
+    std::ifstream template_input(template_path);
+    REQUIRE(template_input.good());
+    const nlohmann::json template_json = nlohmann::json::parse(template_input);
+    REQUIRE(template_json.contains("change_filament_gcode"));
+    return template_json.at("change_filament_gcode").get<std::string>();
+}
+
+DynamicPrintConfig x2d_flush_config(PrimeVolumeMode mode, const std::vector<int> &fast_temperatures,
+                                    const std::string &shipped_template, bool contact_case)
+{
+    DynamicPrintConfig config = route_config(30., 180.);
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(
+        "; ORCA_TOOLCHANGE_BEGIN current={current_filament_id} next={next_filament_id} "
+        "layer={layer_num} physical={filament_map[next_filament_id]} "
+        "contact={if is_prime_tower_interface}1{else}0{endif}\n" +
+        shipped_template +
+        "\n; ORCA_TOOLCHANGE_END current={current_filament_id} next={next_filament_id} "
+        "layer={layer_num} physical={filament_map[next_filament_id]} "
+        "contact={if is_prime_tower_interface}1{else}0{endif}\n"));
+    config.set_key_value("prime_volume_mode", new ConfigOptionEnum<PrimeVolumeMode>(mode));
+
+    // Keep the two logical filaments on distinct variant columns and map them to
+    // opposite physical extruders so the profile's [filament_map[next]-1] is observable.
+    config.set_key_value("filament_self_index", new ConfigOptionInts({1, 2}));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive High Flow", "Direct Drive Standard"
+    }));
+    config.set_key_value("printer_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("extruder_variant_list", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("print_extruder_variant", new ConfigOptionStrings({
+        "Direct Drive Standard", "Direct Drive High Flow"
+    }));
+    config.set_key_value("print_extruder_id", new ConfigOptionInts({1, 2}));
+    config.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({etDirectDrive, etDirectDrive}));
+    config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric({nvtStandard, nvtHighFlow}));
+    config.set_key_value("filament_map", new ConfigOptionInts({2, 1}));
+
+    config.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({0, 1500}));
+    config.set_key_value("filament_flush_temp_fast", new ConfigOptionIntsNullable(fast_temperatures));
+    config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({0.0, 200.0}));
+    config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats({32.0, 45.0}));
+    config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({10.0, 25.0}));
+    config.set_key_value("retract_length_toolchange", new ConfigOptionFloats({0.0, 12.5}));
+    config.set_key_value("nozzle_temperature_range_high", new ConfigOptionInts({245, 255}));
+    config.set_key_value("nozzle_temperature_initial_layer", new ConfigOptionInts({200, 205}));
+    config.set_key_value("nozzle_temperature", new ConfigOptionInts({215, 220}));
+    config.set_key_value("filament_type", new ConfigOptionStrings({"PLA", "PLA"}));
+    config.set_key_value("filament_tower_interface_purge_volume", new ConfigOptionFloats({20.0, 20.0}));
+    config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInts({212, 223}));
+    config.set_key_value("filament_tower_interface_pre_extrusion_dist", new ConfigOptionFloats({2.0, 2.0}));
+    config.set_key_value("filament_tower_interface_pre_extrusion_length", new ConfigOptionFloats({3.0, 3.0}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75}));
+    config.set_deserialize_strict({
+        {"enable_prime_tower", contact_case},
+        {"prime_tower_width", 35.0},
+        {"wipe_tower_type", contact_case ? "type1" : "type2"},
+        {"enable_tower_interface_features", contact_case},
+        {"enable_arc_fitting", false},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"use_relative_e_distances", true},
+    });
+    if (contact_case) {
+        config.set_deserialize_strict({
+            {"prime_volume", 80.0},
+            {"wipe_tower_x", 50.0},
+            {"wipe_tower_y", 50.0},
+            {"wipe_tower_no_sparse_layers", false},
+            {"wipe_tower_sparse_layers_combination", false},
+            {"filament_adhesiveness_category", "0,1"},
+            {"physical_extruder_map", "0,1"},
+            {"enable_filament_ramming", false},
+            {"enable_tower_interface_cooldown_during_tower", false},
+            {"single_extruder_multi_material_priming", false},
+            {"wait_for_temp_on_wipe_tower", false},
+            {"preheat_time", 0.0},
+            {"skirt_loops", 0},
+            {"brim_type", "no_brim"},
+            {"extruder_printable_height", "0,0"},
+        });
+        // route_config() carries a cutter-path exclusion polygon unrelated to
+        // this tower fixture; it overlaps the pinned Type1 tower footprint.
+        config.set_key_value("bed_exclude_area", new ConfigOptionPoints{});
+    }
+    return config;
+}
+
+std::string export_x2d_tower_rows(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    auto add_slab = [object](double z, int extruder, double x, double width) {
+        TriangleMesh mesh = make_cube(width, 8., 0.4);
+        mesh.translate(x, 0., z);
+        ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+        volume->config.set("extruder", extruder);
+    };
+    // Both categories occupy the first 0.4 mm, yielding real first-layer and
+    // later noncontact changes. Subsequent full slabs transition categories,
+    // producing contact changes for the same Type1 consumer.
+    add_slab(0.0, 1, 0., 4.);
+    add_slab(0.0, 2, 4., 4.);
+    add_slab(0.4, 1, 0., 8.);
+    add_slab(0.8, 2, 0., 8.);
+    add_slab(1.2, 1, 0., 8.);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    const auto validation = print.validate();
+    INFO("X2D Type1 tower validation: " << validation.string << " [" << validation.opt_key << "]");
+    REQUIRE(validation.string.empty());
+    REQUIRE(print.has_wipe_tower());
+    const std::string output = Test::gcode(print);
+    REQUIRE_FALSE(output.empty());
+    bool saw_contact = false;
+    bool saw_noncontact = false;
+    for (const auto &layer : print.wipe_tower_data().tool_changes) {
+        for (const WipeTower::ToolChangeResult &change : layer) {
+            if (change.is_contact)
+                saw_contact = true;
+            else
+                saw_noncontact = true;
+        }
+    }
+    REQUIRE(saw_contact);
+    REQUIRE(saw_noncontact);
+    return output;
+}
+
+struct RetractionEMoves {
+    std::array<std::vector<double>, 2> ordinary_retracts;
+    std::array<std::vector<double>, 2> toolchange_retracts;
+    std::array<std::vector<double>, 2> toolchange_retract_totals;
+    std::array<std::vector<double>, 2> unretracts;
+};
+
+RetractionEMoves inspect_retraction_e_moves(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    RetractionEMoves moves;
+    int current_filament = 0;
+    std::array<double, 2> retracted_since_unretract{};
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&moves, &current_filament, &retracted_since_unretract](
+                            GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        const std::string command(line.cmd());
+        if (line.cmd_is("M1020")) {
+            float filament = 0.f;
+            if (line.has_value('S', filament))
+                current_filament = static_cast<int>(std::lround(filament));
+        } else if (command.size() >= 2 && command[0] == 'T' &&
+                   std::isdigit(static_cast<unsigned char>(command[1]))) {
+            current_filament = std::stoi(command.substr(1));
+        }
+        if (current_filament < 0 || current_filament >= int(moves.ordinary_retracts.size()))
+            return;
+
+        const double e = line.dist_E(state);
+        const std::string_view comment = line.comment();
+        if (line.retracting(state) && line.dist_XY(state) <= EPSILON) {
+            retracted_since_unretract[size_t(current_filament)] += -e;
+            if (comment.find("retract for toolchange") != std::string_view::npos) {
+                moves.toolchange_retracts[size_t(current_filament)].push_back(-e);
+                moves.toolchange_retract_totals[size_t(current_filament)].push_back(
+                    retracted_since_unretract[size_t(current_filament)]);
+            }
+            else if (comment.find("retract") != std::string_view::npos)
+                moves.ordinary_retracts[size_t(current_filament)].push_back(-e);
+        } else if (line.extruding(state) && line.dist_XY(state) <= EPSILON &&
+                   comment.find("unretract") != std::string_view::npos) {
+            moves.unretracts[size_t(current_filament)].push_back(e);
+            retracted_since_unretract[size_t(current_filament)] = 0.0;
+        }
+    });
+    return moves;
+}
+
+DynamicPrintConfig retraction_e_config()
+{
+    DynamicPrintConfig config = x2d_flush_config(pvmDefault, {1500, 0}, read_shipped_x2d_change_template(), true);
+    // The X2D fixture has two explicit variant columns: filament 0 uses the first
+    // (High Flow) column and filament 1 uses the second (Standard) column.
+    config.set_key_value("retraction_length", new ConfigOptionFloats({0.8, 0.8}));
+    config.set_key_value("retract_restart_extra", new ConfigOptionFloats({0.0, 0.2}));
+    config.set_key_value("retract_length_toolchange", new ConfigOptionFloats({0.0, 2.4}));
+    config.set_key_value("retract_restart_extra_toolchange", new ConfigOptionFloats({0.0, 0.0}));
+    config.set_key_value("retraction_minimum_travel", new ConfigOptionFloats({0.0, 0.0}));
+    config.set_key_value("wipe", new ConfigOptionBools({false, false}));
+    config.set_deserialize_strict({
+        {"use_firmware_retraction", false},
+        {"retract_when_changing_layer", false},
+    });
+    return config;
+}
+
+bool comment_starts_with_marker(std::string_view comment, std::string_view marker)
+{
+    while (!comment.empty() && std::isspace(static_cast<unsigned char>(comment.front())))
+        comment.remove_prefix(1);
+    return comment.size() >= marker.size() && comment.substr(0, marker.size()) == marker;
+}
+
+std::vector<ChangeRow> inspect_change_rows(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    std::vector<ChangeRow> rows;
+    std::optional<size_t> active;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&rows, &active](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment_starts_with_marker(comment, "ORCA_TOOLCHANGE_BEGIN")) {
+            const auto current = marker_integer(comment, "current");
+            const auto next = marker_integer(comment, "next");
+            const auto layer = marker_integer(comment, "layer");
+            const auto contact = marker_integer(comment, "contact");
+            const auto physical = marker_integer(comment, "physical");
+            REQUIRE(current.has_value());
+            REQUIRE(next.has_value());
+            REQUIRE(layer.has_value());
+            REQUIRE(contact.has_value());
+            REQUIRE(physical.has_value());
+            rows.push_back({});
+            active = rows.size() - 1;
+            rows[*active].current = *current;
+            rows[*active].next = *next;
+            rows[*active].layer = *layer;
+            rows[*active].contact = *contact;
+            rows[*active].physical_next = *physical;
+            return;
+        }
+        if (comment_starts_with_marker(comment, "ORCA_TOOLCHANGE_END")) {
+            active.reset();
+            return;
+        }
+        if (!active.has_value())
+            return;
+
+        ChangeRow &row = rows[*active];
+        float selector = 0.0f;
+        float value = 0.0f;
+        if (line.cmd_is("M620.10") && line.has_value('A', selector)) {
+            const int slot = static_cast<int>(std::lround(selector));
+            if (slot >= 0 && slot < 2) {
+                if (line.has_value('F', value))
+                    row.flush_f[static_cast<size_t>(slot)] = value;
+                if (line.has_value('T', value))
+                    row.flush_t[static_cast<size_t>(slot)] = value;
+            }
+        } else if (line.cmd_is("M620.10") && line.has_value('R', value)) {
+            row.mapped_retract = value;
+        } else if (line.cmd_is("M620.15") && line.has_value('C', value)) {
+            row.cooling_c = value;
+        } else if (line.cmd_is("M983.3") && line.has_value('R', value)) {
+            row.pressure_retracts.push_back(value);
+        }
+    });
+    return rows;
+}
+
+std::string trim_role(std::string value)
+{
+    const auto whitespace = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    const auto first = std::find_if_not(value.begin(), value.end(), whitespace);
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), whitespace).base();
+    if (first >= last)
+        return {};
+    value = std::string(first, last);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+ObjectDeposition inspect_object_deposition(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    ObjectDeposition result;
+    bool in_custom_script = false;
+    std::string role;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&result, &in_custom_script, &role](GCodeReader &state,
+                                                                   const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("ORCA_TOOLCHANGE_BEGIN") != std::string_view::npos) {
+            in_custom_script = true;
+            return;
+        }
+        if (comment.find("ORCA_TOOLCHANGE_END") != std::string_view::npos) {
+            in_custom_script = false;
+            return;
+        }
+        if (in_custom_script)
+            return;
+        const size_t type_pos = comment.find("TYPE:");
+        const size_t feature_pos = comment.find("FEATURE:");
+        if (type_pos != std::string_view::npos || feature_pos != std::string_view::npos) {
+            const bool use_type = type_pos != std::string_view::npos &&
+                                  (feature_pos == std::string_view::npos || type_pos < feature_pos);
+            const size_t value_pos = use_type ? type_pos + 5 : feature_pos + 8;
+            role = trim_role(std::string(comment.substr(value_pos)));
+        }
+        if (in_custom_script || role != "outer wall" ||
+            !line.extruding(state) || line.dist_XY(state) <= EPSILON)
+            return;
+        const double filament = line.dist_E(state);
+        if (!std::isfinite(filament) || filament <= 0.0)
+            return;
+        ++result.moves;
+        result.xy_mm += line.dist_XY(state);
+        result.filament_mm += filament;
+    });
+    return result;
+}
+
+double independent_filament_feed(double volumetric_mm3_s)
+{
+    constexpr double filament_diameter_mm = 1.75;
+    constexpr double pi = 3.14159265358979323846;
+    const double filament_area_mm2 = pi * filament_diameter_mm * filament_diameter_mm / 4.0;
+    return volumetric_mm3_s * 60.0 / filament_area_mm2;
+}
+
+void check_flush_rows(const std::vector<ChangeRow> &rows,
+                      const std::array<double, 2> &flush_temperatures,
+                      const std::array<double, 2> &flush_speeds,
+                      const std::array<double, 2> &nozzle_temps_initial,
+                      const std::array<double, 2> &nozzle_temps,
+                      const std::array<double, 2> &cooling,
+                      const std::array<double, 2> &physical_retract,
+                      const std::array<double, 2> &interface_temps,
+                      bool require_later_noncontact, bool require_later_contact)
+{
+    bool saw_first_layer = false;
+    bool saw_later_noncontact = false;
+    bool saw_later_contact = false;
+    for (const ChangeRow &row : rows) {
+        REQUIRE(row.current >= 0);
+        REQUIRE(row.current < 2);
+        REQUIRE(row.next >= 0);
+        REQUIRE(row.next < 2);
+        REQUIRE(row.layer >= 0);
+        REQUIRE(row.physical_next >= 1);
+        REQUIRE(row.physical_next <= 2);
+        const int expected_physical = row.next == 0 ? 2 : 1;
+        CHECK(row.physical_next == expected_physical);
+        INFO("toolchange current=" << row.current << " next=" << row.next
+             << " physical=" << row.physical_next << " layer=" << row.layer
+             << " contact=" << row.contact);
+        for (int side = 0; side < 2; ++side) {
+            const int filament = side == 0 ? row.current : row.next;
+            REQUIRE(row.flush_f[static_cast<size_t>(side)].has_value());
+            REQUIRE(row.flush_t[static_cast<size_t>(side)].has_value());
+            CHECK_THAT(*row.flush_f[static_cast<size_t>(side)],
+                       Catch::Matchers::WithinAbs(independent_filament_feed(flush_speeds[static_cast<size_t>(filament)]), 0.1));
+            CHECK_THAT(*row.flush_t[static_cast<size_t>(side)],
+                       Catch::Matchers::WithinAbs(flush_temperatures[static_cast<size_t>(filament)], 0.1));
+        }
+        REQUIRE(row.cooling_c.has_value());
+        const double incoming_temp = row.layer == 0 ? nozzle_temps_initial[static_cast<size_t>(row.next)]
+            : (row.contact != 0 ? interface_temps[static_cast<size_t>(row.next)]
+                                : nozzle_temps[static_cast<size_t>(row.next)]);
+        const bool cooling_suppressed = row.layer == 0 || row.contact != 0;
+        const double expected_c = incoming_temp - (cooling_suppressed ? 0.0 : cooling[static_cast<size_t>(row.next)]);
+        CHECK_THAT(*row.cooling_c, Catch::Matchers::WithinAbs(expected_c, 0.1));
+        if (row.layer == 0)
+            saw_first_layer = true;
+        if (row.layer > 0 && row.contact == 0)
+            saw_later_noncontact = true;
+        if (row.layer > 0 && row.contact != 0)
+            saw_later_contact = true;
+
+        const double expected_retract = physical_retract[static_cast<size_t>(row.physical_next - 1)];
+        REQUIRE(row.mapped_retract.has_value());
+        CHECK_THAT(*row.mapped_retract, Catch::Matchers::WithinAbs(expected_retract, 0.1));
+        REQUIRE(row.pressure_retracts.size() == 2);
+        for (double retract : row.pressure_retracts)
+            CHECK_THAT(retract, Catch::Matchers::WithinAbs(expected_retract, 0.1));
+    }
+    CHECK(saw_first_layer);
+    if (require_later_noncontact)
+        CHECK(saw_later_noncontact);
+    if (require_later_contact)
+        CHECK(saw_later_contact);
+}
+
+void check_same_object_deposition(const ObjectDeposition &reference, const ObjectDeposition &observed)
+{
+    REQUIRE(reference.moves > 0);
+    REQUIRE(observed.moves > 0);
+    CHECK(observed.moves == reference.moves);
+    CHECK_THAT(observed.xy_mm, Catch::Matchers::WithinAbs(reference.xy_mm, 1e-5));
+    CHECK_THAT(observed.filament_mm, Catch::Matchers::WithinAbs(reference.filament_mm, 1e-4));
+}
+
+} // namespace x2d_filament_flush_contracts
+
+TEST_CASE("X2D tool-change flush settings reach the shipped template by filament and mode",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][FilamentFlushSettings]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const std::string shipped_template = read_shipped_x2d_change_template();
+    REQUIRE(shipped_template.find("M620.10 A0") != std::string::npos);
+    REQUIRE(shipped_template.find("M620.15 C") != std::string::npos);
+
+    const auto export_tower_case = [&shipped_template](PrimeVolumeMode mode,
+                                                        const std::vector<int> &fast_temperatures) {
+        DynamicPrintConfig config = x2d_flush_config(mode, fast_temperatures, shipped_template, true);
+        const auto *filament_map = config.option<ConfigOptionInts>("filament_map");
+        REQUIRE(filament_map != nullptr);
+        REQUIRE((filament_map->values == std::vector<int>{2, 1}));
+        return std::make_pair(config, export_x2d_tower_rows(config));
+    };
+
+    auto default_case = export_tower_case(pvmDefault, {1500, 0});
+    auto fast_case = export_tower_case(pvmFast, {1500, 0});
+    auto default_fast_changed = export_tower_case(pvmDefault, {1300, 1300});
+    DynamicPrintConfig direct_config = x2d_flush_config(pvmDefault, {1500, 0}, shipped_template, false);
+    const std::string direct_output = export_with_object_rows(10., 30., 180., nullptr, false, nullptr,
+                                                               &direct_config, 0.8);
+
+    const std::array<double, 2> speeds{{32.0, 200.0}};
+    const std::array<double, 2> initial_temps{{200.0, 205.0}};
+    const std::array<double, 2> nozzle_temps{{215.0, 220.0}};
+    const std::array<double, 2> cooling{{10.0, 25.0}};
+    const std::array<double, 2> retract{{0.0, 12.5}};
+    const std::array<double, 2> interface_temps{{212.0, 223.0}};
+    const ObjectDeposition reference_deposition = inspect_object_deposition(default_case.second, default_case.first);
+    REQUIRE(reference_deposition.moves > 0);
+
+    const std::vector<ChangeRow> default_rows = inspect_change_rows(default_case.second, default_case.first);
+    REQUIRE(default_rows.size() >= 2);
+    check_flush_rows(default_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+
+    const std::vector<ChangeRow> fast_rows = inspect_change_rows(fast_case.second, fast_case.first);
+    REQUIRE(fast_rows.size() >= 2);
+    check_flush_rows(fast_rows, {1500.0, 255.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+    check_same_object_deposition(reference_deposition,
+        inspect_object_deposition(fast_case.second, fast_case.first));
+
+    const std::vector<ChangeRow> inert_fast_rows = inspect_change_rows(default_fast_changed.second,
+                                                                       default_fast_changed.first);
+    REQUIRE(inert_fast_rows.size() == default_rows.size());
+    check_flush_rows(inert_fast_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps, cooling, retract,
+                     interface_temps, true, true);
+    check_same_object_deposition(reference_deposition,
+        inspect_object_deposition(default_fast_changed.second, default_fast_changed.first));
+
+    const std::array<double, 2> no_tower_cooling{{0.0, 0.0}};
+    const std::vector<ChangeRow> direct_rows = inspect_change_rows(direct_output, direct_config);
+    REQUIRE(direct_rows.size() >= 2);
+    check_flush_rows(direct_rows, {245.0, 1500.0}, speeds, initial_temps, nozzle_temps,
+                     no_tower_cooling, retract, interface_temps, true, false);
+}
+
+TEST_CASE("Retraction settings change emitted E moves on the mapped filaments",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][RetractionE]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const DynamicPrintConfig config = retraction_e_config();
+    const std::string output = export_x2d_tower_rows(config);
+    const RetractionEMoves moves = inspect_retraction_e_moves(output, config);
+
+    // The Type1 fixture makes real tool changes across five slabs. Each filament
+    // also has object travel retracts; the E-only lines are independent of the
+    // tower purge paths and can be checked against the configured raw-filament mm.
+    REQUIRE_FALSE(moves.ordinary_retracts[0].empty());
+    REQUIRE_FALSE(moves.ordinary_retracts[1].empty());
+    REQUIRE_FALSE(moves.unretracts[0].empty());
+    REQUIRE_FALSE(moves.unretracts[1].empty());
+    for (const double length : moves.ordinary_retracts[0])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.8, 0.001));
+    for (const double length : moves.ordinary_retracts[1])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(0.8, 0.001));
+
+    const auto has_unretract = [&moves](size_t filament, double expected) {
+        return std::any_of(moves.unretracts[filament].begin(), moves.unretracts[filament].end(),
+            [expected](double amount) { return std::abs(amount - expected) < 0.001; });
+    };
+    CHECK(has_unretract(0, 0.8));                 // retract_restart_extra = 0
+    CHECK(has_unretract(1, 0.8 + 0.2));           // retract_restart_extra = 0.2
+
+    // The first filament uses the zero toolchange-length slot; the second uses
+    // the positive slot. Check the emitted retracts independently of recovery.
+    CHECK(moves.toolchange_retracts[0].empty());
+    REQUIRE_FALSE(moves.toolchange_retracts[1].empty());
+    for (const double length : moves.toolchange_retract_totals[1])
+        CHECK_THAT(length, Catch::Matchers::WithinAbs(2.4, 0.001));
+}
+
+TEST_CASE("Nullable filament flush values resolve through child presets during G-code export",
+          "[GCode][GCodeExportWorkflows][SettingsVariance][FilamentFlushNilResolution]")
+{
+    using namespace x2d_filament_flush_contracts;
+    const std::string shipped_template = read_shipped_x2d_change_template();
+    struct ResolvedValues {
+        int flush_temp = 0;
+        double flush_speed = 0.0;
+        double cooling = 0.0;
+    };
+
+    const auto resolve_material = [](int parent_temp, double parent_speed, double parent_cooling,
+                                     int child_temp, double child_speed, double child_cooling) {
+        // Model one filament preset at a time: TYPE_FILAMENT has one selected variant
+        // column per child, so identical variant names from two materials must not share
+        // one two-row merge index.
+        DynamicPrintConfig parent = DynamicPrintConfig::full_print_config();
+        parent.set_key_value("filament_extruder_variant", new ConfigOptionStrings({"Direct Drive Standard"}));
+        parent.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({parent_temp}));
+        parent.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({parent_speed}));
+        parent.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({parent_cooling}));
+
+        DynamicPrintConfig child = parent;
+        child.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({child_temp}));
+        child.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({child_speed}));
+        child.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({child_cooling}));
+
+        std::string extruder_id_name;
+        std::string extruder_variant_name;
+        std::set<std::string> *key_set1 = nullptr;
+        std::set<std::string> *key_set2 = nullptr;
+        Preset::get_extruder_names_and_keysets(Preset::TYPE_FILAMENT, extruder_id_name, extruder_variant_name,
+                                               &key_set1, &key_set2);
+        REQUIRE(key_set1 != nullptr);
+        REQUIRE(key_set2 != nullptr);
+        parent.update_diff_values_to_child_config(child, extruder_id_name, extruder_variant_name,
+                                                  *key_set1, *key_set2);
+
+        const auto *flush_temp = parent.option<ConfigOptionIntsNullable>("filament_flush_temp");
+        const auto *flush_speed = parent.option<ConfigOptionFloatsNullable>("filament_flush_volumetric_speed");
+        const auto *cooling = parent.option<ConfigOptionFloatsNullable>("filament_cooling_before_tower");
+        REQUIRE(flush_temp != nullptr);
+        REQUIRE(flush_speed != nullptr);
+        REQUIRE(cooling != nullptr);
+        INFO("one-variant resolved values: temp=" << flush_temp->serialize()
+             << " speed=" << flush_speed->serialize()
+             << " cooling=" << cooling->serialize());
+        REQUIRE(flush_temp->values.size() == 1);
+        REQUIRE(flush_speed->values.size() == 1);
+        REQUIRE(cooling->values.size() == 1);
+        REQUIRE_FALSE(flush_temp->is_nil(0));
+        REQUIRE_FALSE(flush_speed->is_nil(0));
+        REQUIRE_FALSE(cooling->is_nil(0));
+        REQUIRE(std::isfinite(flush_speed->values.at(0)));
+        REQUIRE(std::isfinite(cooling->values.at(0)));
+        return ResolvedValues{flush_temp->values.at(0), flush_speed->values.at(0), cooling->values.at(0)};
+    };
+
+    const auto export_resolved_child = [&shipped_template, &resolve_material](bool mixed_child) {
+        const int nil_temp = ConfigOptionIntsNullable::nil_value();
+        const double nil_float = ConfigOptionFloatsNullable::nil_value();
+        const ResolvedValues material0 = resolve_material(
+            230, 12.0, 10.0,
+            nil_temp, mixed_child ? 16.0 : nil_float, nil_float);
+        const ResolvedValues material1 = resolve_material(
+            240, 18.0, 15.0,
+            mixed_child ? 1500 : nil_temp, nil_float, mixed_child ? 25.0 : nil_float);
+
+        // Feed the two separately resolved filament presets into the real two-filament
+        // Print/template fixture. The fast-temperature option remains the finite fixture
+        // value installed by x2d_flush_config and is not part of this nullable merge.
+        DynamicPrintConfig config = x2d_flush_config(pvmDefault, {1500, 0}, shipped_template, true);
+        config.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({
+            material0.flush_temp, material1.flush_temp
+        }));
+        config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({
+            material0.flush_speed, material1.flush_speed
+        }));
+        config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({
+            material0.cooling, material1.cooling
+        }));
+
+        const auto *filament_map = config.option<ConfigOptionInts>("filament_map");
+        REQUIRE(filament_map != nullptr);
+        REQUIRE((filament_map->values == std::vector<int>{2, 1}));
+        const std::string output = export_x2d_tower_rows(config);
+        return std::make_pair(config, output);
+    };
+
+    auto all_nil = export_resolved_child(false);
+    auto mixed_nil_explicit = export_resolved_child(true);
+    const std::array<double, 2> speeds_all_nil{{12.0, 18.0}};
+    const std::array<double, 2> temps_all_nil{{230.0, 240.0}};
+    const std::array<double, 2> cooling_all_nil{{10.0, 15.0}};
+    const std::array<double, 2> speeds_mixed{{16.0, 18.0}};
+    const std::array<double, 2> temps_mixed{{230.0, 1500.0}};
+    const std::array<double, 2> cooling_mixed{{10.0, 25.0}};
+    const std::array<double, 2> initial_temps{{200.0, 205.0}};
+    const std::array<double, 2> nozzle_temps{{215.0, 220.0}};
+    const std::array<double, 2> interface_temps{{212.0, 223.0}};
+    const std::array<double, 2> physical_retract{{0.0, 12.5}};
+
+    const ObjectDeposition reference = inspect_object_deposition(all_nil.second, all_nil.first);
+    REQUIRE(reference.moves > 0);
+    const std::vector<ChangeRow> all_nil_rows = inspect_change_rows(all_nil.second, all_nil.first);
+    REQUIRE(all_nil_rows.size() >= 2);
+    check_flush_rows(all_nil_rows, temps_all_nil, speeds_all_nil, initial_temps, nozzle_temps,
+                     cooling_all_nil, physical_retract, interface_temps, true, true);
+
+    const std::vector<ChangeRow> mixed_rows = inspect_change_rows(mixed_nil_explicit.second,
+                                                                   mixed_nil_explicit.first);
+    REQUIRE(mixed_rows.size() == all_nil_rows.size());
+    check_flush_rows(mixed_rows, temps_mixed, speeds_mixed, initial_temps, nozzle_temps,
+                     cooling_mixed, physical_retract, interface_temps, true, true);
+    check_same_object_deposition(reference,
+        inspect_object_deposition(mixed_nil_explicit.second, mixed_nil_explicit.first));
+}
+
 } // namespace gcode_travel_point_reachable_contracts
 
 namespace transform_gcode_contracts {
@@ -5960,7 +6946,8 @@ OuterWallFeeds parse_later_outer_wall_feeds(const std::string &text, const Dynam
     return result;
 }
 
-void check_resonance_row(double requested, double expected, bool enabled)
+void check_resonance_row(double requested, double expected, bool enabled,
+                         double minimum = 30.0, double maximum = 60.0)
 {
     DynamicPrintConfig config = gcode_broad_contracts::base_config();
     config.set_deserialize_strict({
@@ -5989,8 +6976,8 @@ void check_resonance_row(double requested, double expected, bool enabled)
         {"filament_max_volumetric_speed", "1000"},
         {"filament_adaptive_volumetric_speed", false},
         {"resonance_avoidance", enabled},
-        {"min_resonance_avoidance_speed", 30.0},
-        {"max_resonance_avoidance_speed", 60.0},
+        {"min_resonance_avoidance_speed", minimum},
+        {"max_resonance_avoidance_speed", maximum},
     });
 
     const std::string output = export_resonance_cube(config);
@@ -6034,6 +7021,22 @@ TEST_CASE("Resonance avoidance is a public feature gate for outer-wall speed",
           "[GCode][ResonanceAvoidanceGCode]")
 {
     check_resonance_row(40., 40., false);
+}
+
+TEST_CASE("Resonance avoidance honors its configured minimum and maximum speeds",
+          "[GCode][ResonanceAvoidanceGCode][SettingsVariance]")
+{
+    // GCode.cpp uses min + (max - min) / 2 as a strict split: a slower
+    // source speed is clamped down to min, otherwise it is raised to max.
+    // A source speed above max bypasses the adjustment entirely.
+    const auto [requested, minimum, maximum, expected] = GENERATE(table<double, double, double, double>({
+        {35.,  0., 60., 60.}, // min endpoint: midpoint 30, so 35 selects max.
+        {35., 15., 60., 15.}, // midpoint 37.5, so 35 selects min.
+        {50.,  0.,  0., 50.}, // max endpoint: 50 is above max and passes through.
+        {50.,  0., 80., 80.}, // midpoint 40, so 50 selects max.
+    }));
+    CAPTURE(requested, minimum, maximum, expected);
+    check_resonance_row(requested, expected, true, minimum, maximum);
 }
 
 } // namespace gcode_resonance_contracts
