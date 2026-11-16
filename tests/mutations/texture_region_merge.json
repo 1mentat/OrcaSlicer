@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Public merge_small_color_regions contract: strict area threshold, shared-boundary-length winner, and unpainted boundary blocking.",
+  "test_filter": "TextureColorRegions",
+  "mutants": [
+    {
+      "id": "texture-color-region-equal-area-merges",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "        if (area[size_t(id)] < min_area_mm2)",
+      "new": "        if (area[size_t(id)] <= min_area_mm2)",
+      "test_filter": "TextureColorRegions",
+      "description": "Treat an equal-area component as small; the threshold-6 control must remain unchanged under the strict source contract."
+    },
+    {
+      "id": "texture-color-region-shared-boundary-not-accumulated",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "                else\n                    it->second += len;",
+      "new": "                else\n                    it->second = len;",
+      "test_filter": "TextureColorRegions",
+      "description": "Forget repeated boundary lengths for one neighboring color; the central component must choose color 2 from lengths 3+4 over color 1 length 5."
+    },
+    {
+      "id": "texture-color-region-unpainted-boundary-counted",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "                if (c < 0 || c == own)\n                    continue;",
+      "new": "                if (c == own)\n                    continue;",
+      "test_filter": "TextureColorRegions",
+      "description": "Allow the -1 unpainted sentinel to vote; all-unpainted neighbors must leave the central color unchanged."
+    },
+    {
+      "id": "texture-color-region-weakest-boundary-wins",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "                                            [](const std::pair<int, float> &l, const std::pair<int, float> &r) {\n                                                return l.second < r.second;\n                                            })->first;",
+      "new": "                                            [](const std::pair<int, float> &l, const std::pair<int, float> &r) {\n                                                return l.second > r.second;\n                                            })->first;",
+      "test_filter": "TextureColorRegions",
+      "description": "Select the smallest shared boundary instead of the strongest; the 3+4 versus 5 geometry must reject that result."
+    }
+  ]
+}

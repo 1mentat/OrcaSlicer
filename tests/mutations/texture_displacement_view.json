@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Projective texture placement, excluded UV windows, and mirrored-repeat displacement contracts.",
+  "mutants": [
+    {
+      "id": "texture-displacement-projector-behind-guard",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "if (!(w > 1e-6f))\n        return false;",
+      "new": "if (!(std::abs(w) > 1e-6f))\n        return false;",
+      "description": "Accept a point behind the projective camera by testing the magnitude of homogeneous w instead of its sign; the public projection guard must reject it.",
+      "test_filter": "TextureDisplacementView"
+    },
+    {
+      "id": "texture-displacement-projector-reapplies-layer-transform",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "return texture.sample(uv, layer.tile_enabled, layer.tile_method);",
+      "new": "return sample_at(Vec2f(position.dot(layer.view_project_right), position.dot(layer.view_project_up)));",
+      "description": "Apply the ordinary scale/rotation/offset transform to a projective UV even though the projector matrix already produces normalized coordinates.",
+      "test_filter": "TextureDisplacementView"
+    },
+    {
+      "id": "texture-displacement-mirrored-repeat-disabled",
+      "path": "src/libslic3r/TextureDisplacement.cpp",
+      "old": "tile_method == TextureTileMethod::MirroredRepeat",
+      "new": "tile_method == TextureTileMethod::Repeat",
+      "description": "Drop mirrored-repeat reflection so the second texture tile samples the ordinary wrapped image instead of the reflected image.",
+      "test_filter": "TextureDisplacementView"
+    }
+  ]
+}
