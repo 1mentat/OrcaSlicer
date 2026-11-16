@@ -192,8 +192,9 @@ jobs:
 
       - name: Upload the override report
         if: always()
-        uses: ./.github/actions/validation-upload
+        uses: ./slicer/.github/actions/validation-upload
         with:
+          source-sha: ${{ needs.build.outputs.head_sha }}
           name: override-report-shard${{ matrix.shard }}
           path: |
             orca-test-repo/.pytest_cache/override_report.json
@@ -255,8 +256,9 @@ jobs:
 
       - name: Upload the scorecard and evidence
         if: always()
-        uses: ./.github/actions/validation-upload
+        uses: ./slicer/.github/actions/validation-upload
         with:
+          source-sha: ${{ needs.build.outputs.head_sha }}
           name: parity-scorecard
           path: parity-out/
           if-no-files-found: warn
