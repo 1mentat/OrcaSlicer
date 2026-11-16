@@ -140,24 +140,27 @@ tree.
 and runs it as Catch2 batches, so one executable start covers many cases. CTest remains
 the source of the selection. This is an opt-in speed path for the `gcov` backend only;
 it supports only CTest registrations that invoke one Catch executable with exactly one
-test name, and fails closed (`incomplete_preflight`) otherwise. The option is rejected
-without `--backend gcov`. `--gcov-catch-batch-timeout SECONDS` bounds the whole batch
-(default: `--timeout`). `--gcov-catch-batch-fff-shards 2` splits the single-CPU
-`fff_print_tests` cohort into two concurrent shards and requires `--gcov-tool`. The
-`--gcov-data-dir` must not already exist, so name a fresh child of the payload:
+test name; any other registration fails while the selection is discovered, before any
+test runs. The option is rejected without `--backend gcov`.
+`--gcov-catch-batch-timeout SECONDS` bounds each Catch process (one per executable and
+working directory, or per FFF shard; default: `--timeout`). `--gcov-catch-batch-fff-shards 2` splits the single-CPU
+`fff_print_tests` cohort into two concurrent shards and needs a matching
+`gcov-tool`, found beside `--gcov` or on `PATH`, or given with `--gcov-tool` (which the
+parser accepts only with two shards). The profile directory must not already exist; the
+default, `OUT/gcov-data`, is inside the payload because the runner injects `--out`:
 
 ```sh
 python scripts/validation_runner.py ...runner options as above... -- \
   python scripts/slicer_coverage.py run --backend gcov --gcov-catch-batch \
-  --root /absolute/source/checkout --gcov-data-dir /absolute/payload/gcov-data \
+  --root /absolute/source/checkout --object build/tests/libslic3r/libslic3r_tests \
   --test-command 'ctest --test-dir build/tests -C Release -LE "NotWorking|RequiresApp" --no-tests=error' ...
 ```
 
 ### PR-validation evidence gates
 
-`slicer_pr_validation.py` applies a test-only harness overlay to each PR head and to its
+`slicer_pr_validation.py` applies, by default, a test-only harness overlay to each PR head and to its
 base. All of these options keep their meaning under the runner; its `--output-dir`,
-`--work-root`, `--build-dir` and worktree-reuse rules above still apply.
+`--build-dir` and worktree-reuse rules above still apply.
 
 - **Tracked-diff binding.** The tracked state of a worktree is hashed from
   `git diff --binary --full-index`, and overlay patches are generated the same way, so
@@ -168,14 +171,15 @@ base. All of these options keep their meaning under the runner; its `--output-di
   matches.
 - **`--overlay-resolution-manifest FILE`.** The overlay is applied with
   `git apply --3way --index`; a conflict is never auto-resolved. The manifest (JSON,
-  `schema_version` 1) supplies a resolution for exactly one base, head and overlay
-  patch SHA-256 row. Each conflicting path pins `stage_blobs` for index stages `"1"`
+  `schema_version` 1) holds a non-empty `resolutions` list; each row is keyed by an exact
+  base commit, head commit and overlay patch SHA-256. Each conflicting path pins `stage_blobs` for index stages `"1"`
   (merge base), `"2"` (ours) and `"3"` (theirs) as full blob IDs, plus a
   `resolved_path` payload with its `resolved_sha256` and `resolved_blob_sha1`. For an
   add/add conflict there is no merge base, so stage `"1"` is `null`; stages 2 and 3
   must still match. The conflict paths and stages seen in the index must equal the
   manifest exactly, the resolved bytes must hash to the pinned blob, and no unmerged
-  path may remain; otherwise the run reports `overlay_resolution_invalid`.
+  path may remain; otherwise the run reports `overlay_resolution_invalid`. A base, head
+and patch with no row reports `overlay_resolution_missing`.
 - **`--minimum-tests N`** (default 1, must be positive). A run is comparable evidence
   only when its JUnit testcase count is at least `N`; otherwise a passing or failing
   result becomes `test_evidence_incomplete`. Infrastructure failures are not masked.
