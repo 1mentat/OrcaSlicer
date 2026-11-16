@@ -660,10 +660,11 @@ class ProvenanceTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             manifest.parent.mkdir(parents=True)
             binary.write_bytes(b"test-binary")
-            manifest.write_text("src/libslic3r/Print.cpp\n", encoding="utf-8")
-            cache.write_text("CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
+            # Binary writes keep the hashed bytes identical on every platform.
+            manifest.write_bytes(b"src/libslic3r/Print.cpp\n")
+            cache.write_bytes(b"CMAKE_BUILD_TYPE:STRING=Release\n")
             compile_commands = cache.parent / "compile_commands.json"
-            compile_commands.write_text("[]\n", encoding="utf-8")
+            compile_commands.write_bytes(b"[]\n")
 
             provenance = slicer_coverage._coverage_provenance(
                 root, [binary], [manifest], cache.parent
