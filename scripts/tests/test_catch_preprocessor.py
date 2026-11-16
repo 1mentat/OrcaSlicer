@@ -120,7 +120,9 @@ class CatchPreprocessorTests(unittest.TestCase):
             for item in payload["listings"]["tests"]:
                 test = by_name[item["name"]]
                 command = test["command"]
-                self.assertEqual(command[:2], [sys.executable, str(listing_exe)])
+                # CMake may report these paths with forward slashes on Windows.
+                self.assertEqual([Path(command[0]), Path(command[1])],
+                                 [Path(sys.executable), listing_exe])
                 self.assertEqual(command[2], expected_selectors[item["name"]])
                 self.assertTrue(command[3].startswith("--out "))
                 output_path = Path(command[3][len("--out "):])
