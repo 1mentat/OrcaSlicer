@@ -45,6 +45,31 @@ TEST_CASE("Bridge direction follows the long unsupported edge", "[BridgeDetector
     CHECK_THAT(unscale_(unsupported_length), Catch::Matchers::WithinAbs(5., 1e-6));
 }
 
+namespace {
+
+void check_fully_anchored_bridge_contracts()
+{
+    const Polygons region{
+        Polygon::new_scale({{0., 0.}, {30., 0.}, {30., 10.}, {0., 10.}}),
+    };
+
+    const auto [direction, unsupported_length] = detect_bridging_direction(Lines{}, region);
+
+    CHECK(direction.array().isFinite().all());
+    CHECK_THAT(direction.norm(), Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK_THAT(direction.norm(), Catch::Matchers::WithinAbs(1., 1e-6));
+    // With no floating edge the minor principal axis is used, which is the 10 mm side.
+    CHECK(std::abs(direction.y()) > 0.99);
+    CHECK_THAT(unsupported_length, Catch::Matchers::WithinAbs(0., 1e-9));
+}
+
+} // namespace
+
+TEST_CASE("Fully anchored bridge direction remains finite", "[BridgeDetector]")
+{
+    check_fully_anchored_bridge_contracts();
+}
+
 TEST_CASE("Fully anchored bridge spans the short side of the region", "[BridgeDetector]")
 {
     const Polygons region{
