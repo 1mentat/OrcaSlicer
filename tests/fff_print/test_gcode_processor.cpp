@@ -2144,6 +2144,9 @@ TEST_CASE("M109 R updates a selected extruder and S updates the active one", "[G
     FullPrintConfig config;
     config.filament_diameter.values = {1.75, 1.75};
     config.filament_map.values = {1, 2};
+    // The tool change away from physical extruder 1 reads nozzle_volume[1].
+    config.nozzle_diameter.values = {0.4, 0.4};
+    config.nozzle_volume.values = {0., 0.};
     const auto result = process_buffer(
         "M83\nT0\nM109 R190 T1\nT1\nG1 X10 Y0 Z0.2 E1 F600\n"
         "T0\nM109 S210\nG1 X20 Y0 E1 F600\n", config);
@@ -3054,6 +3057,9 @@ TEST_CASE("The processor maps multi-extruder area, height and material restricti
     config.gcode_flavor.value = gcfMarlinFirmware;
     config.filament_diameter.values = {1.75, 1.75};
     config.filament_map.values = {2, 1};
+    // The tool change away from physical extruder 1 reads nozzle_volume[1].
+    config.nozzle_diameter.values = {0.4, 0.4};
+    config.nozzle_volume.values = {0., 0.};
 
     const std::string gcode =
         "G21\nG90\nM83\nT0\n"
