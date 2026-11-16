@@ -1410,6 +1410,63 @@ TEST_CASE("Sketch editor projects cursor onto positive wrapped and negative circ
     CHECK_THAT((clockwise_snap.point - clockwise_projection).norm(), WithinAbs(0.0, 1e-9));
 }
 
+TEST_CASE("Sketch editor snaps point, ellipse and spline endpoints with documented priority", "[SketchEdit]")
+{
+    using K = InferenceSnap::Kind;
+
+    SketchEntity point;
+    point.type = SketchEntity::Type::Point;
+    point.p0 = Vec2d(2.0, 4.0);
+    const auto point_snap = infer_point_snap({point}, Vec2d(2.1, 4.1), 0.25, false);
+    REQUIRE(point_snap.kind == K::Endpoint);
+    CHECK(point_snap.entity == 0);
+    CHECK(point_snap.role == SketchPointRole::P0);
+    CHECK_THAT((point_snap.point - point.p0).norm(), WithinAbs(0.0, 1e-9));
+
+    const SketchEntity ellipse_arc = sketch_array_chamfer_contracts::ellipse_arc_entity(
+        Vec2d(20.0, 20.0), 5.0, 2.0, 0.2, 0.1, 0.9);
+    const auto ellipse_arc_snap = infer_point_snap(
+        {ellipse_arc}, ellipse_arc.p1 + Vec2d(0.1, 0.0), 0.25, false);
+    REQUIRE(ellipse_arc_snap.kind == K::Endpoint);
+    CHECK(ellipse_arc_snap.entity == 0);
+    CHECK(ellipse_arc_snap.role == SketchPointRole::P1);
+    CHECK_THAT((ellipse_arc_snap.point - ellipse_arc.p1).norm(), WithinAbs(0.0, 1e-9));
+
+    SketchEntity ellipse;
+    ellipse.type = SketchEntity::Type::Ellipse;
+    ellipse.center = Vec2d(30.0, 10.0);
+    const auto ellipse_snap = infer_point_snap({ellipse}, ellipse.center + Vec2d(0.1, 0.0), 0.25, false);
+    REQUIRE(ellipse_snap.kind == K::Center);
+    CHECK(ellipse_snap.entity == 0);
+    CHECK(ellipse_snap.role == SketchPointRole::Center);
+    CHECK_THAT((ellipse_snap.point - ellipse.center).norm(), WithinAbs(0.0, 1e-9));
+
+    SketchEntity spline;
+    spline.type = SketchEntity::Type::BSpline;
+    spline.ctrl = {Vec2d(40.0, 0.0), Vec2d(42.0, 3.0), Vec2d(45.0, 0.0)};
+    spline.p0 = spline.ctrl.front();
+    spline.p1 = spline.ctrl.back();
+    const auto spline_snap = infer_point_snap({spline}, spline.p1 + Vec2d(-0.1, 0.0), 0.25, false);
+    REQUIRE(spline_snap.kind == K::Endpoint);
+    CHECK(spline_snap.entity == 0);
+    CHECK(spline_snap.role == SketchPointRole::P1);
+    CHECK_THAT((spline_snap.point - spline.p1).norm(), WithinAbs(0.0, 1e-9));
+
+    // Priority outranks distance: the ellipse center is farther from the query than the
+    // circle-rim projection, but Center is preferred to OnEdge.
+    SketchEntity circle;
+    circle.type = SketchEntity::Type::Circle;
+    circle.center = Vec2d(0.0, 0.0);
+    circle.p0 = circle.center;
+    circle.radius = 5.0;
+    ellipse.center = Vec2d(5.15, 0.0);
+    const auto priority_snap = infer_point_snap({circle, ellipse}, Vec2d(5.05, 0.0), 0.2, false);
+    REQUIRE(priority_snap.kind == K::Center);
+    CHECK(priority_snap.entity == 1);
+    CHECK(priority_snap.role == SketchPointRole::Center);
+    CHECK_THAT((priority_snap.point - ellipse.center).norm(), WithinAbs(0.0, 1e-9));
+}
+
 TEST_CASE("Sketch editor infers tangency only at a joined arc endpoint", "[SketchEdit]")
 {
     SketchEntity arc;
