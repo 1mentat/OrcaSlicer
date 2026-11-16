@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "Bed dispatch, geometric placement, axis alignment and spacing contracts for arrangement.",
+  "mutants": [
+    {
+      "id": "arrange-points-infinite-dispatch",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "if (bed.empty())\n        return fn(InfiniteBed{});",
+      "new": "if (!bed.empty())\n        return fn(InfiniteBed{});",
+      "description": "Empty bed input must remain the explicit unbounded arrangement case.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-points-circle-dispatch",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "else if (!std::isnan(circ.radius()))\n            return fn(circ);",
+      "new": "else if (std::isnan(circ.radius()))\n            return fn(circ);",
+      "description": "A regular point bed must use circular containment rather than the invalid-radius path.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-invalid-contour-dispatch",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "if (p.size() < 3)\n        return;",
+      "new": "if (p.size() >= 3)\n        return;",
+      "description": "Contours with fewer than three points are omitted while valid contours remain arrangeable.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-rotation-gate",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "if (params.allow_rotations) {",
+      "new": "if (!params.allow_rotations) {",
+      "description": "A rectangle that only fits after a quarter turn is rejected with rotation disabled and placed with rotation enabled.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-axis-align-gate",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "if (!params.align_to_y_axis)\n        return;",
+      "new": "if (params.align_to_y_axis)\n        return;",
+      "description": "The explicit axis-alignment request must reach the asymmetric-contour moment calculation.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-axis-ratio-selection",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "if (ratio>0.66) {",
+      "new": "if (ratio<0.66) {",
+      "description": "Symmetric squares stay unchanged while an asymmetric rectangle receives the dominant-axis correction.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-tree-support-brim",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "plate_has_tree_support ? scaled(brim_max / 2) : scaled(ap.brim_width);",
+      "new": "plate_has_tree_support ? scaled(ap.brim_width / 2) : scaled(brim_max);",
+      "description": "A tree-support plate uses its maximum branch brim for every selected item.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-min-distance-inflation",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "params.min_obj_distance != 0 ? params.min_obj_distance / 2 :",
+      "new": "params.min_obj_distance == 0 ? params.min_obj_distance / 2 :",
+      "description": "An explicit minimum object distance must override per-item brim inflation.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-virtual-calibration-gap",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "(ap.is_extrusion_cali_object ? 0 : scale_(exclusion_gap))",
+      "new": "(ap.is_extrusion_cali_object ? scale_(exclusion_gap) : 0)",
+      "description": "Virtual extrusion calibration regions retain zero exclusion inflation.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-shrink-x-direction",
+      "path": "src/libslic3r/Arrange.cpp",
+      "old": "pt[direction] += dist * SGN(center[direction] - pt[direction]);",
+      "new": "pt[direction] -= dist * SGN(center[direction] - pt[direction]);",
+      "description": "Bed shrink must move both edges toward the bed center.",
+      "test_filter": "ArrangeSurface"
+    },
+    {
+      "id": "arrange-skirt-height-distance",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "return dist + loops * width;",
+      "new": "return dist - loops * width;",
+      "description": "The real skirt distance contributes a positive loop-width clearance.",
+      "test_filter": "ArrangeSurface"
+    }
+  ]
+}

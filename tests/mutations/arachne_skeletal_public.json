@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "arachne-filter-outer-central-noop",
+      "path": "src/libslic3r/Arachne/SkeletalTrapezoidation.cpp",
+      "old": "    if (filter_outermost_central_edges)\n        filterOuterCentral();",
+      "new": "    if (false)\n        filterOuterCentral();",
+      "expected_matches": 1,
+      "test_filter": "^SkeletalPublicAPI$",
+      "description": "Disabling the public option must fail the acute-wedge oracle that outer-central filtering reduces open odd paths at sharp corners."
+    }
+  ]
+}
