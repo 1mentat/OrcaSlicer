@@ -151,7 +151,7 @@ void check_coordinates(const std::string &data, const std::vector<double> &expec
 
 } // namespace
 
-TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG]")
+TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const ExPolygons shapes{square_with_hole()};
@@ -172,7 +172,7 @@ TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG
     check_x_range(attr(paths[2], "d"), 60., 120.);
 }
 
-TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG]")
+TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const ExPolygons shapes{square(0., 0., 10., 8.)};
@@ -205,14 +205,14 @@ TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG]")
     CHECK(text(texts.front()) == "fixture legend");
 }
 
-TEST_CASE("SVG skips an empty attribute export without creating a file", "[SVG]")
+TEST_CASE("SVG skips an empty attribute export without creating a file", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     SVG::export_expolygons(output.string(), std::vector<std::pair<ExPolygons, SVG::ExPolygonAttributes>>{});
     CHECK_FALSE(boost::filesystem::exists(output.path()));
 }
 
-TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG]")
+TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const BoundingBox box(Point(0, 0), Point(scaled(10.), scaled(10.)));
@@ -478,7 +478,7 @@ TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[
     CHECK_THAT(centers[3].second - centers[0].second, WithinAbs(-13., 1e-4));
 }
 
-TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG]")
+TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG][SVGStrokeWidth]")
 {
     ScopedTemporaryFile output(".svg");
     const Polygon polygon({Point(scaled(1.), scaled(1.)), Point(scaled(5.), scaled(1.)),
