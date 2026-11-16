@@ -220,7 +220,7 @@ std::vector<std::array<float, 4>> layer_bounds(const indexed_triangle_set &mesh)
 
 } // namespace
 
-TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1]")
+TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1][SLASVGFormatExtended]")
 {
     SLAPrinterConfig cfg = raster_config();
     SL1Archive archive(cfg);
@@ -248,7 +248,7 @@ TEST_CASE("SL1 archive rasterizes and exports named layers", "[SL1]")
     CHECK(layer1->second > 0);
 }
 
-TEST_CASE("SL1 archive configuration changes invalidate encoded layers", "[SL1]")
+TEST_CASE("SL1 archive configuration changes invalidate encoded layers", "[SL1][SLASVGFormatExtended]")
 {
     SLAPrinterConfig cfg = raster_config();
     SL1Archive archive(cfg);
@@ -266,7 +266,7 @@ TEST_CASE("SL1 archive configuration changes invalidate encoded layers", "[SL1]"
     CHECK(std::count_if(entries.begin(), entries.end(), [](const auto &e) { return e.first == "config.ini"; }) == 1);
 }
 
-TEST_CASE("SL1 import reads profile and builds a mesh from raster layers", "[SL1]")
+TEST_CASE("SL1 import reads profile and builds a mesh from raster layers", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster first = make_layer_png(true);
     const sla::EncodedRaster second = make_layer_png(true);
@@ -284,7 +284,7 @@ TEST_CASE("SL1 import reads profile and builds a mesh from raster layers", "[SL1
     CHECK_THAT(profile.option<ConfigOptionFloat>("layer_height")->value, WithinAbs(.1, 1e-6));
 }
 
-TEST_CASE("SL1 import clamps a zero marching-squares window", "[SL1]")
+TEST_CASE("SL1 import clamps a zero marching-squares window", "[SL1][SLASVGFormatExtended]")
 {
     // Diagonal edges make the contour depend on the window size; an axis-aligned square does not.
     ExPolygon diamond;
@@ -304,7 +304,7 @@ TEST_CASE("SL1 import clamps a zero marching-squares window", "[SL1]")
     CHECK(canonical_geometry(zero_mesh) == canonical_geometry(unit_mesh));
 }
 
-TEST_CASE("SL1 import honors progress cancellation without overwriting output", "[SL1]")
+TEST_CASE("SL1 import honors progress cancellation without overwriting output", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster layer = make_layer_png(true);
     ScopedTemporaryFile archive(".sl1");
@@ -325,7 +325,7 @@ TEST_CASE("SL1 import honors progress cancellation without overwriting output", 
     CHECK(canonical_geometry(mesh) == original_geometry);
 }
 
-TEST_CASE("SL1 import recovers layer height when profile is absent", "[SL1]")
+TEST_CASE("SL1 import recovers layer height when profile is absent", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster first = make_layer_png(true);
     const sla::EncodedRaster second = make_layer_png(true);
@@ -348,7 +348,7 @@ TEST_CASE("SL1 import recovers layer height when profile is absent", "[SL1]")
     CHECK_THAT(max_z, WithinAbs(.2f, .05f));
 }
 
-TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails", "[SL1]")
+TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster small = make_layer_png(false);
     const sla::EncodedRaster large = make_layer_png(true);
@@ -384,7 +384,7 @@ TEST_CASE("SL1 import sorts case-insensitive image names and excludes thumbnails
     CHECK(first_height < last_height);
 }
 
-TEST_CASE("SL1 import returns an empty mesh for undecodable raster data", "[SL1]")
+TEST_CASE("SL1 import returns an empty mesh for undecodable raster data", "[SL1][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile archive(".sl1");
     write_archive(archive.string(), config_ini(), profile_ini(),
@@ -396,7 +396,7 @@ TEST_CASE("SL1 import returns an empty mesh for undecodable raster data", "[SL1]
     CHECK(mesh.empty());
 }
 
-TEST_CASE("SL1 import rejects a profile without raster dimensions", "[SL1]")
+TEST_CASE("SL1 import rejects a profile without raster dimensions", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster layer = make_layer_png(true);
     ScopedTemporaryFile archive(".sl1");
@@ -408,7 +408,7 @@ TEST_CASE("SL1 import rejects a profile without raster dimensions", "[SL1]")
     CHECK_THROWS_AS(import_sla_archive(archive.string(), {1, 1}, mesh, profile), MissingProfileError);
 }
 
-TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1]")
+TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1][SLASVGFormatExtended]")
 {
     const sla::EncodedRaster layer = make_layer_png(true);
     ScopedTemporaryFile malformed_ini(".sl1");
@@ -425,7 +425,7 @@ TEST_CASE("SL1 import rejects malformed INI and corrupt zip inputs", "[SL1]")
     CHECK_THROWS(import_sla_archive(corrupt_zip.string(), profile));
 }
 
-TEST_CASE("SL1 import applies portrait and mirror raster transforms", "[SL1]")
+TEST_CASE("SL1 import applies portrait and mirror raster transforms", "[SL1][SLASVGFormatExtended]")
 {
     // The large fixture square is centred on the 32x24 px raster, so mirroring it is a no-op.
     // Use an off-centre, non-square shape so mirror and portrait transforms are observable.
