@@ -759,7 +759,7 @@ TEST_CASE("Recursive directory copies exclude selected filenames and distinguish
     CHECK(file_contents(dst / "ignore.png") == "image");
 }
 
-TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils]") {
+TEST_CASE("Recursive directory copying throws when a directory occupies a file's destination", "[utils][UtilsIOContracts]") {
     ScopedTemporaryDir d;
     const auto src = d.path() / "src", dst = d.path() / "dst";
     boost::filesystem::create_directories(src);
@@ -834,7 +834,7 @@ TEST_CASE("File classification checks case-insensitive extensions and regular-fi
     CHECK_FALSE(is_img_file("image.svg.json"));
 }
 
-TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils]") {
+TEST_CASE("Configured resource directories resolve against the roots they were given", "[utils][UtilsIOContracts]") {
     namespace fs = boost::filesystem;
     ScopedTemporaryDir d;
     ScopeGuard restore([var = var_dir(), resources = resources_dir(), temp = temporary_dir(), local = localization_dir(),
@@ -881,7 +881,7 @@ TEST_CASE("Configured resource directories resolve against the roots they were g
     CHECK_FALSE(is_shapes_dir((root / "data" / "nested").string()));
 }
 
-TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils]") {
+TEST_CASE("Perl-compatible path helpers split a path into parent, file name, stem and final extension", "[utils][UtilsIOContracts]") {
     const auto p = boost::filesystem::path("models") / "nested" / "part.v2.3mf";
     const auto s = p.string();
     CHECK(PerlUtils::path_to_filename(s.c_str()) == "part.v2.3mf");
@@ -890,7 +890,7 @@ TEST_CASE("Perl-compatible path helpers split a path into parent, file name, ste
     CHECK(PerlUtils::path_to_parent_path(s.c_str()) == (boost::filesystem::path("models") / "nested").string());
 }
 
-TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils]") {
+TEST_CASE("Removing an installed vendor removes its profile, cache and presets but no other vendor's", "[utils][VendorInstall]") {
     namespace fs = boost::filesystem;
     ScopedTemporaryDir temporary;
     ScopeGuard restore_data_dir([old = data_dir()] { set_data_dir(old); });
