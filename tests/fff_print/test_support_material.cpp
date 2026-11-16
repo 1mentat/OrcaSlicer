@@ -2488,6 +2488,39 @@ TEST_CASE("Independent support layer height preserves a non-grid top Z gap",
 
 } // namespace independent_support_layer_height_contracts
 
+namespace support_settings_variance_contracts {
+namespace {
+
+SupportStats slice_first_layer_gap_ramp(const double first_layer_gap)
+{
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"support_type",                    "normal(auto)"},
+        {"support_on_build_plate_only",     true},
+        {"support_threshold_angle",         90},
+        {"support_interface_top_layers",    0},
+        {"support_interface_bottom_layers", 0},
+        {"support_object_xy_distance",      0.35},
+        {"support_object_first_layer_gap",  first_layer_gap},
+        {"raft_first_layer_expansion",      20.0},
+        {"layer_height",                    0.2},
+        {"initial_layer_print_height",      0.2},
+        {"raft_layers",                     0},
+        {"support_expansion",               0.0},
+        {"support_remove_small_overhang",  false},
+        {"enforce_support_layers",          0},
+        {"brim_type",                       "no_brim"},
+        {"brim_width",                      0.0}
+    });
+    // The ramp has an 8 mm first-layer foot beside a 24 mm unsupported run. A 20 mm
+    // first-layer support expansion grows its bed-contact footprint across that foot;
+    // the setting under test clips only this first-layer support against the object outline.
+    return inspect_support(slice_checked(support_boundary_ramp(), config));
+}
+
+} // namespace
+} // namespace support_settings_variance_contracts
+
 TEST_CASE("Support first-layer gap trims the first support layer only",
           "[SupportSettingsVariance][SupportMaterial][SupportObjectFirstLayerGap]")
 {
