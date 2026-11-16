@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "The registered zero cooling minimum permits finite slowdown below 1 mm/s without changing deposition.",
+  "mutants": [
+    {
+      "id": "cooling-zero-minimum-clamped-to-one",
+      "path": "src/libslic3r/GCode/CoolingBuffer.cpp",
+      "old": "        adj.slow_down_min_speed           = float(m_config.slow_down_min_speed.get_at(extruder_id));",
+      "new": "        adj.slow_down_min_speed           = std::max(1.f, float(m_config.slow_down_min_speed.get_at(extruder_id)));",
+      "test_filter": "Layer cooling settings slow extrusion without changing deposited geometry",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Clamp the legal zero minimum to 1 mm/s; the physical zero-boundary feed must then fail while existing 1/5 mm/s controls remain valid."
+    }
+  ]
+}

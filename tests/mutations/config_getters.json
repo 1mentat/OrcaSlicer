@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "CPP-only ConfigBase semantic probes for indexed relative values and the coPercent ratio downcast regression.",
+  "mutants": [
+    {
+      "id": "config-indexed-relative-getter-uses-matching-ratio-slot",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "return static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index).get_abs_value(ratio_values->get_at(index));",
+      "new": "return static_cast<const ConfigOptionFloatsOrPercents *>(raw_opt)->get_at(index).get_abs_value(ratio_values->get_at(0));",
+      "expected_matches": 1,
+      "test_filter": "ConfigBase indexed getters use the matching travel speed slot",
+      "description": "Use the matching travel-speed ratio slot for indexed percentages; slot zero gives the wrong second-slot result."
+    },
+    {
+      "id": "config-co-percent-ratio-uses-invalid-float-or-percent-downcast",
+      "path": "src/libslic3r/Config.cpp",
+      "old": "cast_opt->get_abs_value(this->get_abs_value(opt_def->ratio_over));",
+      "new": "static_cast<const ConfigOptionFloatOrPercent*>(raw_opt)->get_abs_value(this->get_abs_value(opt_def->ratio_over));",
+      "expected_matches": 1,
+      "test_filter": "ConfigBase resolves a registered coPercent ratio against layer height",
+      "description": "Restore the measured invalid downcast from coPercent to ConfigOptionFloatOrPercent. The two generated ironing-flow settings must each fail the ordinary expected-value assertion (50 instead of 0.1 for a 50% ratio over layer height 0.2)."
+    }
+  ]
+}
