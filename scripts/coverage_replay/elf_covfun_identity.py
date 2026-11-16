@@ -84,7 +84,9 @@ def read_bounded(path: Path, limit: int, label: str) -> bytes:
         fail(f"{label} is not a regular non-symlink file: {path}")
     if before.st_size < 0 or before.st_size > limit:
         fail(f"{label} exceeds bounded size {limit}: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY exists only on Windows; without it the CRT descriptor is text
+    # mode, drops "\r" and stops at 0x1A, which breaks the size check below.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
