@@ -925,16 +925,39 @@ int generate_layer_height_texture(
     palette_raw.push_back(Vec3crd(0x0F4, 0x06D, 0x043));
     palette_raw.push_back(Vec3crd(0x0D7, 0x030, 0x027));
 
+    // A caller supplies the GUI's positive dimensions and scalar layer domain. Reject
+    // malformed values before pointer arithmetic, products, or integer casts.
+    const coordf_t object_height = slicing_params.object_print_z_height();
+    const coordf_t min_layer_height = slicing_params.min_layer_height;
+    if (data == nullptr || rows <= 0 || cols <= 0 || rows > std::numeric_limits<int>::max() / cols ||
+        !std::isfinite(object_height) || object_height <= 0 ||
+        !std::isfinite(min_layer_height) || min_layer_height <= 0 || layers.size() % 2 != 0)
+        return 0;
     // Clear the main texture and the 2nd LOD level.
 //	memset(data, 0, rows * cols * (level_of_detail_2nd_level ? 5 : 4));
-    // 2nd LOD level data start
-    unsigned char *data1 = reinterpret_cast<unsigned char*>(data) + rows * cols * 4;
-    int ncells  = std::min((cols-1) * rows, int(ceil(16. * (slicing_params.object_print_z_height() / slicing_params.min_layer_height))));
-    int ncells1 = ncells / 2;
-    int cols1   = cols / 2;
-    coordf_t z_to_cell = coordf_t(ncells-1) / slicing_params.object_print_z_height();
-    coordf_t cell_to_z = slicing_params.object_print_z_height() / coordf_t(ncells-1);
-    coordf_t z_to_cell1 = coordf_t(ncells1-1) / slicing_params.object_print_z_height();
+    // 2nd LOD level data start. Cast before multiplication so a valid product
+    // cannot overflow the intermediate int expression.
+    unsigned char *data1 = reinterpret_cast<unsigned char*>(data) +
+        static_cast<std::size_t>(rows) * cols * 4;
+    const int cols1 = cols / 2;
+    const int rows1 = rows / 2;
+    const int base_capacity = std::max(0, (cols - 1) * rows);
+    // The shader's packed mip level has two base cells for every mip cell.
+    // Bound the base sequence by the half-resolution mip row domain.
+    const int lod_capacity = std::max(0, (cols1 - 1) * rows1);
+    const int capacity = level_of_detail_2nd_level ? std::min(base_capacity, 2 * lod_capacity) : base_capacity;
+    const coordf_t requested_cells_real = 16. * (object_height / min_layer_height);
+    const int requested_cells = !std::isfinite(requested_cells_real) ||
+        requested_cells_real >= std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() :
+        int(ceil(requested_cells_real));
+    const int minimum_cells = level_of_detail_2nd_level ? 4 : 2;
+    const int ncells = capacity > 0 ? std::min(capacity, std::max(minimum_cells, requested_cells)) : 0;
+    const int ncells1 = level_of_detail_2nd_level ? ncells / 2 : 0;
+    if (ncells < minimum_cells || (level_of_detail_2nd_level && ncells1 < 2) || object_height <= 0)
+        return 0;
+    coordf_t z_to_cell = coordf_t(ncells-1) / object_height;
+    coordf_t cell_to_z = object_height / coordf_t(ncells-1);
+    coordf_t z_to_cell1 = coordf_t(ncells1-1) / object_height;
     // for color scaling
 	coordf_t hscale = 2.f * std::max(slicing_params.max_layer_height - slicing_params.layer_height, slicing_params.layer_height - slicing_params.min_layer_height);
 	if (hscale == 0)
@@ -969,7 +992,7 @@ int generate_layer_height_texture(
             int col = cell - row * (cols - 1);
 			assert(row >= 0 && row < rows);
 			assert(col >= 0 && col < cols);
-            unsigned char *ptr = (unsigned char*)data + (row * cols + col) * 4;
+            unsigned char *ptr = (unsigned char*)data + (static_cast<std::size_t>(row) * cols + col) * 4;
             ptr[0] = (unsigned char)std::clamp(int(floor(color(0) + 0.5)), 0, 255);
             ptr[1] = (unsigned char)std::clamp(int(floor(color(1) + 0.5)), 0, 255);
             ptr[2] = (unsigned char)std::clamp(int(floor(color(2) + 0.5)), 0, 255);
@@ -999,9 +1022,9 @@ int generate_layer_height_texture(
                     lerp(coordf_t(color1(2)), coordf_t(color2(2)), t));
                 int row = cell / (cols1 - 1);
                 int col = cell - row * (cols1 - 1);
-    			assert(row >= 0 && row < rows/2);
-    			assert(col >= 0 && col < cols/2);
-                unsigned char *ptr = data1 + (row * cols1 + col) * 4;
+                assert(row >= 0 && row < rows1);
+                assert(col >= 0 && col < cols1);
+                unsigned char *ptr = data1 + (static_cast<std::size_t>(row) * cols1 + col) * 4;
                 ptr[0] = (unsigned char)std::clamp(int(floor(color(0) + 0.5)), 0, 255);
                 ptr[1] = (unsigned char)std::clamp(int(floor(color(1) + 0.5)), 0, 255);
                 ptr[2] = (unsigned char)std::clamp(int(floor(color(2) + 0.5)), 0, 255);

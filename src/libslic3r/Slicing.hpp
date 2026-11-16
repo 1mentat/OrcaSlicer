@@ -210,7 +210,10 @@ bool check_object_layers_fixed(
 
 // Produce a 1D texture packed into a 2D texture describing in the RGBA format
 // the planned object layers.
-// Returns number of cells used by the texture of the 0th LOD level.
+// data holds rows * cols RGBA pixels, followed by (rows / 2) * (cols / 2)
+// RGBA pixels when the second LOD is enabled. Layers are valid lo/hi Z pairs.
+// Returns the number of base-level cells, or zero for an invalid scalar domain
+// or dimensions too small for interpolation.
 int generate_layer_height_texture(
     const SlicingParameters     &slicing_params,
     const std::vector<coordf_t> &layers,
