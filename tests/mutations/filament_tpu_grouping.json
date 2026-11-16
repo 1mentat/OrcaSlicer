@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Direct public TPU grouping applies nozzle preferences and physical restrictions while preserving unused assignments.",
+  "mutants": [
+    {
+      "id": "filament-tpu-nozzle-preference-discount-removed",
+      "old": "                    print_time_matrix[i][j] *= 0.9;",
+      "new": "                    print_time_matrix[i][j] *= 1.0;",
+      "description": "The 105-second TPU nozzle must beat the 100-second standard nozzle after its preference discount; removing the discount reverses the expected used-filament assignment.",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "test_filter": "^FilamentTPUGrouping$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1
+    },
+    {
+      "id": "filament-tpu-restrictions-discarded",
+      "old": "        MatchModeGroupSolver s(print_time_matrix, l_nodes, r_nodes, machine_filament_capacity, unlink_limits);",
+      "new": "        MatchModeGroupSolver s(print_time_matrix, l_nodes, r_nodes, machine_filament_capacity, {});",
+      "description": "Discarding the restrictions selects both forbidden unconstrained minima, failing exact assignment assertions for physical-extruder and nozzle-volume restrictions.",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "test_filter": "^FilamentTPUGrouping$",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1
+    }
+  ]
+}

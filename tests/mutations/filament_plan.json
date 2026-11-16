@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "description": "Filament planning consumes physical nozzle indices while preserving legacy solver value results.",
+  "mutants": [
+    {
+      "id": "solver-returns-values-not-indices",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "matching[e.from] = e.to - static_cast<int>(l_nodes.size());",
+      "new": "matching[e.from] = r_nodes[e.to - static_cast<int>(l_nodes.size())];",
+      "description": "Makes the new index API return legacy right-node values.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "legacy-solve-exposes-indices",
+      "path": "src/libslic3r/GCode/ToolOrderUtils.cpp",
+      "old": "index = r_nodes[index];",
+      "new": "index = index + 0;",
+      "description": "Changes the legacy solve() result from right-node values to positions.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "candidate-uses-value-solve",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "s.solve_indices();",
+      "new": "s.solve();",
+      "description": "Passes legacy right-node values into the candidate's position-based consumer.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "candidate-rejects-index-zero",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "if (match_index >= 0 && match_index < static_cast<int>(remaining_r_nodes.size())) {",
+      "new": "if (match_index > 0 && match_index < static_cast<int>(remaining_r_nodes.size())) {",
+      "description": "Drops the first remaining physical nozzle from valid matches.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "filtered-group-vector-regression",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "GroupMinCostFlowSolver s(flush_matrix, l_nodes, remaining_r_nodes, remaining_r_nodes_group);",
+      "new": "GroupMinCostFlowSolver s(flush_matrix, l_nodes, remaining_r_nodes, r_nodes_group);",
+      "description": "Uses unfiltered group IDs after consumed nozzles shift right-node positions.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "state-records-wrong-filament",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "r_nodes[noz_id]                     = filament_id;",
+      "new": "r_nodes[noz_id]                     = filament_id + 1;",
+      "description": "Carries a different filament ID into the next layer state.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "output-records-nozzle-zero",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "layer_fil_nozzle_match[filament_id] = noz_id;",
+      "new": "layer_fil_nozzle_match[filament_id] = 0;",
+      "description": "Loses the selected physical nozzle in the public result.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "origin-map-always-zero",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "remaining_r_nodes_to_origin[match_index]",
+      "new": "remaining_r_nodes_to_origin[0]",
+      "description": "Maps every selected right-node position to the first physical nozzle.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "reopen-first-nozzle-only",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "for (int r_id = 0; r_id < r_nodes.size(); ++r_id) {",
+      "new": "for (int r_id = 0; r_id < 1; ++r_id) {",
+      "description": "Drops valid physical nozzles when all current nozzles are retained.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "queue-records-nozzle-id",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "nozzle_fil_deq[noz_id].push_back(filament_id);",
+      "new": "nozzle_fil_deq[noz_id].push_back(noz_id);",
+      "description": "Publishes a physical nozzle ID as a filament in the output order.",
+      "test_filter": "FilamentPlanContracts"
+    },
+    {
+      "id": "zero-nozzle-silent-success",
+      "path": "src/libslic3r/FilamentGroup.cpp",
+      "old": "throw std::invalid_argument(\"cannot plan requested filaments without physical nozzles\");",
+      "new": "return {};",
+      "description": "Requested filaments without physical nozzles must raise a defined input error.",
+      "test_filter": "FilamentPlanContracts"
+    }
+  ]
+}

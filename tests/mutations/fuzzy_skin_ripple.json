@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "description": "Ripple geometry metamorphic contracts and exhaustive fuzzy-skin selection gates.",
+  "mutants": [
+    {
+      "id": "phase_factor_half",
+      "old": "const double raw_shift       = period_index * (cfg.ripple_offset/100) * (2.0 * M_PI);",
+      "new": "const double raw_shift       = period_index * (cfg.ripple_offset/100) * M_PI;",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "The configured percentage is a fraction of a full 2\u03c0 wave; quarter-offset and phase-group contracts should reject a half phase factor.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "polyline_amplitude_zero",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = 0.;",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Ripple displacement must respond to configured thickness.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "arachne_amplitude_zero",
+      "old": "static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);",
+      "new": "static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = 0.;",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Arachne ripple displacement must preserve the configured amplitude.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "polyline_step_disabled",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = unscale_(cfg.point_distance);\n\n    if (N <= 0.0 || fill_step_mm < 1e-6)",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = unscale_(cfg.point_distance);\n\n    if (N <= 0.0 || fill_step_mm <= 1e6)",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Nonpositive and subresolution sample distances are documented no-op guards; valid distances must still sample.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "polyline_perimeter_degenerate_guard",
+      "old": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = unscale_(cfg.point_distance);\n\n    if (N <= 0.0 || fill_step_mm < 1e-6)\n        return;\n\n    // Compute total perimeter length in mm.\n    const size_t np           = poly.size();\n    double       perimeter_mm = 0.0;\n    for (size_t i = 0; i < np; ++i)\n        perimeter_mm += unscale_((poly[(i + 1) % np] - poly[i]).cast<double>().norm());\n\n    if (perimeter_mm < 1e-6)\n        return;\n\n    const double anchor_arc_mm   = ripple_anchor_arc_mm(poly);",
+      "new": "static void fuzzy_polyline_ripple(Points& poly, const FuzzySkinConfig& cfg)\n{\n    const double amplitude    = unscale_(cfg.thickness);\n    const double N            = static_cast<double>(cfg.ripples_per_layer);\n    const double fill_step_mm = unscale_(cfg.point_distance);\n\n    if (N <= 0.0 || fill_step_mm < 1e-6)\n        return;\n\n    // Compute total perimeter length in mm.\n    const size_t np           = poly.size();\n    double       perimeter_mm = 0.0;\n    for (size_t i = 0; i < np; ++i)\n        perimeter_mm += unscale_((poly[(i + 1) % np] - poly[i]).cast<double>().norm());\n\n    if (perimeter_mm > 1e-6)\n        return;\n\n    const double anchor_arc_mm   = ripple_anchor_arc_mm(poly);",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Collapsed contours must remain unchanged while positive perimeters are ripple-sampled.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "polyline_sampling_perimeter",
+      "old": "    for (size_t i = 0; i < np; ++i)\n        perimeter_mm += unscale_((poly[(i + 1) % np] - poly[i]).cast<double>().norm());",
+      "new": "    for (size_t i = 0; i + 1 < np; ++i)\n        perimeter_mm += unscale_((poly[(i + 1) % np] - poly[i]).cast<double>().norm());",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "A closed ripple contour includes the closing edge in its period and sample count.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "arachne_width_source",
+      "old": "out.emplace_back(pt + (seg_perp * scale_(disp)).cast<coord_t>(), j1.w, j1.perimeter_index);",
+      "new": "out.emplace_back(pt + (seg_perp * scale_(disp)).cast<coord_t>(), j0.w, j1.perimeter_index);",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Each resampled point inherits the destination junction width.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "arachne_metadata_source",
+      "old": "out.emplace_back(pt + (seg_perp * scale_(disp)).cast<coord_t>(), j1.w, j1.perimeter_index);",
+      "new": "out.emplace_back(pt + (seg_perp * scale_(disp)).cast<coord_t>(), j1.w, j0.perimeter_index);",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Each resampled point inherits the destination perimeter metadata.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "disable_fuzzy_types",
+      "old": "    if (fuzziy_type == FuzzySkinType::None|| fuzziy_type == FuzzySkinType::Disabled_fuzzy) {",
+      "new": "    if (false) {",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "None and Disabled_fuzzy are explicit off switches across contour and hole combinations.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "first_layer_gate",
+      "old": "    if (!config.fuzzy_first_layer && layer_id <= 0) {",
+      "new": "    if (!config.fuzzy_first_layer && layer_id < 0) {",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "The first-layer gate includes layer zero unless explicitly enabled.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "contour_outer_loop_gate",
+      "old": "    const bool fuzzify_contours = (loop_idx == 0 && fuzziy_type != FuzzySkinType::Hole) || fuzziy_type == FuzzySkinType::AllWalls;",
+      "new": "    const bool fuzzify_contours = (loop_idx != 0 && fuzziy_type != FuzzySkinType::Hole) || fuzziy_type == FuzzySkinType::AllWalls;",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "External/All contour fuzzification is restricted to the outer loop while AllWalls covers inner loops.",
+      "test_filter": "FuzzyRipple"
+    },
+    {
+      "id": "hole_outer_loop_gate",
+      "old": "                                  && (loop_idx == 0 || fuzziy_type == FuzzySkinType::AllWalls);",
+      "new": "                                  && (loop_idx != 0 || fuzziy_type == FuzzySkinType::AllWalls);",
+      "path": "src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp",
+      "description": "Hole/All fuzzification is restricted to the outer hole loop while AllWalls covers inner loops.",
+      "test_filter": "FuzzyRipple"
+    }
+  ]
+}

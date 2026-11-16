@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "description": "Firmware dialect changes preserve deposited paths while emitting the configured acceleration and pressure advance commands.",
+  "test_filter": "GCode firmware flavor changes command dialect without changing deposited path",
+  "mutants": [
+    {
+      "id": "firmware-marlin2-acceleration-dialect-dropped",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "} else if (FLAVOR_IS(gcfRepRapFirmware) || FLAVOR_IS(gcfMarlinFirmware)) {",
+      "new": "} else if (FLAVOR_IS(gcfRepRapFirmware)) {",
+      "test_filter": "GCode firmware flavor changes command dialect without changing deposited path",
+      "expected_matches": 1,
+      "description": "Marlin 2 uses M204 P for acceleration; dropping its branch emits the Marlin M204 S dialect."
+    },
+    {
+      "id": "firmware-klipper-pressure-advance-dialect-replaced",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "gcode << \"SET_PRESSURE_ADVANCE ADVANCE=\" << std::setprecision(4) << pa << \"; Override pressure advance value\\n\";",
+      "new": "gcode << \"M900 K\" << std::setprecision(4) << pa << \"; Override pressure advance value\\n\";",
+      "test_filter": "GCode firmware flavor changes command dialect without changing deposited path",
+      "expected_matches": 1,
+      "description": "Klipper pressure advance uses SET_PRESSURE_ADVANCE rather than M900."
+    },
+    {
+      "id": "firmware-reprap-pressure-advance-dialect-replaced",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "gcode << (\"M572 D0 S\") << std::setprecision(4) << pa << \"; Override pressure advance value\\n\";",
+      "new": "gcode << \"M900 K\" << std::setprecision(4) << pa << \"; Override pressure advance value\\n\";",
+      "test_filter": "GCode firmware flavor changes command dialect without changing deposited path",
+      "expected_matches": 1,
+      "description": "RepRapFirmware pressure advance uses M572 rather than M900."
+    }
+  ]
+}
