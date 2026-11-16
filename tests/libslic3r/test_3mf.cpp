@@ -7486,15 +7486,14 @@ TEST_CASE("BBS text metadata defaults missing or empty alignment to center", "[3
     CHECK(align.second == FontProp::VerticalAlign::center);
 }
 
-// Known bug: the importer's bimap_cvt() asserts that the name is known before it applies its own
-// documented fallback (src/libslic3r/Format/bbs_3mf.cpp, `assert(found_item != map.end())`), so in
-// a build without NDEBUG this input aborts instead of falling back to center; hidden so Debug runs
-// do not crash. In Release the fallback to center/center holds.
-TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[.][3MF][Bbs3mfTextAlignment][Bbs3mfTextAlignmentUnknown]")
+TEST_CASE("BBS text metadata defaults unknown alignment names to center", "[3MF][Bbs3mfTextAlignment]")
 {
     ScopedTemporaryFile archive(".3mf");
     store_right_bottom_text(archive.string());
-    set_alignment(archive.string(), "horizontal=\"diagonal\"", "vertical=\"upright\"");
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "horizontal=\"right\"", "horizontal=\"diagonal\""));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "model_settings.config",
+                                 "vertical=\"bottom\"", "vertical=\"upright\""));
     const auto align = load_alignment(archive.string());
     CHECK(align.first == FontProp::HorizontalAlign::center);
     CHECK(align.second == FontProp::VerticalAlign::center);
