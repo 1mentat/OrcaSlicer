@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Fixed ironing direction with an empty rotation template and per-layer emitted orientation witnesses.",
+  "mutants": [
+    {
+      "id": "ironing-angle-fixed-zeroing-removed",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;",
+      "new": "double ironing_angle = top_layer_base_angle + config.ironing_angle * M_PI / 180.;",
+      "test_filter": "IroningAngleFixed",
+      "description": "Fixed=true must discard inherited solid direction; otherwise fixed principal layers stay at the relative 135 degree orientation instead of 90 degrees."
+    },
+    {
+      "id": "ironing-angle-fixed-alternation-ignored",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "ironing_params.fixed_angle = config.ironing_angle_fixed || top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();",
+      "new": "ironing_params.fixed_angle = top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();",
+      "test_filter": "IroningAngleFixed",
+      "description": "Fixed=true must suppress FillBase layer alternation even with an explicitly empty rotation template; every fixed layer direction is checked."
+    }
+  ]
+}
