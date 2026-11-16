@@ -431,7 +431,7 @@ jobs:
       run: |
         set -euo pipefail
         echo "FLATPAK_SYSTEM_DIR=$FLATPAK_SYSTEM_DIR"
-        flatpak --installations | head -3
+        flatpak --installations
         case "$(flatpak info --system --show-location org.gnome.Sdk/x86_64/50)" in "$FLATPAK_SYSTEM_DIR"/*) echo "selected installation confirmed" ;; *) echo "later steps do not see the private installation" >&2; exit 1 ;; esac
     - uses: flatpak/flatpak-github-actions/flatpak-builder@master
       with:
@@ -452,8 +452,7 @@ jobs:
         set +e
         root="$RUNNER_TEMP/flatpak-system-installation"
         if [ "$RUNNER_TEMP" = "/__w/_temp" ] && [ -d "$root" ] && [ ! -L "$root" ] && [ -e "$root/.owner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]; then
-          rm -rf --one-file-system -- "$root"
-          echo "removed $root"
+          if rm -rf --one-file-system -- "$root"; then echo "removed $root"; else echo "::warning::failed to remove $root"; fi
         else
           echo "nothing owned by this run to remove"
         fi
