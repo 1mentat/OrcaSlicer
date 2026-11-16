@@ -578,6 +578,158 @@ TEST_CASE("OBJ material lookup records an unknown material without dropping geom
     CHECK(info.face_colors.empty());
 }
 
+
+TEST_CASE("OBJ parsing keeps geometry after malformed records", "[OBJParser]")
+{
+    const ObjParser::ObjData data = parse_obj_stream(
+        "vt0 0\n"
+        "vn0 0 1\n"
+        "vp0 0\n"
+        "v0 0 0\n"
+        "usetml invalid material command\n"
+        "o broken object name\n"
+        "s1\n"
+        "z extension record\n"
+        "v 0 0 0\n"
+        "v 1 0 0\n"
+        "v 0 1 0\n"
+        "f 1 2 3\n");
+
+    REQUIRE(data.coordinates.size() == 21);
+    REQUIRE(data.vertices.size() == 4);
+    CHECK(data.vertices[0].coordIdx == 0);
+    CHECK(data.vertices[1].coordIdx == 1);
+    CHECK(data.vertices[2].coordIdx == 2);
+}
+
+TEST_CASE("OBJ MTL parser preserves ordered materials and texture options", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl,
+        "# material comment\n"
+        "newmtl coat\n"
+        "Ns 12.5\nNi 1.45\nd 0.8\nTr 0.2\nillum 2\n"
+        "Ka 0.1 0.2 0.3\nKd 0.4 0.5 0.6\nKs 0.7 0.8 0.9\nKe 0.05 0.06 0.07\nTf 0.2 0.3 0.4\n"
+        "map_Kd -o 0.1 0.2 0.3 -s 1 2 3 -bm 0.7 coat.png\n"
+        "newmtl plain\nKd 0.9 0.8 0.7\n");
+
+    ObjParser::MtlData data;
+    REQUIRE(ObjParser::mtlparse(mtl.string().c_str(), data));
+    REQUIRE(data.mtl_orders.size() == 2);
+    CHECK(data.mtl_orders[0] == "coat");
+    CHECK(data.mtl_orders[1] == "plain");
+    REQUIRE(data.new_mtl_unmap.count("coat") == 1);
+    REQUIRE(data.new_mtl_unmap.at("coat") != nullptr);
+    const auto &coat = *data.new_mtl_unmap.at("coat");
+    CHECK_THAT(coat.Ns, WithinAbs(12.5, 1e-5));
+    CHECK_THAT(coat.Ni, WithinAbs(1.45, 1e-5));
+    CHECK_THAT(coat.d, WithinAbs(.8, 1e-5));
+    CHECK_THAT(coat.Tr, WithinAbs(.2, 1e-5));
+    CHECK_THAT(coat.illum, WithinAbs(2., 1e-5));
+    CHECK_THAT(coat.Ka[1], WithinAbs(.2, 1e-5));
+    CHECK_THAT(coat.Kd[2], WithinAbs(.6, 1e-5));
+    CHECK_THAT(coat.Ks[0], WithinAbs(.7, 1e-5));
+    CHECK_THAT(coat.Ke[2], WithinAbs(.07, 1e-5));
+    CHECK_THAT(coat.Tf[0], WithinAbs(.2, 1e-5));
+    CHECK(coat.map_Kd == "coat.png");
+}
+
+TEST_CASE("MTL texture names omit supported map options", "[OBJParser]")
+{
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl,
+        "newmtl coat\n"
+        "nawmaterial ignored\n"
+        "ilum 2\n"
+        "map_Kd -o 0.1 0.2 -s 1 2 3 -t 0.5 -mm 0 1 -bm 0.7 -boost 1 -texres 512 "
+        "-clamp on -blendu off -blendv on -cc on -imfchan r -type sphere coat.png  \n");
+
+    ObjParser::MtlData data;
+    REQUIRE(ObjParser::mtlparse(mtl.string().c_str(), data));
+    REQUIRE(data.new_mtl_unmap.count("coat") == 1);
+    CHECK(data.new_mtl_unmap.at("coat")->map_Kd == "coat.png");
+}
+
+TEST_CASE("OBJ and MTL parsers reject oversized records", "[OBJParser]")
+{
+    const std::string oversized_record(65537, 'x');
+
+    ScopedTemporaryFile obj(".obj");
+    write_text(obj, oversized_record);
+    ObjParser::ObjData obj_data;
+    CHECK_FALSE(ObjParser::objparse(obj.string().c_str(), obj_data));
+
+    ScopedTemporaryFile mtl(".mtl");
+    write_text(mtl, oversized_record);
+    ObjParser::MtlData mtl_data;
+    CHECK_FALSE(ObjParser::mtlparse(mtl.string().c_str(), mtl_data));
+}
+
+TEST_CASE("OBJ textured import maps a shared texture once for multiple materials", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    ScopedTemporaryFile texture(".png");
+    write_text(texture, "shared texture bytes");
+    write_text(mtl,
+        "newmtl first\nKd 1 0 0\nmap_Kd " + texture.path().filename().string() + "\n"
+        "newmtl second\nKd 0 0 1\nmap_Kd " + texture.path().filename().string() + "\n");
+    write_text(obj,
+        "mtllib " + mtl.path().filename().string() + "\n"
+        "usemtl first\n"
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 1/1 2/2 3/3\n"
+        "usemtl second\n"
+        "v 2 0 0\nv 3 0 0\nv 2 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 4/4 5/5 6/6\n");
+
+    TriangleMesh mesh;
+    ObjInfo info;
+    ObjParser::MtlData mtl_data;
+    std::string message;
+    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
+
+    TexturedMesh textured;
+    REQUIRE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
+    REQUIRE(textured.textures.size() == 1);
+    REQUIRE(textured.material_texture_map.size() == 2);
+    CHECK(textured.material_texture_map[0] == 0);
+    CHECK(textured.material_texture_map[1] == 0);
+    REQUIRE(textured.material_ids.size() == 2);
+    CHECK(textured.material_ids[0] != textured.material_ids[1]);
+}
+
+TEST_CASE("OBJ textured import keeps geometry when its only texture is missing", "[OBJParser][OBJ]")
+{
+    ScopedTemporaryFile obj(".obj");
+    ScopedTemporaryFile mtl(".mtl");
+    const std::string missing_texture = obj.path().filename().string() + ".missing.png";
+    write_text(mtl,
+        "newmtl painted\nKd 0.2 0.4 0.6\nmap_Kd " + missing_texture + "\n");
+    write_text(obj,
+        "mtllib " + mtl.path().filename().string() + "\n"
+        "usemtl painted\n"
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 0 1\n"
+        "f 1/1 2/2 3/3\n");
+
+    TriangleMesh mesh;
+    ObjInfo info;
+    ObjParser::MtlData mtl_data;
+    std::string message;
+    REQUIRE(load_obj(obj.string().c_str(), &mesh, info, message, &mtl_data));
+
+    TexturedMesh textured;
+    CHECK_FALSE(obj_to_textured_mesh(info, mesh.its, mtl_data, obj.path().parent_path().string(), textured));
+    CHECK(textured.vertices.size() == 3);
+    CHECK(textured.indices.size() == 1);
+    CHECK(textured.textures.empty());
+    REQUIRE(textured.material_texture_map.size() == 1);
+    CHECK(textured.material_texture_map[0] == -1);
+}
+
 } // namespace obj_parser_contracts
 
 namespace obj_binary_contracts {
@@ -880,6 +1032,65 @@ TEST_CASE("OBJ binary cache rejects short and unsupported headers (original M034
     append_raw(bytes, version);
     write_bytes(unsupported, bytes);
     CHECK_FALSE(ObjParser::objbinload(unsupported.string().c_str(), loaded));
+}
+
+
+TEST_CASE("OBJ binary cache rejects a truncated numeric vector", "[OBJBinary][OBJParser]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t coordinate_count = 1;
+    append_raw(bytes, version);
+    append_raw(bytes, coordinate_count);
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a truncated named record", "[OBJBinary][OBJParser]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    const int vertex_index = 3;
+    const size_t name_length = 8;
+    append_raw(bytes, version);
+    // coordinates, texture coordinates, normals, parameters, and mtllibs
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    append_raw(bytes, zero);
+    // one material name-index record with a name length but no payload
+    append_raw(bytes, one);
+    append_raw(bytes, vertex_index);
+    append_raw(bytes, name_length);
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
+}
+
+TEST_CASE("OBJ binary cache rejects a truncated smoothing or face vector", "[OBJBinary][OBJParser]")
+{
+    ScopedTemporaryFile cache(".objbin");
+    std::vector<unsigned char> bytes;
+    const size_t version = 1;
+    const size_t zero = 0;
+    const size_t one = 1;
+    append_raw(bytes, version);
+    // first five variable-length vectors and the three name-index vectors
+    for (int i = 0; i < 8; ++i)
+        append_raw(bytes, zero);
+    append_raw(bytes, one); // smoothing group count, but no record bytes
+    write_bytes(cache, bytes);
+
+    ObjParser::ObjData loaded;
+    CHECK_FALSE(ObjParser::objbinload(cache.string().c_str(), loaded));
 }
 
 } // namespace obj_binary_contracts

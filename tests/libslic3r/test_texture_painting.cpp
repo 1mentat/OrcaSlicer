@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1042,6 +1043,20 @@ TEST_CASE("Texture atlas rejects empty or undecodable texture inputs", "[Texture
     TexturedMesh no_faces = two_material_faces();
     no_faces.indices.clear();
     CHECK_FALSE(texture_to_painting(no_faces, output, atlas_settings()));
+}
+
+TEST_CASE("Texture atlas rejects raw images whose dimensions exceed their pixel buffers", "[TexturePainting][TextureAtlas]")
+{
+    for (const int width : {2, std::numeric_limits<int>::max()}) {
+        TexturedMesh input = two_material_faces();
+        for (TextureImage &image : input.textures) {
+            image.width = width;
+            image.height = 2;
+            image.data.resize(3);
+        }
+        PaintedMesh output;
+        REQUIRE_FALSE(texture_to_painting(input, output, atlas_settings()));
+    }
 }
 
 TEST_CASE("Texture atlas forwards cancellation before expensive color conversion", "[TexturePainting][TextureAtlas]")

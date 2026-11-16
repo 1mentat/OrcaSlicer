@@ -272,6 +272,29 @@ TEST_CASE("Cooling orientation leaves overhang-free and rotationally symmetric s
     check_mesh_unchanged(cone.its, cooled_cone);
 }
 
+TEST_CASE("Cooling orientation leaves fanless and symmetric solids unchanged", "[Orient][FanDirection]")
+{
+    const TriangleMesh source = make_cube(10., 10., 10.);
+    TriangleMesh fanless = source;
+    orientation::orient_for_cooling(fanless, FanDirection::fdUndefine);
+    check_mesh_unchanged(source.its, fanless);
+
+    TriangleMesh right = source;
+    orientation::orient_for_cooling(right, FanDirection::fdRight);
+    check_mesh_unchanged(source.its, right);
+    check_finite_mesh(right);
+
+    TriangleMesh left = source;
+    orientation::orient_for_cooling(left, FanDirection::fdLeft);
+    check_mesh_unchanged(source.its, left);
+    check_finite_mesh(left);
+
+    TriangleMesh both = source;
+    orientation::orient_for_cooling(both, FanDirection::fdBoth);
+    check_mesh_unchanged(source.its, both);
+    check_finite_mesh(both);
+}
+
 TEST_CASE("Cooling orientation turns an asymmetric overhang toward the configured fan", "[Orient][FanDirection]")
 {
     TriangleMesh source = make_cube(40., 30., 2.);

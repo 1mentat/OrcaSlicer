@@ -1673,3 +1673,72 @@ TEST_CASE("Placeholder parser fills numeric percent vectors and preserves them o
     CHECK(parser.process("{percents = repeat(0,4)}", 0, nullptr, &outputs, nullptr).empty());
     check_values({});
 }
+
+TEST_CASE("Placeholder parser resolves dynamic legacy vector indices consistently",
+          "[PlaceholderParser][PlaceholderParserLegacyIndex]")
+{
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_temperature", "357,359" } });
+    PlaceholderParser parser;
+    REQUIRE(parser.apply_config(config));
+
+    parser.set("index", 1);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "359");
+    parser.set("index", 99);
+    CHECK(parser.process("[nozzle_temperature[index]]") == "357");
+    parser.set("index", "one");
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[index]]"),
+                      Catch::Matchers::ContainsSubstring("Indexing variable has to be integer"));
+    CHECK_THROWS_WITH(parser.process("[nozzle_temperature[missing_index]]"),
+                      Catch::Matchers::ContainsSubstring("Variable does not exist"));
+    parser.set("scalar", 1);
+    parser.set("index", 0);
+    CHECK_THROWS_WITH(parser.process("[scalar[index]]"),
+                      Catch::Matchers::ContainsSubstring("Trying to index a scalar variable"));
+}
+
+TEST_CASE("Placeholder parser preserves scalar assignments and rejects vector-shaped values",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("percent", new ConfigOptionPercent(10.));
+    outputs.set_key_value("flag", new ConfigOptionBool(false));
+    outputs.set_key_value("number", new ConfigOptionInt(7));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK(run("{percent = 25}{percent}") == "25");
+    CHECK_THROWS_WITH(run("{flag = 1}"),
+                      Catch::Matchers::ContainsSubstring("Right side is not a boolean expression"));
+    CHECK_THROWS_WITH(run("{number = (1,2)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(run("{number = repeat(2,1)}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a vector value to a scalar variable"));
+    CHECK_THROWS_WITH(parser.process("{local scalar = 1}{local vector = (1,2)}{local vector = scalar}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign scalar to a vector"));
+    CHECK_THROWS_WITH(parser.process("{local vector = (1,2)}{local vector = 1}"),
+                      Catch::Matchers::ContainsSubstring("Cannot assign a scalar value to a vector variable."));
+    CHECK(outputs.option<ConfigOptionBool>("flag")->value == false);
+    CHECK(outputs.option<ConfigOptionInt>("number")->value == 7);
+}
+
+TEST_CASE("Placeholder parser reports empty and size misuse without changing outputs",
+          "[PlaceholderParser][PlaceholderParserAssignmentGaps]")
+{
+    PlaceholderParser parser;
+    DynamicConfig outputs;
+    outputs.set_key_value("scalar", new ConfigOptionInt(4));
+    outputs.set_key_value("empty_values", new ConfigOptionInts({}));
+    auto run = [&parser, &outputs](const std::string &script) {
+        return parser.process(script, 0, nullptr, &outputs, nullptr);
+    };
+
+    CHECK_THROWS_WITH(run("{empty(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(scalar)}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{empty(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{size(empty_values[0])}"), Catch::Matchers::ContainsSubstring("not a vector variable"));
+    CHECK_THROWS_WITH(run("{is_nil(empty_values[0])}"), Catch::Matchers::ContainsSubstring("Indexing an empty vector variable"));
+    CHECK(outputs.option<ConfigOptionInt>("scalar")->value == 4);
+}

@@ -1415,6 +1415,21 @@ TEST_CASE("Transformation axis mirror setter treats zero as unmirrored and uses 
     check_linear_and_offset(transform.get_matrix(), Vec3d(2., 3., 4.).asDiagonal(), Vec3d::Zero());
 }
 
+TEST_CASE("Transformation axis mirror inputs normalize independently", "[Geometry][GeometryGap][MathGap]")
+{
+    Geometry::Transformation zero_x;
+    zero_x.set_mirror(X, 0.);
+    check_linear_and_offset(zero_x.get_matrix(), Matrix3d::Identity(), Vec3d::Zero());
+
+    Geometry::Transformation negative_y;
+    negative_y.set_mirror(Y, -2.);
+    check_linear_and_offset(negative_y.get_matrix(), Vec3d(1., -1., 1.).asDiagonal(), Vec3d::Zero());
+
+    Geometry::Transformation positive_z;
+    positive_z.set_mirror(Z, 0.5);
+    check_linear_and_offset(positive_z.get_matrix(), Matrix3d::Identity(), Vec3d::Zero());
+}
+
 TEST_CASE("Orthogonal transform axes remain free of skew after rotation and reflection",
           "[Geometry][Transformation][Skew]")
 {

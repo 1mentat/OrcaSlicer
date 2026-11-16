@@ -46,6 +46,14 @@ static cv::Mat decode_texture_image(const TextureImage& img) {
         return decoded;
     }
 
+    if (img.channels != 3 && img.channels != 4)
+        return {};
+
+    // Validate the raw buffer size before constructing an OpenCV view. Divide
+    // first to avoid overflowing the dimensions' product for malformed input.
+    if (static_cast<size_t>(img.width) > img.data.size() / img.channels / img.height)
+        return {};
+
     int cv_type = (img.channels == 4) ? CV_8UC4 : CV_8UC3;
     std::vector<unsigned char> pixel_buf(img.data.begin(), img.data.end());
     cv::Mat src(img.height, img.width, cv_type, pixel_buf.data());
