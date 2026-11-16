@@ -1883,6 +1883,64 @@ TEST_CASE("Transformation resets preserve offset and the selected geometric comp
     CHECK(cleared.get_matrix().isApprox(Transform3d::Identity(), 1e-12));
 }
 
+// Source assertion dispositions (source case of the same title):
+//  - quaternion readback of Euler (0.3,-0.2,0.4) within 1e-12: kept.
+//  - scaling-factor matrix equals diag(4,3,2) within 1e-12: kept.
+//  - mirror matrix equals diag(1,1,-1): adapted to the canonical-X diag(-1,1,1) (main 4c073e0809); the source's own
+//    note that the mirror axis is decomposition-dependent (see the signed-scale accessor case above) applies.
+//  - set_scaling_factor(Y, 5) on the quarter turn gives [0,-5,0;4,0,0;0,0,2] with offset: kept.
+//  - a hair below zero about Z is no rotation: kept.
+TEST_CASE("Transformation component access and axis setters preserve signed scale",
+          "[Geometry][Transformation][TransformContract]")
+{
+    const Vec3d euler(0.3, -0.2, 0.4);
+    Geometry::Transformation oriented(Geometry::rotation_transform(euler));
+    const Vec3d recovered = oriented.get_rotation_by_quaternion();
+    for (int axis = 0; axis < 3; ++axis)
+        CHECK_THAT(recovered[axis], Catch::Matchers::WithinAbs(euler[axis], 1e-12));
+
+    Geometry::Transformation signed_scale;
+    signed_scale.set_scaling_factor(Vec3d(4., 3., 2.));
+    signed_scale.set_mirror(Vec3d(1., 1., -1.));
+    Matrix3d expected_scale = Vec3d(4., 3., 2.).asDiagonal();
+    // Adapted (assertion adaptation, see below): the source expected the per-axis display convention
+    // diag(1,1,-1) here. Main (4c073e0809, Geometry.cpp canonical_rotation_scale/get_mirror_matrix) reads every
+    // full-rank left-handed matrix back with the reflection on X. Persisted M = diag(4,3,-2); M*diag(-1,1,1) =
+    // diag(-4,3,-2) has polar factor diag(-1,1,-1) (proper rotation) and stretch V*S*V^T = diag(4,3,2), so the
+    // readback is rotation diag(-1,1,-1), stretch diag(4,3,2), reflection diag(-1,1,1); the product is diag(4,3,-2).
+    Matrix3d expected_mirror = Vec3d(-1., 1., 1.).asDiagonal();
+    const Transform3d persisted = signed_scale.get_matrix();
+    const Matrix3d actual_scale = signed_scale.get_scaling_factor_matrix().linear();
+    const Matrix3d actual_mirror = signed_scale.get_mirror_matrix().linear();
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column) {
+            CHECK_THAT(actual_scale(row, column), Catch::Matchers::WithinAbs(expected_scale(row, column), 1e-12));
+            CHECK_THAT(actual_mirror(row, column), Catch::Matchers::WithinAbs(expected_mirror(row, column), 1e-12));
+        }
+
+    // Added witnesses for the adapted mirror expectation: the persisted matrix keeps the exact signed input
+    // (scale (4,3,2), mirror (1,1,-1)), the readback did not rewrite it, and rotation * stretch * reflection
+    // recomposes it (same oracle as the mirrored-accessor case below).
+    check_linear_and_offset(persisted, Vec3d(4., 3., -2.).asDiagonal(), Vec3d::Zero());
+    CHECK(signed_scale.get_matrix().matrix() == persisted.matrix());
+    const Matrix3d proper_rotation = signed_scale.get_rotation_matrix().linear();
+    CHECK_THAT(proper_rotation.determinant(), Catch::Matchers::WithinAbs(1., 1e-12));
+    CHECK((proper_rotation * actual_scale * actual_mirror).isApprox(persisted.linear(), 1e-12));
+
+    const Vec3d offset(5., -6., 7.);
+    Geometry::Transformation axis_scale(Geometry::assemble_transform(
+        offset, Vec3d(0., 0., PI / 2.), Vec3d(4., 3., 2.)));
+    axis_scale.set_scaling_factor(Y, 5.);
+    Matrix3d expected_axis_scale;
+    expected_axis_scale << 0., -5., 0., 4., 0., 0., 0., 0., 2.;
+    check_linear_and_offset(axis_scale.get_matrix(), expected_axis_scale, offset);
+
+    Geometry::Transformation no_full_turn;
+    no_full_turn.set_offset(offset);
+    no_full_turn.set_rotation(Z, -1e-10);
+    check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
+}
+
 TEST_CASE("Transforming a 3D line applies rotation and translation to both endpoints",
           "[Geometry][Line]")
 {
