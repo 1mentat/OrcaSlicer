@@ -42,6 +42,46 @@
       "payload_env": "VALIDATION_ARTIFACT_DIR"
     },
     {
+      "id": "coverage-validation",
+      "path": "scripts/slicer_coverage.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "coverage-pair-collector",
+      "path": "scripts/slicer_coverage_pair_collector.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "catch-batch",
+      "path": "scripts/slicer_catch_batch.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
+      "id": "coverage-reconcile",
+      "path": "scripts/slicer_coverage_reconcile.py",
+      "kind": "cli",
+      "lifecycle": "validation-runner",
+      "output_options": [
+        "--out"
+      ],
+      "payload_env": "VALIDATION_ARTIFACT_DIR"
+    },
+    {
       "id": "public-validation-upload",
       "path": ".github/actions/validation-upload/action.yml",
       "kind": "github-upload",

@@ -558,4 +558,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from validation_runner import managed_main
+    raise SystemExit(managed_main(main, output_option='--out',
+                                  default_name='coverage-reconcile', readonly_actions=()))

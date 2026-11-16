@@ -28,6 +28,10 @@ class ValidationArtifactLintTests(unittest.TestCase):
             "mutation-validation": ("scripts/slicer_mutation.py", "--out"),
             "pr-validation": ("scripts/slicer_pr_validation.py", "--output-dir"),
             "module-feedback": ("scripts/slicer_module_feedback.py", "--out"),
+            "coverage-validation": ("scripts/slicer_coverage.py", "--out"),
+            "coverage-pair-collector": ("scripts/slicer_coverage_pair_collector.py", "--out"),
+            "catch-batch": ("scripts/slicer_catch_batch.py", "--out"),
+            "coverage-reconcile": ("scripts/slicer_coverage_reconcile.py", "--out"),
         }
         for producer_id, (relative, output_option) in producer_specs.items():
             source = root / relative

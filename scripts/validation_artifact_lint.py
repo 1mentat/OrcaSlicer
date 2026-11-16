@@ -49,6 +49,10 @@ _EXPECTED_CLI_PRODUCERS = {
     "mutation-validation": ("scripts/slicer_mutation.py", "--out"),
     "pr-validation": ("scripts/slicer_pr_validation.py", "--output-dir"),
     "module-feedback": ("scripts/slicer_module_feedback.py", "--out"),
+    "coverage-validation": ("scripts/slicer_coverage.py", "--out"),
+    "coverage-pair-collector": ("scripts/slicer_coverage_pair_collector.py", "--out"),
+    "catch-batch": ("scripts/slicer_catch_batch.py", "--out"),
+    "coverage-reconcile": ("scripts/slicer_coverage_reconcile.py", "--out"),
 }
 _EXPECTED_UPLOAD_PRODUCER = {
     "id": "public-validation-upload",
