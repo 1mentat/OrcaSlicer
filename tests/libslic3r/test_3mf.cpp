@@ -2450,7 +2450,7 @@ struct XmlEntityCase
     std::string main_legacy;
 };
 
-const std::vector<XmlEntityCase>& xml_entity_cases()
+static const std::vector<XmlEntityCase>& xml_entity_cases()
 {
     static const std::vector<XmlEntityCase> cases{
         {"plain text", "plain text"},
@@ -2508,7 +2508,7 @@ struct EntityArchive
     }
 };
 
-void erase_metadata_element(std::string &xml, const std::string &name)
+static void erase_metadata_element(std::string &xml, const std::string &name)
 {
     const std::string open  = "<metadata name=\"" + name + "\">";
     const size_t      begin = xml.find(open);
@@ -2525,7 +2525,7 @@ void erase_metadata_element(std::string &xml, const std::string &name)
 }
 
 // Places a metadata element after every other metadata element of the root model.
-void add_metadata_element_last(std::string &xml, const std::string &name, const std::string &value)
+static void add_metadata_element_last(std::string &xml, const std::string &name, const std::string &value)
 {
     const size_t resources = xml.find("<resources>");
     REQUIRE(resources != std::string::npos);
@@ -2696,6 +2696,11 @@ TEST_CASE("BBS 3MF header metadata decodes quote entities only for Bambu Studio 
         Producer{"BambuStudio 01.03.01.01 development build", {{"Application", "BambuStudio-01.03.01.01"}}, true, false},
         Producer{"BambuStudio 01.04.00.17 four-part version", {{"Application", "BambuStudio-01.04.00.17"}}, true, true},
         Producer{"BambuStudio unparseable version", {{"Application", "BambuStudio-abc"}}, true, false},
+        Producer{"BambuStudio 1.10.0 compares by component", {{"Application", "BambuStudio-1.10.0"}}, true, true},
+        Producer{"BambuStudio 1.4 with garbage suffix", {{"Application", "BambuStudio-1.4garbage"}}, true, false},
+        Producer{"BambuStudio 1.4 with empty components", {{"Application", "BambuStudio-1.4.."}}, true, false},
+        Producer{"BambuStudio 01.04.00.17 with letter suffix", {{"Application", "BambuStudio-01.04.00.17x"}}, true, false},
+        Producer{"BambuStudio 01.04.00.17.5 has five components", {{"Application", "BambuStudio-01.04.00.17.5"}}, true, false},
         Producer{"BambuStudio without version separator", {{"Application", "BambuStudio"}}, true, false},
         Producer{"OrcaSlicer with version, after the header", {{"Application", "OrcaSlicer-2.3.2"}}, true, true},
         Producer{"OrcaSlicer without version", {{"Application", "OrcaSlicer"}}, true, false},
