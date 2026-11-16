@@ -7688,4 +7688,38 @@ TEST_CASE("ConfigBase scalar getters resolve registered values and line width in
 
 }
 
+// Source case "set_num_filaments resizes filament vectors while preserving the prefix"
+// was tagged [KnownBaselineDefect][!shouldfail] because the source resized only a
+// subset of vectors. Main's set_num_filaments (0f45d7c918) preserves the prefix, so
+// the same assertions now hold and the expected-failure tags are dropped.
+TEST_CASE("set_num_filaments keeps a full config's colour and diameter prefix when growing and shrinking",
+          "[PrintConfigActive][Config]")
+{
+    using namespace testing_branch_support_test_config;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    auto *colours = config.opt<ConfigOptionStrings>("filament_colour");
+    auto *diameters = config.opt<ConfigOptionFloats>("filament_diameter");
+    REQUIRE(colours != nullptr);
+    REQUIRE(diameters != nullptr);
+
+    colours->values = {"#112233", "#445566"};
+    diameters->values = {1.70, 1.80};
+    config.set_num_filaments(3);
+
+    REQUIRE(colours->values.size() == 3);
+    REQUIRE(diameters->values.size() == 3);
+    CHECK(colours->values[0] == "#112233");
+    CHECK(colours->values[1] == "#445566");
+    CHECK_THAT(diameters->values[0], Catch::Matchers::WithinAbs(1.70, 1e-12));
+    CHECK_THAT(diameters->values[1], Catch::Matchers::WithinAbs(1.80, 1e-12));
+
+    config.set_num_filaments(1);
+    REQUIRE(colours->values.size() == 1);
+    REQUIRE(diameters->values.size() == 1);
+    CHECK(colours->values.front() == "#112233");
+    CHECK_THAT(diameters->values.front(), Catch::Matchers::WithinAbs(1.70, 1e-12));
+
+}
+
 } // namespace gap_c_config_test_cases
