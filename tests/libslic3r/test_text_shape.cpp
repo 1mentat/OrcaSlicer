@@ -25,6 +25,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fstream>
+#include <ios>
 #include <map>
 #include <optional>
 #include <stdexcept>
