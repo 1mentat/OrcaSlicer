@@ -9259,7 +9259,7 @@ TEST_CASE("External preset loading selects the imported profile", "[Preset][Exte
     CHECK(bundle.prints.get_selected_preset_name() == "(Imported)");
 }
 
-TEST_CASE("External preset matches preserve identity and selection policy", "[Preset][ExternalPresetSelection]")
+TEST_CASE("External preset matches preserve identity and selection policy", "[Preset][ExternalPresetSelection][PresetExternalMatch]")
 {
     PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
@@ -9295,7 +9295,7 @@ TEST_CASE("External preset matches preserve identity and selection policy", "[Pr
     CHECK_FALSE(collection.get_edited_preset().is_dirty);
 }
 
-TEST_CASE("External preset resolves an unchanged inherited system profile", "[Preset][ExternalPresetSelection]")
+TEST_CASE("External preset resolves an unchanged inherited system profile", "[Preset][ExternalPresetSelection][PresetExternalMatch]")
 {
     ScopedTemporaryDir temp("preset-external-inherited-match");
     ScopedDataDir data(temp.path());
@@ -9342,7 +9342,7 @@ TEST_CASE("External preset resolves an unchanged inherited system profile", "[Pr
     CHECK_THAT(loaded.first->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.25, 1e-9));
 }
 
-TEST_CASE("External preset override marks an existing profile dirty", "[Preset][ExternalPresetSelection]")
+TEST_CASE("External preset override marks an existing profile dirty", "[Preset][ExternalPresetSelection][PresetExternalMatch]")
 {
     PresetCollection collection(Preset::TYPE_PRINT, Preset::print_options(),
                                 static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()));
@@ -11184,7 +11184,7 @@ TEST_CASE("Cloud user loading routes printer and filament profiles through typed
 }
 
 TEST_CASE("Printer snapshot restores filament colors and replaces unavailable slots",
-          "[PresetBundleLoading][PresetPrinterSnapshot]")
+          "[PresetBundleLoading][PresetPrinterSnapshot][PresetCloudSelection][PresetBundle]")
 {
     preset_lifecycle_contracts::ScopedPresetBundle scoped;
     PresetBundle &bundle = scoped.bundle;
@@ -11257,7 +11257,7 @@ TEST_CASE("Printer snapshot restores filament colors and replaces unavailable sl
 }
 
 TEST_CASE("Printer snapshot supplies defaults when optional filament arrays are absent",
-          "[PresetBundleLoading][PresetPrinterSnapshotDefaults]")
+          "[PresetBundleLoading][PresetPrinterSnapshotDefaults][PresetCloudSelection][PresetBundle]")
 {
     preset_lifecycle_contracts::ScopedPresetBundle scoped;
     PresetBundle &bundle = scoped.bundle;
@@ -11512,7 +11512,7 @@ TEST_CASE("Preset JSON extraction distinguishes missing malformed and valid file
 }
 
 TEST_CASE("Preset parent save emits nil for inherited filament variants",
-          "[PresetBundleLoading][PresetNullableVariantSave]")
+          "[PresetBundleLoading][PresetNullableVariantSave][Preset][PresetNullableSave][PresetExtendedVariance]")
 {
     ScopedTemporaryDir dir("preset-nullable-save");
     ScopedDataDir data(dir.path());
