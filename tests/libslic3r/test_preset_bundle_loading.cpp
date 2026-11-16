@@ -11792,6 +11792,27 @@ TEST_CASE("AMS sync replaces physical slots with matched IDs and parallel metada
     CHECK(unknowns.empty());
 }
 
+TEST_CASE("AMS sync keeps the default colour type of matched trays",
+          "[PresetBundleLoading][PresetAmsMatched][Preset][PresetBundleAmsVariance]")
+{
+    PresetBundle bundle;
+    system_filament(bundle, "Generic PLA", "PLA-ID", "PLA");
+    system_filament(bundle, "Generic PETG", "PETG-ID", "PETG");
+    project_slots(bundle, {"Old A", "Old B"}, {"#000000", "#000000"});
+    bundle.filament_ams_list.emplace(0, tray("PLA-ID", "#112233", "PLA", "0", "0", true, false, {"#112233"}));
+    bundle.filament_ams_list.emplace(1, tray("PETG-ID", "#445566", "PETG", "0", "1", true, false, {"#445566"}));
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge;
+    bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA", "Generic PETG"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#112233", "#445566"});
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour_type")->values ==
+          std::vector<std::string>{"1", "1"});
+    CHECK(unknowns.empty());
+}
+
 } // namespace preset_ams_sync_contracts
 
 namespace preset_ams_sync_contracts {
