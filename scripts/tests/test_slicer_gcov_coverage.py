@@ -5,6 +5,7 @@ import gzip
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -333,7 +334,7 @@ class GcovPhysicalLineTests(unittest.TestCase):
             source_root = root / "src"
             project_source = source_root / "lib.cpp"
             test_source = root / "tests" / "test.cpp"
-            pattern = str(source_root).replace(".", r"\.") + r"/.*"
+            pattern = re.escape(str(source_root) + os.sep) + r".*"
             safe = ["g++", "--coverage", "-fprofile-update=atomic",
                     f"-fprofile-filter-files=^{pattern}"]
             self.assertTrue(gcov.validate_gcc_compile_argv(
@@ -376,7 +377,7 @@ class GcovPhysicalLineTests(unittest.TestCase):
                               "libslic3r_tests.dir/a.cpp.gcda"))
 
     def test_gcov_without_project_output_requires_explicit_exclusion_or_empty_note(self):
-        root = Path("/checkout/src")
+        root = Path("/checkout/src").resolve()
         source = root / "empty.cpp"
         self.assertEqual(gcov.classify_translation_unit(
             source, filter_matches_project=True,
