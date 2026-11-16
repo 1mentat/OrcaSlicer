@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "sl1-display-pixels-x-reads-y",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "    auto   pw = size_t(m_cfg.display_pixels_x.getInt());",
+      "new": "    auto   pw = size_t(m_cfg.display_pixels_y.getInt());",
+      "expected_matches": 1,
+      "test_filter": "^SL1RasterResolution$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Read the Y pixel count for raster width; default and asymmetric resolution cases must fail their public PNG dimension and independent footprint assertions."
+    },
+    {
+      "id": "sl1-display-pixels-y-reads-x",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "    auto   ph = size_t(m_cfg.display_pixels_y.getInt());",
+      "new": "    auto   ph = size_t(m_cfg.display_pixels_x.getInt());",
+      "expected_matches": 1,
+      "test_filter": "^SL1RasterResolution$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Read the X pixel count for raster height; the asymmetric/default resolution cases must fail their public PNG dimensions and physical footprint assertions."
+    },
+    {
+      "id": "sl1-gamma-setting-ignored",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "    double gamma = m_cfg.gamma_correction.getFloat();",
+      "new": "    double gamma = 1.0;",
+      "expected_matches": 1,
+      "test_filter": "^SL1RasterGamma$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Ignore the printer gamma setting; fractional edge values at gamma 0 and 0.5 must fail the independent geometric coverage expectations."
+    }
+  ]
+}

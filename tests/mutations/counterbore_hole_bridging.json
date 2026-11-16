@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed counterbore hole bridging mutations for the three-mode classic/Arachne public geometry matrix. No native outcomes are recorded here.",
+  "mutants": [
+    {
+      "id": "counterbore-disabled-gate-removed",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "    if (this->config->counterbore_hole_bridging == chbNone)\n        return; // return if counterbore hole is not enabled",
+      "new": "    if (false)\n        return; // return if counterbore hole is not enabled",
+      "description": "Keep the none control from entering process_no_bridge; the mode matrix requires no option-specific annulus fill for none.",
+      "test_filter": "CounterboreHoleBridging"
+    },
+    {
+      "id": "counterbore-partial-full-routing-swapped",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "                            if (this->config->counterbore_hole_bridging.value == chbFilled) {",
+      "new": "                            if (this->config->counterbore_hole_bridging.value != chbFilled) {",
+      "description": "Route partial and sacrificial modes through the opposite mask/full branch; the bore and total-area ordering must fail.",
+      "test_filter": "CounterboreHoleBridging"
+    },
+    {
+      "id": "counterbore-sacrificial-hole-removal-disabled",
+      "path": "src/libslic3r/PerimeterGenerator.cpp",
+      "old": "                                        if (!hole_wall_area.empty() &&\n                                            intersection_ex(hole_wall_area, *this->lower_slices, ApplySafetyOffset::Yes).empty())\n                                            expol.holes.erase(expol.holes.begin() + hole_idx);",
+      "new": "                                        if (false)\n                                            expol.holes.erase(expol.holes.begin() + hole_idx);",
+      "description": "Retain the sacrificial hole instead of removing it when the full branch fills unsupported bore area; the positive full-bore witness must fail.",
+      "test_filter": "CounterboreHoleBridging"
+    }
+  ]
+}

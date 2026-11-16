@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutation checks for NormalUtilsAngles public contracts.",
+  "mutants": [
+    {
+      "id": "normal-utils-first-ray-index-ignored",
+      "path": "src/libslic3r/NormalUtils.cpp",
+      "old": "Vec3f v1 = vertices[indice[i1]] - vertices[indice[i]];",
+      "new": "Vec3f v1 = vertices[i1] - vertices[indice[i]];",
+      "description": "Triangle angle rays must use face-local vertex indices; ignoring one neighbor index changes the independent equilateral-face and angle-weighted normal oracles.",
+      "test_filter": "NormalUtilsAngles"
+    },
+    {
+      "id": "normal-utils-second-ray-index-ignored",
+      "path": "src/libslic3r/NormalUtils.cpp",
+      "old": "Vec3f v2 = vertices[indice[i2]] - vertices[indice[i]];",
+      "new": "Vec3f v2 = vertices[i2] - vertices[indice[i]];",
+      "description": "Triangle angle rays must use face-local vertex indices; ignoring one neighbor index changes the independent equilateral-face and angle-weighted normal oracles.",
+      "test_filter": "NormalUtilsAngles"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public normal-Y TPMS section invariance and transverse density contracts.",
+  "mutants": [
+    {
+      "id": "tpms-normal-y-axis-mapped-to-x",
+      "path": "src/libslic3r/Fill/FillTpmsAdaptive.cpp",
+      "old": "    , m_axis(mode == TpmsAdaptiveMode::NormalX ? 0 : mode == TpmsAdaptiveMode::NormalY ? 1 : mode == TpmsAdaptiveMode::NormalZ ? 2 : -1)",
+      "new": "    , m_axis(mode == TpmsAdaptiveMode::NormalX ? 0 : mode == TpmsAdaptiveMode::NormalY ? 0 : mode == TpmsAdaptiveMode::NormalZ ? 2 : -1)",
+      "test_filter": "TpmsAdaptiveNormalY",
+      "description": "Map the registered normal_y mode to the X axis. The public fixture requires Y invariance and a denser X shell than core, so the wrong section normal should fail the transverse oracle."
+    },
+    {
+      "id": "tpms-normal-y-distance-transform-axis-included",
+      "path": "src/libslic3r/Fill/FillTpmsAdaptive.cpp",
+      "old": "        if (axis != m_axis)",
+      "new": "        if (axis == m_axis)",
+      "test_filter": "TpmsAdaptiveNormalY",
+      "description": "Run the distance transform only along the selected normal axis instead of excluding it. The public normal-Y section and transverse-density witnesses should detect the altered radial field."
+    }
+  ]
+}

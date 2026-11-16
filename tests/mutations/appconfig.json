@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "AppConfig mutants for temporary-directory persistence, numeric normalization, and legacy migration contracts.",
+  "mutants": [
+    {
+      "id": "appconfig-opengl-fps-upper-bound",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "fps_cap = std::max(0, std::min(fps_cap, 240));",
+      "new": "fps_cap = std::max(0, std::min(fps_cap, 60));",
+      "description": "Lower the OpenGL FPS cap ceiling so a persisted value above 60 no longer resolves to the documented 240 maximum.",
+      "test_filter": "AppConfigContract"
+    },
+    {
+      "id": "appconfig-plugin-count-invalid-fallback",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "    catch (...) {\n        return PLUGIN_PAGES_VISIBLE_COUNT_DEFAULT;\n    }\n    return std::clamp(visible_count, PLUGIN_PAGES_VISIBLE_COUNT_MIN, PLUGIN_PAGES_VISIBLE_COUNT_MAX);",
+      "new": "    catch (...) {\n        return PLUGIN_PAGES_VISIBLE_COUNT_MIN;\n    }\n    return std::clamp(visible_count, PLUGIN_PAGES_VISIBLE_COUNT_MIN, PLUGIN_PAGES_VISIBLE_COUNT_MAX);",
+      "description": "Resolve malformed plugin-page counts to the minimum rather than the documented default.",
+      "test_filter": "AppConfigContract"
+    },
+    {
+      "id": "appconfig-plugin-count-lower-bound",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "return std::clamp(visible_count, PLUGIN_PAGES_VISIBLE_COUNT_MIN, PLUGIN_PAGES_VISIBLE_COUNT_MAX);",
+      "new": "return std::clamp(visible_count, PLUGIN_PAGES_VISIBLE_COUNT_MAX, PLUGIN_PAGES_VISIBLE_COUNT_MAX);",
+      "description": "Collapse the plugin-page lower bound to the maximum, rejecting a negative persisted value as the documented minimum.",
+      "test_filter": "AppConfigContract"
+    },
+    {
+      "id": "appconfig-legacy-physical-printer-copy",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "m_storage[\"presets\"][\"physical_printer\"] = it_physical_printer->second;\n                it_section->second.erase(it_physical_printer);\n            }\n            if (it_section->second.empty())\n                m_storage.erase(it_section);\n        }\n\n        // Default for new installs",
+      "new": "m_storage[\"presets\"][\"physical_printer\"] = std::string();\n                it_section->second.erase(it_physical_printer);\n            }\n            if (it_section->second.empty())\n                m_storage.erase(it_section);\n        }\n\n        // Default for new installs",
+      "description": "Drop the legacy physical-printer value while migrating it out of the extras section.",
+      "test_filter": "AppConfigContract"
+    },
+    {
+      "id": "appconfig-legacy-extras-section-retained",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "if (it_section->second.empty())\n                m_storage.erase(it_section);\n        }\n\n        // Default for new installs",
+      "new": "if (!it_section->second.empty())\n                m_storage.erase(it_section);\n        }\n\n        // Default for new installs",
+      "description": "Invert empty-section cleanup so a migrated legacy extras section remains visible and a non-empty section can be erased.",
+      "test_filter": "AppConfigContract"
+    }
+  ]
+}

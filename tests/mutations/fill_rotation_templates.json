@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "fill-rotation-u-joint-routed-as-cubic",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "case 8: negvalue = 1. - pow(1. - negvalue, 2); break;",
+      "new": "case 8: negvalue = 1. - pow(1. - negvalue, 3); break;",
+      "expected_matches": 1,
+      "test_filter": "^FillRotationTemplates$",
+      "ordinary_assertion_only": true,
+      "description": "Route the deterministic U squared joint through the cubic curve; the independent analytic checkpoints in the all-joints case must fail."
+    },
+    {
+      "id": "fill-rotation-mm-duration-scaled-as-centimeters",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "limit_fill_z = angle_steps * 1.;",
+      "new": "limit_fill_z = angle_steps * 10.;",
+      "expected_matches": 1,
+      "test_filter": "^FillRotationTemplates$",
+      "ordinary_assertion_only": true,
+      "description": "Interpret millimeter duration as ten times longer; the per-layer physical-duration comparisons must diverge."
+    },
+    {
+      "id": "fill-rotation-percent-duration-height-factor",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "limit_fill_z = angle_steps * object->height() * 1e-8;",
+      "new": "limit_fill_z = angle_steps * object->height() * 1e-7;",
+      "expected_matches": 1,
+      "test_filter": "^FillRotationTemplates$",
+      "ordinary_assertion_only": true,
+      "description": "Change percent duration scaling by one order of magnitude; the source-derived 50% height control must stop matching the 0.8 mm controls."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Two source-bound ordinary-assertion probes for the c45 preset import and subscribed-refresh cases.",
+  "mutants": [
+    {
+      "description": "Skip the public inherited-config base path; the child JSON save must retain the parent wall_loops value while overriding only its own layer height.",
+      "expected_matches": 1,
+      "id": "preset-json-import-require-inherited-parent",
+      "new": "        if (false && inherit_preset) {\n            new_config = inherit_preset->config;",
+      "old": "        if (inherit_preset) {\n            new_config = inherit_preset->config;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "^PresetBundleImportInheritance$"
+    },
+    {
+      "description": "Discard the existing same-ID metadata before refresh; imported_time preservation and refreshed bundle metadata must fail.",
+      "expected_matches": 1,
+      "id": "preset-subscribed-refresh-retains-existing-metadata",
+      "new": "    if (existing_it != bundles.m_bundles.end()) {\n        merged_metadata = BundleMetadata{};",
+      "old": "    if (existing_it != bundles.m_bundles.end()) {\n        merged_metadata = existing_it->second;",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "test_filter": "^PresetBundleSubscribedRefresh$"
+    }
+  ]
+}

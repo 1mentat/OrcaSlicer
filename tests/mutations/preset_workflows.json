@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Mutations for preset file ownership, inheritance, and bundle material workflows.",
+  "mutants": [
+    {
+      "id": "preset-dirty-label-prefix",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "return (this->is_dirty ? g_suffix_modified : \"\")",
+      "new": "return (this->is_dirty ? \"\" : \"\")",
+      "description": "Drop the modified marker from a dirty preset label; the alias and no-alias label contract should distinguish the change.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "preset-save-info-bundle-guard",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (this->is_project_embedded || this->is_from_bundle())",
+      "new": "if (this->is_project_embedded && this->is_from_bundle())",
+      "description": "Allow bundle presets to write standalone metadata; embedded and bundled save-info ownership is intentionally separate.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "preset-embedded-remove-guard",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (this->is_project_embedded) {",
+      "new": "if (!this->is_project_embedded) {",
+      "description": "Invert the project-embedded remove-files guard; detached embedded-preset lifecycle checks should expose file deletion.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-filament-growth-branch",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (n > old_filament_count && old_filament_count != 0)",
+      "new": "if (n > old_filament_count && old_filament_count == 0)",
+      "description": "Disable copying the previous preset when growing a nonempty filament list; sizing and selected preset inheritance should expose it.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-new-filament-color-guard",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!new_color.empty()) {",
+      "new": "if (new_color.empty()) {",
+      "description": "Invert application of a requested color to newly created slots; the exact color contract must fail.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-mixed-count-null-guard",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (opt == nullptr)\n        return 0;",
+      "new": "if (opt != nullptr)\n        return 0;",
+      "description": "Invert the absent mixed-slot metadata guard; physical and mixed filament accounting should expose the invalid early return.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-physical-slot-selection",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!is_mixed_filament(i))",
+      "new": "if (is_mixed_filament(i))",
+      "description": "Select virtual mixed slots instead of physical slots; the explicit index and physical-count contract should detect it.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-project-ignore-set",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.end());",
+      "new": "keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.begin());",
+      "description": "Stop adding project identity keys to the differing-key set; the deterministic key inventory should detect the missing defaults.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-filament-name-conversion-machine-lookup",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (machine_iter != filament_preset_convert.end())",
+      "new": "if (machine_iter == filament_preset_convert.end())",
+      "description": "Invert recognition of supported machines; known H2D names must gain the nozzle suffix while unknown machines preserve their names.",
+      "test_filter": "PresetDeep"
+    },
+    {
+      "id": "presetbundle-hotend-fallback-condition",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (out.empty() ||!boost::filesystem::exists(boost::filesystem::path(out)))",
+      "new": "if (out.empty() && !boost::filesystem::exists(boost::filesystem::path(out)))",
+      "description": "Require both fallback conditions instead of either; a missing model must still resolve to the configured fallback hotend asset.",
+      "test_filter": "PresetDeep"
+    }
+  ]
+}

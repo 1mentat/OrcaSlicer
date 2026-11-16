@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Centered bounding-box rotation and 3D footprint unit selection fail ordinary geometric assertions when mutated.",
+  "mutants": [
+    {
+      "id": "bounding-box-center-rotation-uses-origin-for-first-corner",
+      "path": "src/libslic3r/BoundingBox.cpp",
+      "old": "    out.merge(this->min.rotated(angle, center));",
+      "new": "    out.merge(this->min.rotated(angle));",
+      "test_filter": "Bounding boxes rotate around an explicit center",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "The asymmetric non-origin quarter-turn checks both returned bounds, so rotating a corner around the origin instead of the requested center changes the result."
+    },
+    {
+      "id": "bounding-box-3d-footprint-reverses-scaled-unit-selection",
+      "path": "src/libslic3r/BoundingBox.cpp",
+      "old": "    double scale_factor = 1 / (is_scaled ? SCALING_FACTOR : 1);",
+      "new": "    double scale_factor = 1 / (is_scaled ? 1 : SCALING_FACTOR);",
+      "test_filter": "3D bounding boxes merge point clouds and expose xy footprints in both units",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "The raw and scaled footprint expectations distinguish the documented unit choice for each public polygon(bool) mode."
+    }
+  ]
+}

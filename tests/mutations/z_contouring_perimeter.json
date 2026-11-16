@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "Public perimeter-height settings contracts for the slope-threshold and zero-value gates; assertion kills required.",
+  "test_filter": "ZContouringPerimeter",
+  "mutants": [
+    {
+      "id": "zaa-perimeter-threshold-direction-reversed",
+      "path": "src/libslic3r/ContourZ.cpp",
+      "old": "                if (d > min_down && minimize_perimeter_height_angle > 0 && minimize_perimeter_height_angle < slope_degrees) {",
+      "new": "                if (d > min_down && minimize_perimeter_height_angle > 0 && minimize_perimeter_height_angle > slope_degrees) {",
+      "test_filter": "ZContouringPerimeter",
+      "description": "Reverse the threshold-versus-facet comparison. The 35-degree row must change the 45-degree roof while the 90-degree row remains at the zero-threshold baseline."
+    },
+    {
+      "id": "zaa-perimeter-zero-threshold-enables-correction",
+      "path": "src/libslic3r/ContourZ.cpp",
+      "old": "                if (d > min_down && minimize_perimeter_height_angle > 0 && minimize_perimeter_height_angle < slope_degrees) {",
+      "new": "                if (d > min_down && minimize_perimeter_height_angle >= 0 && minimize_perimeter_height_angle < slope_degrees) {",
+      "test_filter": "ZContouringPerimeter",
+      "description": "Make the zero setting enter the correction gate. The zero row must remain the no-correction baseline, distinct from the 35-degree row."
+    }
+  ]
+}

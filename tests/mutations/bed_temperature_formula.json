@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "First-filament and highest-used-filament bed temperatures at initial and ordinary-layer transitions.",
+  "mutants": [
+    {
+      "id": "bed-temperature-first-formula-replaced",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (m_config.bed_temperature_formula.value == BedTempFormula::btfHighestTemp) {\n        bed_temp = get_highest_bed_temperature(true, print);\n    }\n    else {\n        bed_temp = get_bed_temperature(first_printing_extruder_id, true, print.config().curr_bed_type);\n    }",
+      "new": "if (m_config.bed_temperature_formula.value == BedTempFormula::btfFirstFilament) {\n        bed_temp = get_highest_bed_temperature(true, print);\n    }\n    else {\n        bed_temp = get_bed_temperature(first_printing_extruder_id, true, print.config().curr_bed_type);\n    }",
+      "test_filter": "BedTemperatureFormula",
+      "description": "The first-layer formula must select either filament 0 temperature or the highest used-filament temperature, with both filaments exercised and the selected command position/type checked."
+    },
+    {
+      "id": "bed-temperature-ordinary-formula-replaced",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (m_config.bed_temperature_formula == BedTempFormula::btfHighestTemp)\n            bed_temp = get_highest_bed_temperature(false,print);\n        else\n            bed_temp = get_bed_temperature(first_extruder_id, false, m_config.curr_bed_type);",
+      "new": "if (m_config.bed_temperature_formula == BedTempFormula::btfFirstFilament)\n            bed_temp = get_highest_bed_temperature(false,print);\n        else\n            bed_temp = get_bed_temperature(first_extruder_id, false, m_config.curr_bed_type);",
+      "test_filter": "BedTemperatureFormula",
+      "description": "The post-first-layer bed transition must use the same selected-filament formula as the first-layer command, with the complete two-command sequence checked."
+    }
+  ]
+}

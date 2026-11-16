@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "TexturePainting mutants paired with headless texture sampling, volume-placement, and cancellation contracts.",
+  "mutants": [
+    {
+      "id": "texture-painting-rgba-channel-order",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "cv::cvtColor(src, bgr, cv::COLOR_RGBA2BGR);",
+      "new": "cv::cvtColor(src, bgr, cv::COLOR_BGRA2BGR);",
+      "description": "Drop the alpha-aware conversion for raw RGBA input, changing the byte stride and decoded color contract.",
+      "test_filter": "TexturePainting"
+    },
+    {
+      "id": "texture-painting-material-map-ignored",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "if (has_mapping && mat_idx >= 0 && static_cast<size_t>(mat_idx) < textured.material_texture_map.size())",
+      "new": "if (!has_mapping && mat_idx >= 0 && static_cast<size_t>(mat_idx) < textured.material_texture_map.size())",
+      "description": "Ignore a valid per-face material-to-texture mapping so the second mapped face samples the wrong texture or fallback color.",
+      "test_filter": "TexturePainting"
+    },
+    {
+      "id": "texture-painting-solid-material-channel-order",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "static_cast<std::size_t>(std::clamp(c[0] * 255.f, 0.f, 255.f)),\n                static_cast<std::size_t>(std::clamp(c[1] * 255.f, 0.f, 255.f)),\n                static_cast<std::size_t>(std::clamp(c[2] * 255.f, 0.f, 255.f))",
+      "new": "static_cast<std::size_t>(std::clamp(c[2] * 255.f, 0.f, 255.f)),\n                static_cast<std::size_t>(std::clamp(c[1] * 255.f, 0.f, 255.f)),\n                static_cast<std::size_t>(std::clamp(c[0] * 255.f, 0.f, 255.f))",
+      "description": "Swap RGB baseColorFactor channels when a material has no usable texture.",
+      "test_filter": "TexturePainting"
+    },
+    {
+      "id": "texture-painting-volume-offset-sign",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "new_mesh.translate(-mesh_offset.cast<float>());",
+      "new": "new_mesh.translate(mesh_offset.cast<float>());",
+      "description": "Apply the recorded source mesh offset in the wrong direction, moving a replaced painted volume away from its original world placement.",
+      "test_filter": "TexturePainting"
+    },
+    {
+      "id": "texture-painting-cancel-callback-gate",
+      "path": "src/libslic3r/TexturePainting.cpp",
+      "old": "    tex2color::AlgoCancelCallback algo_cancel = nullptr;\n    if (cancel) {\n        algo_cancel = [&cancel]() -> bool { return cancel(); };\n    }\n\n    tex2color::TriMesh out_mesh;",
+      "new": "    tex2color::AlgoCancelCallback algo_cancel = nullptr;\n    if (cancel) {\n        algo_cancel = [&cancel]() -> bool { return false; };\n    }\n\n    tex2color::TriMesh out_mesh;",
+      "description": "Stop forwarding cancellation from the public face-color import API to the clustering pipeline.",
+      "test_filter": "TexturePainting"
+    }
+  ]
+}

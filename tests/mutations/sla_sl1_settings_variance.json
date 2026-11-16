@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion-only SLA SL1 exported profile metadata mutants.",
+  "mutants": [
+    {
+      "id": "sl1-export-material-speed-profile-flag-inverted",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "    m[\"expUserProfile\"] = get_cfg_value(cfg, \"material_print_speed\") == \"slow\" ? \"1\" : \"0\";",
+      "new": "    m[\"expUserProfile\"] = get_cfg_value(cfg, \"material_print_speed\") == \"slow\" ? \"0\" : \"1\";",
+      "test_filter": "SLA SL1 export records material speed and profile identity values",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "7fa8bd5047f850ba0498136f65a158a4df0a89e6c6d18556ab81df235b585755",
+      "new_sha256": "d2aa5256448304e50d36b23b48ac83cf51079d7983e65008d3ad6759b49e3d95",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    },
+    {
+      "id": "sl1-export-printer-model-reads-variant",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "    m[\"printerModel\"]   = get_cfg_value(cfg, \"printer_model\");",
+      "new": "    m[\"printerModel\"]   = get_cfg_value(cfg, \"printer_variant\");",
+      "test_filter": "SLA SL1 export records material speed and profile identity values",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "old_sha256": "095fc5e9eef51faedbf36ade533b9bf3e69e917a45d95a9600fccdc1236e1394",
+      "new_sha256": "fea40b7f57727d4a59d9312b48a918b500749fd5688d95591126df2ff08bbce1",
+      "unique_old_anchor_matches": 1,
+      "unique_new_anchor_matches": 1
+    }
+  ]
+}

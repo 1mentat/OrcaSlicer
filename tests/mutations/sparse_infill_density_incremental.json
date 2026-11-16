@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Sparse infill density incremental behavior mutants.",
+  "mutants": [
+    {
+      "id": "sparse-density-new-zero-perimeters-omitted-v2",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);",
+      "new": "            if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);",
+      "description": "Omitting new-density-zero perimeter invalidation must leave stale odd-layer alternate walls on 20%->0%; the fresh-zero perimeter geometry and incremental snapshot comparison should fail.",
+      "test_filter": "SparseInfillDensity"
+    },
+    {
+      "id": "sparse-density-old-zero-perimeters-omitted-v2",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);",
+      "new": "            if (is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);",
+      "description": "Omitting old-density-zero perimeter invalidation must leave the 0%->20% incremental print without odd-layer alternate walls; the fresh-20 snapshot and transition oracle should fail.",
+      "test_filter": "SparseInfillDensity"
+    },
+    {
+      "id": "sparse-density-prepare-infill-omitted-v2",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);\n            steps.emplace_back(posPrepareInfill);",
+      "new": "            if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||\n                is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))\n                steps.emplace_back(posPerimeters);\n            // mutation: omit sparse-density infill preparation",
+      "description": "Omitting unconditional posPrepareInfill must leave the 20%->40% sparse output stale; fresh-40 equality and the positive density-change witness should fail.",
+      "test_filter": "SparseInfillDensity"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Vertical faces, coplanar slab ownership, reflected surfaces, independent mesh projections, and watertight cuts through existing edges and plane vertices.",
+  "mutants": [
+    {
+      "id": "trianglemesh-slicer-vertical-point-omitted",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "            if(vertical_points && fo==FaceOrientation::Vertical)",
+      "new": "            if(vertical_points && fo==FaceOrientation::Degenerate)",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Slab slicing reports vertical face centers and normals",
+      "rationale": "Suppresses emission for valid vertical triangles while leaving the slab geometry path intact.",
+      "expected_failure": "vertical_points.size() == 2 and center/normal assertions fail; no crash or exception is expected.",
+      "anchor_occurrences": 1,
+      "description": "Suppresses emission for valid vertical triangles while leaving the slab geometry path intact."
+    },
+    {
+      "id": "trianglemesh-slicer-top-loop-uses-bottom-projection",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "        *out_top = make_slab_loops<true>(lines.first, num_edges, throw_on_cancel);",
+      "new": "        *out_top = make_slab_loops<false>(lines.first, num_edges, throw_on_cancel);",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Slab slicing assigns coplanar faces to their documented surface",
+      "rationale": "Uses the bottom loop interpretation for top projection lines. The coplanar ownership case, selected by the common CTest label, detects the wrong polarity through its top/bottom occupancy and bounds; the pointer remains valid and this is not a crash-only oracle.",
+      "expected_failure": "The coplanar ownership case loses or misplaces the upward top polygon; ordinary geometry assertions fail.",
+      "anchor_occurrences": 1,
+      "description": "Uses the bottom loop interpretation for top projection lines. The coplanar ownership case, selected by the common CTest label, detects the wrong polarity through its top/bottom occupancy and bounds; the pointer remains valid and this is not a crash-only oracle."
+    },
+    {
+      "id": "trianglemesh-slicer-mirrored-sign-reversed",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "    const auto mirrored_sign = int64_t(trafo.matrix().block(0, 0, 3, 3).determinant() < 0 ? -1 : 1);",
+      "new": "    const auto mirrored_sign = int64_t(trafo.matrix().block(0, 0, 3, 3).determinant() < 0 ? 1 : -1);",
+      "test_filter": "TriangleMeshSlicerContracts",
+      "test_case": "Mirrored slab transforms preserve surface roles",
+      "rationale": "Reverses the determinant correction, causing a reflected upward/downward pair to swap surface roles while preserving bounded geometry.",
+      "expected_failure": "top/bottom occupancy or mirrored bounds fail ordinary assertions; no invalid memory access is introduced.",
+      "anchor_occurrences": 1,
+      "description": "Reverses the determinant correction, causing a reflected upward/downward pair to swap surface roles while preserving bounded geometry."
+    },
+    {
+      "id": "trianglemesh-cut-plane-vertex-half-ownership",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "} else if (is_new_vertex_v0v1) {\n                if (v0.z() > z) {",
+      "new": "} else if (is_new_vertex_v0v1) {\n                if (v0.z() < z) {",
+      "test_filter": "The cut preserves a plane vertex when adjacent facets cross the plane",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Reverse half ownership only for a facet with one new intersection and one existing plane vertex. Both output indices remain valid, but the analytic tetrahedron half volumes or closed topology must fail."
+    },
+    {
+      "id": "trianglemesh-cut-plane-edge-wrong-cap-channel",
+      "path": "src/libslic3r/TriangleMeshSlicer.cpp",
+      "old": "                bool third_below = c->z() < slice_z;\n                // Two vertices on the cutting plane, the third vertex is below the plane. Consider the edge to be part of the slice\n                // only if it is the upper edge.\n                // (the bottom most edge resp. vertex of a triangle is not owned by the triangle, but the top most edge resp. vertex is part of the triangle\n                // in respect to the cutting plane).\n                result = third_below ? FacetSliceType::Slicing : FacetSliceType::Cutting;\n                if (third_below) {\n                    line_out.edge_type = IntersectionLine::FacetEdgeType::Top;\n",
+      "new": "                bool third_below = c->z() < slice_z;\n                // Two vertices on the cutting plane, the third vertex is below the plane. Consider the edge to be part of the slice\n                // only if it is the upper edge.\n                // (the bottom most edge resp. vertex of a triangle is not owned by the triangle, but the top most edge resp. vertex is part of the triangle\n                // in respect to the cutting plane).\n                result = third_below ? FacetSliceType::Slicing : FacetSliceType::Cutting;\n                if (third_below) {\n                    line_out.edge_type = IntersectionLine::FacetEdgeType::Bottom;\n",
+      "test_filter": "The cut keeps both halves watertight when the plane follows an existing mesh edge",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Assign a below-plane facet exact edge to the upper cap channel instead of the lower channel. The public closed-mesh cut must preserve both closed halves and analytic volume."
+    }
+  ]
+}

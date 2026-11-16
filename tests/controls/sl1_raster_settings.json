@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "names": [
+    "FocusedSL1Raster::SL1 archive configuration changes invalidate encoded layers",
+    "FocusedSL1Raster::SL1 archive rasterizes and exports named layers",
+    "FocusedSL1Raster::SL1 import applies portrait and mirror raster transforms",
+    "FocusedSL1Raster::SL1 import clamps a zero marching-squares window",
+    "FocusedSL1Raster::SL1 import honors progress cancellation without overwriting output",
+    "FocusedSL1Raster::SL1 import reads profile and builds a mesh from raster layers",
+    "FocusedSL1Raster::SL1 import recovers layer height when profile is absent",
+    "FocusedSL1Raster::SL1 import rejects a profile without raster dimensions",
+    "FocusedSL1Raster::SL1 import rejects malformed INI and corrupt zip inputs",
+    "FocusedSL1Raster::SL1 import returns an empty mesh for undecodable raster data",
+    "FocusedSL1Raster::SL1 import sorts case-insensitive image names and excludes thumbnails",
+    "FocusedSL1Raster::SL1 raster dimensions and footprint follow display pixel settings",
+    "FocusedSL1Raster::SL1 raster gamma follows known fractional pixel coverage"
+  ]
+}

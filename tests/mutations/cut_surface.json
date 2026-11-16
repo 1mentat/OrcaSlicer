@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed CutSurface mutants for validating mesh masking, projected AOI selection, and cut mesh winding contracts.",
+  "mutants": [
+    {
+      "id": "cut-surface-mask-selection",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "size_t index = &t - &its.indices.front();\n        if (!mask[index]) continue;",
+      "new": "size_t index = &t - &its.indices.front();\n        if (mask[index]) continue;",
+      "description": "Invert triangle selection so its_mask keeps rejected faces and drops requested faces.",
+      "test_filter": "CutSurface"
+    },
+    {
+      "id": "cut-surface-back-face-winding",
+      "path": "src/libslic3r/CutSurface.cpp",
+      "old": "result.indices.emplace_back(i.x() + back_offset,\n                                    i.z() + back_offset,\n                                    i.y() + back_offset);",
+      "new": "result.indices.emplace_back(i.x() + back_offset,\n                                    i.y() + back_offset,\n                                    i.z() + back_offset);",
+      "description": "Stop reversing back-face winding when converting a surface cut into a closed mesh.",
+      "test_filter": "CutSurface"
+    }
+  ]
+}

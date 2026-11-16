@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Flow width hints preserve top-surface defaults and nozzle-relative bridge percentages.",
+  "mutants": [
+    {
+      "id": "flow-top-width-uses-solid-default",
+      "path": "src/libslic3r/Flow.cpp",
+      "old": "else if (opt_key == \"top_surface_line_width\")\n\t\treturn frTopSolidInfill;",
+      "new": "else if (opt_key == \"top_surface_line_width\")\n\t\treturn frSolidInfill;",
+      "test_filter": "Flow width hints select role defaults for the chosen nozzle",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "flow-bridge-percent-halves-width",
+      "path": "src/libslic3r/Flow.cpp",
+      "old": "const double bridge_width = opt->get_abs_value(nozzle_diameter);",
+      "new": "const double bridge_width = 0.5 * opt->get_abs_value(nozzle_diameter);",
+      "test_filter": "Flow width hints resolve explicit values before global and bridge fallbacks",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

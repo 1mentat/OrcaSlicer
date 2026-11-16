@@ -1,0 +1,33 @@
+{
+  "description": "BBS 3MF layer-height profiles reject malformed sizes, use one-based object IDs, and retain the first duplicate record.",
+  "mutants": [
+    {
+      "id": "bbs-profile-four-sample-minimum-relaxed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (object_data_profile.size() <= 4 || object_data_profile.size() % 2 != 0) {",
+      "new": "if (object_data_profile.size() < 4 || object_data_profile.size() % 2 != 0) {",
+      "description": "Accept a four-value profile record that the importer currently rejects; the object 1 empty-profile oracle must fail.",
+      "test_filter": "BBS 3MF skips malformed layer height profile records",
+      "expected_matches": 1
+    },
+    {
+      "id": "bbs-profile-one-based-object-map-zero-based",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "m_layer_heights_profiles.find(object.second + 1);",
+      "new": "m_layer_heights_profiles.find(object.second);",
+      "description": "Use the model's zero-based object index to look up the importer’s one-based profile key; the per-object profile placement oracles must fail.",
+      "test_filter": "BBS 3MF skips malformed layer height profile records",
+      "expected_matches": 1
+    },
+    {
+      "id": "bbs-profile-duplicate-record-last-wins",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "if (object_item != m_layer_heights_profiles.end()) {\n                    add_error(\"Found duplicated layer heights profile\");\n                    continue;\n                }",
+      "new": "if (object_item != m_layer_heights_profiles.end()) {\n                    add_error(\"Found duplicated layer heights profile\");\n                    m_layer_heights_profiles.erase(object_item);\n                }",
+      "description": "Replace the first valid duplicate with the later profile record; the first-record-wins profile oracle must fail.",
+      "test_filter": "BBS 3MF skips malformed layer height profile records",
+      "expected_matches": 1
+    }
+  ],
+  "schema_version": 1
+}

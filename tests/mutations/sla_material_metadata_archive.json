@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Public SLA material metadata archive-persistence omission mutants.",
+  "mutants": [
+    {
+      "id": "sla-material-archive-omits-material-density",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "        if (! is_banned(key) && ! cfg.option(key)->is_nil())",
+      "new": "        if (key != \"material_density\" && ! is_banned(key) && ! cfg.option(key)->is_nil())",
+      "expected_matches": 1,
+      "test_filter": "^SLAMaterialArchive$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Omit material_density from fill_slicerconf archive serialization. The archive profile must preserve density at its registered zero minimum, default 1, and representative 1.25. Importing the exported archive must fail its exact DynamicPrintConfig round-trip assertion."
+    },
+    {
+      "id": "sla-material-archive-omits-material-vendor",
+      "path": "src/libslic3r/Format/SL1.cpp",
+      "old": "        if (! is_banned(key) && ! cfg.option(key)->is_nil())",
+      "new": "        if (key != \"material_vendor\" && ! is_banned(key) && ! cfg.option(key)->is_nil())",
+      "expected_matches": 1,
+      "test_filter": "^SLAMaterialArchive$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Omit material_vendor from fill_slicerconf archive serialization. The archive profile must preserve both the empty default and representative Unicode vendor Résine 雪. Importing the exported archive must fail its exact DynamicPrintConfig round-trip assertion."
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "scope": "Preset composition, per-nozzle purge matrices, filament selection, inheritance, and embedded-profile ownership.",
+  "mutants": [
+    {
+      "id": "secure_print_host_retained",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    config.erase(\"print_host\");",
+      "new": "    config.erase(\"print_host_webui\");",
+      "test_filter": "PresetBundleContracts",
+      "description": "secure print host retained"
+    },
+    {
+      "id": "secure_port_retained",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    config.erase(\"printhost_port\");",
+      "new": "    config.erase(\"printhost_user\");",
+      "test_filter": "PresetBundleContracts",
+      "description": "secure port retained"
+    },
+    {
+      "id": "flush_multiplier_gate_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (with_multiplier) {\n        // Fast purge mode uses flush_multiplier_fast; the default prime_volume_mode==Default",
+      "new": "    if (!with_multiplier) {\n        // Fast purge mode uses flush_multiplier_fast; the default prime_volume_mode==Default",
+      "test_filter": "PresetBundleContracts",
+      "description": "flush multiplier gate inverted"
+    },
+    {
+      "id": "fast_purge_mode_predicate_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        const bool use_fast = mode_opt && mode_opt->value == PrimeVolumeMode::pvmFast;",
+      "new": "        const bool use_fast = mode_opt && mode_opt->value != PrimeVolumeMode::pvmFast;",
+      "test_filter": "PresetBundleContracts",
+      "description": "fast purge mode predicate inverted"
+    },
+    {
+      "id": "nozzle_volume_map_bounds_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (opt_nozzle_volume_type && opt_nozzle_volume_type->values.size() > (f_maps[index] - 1))",
+      "new": "        if (opt_nozzle_volume_type && opt_nozzle_volume_type->values.size() < (f_maps[index] - 1))",
+      "test_filter": "PresetBundleContracts",
+      "description": "nozzle volume map bounds inverted"
+    },
+    {
+      "id": "extruder_info_single_gate_widened",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (extruder_nums > 1) {\n        filament_infos.resize(extruder_nums, std::vector<DynamicPrintConfig>());",
+      "new": "    if (extruder_nums > 2) {\n        filament_infos.resize(extruder_nums, std::vector<DynamicPrintConfig>());",
+      "test_filter": "PresetBundleContracts",
+      "description": "extruder info single gate widened"
+    },
+    {
+      "id": "tpu_display_type_misclassified",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                if (display_filament_type == \"TPU\") {\n                    tpu_filaments.push_back(i);",
+      "new": "                if (display_filament_type == \"PLA\") {\n                    tpu_filaments.push_back(i);",
+      "test_filter": "PresetBundleContracts",
+      "description": "tpu display type misclassified"
+    },
+    {
+      "id": "edited_filament_identity_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    if (edited_preset.name != name)\n        return false;",
+      "new": "    if (edited_preset.name == name)\n        return false;",
+      "test_filter": "PresetBundleContracts",
+      "description": "edited filament identity inverted"
+    },
+    {
+      "id": "ams_changed_false_branch_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        if (!filament_changed && this->filament_presets.size() > combox_info.ams_filament_presets.size()) {",
+      "new": "        if (filament_changed && this->filament_presets.size() > combox_info.ams_filament_presets.size()) {",
+      "test_filter": "PresetBundleContracts",
+      "description": "ams changed false branch inverted"
+    },
+    {
+      "id": "system_setting_id_empty_gate_inverted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "            else if (preset->setting_id.empty())\n                preset->setting_id = setting_id;",
+      "new": "            else if (!preset->setting_id.empty())\n                preset->setting_id = setting_id;",
+      "test_filter": "PresetBundleContracts",
+      "description": "system setting id empty gate inverted"
+    },
+    {
+      "id": "full_sla_retains_compatible_printers",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    // These two value types clash between the print and filament profiles. They should be renamed.\n    out.erase(\"compatible_printers\");",
+      "new": "    // These two value types clash between the print and filament profiles. They should be renamed.\n    out.erase(\"compatible_prints\");",
+      "test_filter": "PresetBundleContracts",
+      "description": "full sla retains compatible printers"
+    },
+    {
+      "id": "full_sla_retains_compatible_condition",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    // These two value types clash between the print and filament profiles. They should be renamed.\n    out.erase(\"compatible_printers\");\n    out.erase(\"compatible_printers_condition\");",
+      "new": "    // These two value types clash between the print and filament profiles. They should be renamed.\n    out.erase(\"compatible_printers\");\n    out.erase(\"compatible_prints_condition\");",
+      "test_filter": "PresetBundleContracts",
+      "description": "full sla retains compatible condition"
+    },
+    {
+      "id": "embedded_load_gate_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        if (!preset->is_project_embedded) continue;",
+      "new": "        if (preset->is_project_embedded) continue;",
+      "test_filter": "PresetBundleContracts",
+      "description": "embedded load gate inverted"
+    },
+    {
+      "id": "embedded_reset_gate_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "        //if (preset.type != Preset::get_type_from_string(type)) continue;\n        if (it->is_project_embedded) {",
+      "new": "        //if (preset.type != Preset::get_type_from_string(type)) continue;\n        if (!it->is_project_embedded) {",
+      "test_filter": "PresetBundleContracts",
+      "description": "embedded reset gate inverted"
+    },
+    {
+      "id": "root_parent_empty_gate_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    if (inherits.empty())\n// \t\treturn this->get_selected_preset().is_system ? &this->get_selected_preset() : nullptr;\n        return nullptr;",
+      "new": "    if (!inherits.empty())\n// \t\treturn this->get_selected_preset().is_system ? &this->get_selected_preset() : nullptr;\n        return nullptr;",
+      "test_filter": "PresetBundleContracts",
+      "description": "root parent empty gate inverted"
+    },
+    {
+      "id": "user_base_empty_gate_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    // Handle user preset\n    if (child.inherits().empty())\n        return &child; // this is user root",
+      "new": "    // Handle user preset\n    if (!child.inherits().empty())\n        return &child; // this is user root",
+      "test_filter": "PresetBundleContracts",
+      "description": "user base empty gate inverted"
+    },
+    {
+      "id": "detached_collision_gate_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    if (exists(final_name)) {\n        final_name = base_name + \" (Published)\";",
+      "new": "    if (!exists(final_name)) {\n        final_name = base_name + \" (Published)\";",
+      "test_filter": "PresetBundleContracts",
+      "description": "detached collision gate inverted"
+    },
+    {
+      "id": "default_suppression_start_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    size_t idx = m_default_suppressed ? m_num_default_presets : 0;\n    for (; idx < m_presets.size(); ++ idx)",
+      "new": "    size_t idx = m_default_suppressed ? 0 : 0;\n    for (; idx < m_presets.size(); ++ idx)",
+      "test_filter": "PresetBundleContracts",
+      "description": "default suppression start inverted"
+    },
+    {
+      "id": "embedded_remove_files_guard_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    if (this->is_project_embedded) {\n        return;\n    }\n    InstanceLock instance_lock(user_presets_lock_path());",
+      "new": "    if (!this->is_project_embedded) {\n        return;\n    }\n    InstanceLock instance_lock(user_presets_lock_path());",
+      "test_filter": "PresetBundleContracts",
+      "description": "embedded remove files guard inverted"
+    },
+    {
+      "id": "embedded_save_guard_inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "    if (this->is_project_embedded)\n        return true;\n    //BBS: change to json format",
+      "new": "    if (!this->is_project_embedded)\n        return true;\n    //BBS: change to json format",
+      "test_filter": "PresetBundleContracts",
+      "description": "embedded save guard inverted"
+    }
+  ]
+}

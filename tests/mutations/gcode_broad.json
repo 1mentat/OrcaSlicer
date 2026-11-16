@@ -1,0 +1,151 @@
+{
+  "scope": "GCode coordinate and output contracts with independent parsed-motion and snapshot-position oracles.",
+  "mutants": [
+    {
+      "id": "coordinate-offset-sign",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    return unscale(point) + m_origin - extruder_offset;",
+      "new": "    return unscale(point) + m_origin + extruder_offset;",
+      "description": "coordinate conversion oracle",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "gcode-to-point-origin-sign",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    Vec2d pt = point - m_origin;",
+      "new": "    Vec2d pt = point + m_origin;",
+      "description": "inverse coordinate oracle",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "quantized-x-uses-y",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    return { GCodeFormatter::quantize_xyzf(p.x()), GCodeFormatter::quantize_xyzf(p.y()) };",
+      "new": "    return { GCodeFormatter::quantize_xyzf(p.y()), GCodeFormatter::quantize_xyzf(p.y()) };",
+      "description": "quantized coordinate oracle",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "interpolation-initial-uses-end",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        return start_value;\n    } else {\n        ratio = m_layer_index / (m_layer_count - 1.f);",
+      "new": "        return end_value;\n    } else {\n        ratio = m_layer_index / (m_layer_count - 1.f);",
+      "description": "initial interpolation oracle",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "role-external-name",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        case erExternalPerimeter: return \"ExternalPerimeter\";",
+      "new": "        case erExternalPerimeter: return \"Perimeter\";",
+      "description": "role parser names",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "role-gap-name",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        case erGapFill: return \"GapFill\";",
+      "new": "        case erGapFill: return \"Mixed\";",
+      "description": "role parser names",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "z-hop-slope-normal",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    case ZHopType::zhtSlope:\n        return LiftType::SlopeLift;",
+      "new": "    case ZHopType::zhtSlope:\n        return LiftType::NormalLift;",
+      "description": "lift policy mapping",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "mass-force-uses-max",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            y_acceleration_limit_res = std::min(curr_acceleration_temp, curr_acceleration_y_config);",
+      "new": "            y_acceleration_limit_res = std::max(curr_acceleration_temp, curr_acceleration_y_config);",
+      "description": "mass acceleration cap",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "calc-invalid-size-bound",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (cs.size() != 6 || std::all_of(cs.begin(), cs.end(), [](double v) { return v == 0; })) return std::numeric_limits<double>::max();",
+      "new": "    if (cs.size() != 5 || std::all_of(cs.begin(), cs.end(), [](double v) { return v == 0; })) return std::numeric_limits<double>::max();",
+      "description": "volumetric polynomial malformed input",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "calc-first-coefficient",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    double res = cs[0] * x * x + cs[1] * y * y + cs[2] * x * y + cs[3] * x + cs[4] * y + cs[5];",
+      "new": "    double res = cs[0] * x + cs[1] * y * y + cs[2] * x * y + cs[3] * x + cs[4] * y + cs[5];",
+      "description": "volumetric polynomial terms",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "calc-parser-drops-values",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            cs.push_back(std::stod(token));",
+      "new": "            cs.push_back(0.0);",
+      "description": "volumetric polynomial parse",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "full-config-unbans-farthest",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        \"farthest_point_timelapse\"sv,",
+      "new": "        // \"farthest_point_timelapse\"sv,",
+      "description": "full config banned settings",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "full-config-ignores-ban-check",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (!is_banned(key) && !cfg.option(key)->is_nil()) {",
+      "new": "        if (true && !cfg.option(key)->is_nil()) {",
+      "description": "full config banned settings",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "pa-guard-always-true",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (!m_config.enable_pressure_advance.get_at(fi))",
+      "new": "    if (true || !m_config.enable_pressure_advance.get_at(fi))",
+      "description": "pressure advance gate",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "pa-return-empty",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    return m_writer.set_pressure_advance(m_config.pressure_advance.get_at(fi));",
+      "new": "    return {};",
+      "description": "pressure advance command",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "exclude-labels-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    m_enable_exclude_object = m_config.exclude_object;",
+      "new": "    m_enable_exclude_object = false;",
+      "description": "object-label export gate",
+      "test_filter": "GCodeBroad"
+    },
+    {
+      "id": "farthest-gate-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    m_farthest_point_timelapse.enabled = m_config.farthest_point_timelapse.value",
+      "new": "    m_farthest_point_timelapse.enabled = false && m_config.farthest_point_timelapse.value",
+      "description": "farthest-point gate",
+      "test_filter": "GCodeBroad"
+    }
+  ],
+  "known_survivors": [
+    {
+      "id": "cooling-branch-delayed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    } else if (m_config.slow_down_layers > 1 && m_config.raft_layers == 0) {",
+      "new": "    } else if (m_config.slow_down_layers > 1000 && m_config.raft_layers == 0) {",
+      "description": "slowdown branch",
+      "test_filter": "GCodeBroad"
+    }
+  ]
+}

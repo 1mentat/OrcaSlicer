@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Public Print export gates air-filtration exhaust phases by capability, master activation, and per-phase controls while preserving deposited material.",
+  "mutants": [
+    {
+      "id": "gcode-air-filtration-during-capability-gate-disabled-v2",
+      "description": "Disable the unique during-print capability gate; the all-enabled row must change from PWM89 then PWM165 to PWM165 alone, while the capability-disabled control remains empty.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "// Orca: when air filtration is supported, check if it needs to be activated during printing and set the exhaust fan speed accordingly\n    if (m_config.support_air_filtration.value) {",
+      "new": "// Orca: when air filtration is supported, check if it needs to be activated during printing and set the exhaust fan speed accordingly\n    if (false) {",
+      "test_filter": "AirFiltration"
+    }
+  ]
+}

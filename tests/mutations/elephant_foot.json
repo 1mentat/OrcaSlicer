@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Public elephant-foot compensation fades solid contours across configured layers, and reduced solid-infill density ramps by layer.",
+  "test_filter": "[ElephantFoot]",
+  "mutants": [
+    {
+      "id": "elephant-foot-compensation-does-not-fade",
+      "path": "src/libslic3r/PrintObjectSlice.cpp",
+      "old": "\t                float elfoot = elephant_foot_compensation_scaled > 0 && layer_id < m_config.elefant_foot_compensation_layers.value ? \n                        elephant_foot_compensation_scaled - (elephant_foot_compensation_scaled / m_config.elefant_foot_compensation_layers.value) * layer_id : \n                        0.f;\n",
+      "new": "\t                float elfoot = elephant_foot_compensation_scaled > 0 && layer_id < m_config.elefant_foot_compensation_layers.value ? \n                        elephant_foot_compensation_scaled : \n                        0.f;\n",
+      "expected_matches": 1,
+      "description": "Keep full first-layer contour correction on each active compensation layer instead of fading it. The public layer-boundary widths must progress across the three-layer ramp.",
+      "test_filter": "[ElephantFoot]"
+    },
+    {
+      "id": "elephant-foot-solid-density-does-not-ramp",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "                    params.density = 1.0f - (1.0f - elefant_density) * (elefant_layers - (f->layer_id - 1)) / elefant_layers; // Reverse calculation - The higher layer number means the higher density. Counting starts from the second layer.\n",
+      "new": "                params.density = elefant_density;\n",
+      "expected_matches": 1,
+      "description": "Apply the configured 50% solid density unchanged to every affected layer rather than ramping toward full density. The measured emitted solid-fill volume ratios must increase over layers 1 through 3.",
+      "test_filter": "[ElephantFoot]"
+    }
+  ]
+}

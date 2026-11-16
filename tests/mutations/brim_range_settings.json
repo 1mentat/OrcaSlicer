@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Source-pinned probes for flat and belt brim range geometry. Baseline and restored 50-case controls pass; all three probes are killed by ordinary assertions.",
+  "mutants": [
+    {
+      "id": "flat-brim-width-clamped-at-25mm",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "float              brim_width = scale_(floor(object->config().brim_width.value / flowWidth / 2) * flowWidth * 2);",
+      "new": "float              brim_width = scale_(floor(std::min(object->config().brim_width.value, 25.) / flowWidth / 2) * flowWidth * 2);",
+      "description": "Preserve the 0 and 5 mm controls but truncate the registered 100 mm maximum; the actual outer emitted-path clearance must remain near 100 mm on all four sides.",
+      "test_filter": "^BrimRangeBoundaries$"
+    },
+    {
+      "id": "belt-leading-brim-length-ignored",
+      "path": "src/libslic3r/BeltBrim.cpp",
+      "old": "const coord_t leading = scale_(cfg.leading_brim_length.value);",
+      "new": "const coord_t leading = 0;",
+      "description": "Ignore the belt leading-length consumer; default and explicit-zero rows must still emit no brim. Positive 5 and 100 mm rows are measured against an otherwise identical extra-width=5 mm anchor, cancelling the fixture/contact-boundary offset; both true configured distances must be recovered from the 45-degree projected belt metric.",
+      "test_filter": "^BrimRangeBoundaries$"
+    },
+    {
+      "id": "belt-extra-brim-width-ignored",
+      "path": "src/libslic3r/BeltBrim.cpp",
+      "old": "const coord_t lateral = scale_(cfg.extra_brim_width.value);",
+      "new": "const coord_t lateral = 0;",
+      "description": "Ignore the cross-belt consumer; left and right emitted path reaches must each match 5 and 100 mm, with no corresponding change along the belt-feed axis.",
+      "test_filter": "^BrimRangeBoundaries$"
+    }
+  ]
+}

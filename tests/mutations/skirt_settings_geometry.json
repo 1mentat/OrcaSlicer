@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Skirt clearance, registered start bearings, and explicit speed versus first-layer fallback through public Print export.",
+  "mutants": [
+    {
+      "id": "skirt-distance-initial-offset-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "float distance = float(scale_(m_config.skirt_distance.value - spacing/2.));",
+      "new": "float distance = float(scale_(-spacing/2.));",
+      "description": "Zero the configured skirt_distance contribution at the initial skirt-centerline offset; the zero-distance row remains a control while nonzero configured clearances should fail.",
+      "test_filter": "SkirtDistance"
+    },
+    {
+      "id": "skirt-start-angle-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "const Point desired_start_point = Skirt::find_start_point(loop, skirt_start_angle);",
+      "new": "const Point desired_start_point = Skirt::find_start_point(loop, 0.0);",
+      "description": "Ignore the configured angle in the first-layer start-point selection; nonzero requested bearings should fail while same-root geometry and feed-speed checks remain controls.",
+      "test_filter": "SkirtAngle"
+    },
+    {
+      "id": "skirt-speed-override-cannot-raise-speed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = skirt_speed;",
+      "new": "speed = std::min(skirt_speed, speed);",
+      "description": "Clamp the positive override to its pre-override fallback; the registered 37 mm/s rows should fail and the zero-override 23 mm/s row should remain a control.",
+      "test_filter": "SkirtAngle"
+    }
+  ]
+}

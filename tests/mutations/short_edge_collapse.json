@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "Two exact semantic probes for the short_edge_collapse controls.",
+  "mutants": [
+    {
+      "id": "short-edge-collapse-runs-at-equal-face-budget",
+      "path": "src/libslic3r/ShortEdgeCollapse.cpp",
+      "old": "while (face_indices.size() > target_triangle_count) {",
+      "new": "while (face_indices.size() >= target_triangle_count) {",
+      "test_filter": "Short-edge collapse preserves geometry when the face budget is already met",
+      "expected_matches": 1
+    },
+    {
+      "id": "short-edge-collapse-corrupts-final-face-remap",
+      "path": "src/libslic3r/ShortEdgeCollapse.cpp",
+      "old": "final_face[i] = final_vertices_mapping[final_face[i]];",
+      "new": "final_face[i] = 0;",
+      "test_filter": "Short-edge collapse can reduce an open indexed surface to its requested face budget",
+      "expected_matches": 1
+    }
+  ],
+  "base_commit": "0a6caec9ce6d433850a3a728d82c774d1f8b8901"
+}

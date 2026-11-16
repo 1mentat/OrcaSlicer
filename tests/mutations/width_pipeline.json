@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Initial-layer, role-specific, and nozzle-relative line widths reach physical extrusion paths.",
+  "mutants": [
+    {
+      "id": "initial-layer-width-override-disabled",
+      "path": "src/libslic3r/PrintRegion.cpp",
+      "old": "if (first_layer && print_config.initial_layer_line_width.value > 0) {",
+      "new": "if (false) {",
+      "test_filter": "Initial-layer line width controls first-layer extrusion paths",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_assertion": "CHECK_THAT(measurement.minimum_width, Catch::Matchers::WithinAbs(expected, 1e-4))"
+    },
+    {
+      "id": "internal-solid-width-uses-top-surface-setting",
+      "path": "src/libslic3r/PrintRegion.cpp",
+      "old": "config_width = m_config.internal_solid_infill_line_width;",
+      "new": "config_width = m_config.top_surface_line_width;",
+      "test_filter": "Internal-solid infill line width controls solid-infill paths",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_assertion": "CHECK(measurement.minimum_width >= expected - rounding_mm)"
+    },
+    {
+      "id": "percent-line-width-resolves-to-eighty-percent-nozzle",
+      "path": "src/libslic3r/Flow.cpp",
+      "old": "w = float(width.get_abs_value(nozzle_diameter));",
+      "new": "w = width.percent ? 0.8f * nozzle_diameter : float(width.value);",
+      "test_filter": "Outer-wall line width controls external-perimeter paths",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_assertion": "CHECK_THAT(measurement.minimum_width, Catch::Matchers::WithinAbs(expected, 1e-4))"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "names": [
+    "FocusedSLA::SLA support point density spans its minimum, representative, and default",
+    "FocusedSLA::SLA maximum bridges per pillar bounds support head clustering",
+    "FocusedSLA::SLA generated support points project onto model surfaces"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "description": "Public extrusion contracts preserve connected path footprints, per-vertex contour heights, loop geometry, and the configured scarf seam gap.",
+  "test_filter": "ExtrusionEntity",
+  "mutants": [
+    {
+      "id": "contoured-reverse-keeps-height-order",
+      "path": "src/libslic3r/ExtrusionEntity.cpp",
+      "old": "    std::reverse(this->z_diffs.begin(), this->z_diffs.end());",
+      "new": "    // Mutant: leave vertex height offsets in their original order.",
+      "expected_matches": 1,
+      "test_filter": "Contoured path operations preserve vertex heights and geometry",
+      "description": "Reversing a contoured path must reverse the per-vertex height deltas with the geometry; endpoint and cloned metadata assertions detect the mismatch.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "scarf-gap-keeps-nonextruding-tail",
+      "path": "src/libslic3r/ExtrusionEntity.cpp",
+      "old": "                orig.split_at_length(seg_length - seam_gap, &detailed_poly, &tmp);",
+      "new": "                orig.split_at_length(seg_length, &detailed_poly, &tmp);",
+      "expected_matches": 1,
+      "test_filter": "A scarf seam gap stops the final ramp before its non-extruding tail",
+      "description": "Keep the requested physical seam gap outside the final scarf extrusion segment; the independent 10 mm path and 2 mm gap witness detects a missing trim.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

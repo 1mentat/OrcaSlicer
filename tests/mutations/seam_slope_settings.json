@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Seam-slope mode, conditional activation, start height, length, and subdivision settings.",
+  "mutants": [
+    {
+      "id": "seam-slope-type-forced-none",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    const auto seam_scarf_type = m_config.seam_slope_type.value;",
+      "new": "    const auto seam_scarf_type = SeamScarfType::None;",
+      "description": "Force the local seam type to None while retaining the local read/use shape; the active external fixture must lose its scarf distance and positive outer moves.",
+      "test_filter": "SeamSlopeSettings"
+    },
+    {
+      "id": "seam-slope-conditional-smoothness-forced-on",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        enable_seam_slope = loop.is_smooth(m_config.scarf_angle_threshold.value * M_PI / 180., nozzle_diameter);",
+      "new": "        enable_seam_slope = true;",
+      "description": "Bypass the conditional smooth-loop result and force a qualifying seam on the square fixture.",
+      "test_filter": "SeamSlopeSettings"
+    },
+    {
+      "id": "seam-slope-percent-start-ratio-forced-zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            start_slope_ratio = m_config.seam_slope_start_height.value / 100.;",
+      "new": "            start_slope_ratio = 0.;",
+      "description": "Ignore the configured percent start height while retaining the absolute-height branch and shared local.",
+      "test_filter": "SeamSlopeSettings"
+    },
+    {
+      "id": "seam-slope-min-length-forced-full-loop",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        const double slope_min_length         = slope_entire_loop ? loop_length : std::min(m_config.seam_slope_min_length.value, loop_length);",
+      "new": "        const double slope_min_length         = slope_entire_loop ? loop_length : loop_length;",
+      "description": "Ignore the configured minimum scarf length for the non-entire-loop branch and use the complete loop length.",
+      "test_filter": "SeamSlopeSettings"
+    },
+    {
+      "id": "seam-slope-steps-forced-single-subdivision",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        const double slope_max_segment_length = scale_(slope_min_length / slope_steps);",
+      "new": "        const double slope_max_segment_length = scale_(slope_min_length / (slope_steps > 0 ? 1 : 1));",
+      "description": "Force one subdivision segment per slope while retaining a read of the registered positive step count.",
+      "test_filter": "SeamSlopeSettings"
+    }
+  ]
+}

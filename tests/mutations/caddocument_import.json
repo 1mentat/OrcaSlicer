@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "Public CAD import replay preserves independent solids, their analytic geometry, and tessellated body ownership.",
+  "test_filter": "CadDocumentImport",
+  "mutants": [
+    {
+      "id": "caddocument-import-body-start-gate-removed",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "        || f.type == CadFeatureType::Import   // an imported solid is always its own base body",
+      "new": "        || false // mutation: imported features must start independent bodies",
+      "test_filter": "CadDocumentImport",
+      "description": "Remove the Import starts_new branch; the second imported feature must append a second body instead of replacing the current target body."
+    },
+    {
+      "id": "caddocument-import-shape-adoption-removed",
+      "path": "src/libslic3r/CAD/CadDocument.cpp",
+      "old": "        result    = f.imported_solid;",
+      "new": "        result    = TopoDS_Shape(); // mutation: drop imported solid before replay",
+      "test_filter": "CadDocumentImport",
+      "description": "Drop the public Import feature shape during replay; recompute must reject the missing solid rather than report a valid imported body."
+    }
+  ]
+}

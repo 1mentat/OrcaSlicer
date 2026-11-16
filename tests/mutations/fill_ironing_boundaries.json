@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "description": "Ironing process and nullable filament boundaries: flow, writer feed, inset, and inherited spacing.",
+  "selection": {
+    "label_filter": "^IroningOptionBoundaries$",
+    "expected_filtered_case_count": 7,
+    "case_names": [
+      "Zero ironing flow retains fill geometry without extrusion volume",
+      "Zero filament ironing flow overrides the process flow",
+      "Minimum ironing speed emits the configured 1 mm per second feed",
+      "Minimum filament ironing speed overrides process speed",
+      "Zero ironing inset keeps half a nozzle diameter from the edge",
+      "Zero filament ironing inset uses half-nozzle geometry over inherited inset",
+      "Nil filament ironing spacing inherits process geometry"
+    ]
+  },
+  "mutants": [
+    {
+      "id": "ironing-zero-flow-is-raised-to-one-percent",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "ironing_params.height = default_layer_height * 0.01 * (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_flow);",
+      "new": "ironing_params.height = default_layer_height * 0.01 * std::max<double>(1., (!config.filament_ironing_flow.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_flow.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_flow));",
+      "expected_matches": 1,
+      "test_filter": "^IroningOptionBoundaries$",
+      "expected_test_count": 7,
+      "intended_failed_case": "Zero ironing flow retains fill geometry without extrusion volume",
+      "additional_intended_failed_cases": [
+        "Zero filament ironing flow overrides the process flow"
+      ],
+      "ordinary_assertion_only": true,
+      "description": "Clamp the resolved flow percent to 1%: both registered zero values incorrectly extrude, while the existing 10% process control is unchanged.",
+      "production_source_sha256": "ddce90378b697e5cd44396bd4c9dd62e9ece4a776c5e713d5573b61c6fbc13a4"
+    },
+    {
+      "id": "ironing-minimum-speed-is-clamped-at-gcode-writer",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx);",
+      "new": "speed = std::max<double>(20., m_config.filament_ironing_speed.is_nil(filament_idx)\n                ? m_config.ironing_speed.value\n                : m_config.filament_ironing_speed.get_at(filament_idx));",
+      "expected_matches": 1,
+      "test_filter": "^IroningOptionBoundaries$",
+      "expected_test_count": 7,
+      "intended_failed_case": "Minimum ironing speed emits the configured 1 mm per second feed",
+      "additional_intended_failed_cases": [
+        "Minimum filament ironing speed overrides process speed"
+      ],
+      "ordinary_assertion_only": true,
+      "description": "Clamp the selected ironing writer speed to the ordinary 20 mm/s default. Both process and filament 1 mm/s settings then emit 1200 instead of 60 mm/min; their inherited 20 mm/s controls remain unchanged. Fill-side speed grouping data and equality semantics are untouched.",
+      "production_source_sha256": "875766b0177490db1698eac2aa716e49c8166ad8a4f9fb58dfb9144bfee986db"
+    },
+    {
+      "id": "ironing-zero-inset-loses-half-nozzle-offset",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "double ironing_areas_offset = ironing_params.inset == 0 ? float(scale_(0.5 * nozzle_dmr)) : scale_(ironing_params.inset);",
+      "new": "double ironing_areas_offset = ironing_params.inset == 0 ? 0. : scale_(ironing_params.inset);",
+      "expected_matches": 1,
+      "test_filter": "^IroningOptionBoundaries$",
+      "expected_test_count": 7,
+      "intended_failed_case": "Zero ironing inset keeps half a nozzle diameter from the edge",
+      "additional_intended_failed_cases": [
+        "Zero filament ironing inset uses half-nozzle geometry over inherited inset"
+      ],
+      "ordinary_assertion_only": true,
+      "description": "Treat zero as no inset instead of half a nozzle diameter for either source. Both zero-sentinel geometry comparisons must fail while their positive-inset controls remain unchanged.",
+      "production_source_sha256": "ddce90378b697e5cd44396bd4c9dd62e9ece4a776c5e713d5573b61c6fbc13a4"
+    },
+    {
+      "id": "filament-ironing-spacing-nil-uses-constant-fallback",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "ironing_params.line_spacing = std::max(IRONING_SPACING_MIN, !config.filament_ironing_spacing.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_spacing.get_at(extruder_idx)\n\t\t\t\t\t: config.ironing_spacing.value);",
+      "new": "ironing_params.line_spacing = std::max(IRONING_SPACING_MIN, !config.filament_ironing_spacing.is_nil(extruder_idx)\n\t\t\t\t\t? config.filament_ironing_spacing.get_at(extruder_idx)\n\t\t\t\t\t: 0.1);",
+      "expected_matches": 1,
+      "test_filter": "^IroningOptionBoundaries$",
+      "expected_test_count": 7,
+      "intended_failed_case": "Nil filament ironing spacing inherits process geometry",
+      "ordinary_assertion_only": true,
+      "description": "Replace only the nil-override fallback with a finite 0.1 mm constant. The explicit 0.4 mm same-as-process and 0.2 mm distinct-override controls remain intact; the nil row must stop matching the configured 0.4 mm process ironing length. This avoids zero or sub-floor spacing values.",
+      "production_source_sha256": "ddce90378b697e5cd44396bd4c9dd62e9ece4a776c5e713d5573b61c6fbc13a4"
+    }
+  ]
+}

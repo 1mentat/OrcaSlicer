@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "description": "Complete adaptive pressure-advance model grammar, numeric parsing and ordering constraints.",
+  "mutants": [
+    {
+      "id": "decimal-consumption-check",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (consumed != value.size())",
+      "new": "if (false)",
+      "description": "Each numeric field must be consumed completely.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "blank-line-rejected",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (first == std::string::npos)\n            continue;",
+      "new": "if (first == std::string::npos)\n            return \"blank line rejected\";",
+      "description": "Whitespace-only physical lines are valid.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "line-number",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "++line_number;",
+      "new": "line_number += 2;",
+      "description": "Errors identify the physical source line.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "illegal-character-gate",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (!std::isdigit(static_cast<unsigned char>(c)) && c != ',' && c != '.')",
+      "new": "if (false)",
+      "description": "Signed or exponent numeric values are outside the declared grammar.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "comma-count-gate",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (comma_count != 2)",
+      "new": "if (false)",
+      "description": "A row has exactly three fields.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "pa-boundary",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (pa >= 2.0)",
+      "new": "if (pa > 2.0)",
+      "description": "PA equal to two is rejected.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "flow-boundary",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (flow <= pa)",
+      "new": "if (flow < pa)",
+      "description": "Flow must strictly exceed PA.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "accel-boundary",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (accel <= flow)",
+      "new": "if (accel < flow)",
+      "description": "Acceleration must strictly exceed flow.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "flow-order",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (flow <= pa)",
+      "new": "if (flow >= pa)",
+      "description": "Valid and reversed flow values remain distinguishable.",
+      "test_filter": "AdaptivePAValidation"
+    },
+    {
+      "id": "accel-order",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "if (accel <= flow)",
+      "new": "if (accel >= flow)",
+      "description": "Valid and reversed acceleration values remain distinguishable.",
+      "test_filter": "AdaptivePAValidation"
+    }
+  ],
+  "unclaimed_experiments": [
+    {
+      "id": "blank-line-gate-v1",
+      "status": "process_failure",
+      "reason": "Disabling the blank-line gate caused unexpected exceptions; excluded from assertion kills and replaced by an explicit rejection mutant."
+    }
+  ]
+}

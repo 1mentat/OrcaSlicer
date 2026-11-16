@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "AMS temperature reconciliation and optional duplicate material validation.",
+  "mutants": [
+    {
+      "id": "tray-tag-gate",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (tag_uid == \"0\" || (tag_uid.size() == 16 && tag_uid.substr(12, 2) == \"01\")) continue;",
+      "new": "if (false) continue;",
+      "test_filter": "AmsValidation",
+      "description": "tray tag gate"
+    },
+    {
+      "id": "tray-system-gate",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (preset && !preset->is_user()) continue;",
+      "new": "if (false) continue;",
+      "test_filter": "AmsValidation",
+      "description": "tray system gate"
+    },
+    {
+      "id": "tray-low-temperature",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "min_nozzle_temp                = opt_min_ints->get_at(variant_index);",
+      "new": "min_nozzle_temp                = opt_min_ints->get_at(variant_index) + 1;",
+      "test_filter": "AmsValidation",
+      "description": "tray low temperature"
+    },
+    {
+      "id": "tray-high-temperature",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "max_nozzle_temp                = opt_max_ints->get_at(variant_index);",
+      "new": "max_nozzle_temp                = opt_max_ints->get_at(variant_index) - 1;",
+      "test_filter": "AmsValidation",
+      "description": "tray high temperature"
+    },
+    {
+      "id": "tray-half-match",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (min_temp_equation && max_temp_equation) {",
+      "new": "if (min_temp_equation || max_temp_equation) {",
+      "test_filter": "AmsValidation",
+      "description": "tray half match"
+    },
+    {
+      "id": "tray-setting-identity",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "preset_setting_id = preset->setting_id;",
+      "new": "preset_setting_id = preset->filament_id;",
+      "test_filter": "AmsValidation",
+      "description": "tray setting identity"
+    },
+    {
+      "id": "duplicate-threshold",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (entry.second.size() < 2)\n                continue;",
+      "new": "if (entry.second.size() < 3)\n                continue;",
+      "test_filter": "AmsValidation",
+      "description": "duplicate threshold"
+    },
+    {
+      "id": "duplicate-library-omitted",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (&vendor_filaments != &library_filaments)\n            for (const Preset *fil : library_filaments)",
+      "new": "if (false)\n            for (const Preset *fil : library_filaments)",
+      "test_filter": "AmsValidation",
+      "description": "duplicate library omitted"
+    },
+    {
+      "id": "duplicate-user-printer",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "if (!printer.is_system || printer.vendor == nullptr)\n            continue;\n        auto vendor_it",
+      "new": "if (printer.vendor == nullptr)\n            continue;\n        auto vendor_it",
+      "test_filter": "AmsValidation",
+      "description": "duplicate user printer"
+    },
+    {
+      "id": "tray-variant-index-ignored",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "const int     variant_index     = printer ? get_filament_variant_index(preset->config, printer->config, extruder_id, nozzle_volume_type) : 0;",
+      "new": "const int     variant_index     = 0;",
+      "test_filter": "AmsValidation",
+      "description": "tray variant index ignored"
+    }
+  ]
+}

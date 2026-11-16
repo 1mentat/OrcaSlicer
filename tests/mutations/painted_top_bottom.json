@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Independent top and bottom painted-shell projections and shell-depth contracts.",
+  "mutants": [
+    {
+      "id": "painted-top-bottom-top-gate-uses-bottom",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "slice_mesh_slabs(painted, zs, volume_trafo, max_top_layers > 0 ? &top : nullptr, max_bottom_layers > 0 ? &bottom : nullptr, nullptr, throw_on_cancel_callback);",
+      "new": "slice_mesh_slabs(painted, zs, volume_trafo, max_bottom_layers > 0 ? &top : nullptr, max_bottom_layers > 0 ? &bottom : nullptr, nullptr, throw_on_cancel_callback);",
+      "description": "Use the bottom-shell enable gate for painted top projections; asymmetric (0,2) and (3,0) shell cases require the independent top gate.",
+      "test_filter": "PaintedShellProjection"
+    },
+    {
+      "id": "painted-top-bottom-bottom-gate-uses-top",
+      "path": "src/libslic3r/MultiMaterialSegmentation.cpp",
+      "old": "slice_mesh_slabs(painted, zs, volume_trafo, max_top_layers > 0 ? &top : nullptr, max_bottom_layers > 0 ? &bottom : nullptr, nullptr, throw_on_cancel_callback);",
+      "new": "slice_mesh_slabs(painted, zs, volume_trafo, max_top_layers > 0 ? &top : nullptr, max_top_layers > 0 ? &bottom : nullptr, nullptr, throw_on_cancel_callback);",
+      "description": "Use the top-shell enable gate for painted bottom projections; the asymmetric (3,0) case requires the independent bottom gate.",
+      "test_filter": "PaintedShellProjection"
+    }
+  ]
+}

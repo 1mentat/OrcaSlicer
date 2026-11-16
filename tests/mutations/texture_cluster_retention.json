@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public fixed-palette retention and adaptive post-smoothing palette-value propagation.",
+  "mutants": [
+    {
+      "id": "texture-to-color-fixed-palette-skips-unused-center-reassignment",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "        if (usage[cluster_id] != 0) {",
+      "new": "        if (usage[cluster_id] == 0) {",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "ClusterAndSmooth preserves a fixed palette center after region smoothing",
+      "description": "Invert the unused-center predicate. The singleton black face must remain represented after topological smoothing collapses its region."
+    },
+    {
+      "id": "texture-to-color-adaptive-compaction-corrupts-retained-palette-value",
+      "path": "src/libslic3r/TextureToColor/TextureToColor.cpp",
+      "old": "    cluster_centers = std::move(used_cluster_centers);",
+      "new": "    cluster_centers = {RGB{0, 0, 0}};",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "ClusterAndSmooth keeps the majority color after adaptive region smoothing",
+      "description": "Corrupt the retained adaptive palette value after labels are compacted. The public output-color assertions require the all-white result and reject black output."
+    }
+  ]
+}

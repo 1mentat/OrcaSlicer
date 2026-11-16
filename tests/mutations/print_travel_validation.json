@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Print validation reports travel acceleration against supported firmware and machine travel limits, with zero-limit and zero-default gates.",
+  "test_filter": "PrintValidationTravelAcceleration",
+  "mutants": [
+    {
+      "id": "print-validate-travel-firmware-gate-omits-marlin2",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "const bool support_travel_acc = (m_config.gcode_flavor == gcfRepetier || m_config.gcode_flavor == gcfMarlinFirmware ||\n                                                    m_config.gcode_flavor == gcfRepRapFirmware);",
+      "new": "const bool support_travel_acc = (m_config.gcode_flavor == gcfRepetier ||\n                                                    m_config.gcode_flavor == gcfRepRapFirmware);",
+      "expected_matches": 1,
+      "test_filter": "PrintValidationTravelAcceleration",
+      "description": "Remove the gcfMarlinFirmware travel-limit branch. The supported marlin2 row above machine_max_acceleration_travel must lose its travel_acceleration warning while the ordinary assertion remains safe."
+    },
+    {
+      "id": "print-validate-travel-zero-limit-gate-removed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (max_travel > 0) {",
+      "new": "if (max_travel >= 0) {",
+      "expected_matches": 1,
+      "test_filter": "PrintValidationTravelAcceleration",
+      "description": "Treat a zero machine travel limit as active. The supported zero-limit control must then acquire a travel_acceleration warning, killing this ordinary assertion mutant."
+    }
+  ]
+}

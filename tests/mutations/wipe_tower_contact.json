@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Wipe-tower solid contact layers, interface temperatures, pre-extrusion and bed clipping.",
+  "mutants": [
+    {
+      "id": "contact_speed_not_overridden",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "feedrate       = (layer_type == WipeTowerLayerType::Contact || layer_type == WipeTowerLayerType::Contact_UP) ? 20.f * 60.f : feedrate;",
+      "new": "feedrate       = 1.f;",
+      "description": "Contact and Contact_UP grid layers have the 20 mm/s feedrate",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "solid_grid_loop_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "int   i             = 0;\n        for (i = 0; i < n; ++i) {",
+      "new": "int   i             = 0;\n        for (i = 0; i < 0; ++i) {",
+      "description": "Every solid/contact result has a balanced grid marker and positive extrusion",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_interface_gate_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (is_full_block && layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features ) {",
+      "new": "if (false) {",
+      "description": "Interface temperature and pre-extrusion are emitted only through the contact full-block gate",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_clip_min_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (stop_pos.x() < printer_bbx.min[0]) stop_pos.x() = printer_bbx.min[0];\n            if (stop_pos.x() > printer_bbx.max[0]) stop_pos.x() = printer_bbx.max[0];\n            initial_pos = stop_pos;",
+      "new": "if (false) stop_pos.x() = printer_bbx.min[0];\n            if (stop_pos.x() > printer_bbx.max[0]) stop_pos.x() = printer_bbx.max[0];\n            initial_pos = stop_pos;",
+      "description": "Large negative pre-extrusion distance is clipped to the translated bed minimum",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_clip_max_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "if (stop_pos.x() < printer_bbx.min[0]) stop_pos.x() = printer_bbx.min[0];\n            if (stop_pos.x() > printer_bbx.max[0]) stop_pos.x() = printer_bbx.max[0];\n            initial_pos = stop_pos;",
+      "new": "if (stop_pos.x() < printer_bbx.min[0]) stop_pos.x() = printer_bbx.min[0];\n            if (false) stop_pos.x() = printer_bbx.max[0];\n            initial_pos = stop_pos;",
+      "description": "Large positive pre-extrusion distance is clipped to the translated bed maximum",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_interface_wait_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "writer.format_line_M109(m_filpar[m_current_tool].filament_tower_interface_print_temp, get_extruder_id(m_current_tool, m_cur_layer_id));",
+      "new": "writer.append(\"\");",
+      "description": "Configured interface temperature wait is present in contact output",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_preextrusion_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "writer.retract(-m_filpar[m_current_tool].filament_tower_interface_pre_extrusion_length - 2.f, 100.f);",
+      "new": "writer.retract(0.f, 100.f);",
+      "description": "Configured interface pre-extrusion move is present before contact grid",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_interface_restore_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        if (layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features && m_filpar[m_current_tool].filament_tower_interface_print_temp != m_filpar[m_current_tool].nozzle_temperature)\n            writer.format_line_M104(m_filpar[m_current_tool].nozzle_temperature, get_extruder_id(m_current_tool, m_cur_layer_id));\n        writer.append(\"; CP EMPTY GRID END\\n\"\n                      \";------------------\\n\\n\\n\\n\\n\\n\\n\");",
+      "new": "        if (false)\n            writer.format_line_M104(m_filpar[m_current_tool].nozzle_temperature, get_extruder_id(m_current_tool, m_cur_layer_id));\n        writer.append(\"; CP EMPTY GRID END\\n\"\n                      \";------------------\\n\\n\\n\\n\\n\\n\\n\");",
+      "description": "Contact output restores the nozzle temperature after the interface grid",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_grid_start_marker_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "writer\n            .append(\";--------------------\\n\"\n                    \"; CP EMPTY GRID START\\n\")\n            .comment_with_value(\" layer #\", m_num_layer_changes + 1);",
+      "new": "writer\n            .append(\";--------------------\\n\")\n            .comment_with_value(\" layer #\", m_num_layer_changes + 1);",
+      "description": "Solid/contact geometry is delimited as a grid in emitted output",
+      "test_filter": "WipeTowerContact"
+    },
+    {
+      "id": "contact_grid_end_marker_removed",
+      "path": "src/libslic3r/GCode/WipeTower.cpp",
+      "old": "        if (layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features && m_filpar[m_current_tool].filament_tower_interface_print_temp != m_filpar[m_current_tool].nozzle_temperature)\n            writer.format_line_M104(m_filpar[m_current_tool].nozzle_temperature, get_extruder_id(m_current_tool, m_cur_layer_id));\n        writer.append(\"; CP EMPTY GRID END\\n\"\n                      \";------------------\\n\\n\\n\\n\\n\\n\\n\");",
+      "new": "        if (layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features && m_filpar[m_current_tool].filament_tower_interface_print_temp != m_filpar[m_current_tool].nozzle_temperature)\n            writer.format_line_M104(m_filpar[m_current_tool].nozzle_temperature, get_extruder_id(m_current_tool, m_cur_layer_id));\n        writer.append(\";------------------\\n\\n\\n\\n\\n\\n\\n\");",
+      "description": "Every emitted solid/contact grid has a closing marker",
+      "test_filter": "WipeTowerContact"
+    }
+  ]
+}

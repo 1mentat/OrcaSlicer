@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "description": "Polynomial roots, orthogonal vectors and byte-color clustering contracts.",
+  "mutants": [
+    {
+      "id": "measure-eliminate-leading-zero-off-by-one",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "            m_coefficient.resize(++leading);",
+      "new": "            m_coefficient.resize(leading);",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "measure-polynomial-product-subtracts-terms",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "            result[i0 + i1] += p0[i0] * p1[i1];",
+      "new": "            result[i0 + i1] -= p0[i0] * p1[i1];",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "measure-polynomial-addition-sign",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "        for (i = 0; i <= p1Degree; ++i) {\n            result[i] = p0[i] + p1[i];\n        }\n        for (/**/; i <= p0Degree; ++i) {",
+      "new": "        for (i = 0; i <= p1Degree; ++i) {\n            result[i] = p0[i] - p1[i];\n        }\n        for (/**/; i <= p0Degree; ++i) {",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "measure-polynomial-scalar-scale",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "        result[i] = scalar * p[i];",
+      "new": "        result[i] = p[i];",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "measure-interval-bracket-comparison",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "        if (pmin * pmax > zero)",
+      "new": "        if (pmin * pmax < zero)",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "measure-orthogonal-component-sign",
+      "path": "src/libslic3r/MeasureUtils.hpp",
+      "old": "    result[imax] = v[inext];",
+      "new": "    result[imax] = -v[inext];",
+      "test_filter": "MeasureUtilsExtended"
+    },
+    {
+      "id": "objcolor-requested-cardinality-boundary",
+      "path": "src/libslic3r/ObjColorUtils.hpp",
+      "old": "                if (uniqueImage.size() >= target_num) return true;",
+      "new": "                if (uniqueImage.size() > target_num) return true;",
+      "test_filter": "ObjColorUtilsExtended"
+    },
+    {
+      "id": "objcolor-alpha-threshold-inclusive",
+      "path": "src/libslic3r/ObjColorUtils.hpp",
+      "old": "                if ((int) pixel[3] < this->m_alpha_thres) num_pixels--;",
+      "new": "                if ((int) pixel[3] <= this->m_alpha_thres) num_pixels--;",
+      "test_filter": "ObjColorUtilsExtended"
+    },
+    {
+      "id": "objcolor-unique-color-blue-channel-ignored",
+      "path": "src/libslic3r/ObjColorUtils.hpp",
+      "old": "            if (cur_color[0] == color[0] && cur_color[1] == color[1] && cur_color[2] == color[2]) return true;",
+      "new": "            if (cur_color[0] == color[0] && cur_color[1] == color[1]) return true;",
+      "test_filter": "ObjColorUtilsExtended"
+    },
+    {
+      "id": "objcolor-cluster-result-byte-scale",
+      "path": "src/libslic3r/ObjColorUtils.hpp",
+      "old": "            cluster_results.emplace_back(std::array<float, 4>{center[0] / 255.f, center[1] / 255.f, center[2] / 255.f, 1.f});",
+      "new": "            cluster_results.emplace_back(std::array<float, 4>{center[0] / 128.f, center[1] / 255.f, center[2] / 255.f, 1.f});",
+      "test_filter": "ObjColorUtilsExtended"
+    }
+  ]
+}

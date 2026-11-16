@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Public placeholder parsing preserves percent vector values, rejects mixed initializer types and validates UTF-8 continuation bytes and escapes.",
+  "mutants": [
+    {
+      "id": "placeholder-percent-vector-clone-values-zeroed",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "opt_new = std::make_unique<ConfigOptionFloats>(static_cast<const ConfigOptionPercents*>(rhs.opt)->values);",
+      "new": "opt_new = std::make_unique<ConfigOptionFloats>(std::vector<double>(static_cast<const ConfigOptionPercents*>(rhs.opt)->values.size(), 0.0));",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserVectors$",
+      "ordinary_assertion_only": true,
+      "description": "Preserve the cloned vector length but replace its numeric values with zero; literal content equality fails without an empty-vector exception."
+    },
+    {
+      "id": "placeholder-mixed-initializer-type-guard-inverted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (num_double + num_int > 0)",
+      "new": "if (num_double + num_int == 0)",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserVectors$",
+      "ordinary_assertion_only": true,
+      "description": "An initializer mixing boolean and numeric expressions must report the dedicated type error before constructing a boolean vector."
+    },
+    {
+      "id": "placeholder-utf8-continuation-validation-bypassed",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (cnt > 1 && (c & 0xC0) != 0x80)",
+      "new": "if (false)",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserUnicode$",
+      "ordinary_assertion_only": true,
+      "description": "Remove validation of an early continuation byte in a three-byte sequence. The malformed E2 28 A1 literal is then accepted and fails the expected-error assertion; valid UTF-8 controls remain accepted."
+    },
+    {
+      "id": "placeholder-string-invalid-escape-accepted",
+      "path": "src/libslic3r/PlaceholderParser.cpp",
+      "old": "if (++ it == end ||\n                                (*it != 'r' && *it != 'n' && *it != '\"' && *it != '\\\\'))",
+      "new": "if (++ it == end)",
+      "expected_matches": 1,
+      "test_filter": "^PlaceholderParserUnicode$",
+      "ordinary_assertion_only": true,
+      "description": "Unknown backslash escapes must remain rejected by the public string literal parser rather than being copied through as ordinary characters."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Role flow ratios select their own material multiplier while geometry and other roles remain unchanged.",
+  "mutants": [
+    {
+      "id": "outer-wall-flow-uses-inner-wall-ratio",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            _mm3_per_mm *= m_config.outer_wall_flow_ratio;",
+      "new": "            _mm3_per_mm *= m_config.inner_wall_flow_ratio;",
+      "test_filter": "Outer wall flow ratio scales only external-wall material",
+      "description": "Use a distinct companion role ratio; independently parsed deposited material must expose wrong routing while geometry remains stable."
+    },
+    {
+      "id": "overhang-flow-uses-sparse-infill-ratio",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            _mm3_per_mm *= m_config.overhang_flow_ratio;",
+      "new": "            _mm3_per_mm *= m_config.sparse_infill_flow_ratio;",
+      "test_filter": "Overhang flow ratio scales only detected overhang-wall material",
+      "description": "Use a distinct companion role ratio; independently parsed deposited material must expose wrong routing while geometry remains stable."
+    }
+  ]
+}

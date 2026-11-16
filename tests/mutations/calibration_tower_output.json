@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "calibration-temp-end-interpolation-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            gcode += writer().set_temperature(this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start), static_cast<float>(print.calib_params().end), 5.0f));",
+      "new": "            gcode += writer().set_temperature(this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start), static_cast<float>(print.calib_params().start), 5.0f));",
+      "description": "Use the start value for both endpoints of temperature calibration; layers above the initial band must expose the missing end ramp.",
+      "test_filter": "CalibrationTowerOutput"
+    },
+    {
+      "id": "calibration-vfa-speed-writes-inner-wall",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            float _speed = this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start),\n                                                                 static_cast<float>(print.calib_params().end),\n                                                                 static_cast<float>(print.calib_params().step));\n            m_calib_config.set_key_value(\"outer_wall_speed\", new ConfigOptionFloatsNullable({std::round(_speed)}));",
+      "new": "            float _speed = this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start),\n                                                                 static_cast<float>(print.calib_params().end),\n                                                                 static_cast<float>(print.calib_params().step));\n            m_calib_config.set_key_value(\"inner_wall_speed\", new ConfigOptionFloatsNullable({std::round(_speed)}));",
+      "description": "Route VFA calibration speed to the inner-wall setting; outer-wall feed bands must no longer follow the calibration values.",
+      "test_filter": "CalibrationTowerOutput"
+    },
+    {
+      "id": "calibration-volumetric-speed-uses-end",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            auto _speed = print.calib_params().start + std::max(0.0, calib_z) * print.calib_params().step;",
+      "new": "            auto _speed = print.calib_params().end + std::max(0.0, calib_z) * print.calib_params().step;",
+      "description": "Use the unused end parameter as the volumetric tower base; the independent start-plus-Z feed oracle must reject this route.",
+      "test_filter": "CalibrationTowerOutput"
+    },
+    {
+      "id": "calibration-cornering-junction-branch-inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            if (m_writer.get_gcode_flavor() == gcfMarlinFirmware &&\n                !m_config.machine_max_junction_deviation.values.empty() &&\n                m_config.machine_max_junction_deviation.values.front() > 0) {",
+      "new": "            if (m_writer.get_gcode_flavor() == gcfMarlinFirmware &&\n                !m_config.machine_max_junction_deviation.values.empty() &&\n                m_config.machine_max_junction_deviation.values.front() == 0) {",
+      "description": "Invert the Marlin junction-deviation gate; the positive-JD row and zero-JD jerk fallback must swap behavior and fail their command-shape oracles.",
+      "test_filter": "CalibrationTowerOutput"
+    }
+  ]
+}

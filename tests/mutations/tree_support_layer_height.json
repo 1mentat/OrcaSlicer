@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Independent tree-support layer heights differ from synchronized object layers while preserving valid bounded extrusion layers.",
+  "mutants": [
+    {
+      "id": "treesupport-independent-layer-height-branch-swap",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (!m_support_params.independent_layer_height) {\n        layer_heights.resize(m_object->layer_count());",
+      "new": "if (m_support_params.independent_layer_height) {\n        layer_heights.resize(m_object->layer_count());",
+      "expected_matches": 1,
+      "test_filter": "^TreeSupportLayerHeight$",
+      "description": "Swap the object-grid and independent layer-height planning branches; the synchronized row should no longer retain the nominal grid while the independent row loses its non-grid interval.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

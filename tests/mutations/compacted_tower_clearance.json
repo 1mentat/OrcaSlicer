@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Public pre-slice compacted prime tower diagnostics, offender identity aggregation, and configured rod clearance.",
+  "mutants": [
+    {
+      "id": "compacted-tower-single-offender-object-dropped",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                exception.string = msg;\n                exception.object = instance.model_instance;",
+      "new": "                exception.string = msg;\n                exception.object = nullptr;",
+      "test_filter": "CompactedTower",
+      "description": "Drop the sole-offender pointer; the one-offender row must retain the offending internal ModelInstance for plater selection."
+    },
+    {
+      "id": "compacted-tower-multiple-offender-pointer-retained",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                // Same wording for every offender; keep a single copy and drop the object pointer.\n                exception.object = nullptr;",
+      "new": "                // Same wording for every offender; keep a single copy and drop the object pointer.\n                exception.object = instance.model_instance;",
+      "test_filter": "CompactedTower",
+      "description": "Retain the first/last object pointer after two offenders; the aggregate must become intentionally non-specific."
+    },
+    {
+      "id": "compacted-tower-diagnostic-polygons-suppressed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    if (polygons && ! offenders.empty()) {",
+      "new": "    if (polygons)\n        return exception;\n    if (polygons && ! offenders.empty()) {",
+      "test_filter": "CompactedTower",
+      "description": "Suppress the public collision overlay; offending rows must still expose a positive tower ring and object outlines."
+    },
+    {
+      "id": "compacted-tower-height-plane-shifted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                height_polygons->emplace_back(outline, float(clearance.allowed_rise));",
+      "new": "                height_polygons->emplace_back(outline, float(clearance.allowed_rise + 1.));",
+      "test_filter": "CompactedTower",
+      "description": "Move the public height diagnostic away from the configured rod limit; every rod-band offender must report exactly 25 mm."
+    }
+  ]
+}

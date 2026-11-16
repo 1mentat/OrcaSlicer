@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Four source-local faults for the preheat setting behavior and the corrected original-to-rewritten G-code line mapping. Each must fail the single preheat regression case through an ordinary assertion.",
+  "mutants": [
+    {
+      "id": "gcp-preheat-time-config-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    m_preheat_time = config.preheat_time;",
+      "new": "    m_preheat_time = 0.f;",
+      "description": "Ignore configured preheat_time; positive-time rows must lose their XL backtrace behavior.",
+      "test_filter": "^GCodeProcessorBacktraceControls$",
+      "intended_failed_case": "Preheat time and steps control XL backtrace commands",
+      "expected_failure_kind": "ordinary assertion"
+    },
+    {
+      "id": "gcp-preheat-time-halved-positive-window",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    m_preheat_time = config.preheat_time;",
+      "new": "    m_preheat_time = config.preheat_time * 0.5f;",
+      "description": "Shorten a valid positive preheat window by half; the near-window P oracle must fail while a positive command still exists.",
+      "test_filter": "^GCodeProcessorBacktraceControls$",
+      "intended_failed_case": "Preheat time and steps control XL backtrace commands",
+      "expected_failure_kind": "ordinary assertion"
+    },
+    {
+      "id": "gcp-preheat-steps-config-ignored",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    m_preheat_steps = config.preheat_steps;",
+      "new": "    m_preheat_steps = 1;",
+      "description": "Ignore configured preheat_steps; the max-step row must lose the ten-command schedule.",
+      "test_filter": "^GCodeProcessorBacktraceControls$",
+      "intended_failed_case": "Preheat time and steps control XL backtrace commands",
+      "expected_failure_kind": "ordinary assertion"
+    },
+    {
+      "id": "gcp-output-line-map-increment-by-two",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "                    ++map_it->second;",
+      "new": "                    map_it->second += 2;",
+      "description": "Advance original-to-output line mappings by two for each inserted command; the fixture-coordinate-selected move IDs must no longer match emitted G1 line IDs.",
+      "test_filter": "^GCodeProcessorBacktraceControls$",
+      "intended_failed_case": "Preheat time and steps control XL backtrace commands",
+      "expected_failure_kind": "ordinary assertion"
+    }
+  ]
+}

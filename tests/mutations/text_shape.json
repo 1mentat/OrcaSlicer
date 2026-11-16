@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutation checks for TextShape public contracts.",
+  "mutants": [
+    {
+      "id": "text-shape-height-input-ignored",
+      "path": "src/libslic3r/Shape/TextShape.cpp",
+      "old": "double                  aTextHeight = theTextHeight;",
+      "new": "double                  aTextHeight = 1.0;",
+      "test_filter": "TextShape",
+      "description": "The same registered bundled glyph must scale in width and XY bounds when the public text height doubles."
+    },
+    {
+      "id": "text-shape-thickness-input-ignored",
+      "path": "src/libslic3r/Shape/TextShape.cpp",
+      "old": "gp_Vec V(0.f, 0.f, thickness);",
+      "new": "gp_Vec V(0.f, 0.f, 1.f);",
+      "test_filter": "TextShape",
+      "description": "The same glyph at two positive thicknesses must retain XY geometry while its closed-mesh Z span follows the requested thickness."
+    }
+  ]
+}

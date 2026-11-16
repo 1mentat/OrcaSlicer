@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "The role-flow gate and composition of first-layer and role multipliers.",
+  "mutants": [
+    {
+      "id": "role-flow-gate-forced-on-retained-read",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (m_config.set_other_flow_ratios) {",
+      "new": "    if (m_config.set_other_flow_ratios || !m_config.set_other_flow_ratios) {",
+      "test_filter": "RoleFlowVariance",
+      "description": "Force the gated first-layer, internal-solid, and gap-fill multipliers to run even when set_other_flow_ratios is false, while retaining the production read to avoid an unused-field build warning."
+    },
+    {
+      "id": "role-flow-first-layer-overwrites-volume",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            _mm3_per_mm *= m_config.first_layer_flow_ratio;",
+      "new": "            _mm3_per_mm = m_config.first_layer_flow_ratio;",
+      "test_filter": "RoleFlowVariance",
+      "description": "Replace the first-layer composition with the bare ratio while retaining a typed read. This drops the path's existing volume/role composition instead of duplicating the existing ignore-first-layer mutant, so the compound role products are observably wrong."
+    }
+  ]
+}

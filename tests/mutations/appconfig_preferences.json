@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "description": "AppConfig locale normalization, setup privacy gating, and region routing.",
+  "mutants": [
+    {
+      "id": "appconfig-language-zh-cn-normalization-dropped",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "    if (get_lang == \"zh_CN\")\n    {\n        get_lang = \"zh-cn\";\n    }",
+      "new": "    if (get_lang == \"zh_CN\")\n    {\n        get_lang = \"zh_CN\";\n    }",
+      "expected_matches": 1,
+      "test_filter": "^AppConfigLanguage$",
+      "description": "Keep the Chinese locale in its underscore form instead of the public zh-cn form. The language case asserts the canonical conversion and also covers short and empty inputs.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "appconfig-stealth-setup-gate-bypassed",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "    if (!get_bool(\"firstguide\",\"finish\")) {\n        return true;\n    }",
+      "new": "    if (false) {\n        return true;\n    }",
+      "expected_matches": 1,
+      "test_filter": "^AppConfigStealth$",
+      "description": "Bypass the unfinished setup gate. The public preference case sets stealth_mode=false before setup completion and requires the gate to force true.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    },
+    {
+      "id": "appconfig-europe-country-code-misclassified",
+      "path": "src/libslic3r/AppConfig.cpp",
+      "old": "    else if (region == \"Europe\")\n        return \"US\";",
+      "new": "    else if (region == \"Europe\")\n        return \"Others\";",
+      "expected_matches": 1,
+      "test_filter": "^AppConfigRegion$",
+      "description": "Misclassify Europe as an unspecified country. The region matrix asserts Europe maps to US while separately covering Asia-Pacific and fallback behavior.",
+      "ordinary_assertion_only": true,
+      "crash_or_exception_is_not_credit": true
+    }
+  ],
+  "test_filters": {
+    "language_normalization": "^AppConfigLanguage$",
+    "stealth_setup_gate": "^AppConfigStealth$",
+    "europe_country_code": "^AppConfigRegion$"
+  }
+}

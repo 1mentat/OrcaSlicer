@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "description": "Installed-vendor removal must preserve other vendors while removing the selected profile, cache, and preset tree.",
+  "mutants": [
+    {
+      "id": "vendor-removal-crosses-vendor-boundary",
+      "path": "src/libslic3r/utils.cpp",
+      "old": "boost::filesystem::remove_all(dir / vendor);",
+      "new": "boost::filesystem::remove_all(dir);",
+      "expected_matches": 1,
+      "test_filter": "VendorInstall",
+      "description": "Delete the entire vendor-install directory instead of the selected vendor subtree; an unrelated vendor profile and its bytes must remain intact."
+    }
+  ]
+}

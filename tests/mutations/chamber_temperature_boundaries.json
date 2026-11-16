@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Chamber temperature endpoints preserve numeric automatic targets and documented custom-start waits before deposition.",
+  "mutants": [
+    {
+      "id": "chamber-temperature-1500-clamped-to-1499",
+      "description": "Clamp the 1500-degree chamber target to 1499 before the automatic M191 output; the active maximum row requires physical M191 S1500.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        max_chamber_temp = std::max(max_chamber_temp, m_config.chamber_temperature.get_at(extruder.id()));",
+      "new": "        max_chamber_temp = std::max(max_chamber_temp, m_config.chamber_temperature.get_at(extruder.id()) == 1500 ? 1499 : m_config.chamber_temperature.get_at(extruder.id()));",
+      "test_filter": "Chamber temperature activation emits guarded start and shutdown targets",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "chamber-minimal-temperature-1500-macro-clamped-to-1499",
+      "description": "Clamp the registered1500-degree chamber-minimal placeholder endpoint to1499; the maximum row must parse the custom-start wait as M191 S1500 before positive-XY deposition.",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        this->placeholder_parser().set(\"chamber_minimal_temperature\", new ConfigOptionInts(m_config.chamber_minimal_temperature));",
+      "new": "        this->placeholder_parser().set(\"chamber_minimal_temperature\", new ConfigOptionInts(std::vector<int>{m_config.chamber_minimal_temperature.get_at(0) == 1500 ? 1499 : m_config.chamber_minimal_temperature.get_at(0)}));",
+      "test_filter": "Chamber minimal temperature supplies the custom start wait with automatic control disabled",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

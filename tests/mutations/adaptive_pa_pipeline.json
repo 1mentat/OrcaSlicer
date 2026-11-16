@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Private adaptive pressure advance numeric output mutation; native execution not performed.",
+  "mutants": [
+    {
+      "id": "adaptive-pa-interpolator-result-replaced-by-configured-pa",
+      "path": "src/libslic3r/GCode/AdaptivePAProcessor.cpp",
+      "old": "                    predicted_pa = (*interpolator)(mm3mm_value * adaptive_PA_speed, accel_value);",
+      "new": "                    predicted_pa = m_config.pressure_advance.get_at(m_last_config_index);",
+      "test_filter": "AdaptivePressureAdvanceRamps",
+      "description": "Replacing the model prediction with the configured constant PA removes the varying model-derived SET_PRESSURE_ADVANCE values; the independent numeric output spread and per-sample model oracle must fail."
+    }
+  ]
+}

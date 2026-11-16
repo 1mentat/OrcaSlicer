@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Configured layer height determines full Print layer counts, deposition Z, and layer-height metadata.",
+  "mutants": [
+    {
+      "id": "layer-height-profile-falls-back-to-minimum",
+      "path": "src/libslic3r/Slicing.cpp",
+      "old": "        lh_append(z, slicing_params.layer_height);\n        lh_append(slicing_params.object_print_z_uncompensated_height(), slicing_params.layer_height);",
+      "new": "        lh_append(z, slicing_params.min_layer_height);\n        lh_append(slicing_params.object_print_z_uncompensated_height(), slicing_params.layer_height);",
+      "description": "Use the configured minimum for the normal profile step at the end of the object instead of the selected layer height. The pipeline contract requires the minimum, nominal, and maximum configured heights to produce their exact layer counts and HEIGHT tags.",
+      "test_filter": "LayerHeightPrintPipeline"
+    }
+  ]
+}

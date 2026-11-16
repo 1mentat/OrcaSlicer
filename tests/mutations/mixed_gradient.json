@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Public mixed-filament gradients preserve configured ratios and independent object and volume run metadata.",
+  "mutants": [
+    {
+      "id": "mixed-gradient-object-first-layer-retained",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "            // Erase layer 0 \u2014 this mutation is also relied upon by the Pass 2 binary_search below.\n            if (!layer_indices.empty() && layer_indices.front() == 0)\n                layer_indices.erase(layer_indices.begin());",
+      "new": "            // Erase layer 0 \u2014 this mutation is also relied upon by the Pass 2 binary_search below.\n            if (!layer_indices.empty() && layer_indices.front() == 0)\n                (void)layer_indices.front();",
+      "description": "Retaining layer zero in the per-object gradient run makes total_layers/current_idx include the adhesion layer, contrary to the public metadata contract that skips the first layer.",
+      "test_filter": "MixedGradient"
+    },
+    {
+      "id": "mixed-gradient-volume-first-layer-retained",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "    // Per-volume gradient: mirror the per-object run-segmentation logic above for\n    // m_gradient_volume_layers. When per_part_gradient is off (or no qualifying volume exists),\n    // m_gradient_volume_layers is empty and per_vol_runs ends up empty too \u2014 so all subsequent\n    // checks of `per_vol_runs.find(slot) != end()` will fail and the legacy per-object path\n    // remains the only path taken.\n    using VolumeKey = LayerTools::MixedSubLayerGroup::VolumeKey;\n    std::map<unsigned int, std::map<VolumeKey, PerObjRunState>> per_vol_runs;\n    for (auto &[slot, vol_map] : m_gradient_volume_layers) {\n        if (slot >= is_gradient.size() || !is_gradient[slot])\n            continue;\n        for (auto &[vkey, layer_indices] : vol_map) {\n            sort_remove_duplicates(layer_indices);\n            if (!layer_indices.empty() && layer_indices.front() == 0)\n                layer_indices.erase(layer_indices.begin());",
+      "new": "    // Per-volume gradient: mirror the per-object run-segmentation logic above for\n    // m_gradient_volume_layers. When per_part_gradient is off (or no qualifying volume exists),\n    // m_gradient_volume_layers is empty and per_vol_runs ends up empty too \u2014 so all subsequent\n    // checks of `per_vol_runs.find(slot) != end()` will fail and the legacy per-object path\n    // remains the only path taken.\n    using VolumeKey = LayerTools::MixedSubLayerGroup::VolumeKey;\n    std::map<unsigned int, std::map<VolumeKey, PerObjRunState>> per_vol_runs;\n    for (auto &[slot, vol_map] : m_gradient_volume_layers) {\n        if (slot >= is_gradient.size() || !is_gradient[slot])\n            continue;\n        for (auto &[vkey, layer_indices] : vol_map) {\n            sort_remove_duplicates(layer_indices);\n            if (!layer_indices.empty() && layer_indices.front() == 0)\n                (void)layer_indices.front();",
+      "description": "Retaining layer zero in per-volume run segmentation shifts each tagged volume run length and current index while leaving the public fixture valid.",
+      "test_filter": "MixedGradient"
+    },
+    {
+      "id": "mixed-gradient-range-end-replaced-with-start",
+      "path": "src/libslic3r/GCode/ToolOrdering.cpp",
+      "old": "                gradient_info[i].end_val = v1;",
+      "new": "                gradient_info[i].end_val = v0;",
+      "description": "Using the start ratio for both parsed endpoints is caught by the independent configured 0.8-to-0.2 metadata assertions in both per-part modes.",
+      "test_filter": "MixedGradient"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Outgoing filament-end and incoming filament-start script selectors, plus the shared change-filament macro, through a bounded two-tool BBL G-code export.",
+  "mutants": [
+    {
+      "id": "outgoing-end-uses-incoming-filament-id",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        unsigned int        old_filament_id = m_writer.filament()->id();\n        const std::string  &filament_end_gcode  = m_config.filament_end_gcode.get_at(old_filament_id);\n",
+      "new": "        unsigned int        old_filament_id = m_writer.filament()->id();\n        const std::string  &filament_end_gcode  = m_config.filament_end_gcode.get_at(new_filament_id);\n",
+      "expected_matches": 1,
+      "description": "Select the outgoing end macro with the incoming filament ID. The distinct slot-0/slot-1 scripts make the real 0-to-1 BBL transition fail an ordinary lifecycle assertion while all five existing CTest-label controls pass.",
+      "test_filter": "^(FilamentLifecycleVariance|GCodeTravelPointReachable|GCodeManualFilamentChange|SupportObjectSkipFlush)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "f3a50e87eab470c68bffca4a0427216202eb18ea1d64ee606722bcc3af99f93e"
+    },
+    {
+      "id": "incoming-start-uses-outgoing-filament-id",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    // Append the filament start G-code.\n    const std::string &filament_start_gcode = m_config.filament_start_gcode.get_at(new_filament_id);\n    if (! filament_start_gcode.empty()) {\n        // Process the filament_start_gcode for the new filament.\n",
+      "new": "    // Append the filament start G-code.\n    const std::string &filament_start_gcode = m_config.filament_start_gcode.get_at(old_filament_id);\n    if (! filament_start_gcode.empty()) {\n        // Process the filament_start_gcode for the new filament.\n",
+      "expected_matches": 1,
+      "description": "Select the incoming start macro with the outgoing filament ID. The distinct slot-0/slot-1 scripts make the real 0-to-1 BBL transition fail an ordinary lifecycle assertion while all five existing CTest-label controls pass.",
+      "test_filter": "^(FilamentLifecycleVariance|GCodeTravelPointReachable|GCodeManualFilamentChange|SupportObjectSkipFlush)$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "85a4bfa36f06d423581e63b8096c8490816e5f98ece5e3ea24150bfdf41c7720"
+    }
+  ]
+}

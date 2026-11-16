@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Semantic mutations for painted vertical contacts and alternating bottom-interface directions.",
+  "mutants": [
+    {
+      "id": "tree-vertical-enforcer-contact-displaced",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "                auto node=insert_point(vertical_enforcer_point, ExPolygon(), false);",
+      "new": "                auto node=insert_point(vertical_enforcer_point + Point::new_scale(10.0, 0.0), ExPolygon(), false);",
+      "expected_matches": 1,
+      "description": "Displacing the projected vertical enforcer contact 10 mm in X must remove the local support extrusion at the selected painted face.",
+      "test_filter": "Painted vertical enforcers create support at the selected facet"
+    },
+    {
+      "id": "tree-bottom-interface-direction-not-advanced",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "            if (has_floor_interface)\n                ++floor_interface_id;",
+      "new": "            if (false && has_floor_interface)\n                ++floor_interface_id;",
+      "expected_matches": 1,
+      "description": "Keeping every floor interface at the same interlace id must eliminate the observed alternating directions across independently detected lower-plate contact rows.",
+      "test_filter": "Tree support floor contacts keep base-interface roles and interlace direction"
+    }
+  ]
+}

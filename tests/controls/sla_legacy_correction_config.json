@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "names": [
+    "Legacy SLA vector corrections are expanded into axis options",
+    "Legacy SLA vector migration preserves explicit axis options",
+    "Malformed legacy SLA correction vectors leave axis options unchanged"
+  ]
+}

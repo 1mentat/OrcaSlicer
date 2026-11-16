@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Exact source mutations for buildplate filtering and hybrid large-overhang branching. The compact filtered case detects these through retained density guards (>1000 support points) in the original sections; it does not directly compare anywhere-versus-plate-only or hybrid-versus-slim output, and the unchanged sliced-twice point-sequence comparison remains a secondary oracle.",
+  "mutants": [
+    {
+      "id": "tree-buildplate-node-filter",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (support_on_buildplate_only && !node.to_buildplate)",
+      "new": "if (support_on_buildplate_only && node.to_buildplate)",
+      "description": "Reversing the buildplate-only node filter is expected to reduce the retained support-point count below the fixture density guard.",
+      "test_filter": "TreeSupportScheduling"
+    },
+    {
+      "id": "tree-buildplate-node-filter-unguarded",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (support_on_buildplate_only && !node.to_buildplate)",
+      "new": "if (support_on_buildplate_only)",
+      "description": "Dropping the node reachability predicate is expected to reduce the retained support-point count below the fixture density guard.",
+      "test_filter": "TreeSupportScheduling"
+    },
+    {
+      "id": "tree-hybrid-overhang-split-gate",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (m_support_params.support_style == smsTreeHybrid && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail)",
+      "new": "if (m_support_params.support_style != smsTreeHybrid && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail)",
+      "description": "Routing the large-overhang branch to a different support style reduces the retained support-point count below the fixture density guard.",
+      "test_filter": "TreeSupportScheduling"
+    },
+    {
+      "id": "tree-hybrid-normal-overhang-branch",
+      "path": "src/libslic3r/Support/TreeSupport.cpp",
+      "old": "if (m_support_params.support_style == smsTreeHybrid && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail)",
+      "new": "if (m_support_params.support_style == smsTreeSlim && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail)",
+      "description": "Routing the large-overhang branch to a different support style reduces the retained support-point count below the fixture density guard.",
+      "test_filter": "TreeSupportScheduling"
+    }
+  ]
+}

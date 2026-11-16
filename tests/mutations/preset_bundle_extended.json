@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed ConstructFullConfig mutation candidates. Run results are recorded separately by the mutation harness.",
+  "mutants": [
+    {
+      "id": "construct-full-config-support-filament-upper-bound",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        auto       *opt = dynamic_cast<ConfigOptionInt *>(out.option(key, false));\n        assert(opt != nullptr);\n        opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));\n    }\n",
+      "new": "        auto       *opt = dynamic_cast<ConfigOptionInt *>(out.option(key, false));\n        assert(opt != nullptr);\n        opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments) - 1);\n    }\n",
+      "description": "The merged support filament index may address the selected filament count as an inclusive 1-based slot; the one-filament case must preserve index 1.",
+      "test_filter": "ConstructFullConfig"
+    },
+    {
+      "id": "construct-full-config-self-index-source-slot",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                for (size_t j = 0; j < filament_variant_count[i]; j++) { filament_self_indice[k++] = i + 1; }",
+      "new": "                for (size_t j = 0; j < filament_variant_count[i]; j++) { filament_self_indice[k++] = i; }",
+      "description": "Expanded filament vectors retain 1-based source slot identities.",
+      "test_filter": "ConstructFullConfig"
+    },
+    {
+      "id": "construct-full-config-multi-filament-append",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "                                opt_vec_dst->set(filament_option);\n                            else\n                                opt_vec_dst->append(filament_option);\n\n                            if (key == \"filament_extruder_variant\") filament_variant_count[i] = filament_option->size();",
+      "new": "                                opt_vec_dst->set(filament_option);\n                            else\n                                opt_vec_dst->set(filament_option);\n\n                            if (key == \"filament_extruder_variant\") filament_variant_count[i] = filament_option->size();",
+      "description": "Multiple filament presets concatenate vector settings in source order.",
+      "test_filter": "ConstructFullConfig"
+    },
+    {
+      "id": "construct-full-config-apply-extruder-guard",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "        DynamicPrintConfig filament_config = in_filament_presets[0].config;\n        // Orca: a multi-variant filament resolves its variants on a single-variant printer too.\n        if (apply_extruder && ((extruder_count > 1) || different_extruder || filament_config.has_multi_variant_filament()))\n            filament_config.update_values_to_printer_extruders(out, extruder_count, extruder_volume_type_count, nozzle_volume_types, filament_options_with_variant, \"\", \"filament_extruder_variant\", 1, filament_maps[0], (NozzleVolumeType)filament_volume_maps[0]);\n        out.apply(filament_config);",
+      "new": "        DynamicPrintConfig filament_config = in_filament_presets[0].config;\n        // Orca: a multi-variant filament resolves its variants on a single-variant printer too.\n        if (false && ((extruder_count > 1) || different_extruder || filament_config.has_multi_variant_filament()))\n            filament_config.update_values_to_printer_extruders(out, extruder_count, extruder_volume_type_count, nozzle_volume_types, filament_options_with_variant, \"\", \"filament_extruder_variant\", 1, filament_maps[0], (NozzleVolumeType)filament_volume_maps[0]);\n        out.apply(filament_config);",
+      "description": "Dual-extruder construction must resolve variant columns before merging filament values.",
+      "test_filter": "ConstructFullConfig"
+    },
+    {
+      "id": "construct-full-config-bookkeeping-erase",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    out.erase(\"compatible_printers_condition\");\n    out.erase(\"inherits\");\n    // BBS: add logic for settings check between different system presets",
+      "new": "    out.erase(\"compatible_printers_condition\");\n    /* out.erase(\"inherits\"); */\n    // BBS: add logic for settings check between different system presets",
+      "description": "Preset inheritance metadata is represented in inherits_group and must not leak as a slicing setting.",
+      "test_filter": "ConstructFullConfig"
+    },
+    {
+      "id": "construct-full-config-filament-map-resize",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "    // in some middle state, they may be different\n    if (filament_maps.size() != num_filaments) {\n        filament_maps.resize(num_filaments, 1);\n    }\n    if (filament_volume_maps.size() != num_filaments) {",
+      "new": "    // in some middle state, they may be different\n    if (filament_maps.size() != num_filaments) {\n        filament_maps.resize(num_filaments, 0);\n    }\n    if (filament_volume_maps.size() != num_filaments) {",
+      "description": "Transient map repair pads missing entries with the first 1-based filament mapping.",
+      "test_filter": "ConstructFullConfig"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public BBS import validation and metadata-only archive contracts.",
+  "mutants": [
+    {
+      "id": "bbs-model-settings-duplicate-guard-bypassed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            add_error(\"Duplicated object id: \" + std::to_string(object_id) + \" in model_settings.config\");\n            return false;",
+      "new": "            add_error(\"Duplicated object id: \" + std::to_string(object_id) + \" in model_settings.config\");\n            return true;",
+      "expected_matches": 1,
+      "test_filter": "^BbsImportContracts$",
+      "description": "Ordinary assertion probe: native duplicate-object settings must reject while foreign input preserves geometry; bypassing the production guard should violate the native row.",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "bbs-skip-model-continue-removed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                if (m_skip_model) continue;",
+      "new": "                if (false) continue;",
+      "expected_matches": 1,
+      "test_filter": "^BbsImportContracts$",
+      "description": "Ordinary assertion probe: SkipModel must omit serialized object/build resources; removing the production continue should make the ZIP shape assertion fail.",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

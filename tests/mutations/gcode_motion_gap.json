@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "mutants": [
+    {
+      "id": "gcode-motion-g1-zero-z-tagged-height-fallback",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        if (m_end_position[Z] == 0.0f)\n            m_end_position[Z] = m_height;",
+      "new": "        if (m_end_position[Z] == 0.0f)\n            m_end_position[Z] = 0.0f;",
+      "test_filter": "^GCodeMotionGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "gcode-motion-vg1-relative-coordinate-origin",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "            float ret = lineG1.value(Slic3r::Axis(axis)) * lengthsScaleFactor;\n            return is_relative ? m_start_position[axis] + ret : m_origin[axis] + ret;",
+      "new": "            float ret = lineG1.value(Slic3r::Axis(axis)) * lengthsScaleFactor;\n            return m_origin[axis] + ret;",
+      "test_filter": "^GCodeMotionGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "gcode-motion-full-circle-sweep-halved",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "        arc.angle = 2.0 * PI;",
+      "new": "        arc.angle = PI;",
+      "test_filter": "^GCodeMotionGap$",
+      "expected_matches": 1
+    },
+    {
+      "id": "gcode-motion-inch-ij-center-offset-unscaled",
+      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
+      "old": "    if (m_units == EUnits::Inches)\n        rel_center *= INCHES_TO_MM;",
+      "new": "    if (m_units == EUnits::Inches)\n        rel_center *= 1.0f;",
+      "test_filter": "^GCodeMotionGap$",
+      "expected_matches": 1
+    }
+  ]
+}
