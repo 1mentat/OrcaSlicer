@@ -8807,6 +8807,72 @@ TEST_CASE("JSON import resolves an inherited parent and rejects an unresolved pa
     CHECK_FALSE(any_filename_contains(temp.path() / "data", "Orphan Child"));
 }
 
+namespace hand_written_inherited_json_import {
+
+namespace {
+
+void write_inherited_process_json(const fs::path &file, const std::string &name,
+                                  const std::string &inherits, const std::string &layer_height = {})
+{
+    fs::create_directories(file.parent_path());
+    std::ofstream out(file.string());
+    REQUIRE(out.good());
+    out << R"({"type":"process","name":")" << name
+        << R"(","from":"User","version":"1.0.0","print_settings_id":")" << name
+        << R"(","inherits":")" << inherits << '"';
+    if (!layer_height.empty())
+        out << R"(,"layer_height":")" << layer_height << '"';
+    out << "}\n";
+}
+
+} // namespace
+
+TEST_CASE("JSON import re-serializes a hand-written inherited child into the user directory", "[Preset][Bundle][PresetBundleImportInheritance][PresetBundle][PresetPersistence]")
+{
+    ScopedTemporaryDir temp("preset-persistence-json-inheritance");
+    ScopedDataDir data(temp.path() / "data");
+    PresetBundle bundle;
+
+    Preset &parent = add_inmemory_preset(bundle.prints, "Import Parent");
+    parent.is_system = true;
+    parent.setting_id = "import-parent-id";
+    parent.config.opt<ConfigOptionFloat>("layer_height", true)->value = 0.31;
+    parent.config.opt<ConfigOptionInt>("wall_loops", true)->value = 4;
+
+    const fs::path child_file = temp.path() / "incoming" / "Imported Child.json";
+    write_inherited_process_json(child_file, "Imported Child", "Import Parent", "0.27");
+    const std::string incoming_child = read_file(child_file);
+
+    AppConfig app;
+    std::vector<std::string> files{child_file.string()};
+    REQUIRE_NOTHROW(bundle.import_presets(
+        files, [](std::string const &) { return 1; },
+        ForwardCompatibilitySubstitutionRule::Disable, app));
+    REQUIRE(files.size() == 1);
+    CHECK(files.front() == child_file.string());
+
+    const Preset *child = bundle.prints.find_preset("Imported Child");
+    REQUIRE(child != nullptr);
+    CHECK(child->is_external);
+    CHECK(child->inherits() == "Import Parent");
+    CHECK(child->base_id == "import-parent-id");
+    CHECK_THAT(child->config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK(child->config.opt_int("wall_loops") == 4);
+
+    const fs::path saved_child(child->file);
+    REQUIRE(fs::exists(saved_child));
+    CHECK(saved_child != child_file);
+    const std::string saved_child_text = read_file(saved_child);
+    CHECK(saved_child_text != incoming_child);
+    const nlohmann::json saved_child_json = nlohmann::json::parse(saved_child_text);
+    CHECK(saved_child_json.at(BBL_JSON_KEY_INHERITS).get<std::string>() == "Import Parent");
+    CHECK_THAT(std::stod(saved_child_json.at("layer_height").get<std::string>()),
+               Catch::Matchers::WithinAbs(0.27, 1e-9));
+    CHECK_FALSE(saved_child_json.contains("wall_loops"));
+}
+
+} // namespace hand_written_inherited_json_import
+
 
 TEST_CASE("Config loading rejects a non-G-code extension even for loadable G-code contents", "[Preset][Bundle][ConfigFileRejection]")
 {
