@@ -121,6 +121,13 @@ python scripts/validation_runner.py ...runner options as above... -- \
   --mutants tests/mutations/<catalog>.json
 ```
 
+`scripts/focused_control_check.py` is the hosted Linux leg's proof that a focused target's
+CTest registration matches its control inventory. It reconfigures the existing build with
+focused discovery on, links only that target, and requires each name in
+`tests/controls/wipe_tower.json` to be registered once, against the focused binary, and
+to pass when run by exact name. It never lowers the control count; extra registered names
+are reported but tolerated.
+
 The `--target` mode, which reads an exact control inventory from `tests/controls/`,
 needs an already configured build that persists between runs and cannot configure it
 itself, so it is not available under the runner. Explicit mode rejects
