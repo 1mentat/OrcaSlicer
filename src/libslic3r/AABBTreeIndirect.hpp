@@ -8,6 +8,7 @@
 
 #include <Eigen/Core>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cassert>
 #include <limits>
@@ -284,10 +285,16 @@ namespace detail {
 		if (inv_dir.y() < 0)
 			std::swap(box.min().y(), box.max().y());
         Scalar tmin = (box.min().x() - origin.x()) * inv_dir.x();
+		// A parallel ray on a closed slab boundary computes 0 * infinity here.
+		// Treat that slab as unconstrained so the other axes decide intersection.
+		if (std::isnan(tmin))
+			tmin = -std::numeric_limits<Scalar>::infinity();
 		Scalar tymax = (box.max().y() - origin.y()) * inv_dir.y();
 		if (tmin > tymax)
 			return false;
         Scalar tmax = (box.max().x() - origin.x()) * inv_dir.x();
+		if (std::isnan(tmax))
+			tmax = std::numeric_limits<Scalar>::infinity();
 		Scalar tymin = (box.min().y()  - origin.y()) * inv_dir.y();
 		if (tymin > tmax)
 			return false;
