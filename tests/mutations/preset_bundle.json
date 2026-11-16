@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source-reviewed preset compatibility and multi-slot selection mutants for the preset bundle contracts.",
+  "mutants": [
+    {
+      "id": "preset-bundle-process-selection-policy",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "this->prints.update_compatible(printer_preset_with_vendor_profile, nullptr, select_other_print_if_incompatible,\n            PreferedPrintProfileMatch(this->prints.get_selected_idx() == size_t(-1) ? nullptr : &this->prints.get_edited_preset(), printer_preset.config.opt_string(\"default_print_profile\")));",
+      "new": "this->prints.update_compatible(printer_preset_with_vendor_profile, nullptr, PresetSelectCompatibleType::Never,\n            PreferedPrintProfileMatch(this->prints.get_selected_idx() == size_t(-1) ? nullptr : &this->prints.get_edited_preset(), printer_preset.config.opt_string(\"default_print_profile\")));",
+      "description": "Keep the old process selected after the active printer makes it incompatible.",
+      "test_filter": "PresetSelection"
+    },
+    {
+      "id": "preset-bundle-only-repair-first-filament-slot",
+      "path": "src/libslic3r/PresetBundle.cpp",
+      "old": "for (size_t idx = 0; idx < this->filament_presets.size(); ++ idx) {\n                    std::string &filament_name = this->filament_presets[idx];",
+      "new": "for (size_t idx = 0; idx < 1; ++ idx) {\n                    std::string &filament_name = this->filament_presets[idx];",
+      "description": "Repair only the first filament slot when changing printer compatibility.",
+      "test_filter": "PresetSelection"
+    }
+  ]
+}

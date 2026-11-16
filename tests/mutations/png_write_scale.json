@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Public PNG writer overload, scaling, orientation, and safe file-failure contracts. The two source probes target row replication and decoded row order.",
+  "mutants": [
+    {
+      "id": "png-scaled-gray-omits-vertical-replication",
+      "path": "src/libslic3r/PNGReadWrite.cpp",
+      "old": "            for (size_t repr = 0; repr < scale; ++ repr) {",
+      "new": "            for (size_t repr = 0; repr < 1; ++ repr) {",
+      "expected_matches": 1,
+      "test_filter": "Grayscale PNG writer overloads preserve pixels and nearest-neighbor scaling",
+      "description": "Only copy one output row per input row despite the scaled dimensions. The independent 2x3-to-4x6 expected pixel matrix detects the missing row replication."
+    },
+    {
+      "id": "png-colored-decoder-reverses-row-order",
+      "path": "src/libslic3r/PNGReadWrite.cpp",
+      "old": "                               /* bottom_up */ true, /* read_end */ true)) {",
+      "new": "                               /* bottom_up */ false, /* read_end */ true)) {",
+      "expected_matches": 1,
+      "test_filter": "RGB PNG writer overloads preserve channels and decoded row order",
+      "description": "Read colored rows in file order rather than the documented bottom-up buffer order. The asymmetric top/middle/bottom RGB rows make the public output mismatch the literal expected pixels."
+    }
+  ]
+}
