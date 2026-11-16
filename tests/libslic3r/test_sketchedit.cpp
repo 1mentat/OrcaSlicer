@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include "libslic3r/CAD/SketchEngine.hpp"
+#include "libslic3r/CAD/SketchInference.hpp"
 #include <cmath>
 #include <algorithm>
 #include <TopExp_Explorer.hxx>
@@ -1361,3 +1362,130 @@ TEST_CASE("Line trim follows positive and negative arc-cutter sweeps", "[SketchE
     }
 }
 
+TEST_CASE("Sketch editor projects cursor onto positive wrapped and negative circular arcs", "[SketchEdit]")
+{
+    using K = InferenceSnap::Kind;
+    const Vec2d center(8.0, -3.0);
+    constexpr double radius = 5.0;
+    auto arc_at = [&](double start, double end) {
+        SketchEntity arc;
+        arc.type = SketchEntity::Type::Arc;
+        arc.center = center;
+        arc.radius = radius;
+        arc.start_angle = start;
+        arc.end_angle = end;
+        arc.p0 = center + radius * Vec2d(std::cos(start), std::sin(start));
+        arc.p1 = center + radius * Vec2d(std::cos(end), std::sin(end));
+        return arc;
+    };
+
+    // atan2 reports this point as -110 degrees, while the stored arc runs from 225 to
+    // 315 degrees. The snapped point must lie on the arc after angle normalization.
+    const double wrapped_angle = 250.0 * M_PI / 180.0;
+    const SketchEntity wrapped = arc_at(225.0 * M_PI / 180.0, 315.0 * M_PI / 180.0);
+    const Vec2d wrapped_query = center + 5.3 * Vec2d(std::cos(wrapped_angle), std::sin(wrapped_angle));
+    const auto wrapped_snap = infer_point_snap({wrapped}, wrapped_query, 0.5, false);
+    REQUIRE(wrapped_snap.kind == K::OnEdge);
+    CHECK(wrapped_snap.entity == 0);
+    CHECK(wrapped_snap.role == SketchPointRole::Center);
+    const Vec2d wrapped_projection = center + radius * Vec2d(std::cos(wrapped_angle), std::sin(wrapped_angle));
+    CHECK_THAT((wrapped_snap.point - wrapped_projection).norm(), WithinAbs(0.0, 1e-9));
+
+    const double wrapped_midangle = 0.5 * (wrapped.start_angle + wrapped.end_angle);
+    const Vec2d wrapped_midpoint = center + radius * Vec2d(std::cos(wrapped_midangle), std::sin(wrapped_midangle));
+    const auto midpoint_snap = infer_point_snap({wrapped}, wrapped_midpoint, 0.1, false);
+    REQUIRE(midpoint_snap.kind == K::Midpoint);
+    CHECK(midpoint_snap.role == SketchPointRole::P0);
+    CHECK_THAT((midpoint_snap.point - wrapped_midpoint).norm(), WithinAbs(0.0, 1e-9));
+
+    // A clockwise half arc exercises the signed-sweep projection without angle wrapping.
+    const double clockwise_query_angle = M_PI / 2.0;
+    const SketchEntity clockwise = arc_at(3.0 * M_PI / 4.0, -M_PI / 4.0);
+    const Vec2d clockwise_query = center + 5.3 * Vec2d(std::cos(clockwise_query_angle), std::sin(clockwise_query_angle));
+    const auto clockwise_snap = infer_point_snap({clockwise}, clockwise_query, 0.5, false);
+    REQUIRE(clockwise_snap.kind == K::OnEdge);
+    CHECK(clockwise_snap.entity == 0);
+    CHECK(clockwise_snap.role == SketchPointRole::Center);
+    const Vec2d clockwise_projection = center + radius * Vec2d(std::cos(clockwise_query_angle), std::sin(clockwise_query_angle));
+    CHECK_THAT((clockwise_snap.point - clockwise_projection).norm(), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Sketch editor infers tangency only at a joined arc endpoint", "[SketchEdit]")
+{
+    SketchEntity arc;
+    arc.type = SketchEntity::Type::Arc;
+    arc.center = Vec2d(2.0, 3.0);
+    arc.radius = 5.0;
+    arc.start_angle = 0.0;
+    arc.end_angle = M_PI / 2.0;
+    arc.p0 = Vec2d(7.0, 3.0);
+    arc.p1 = Vec2d(2.0, 8.0);
+
+    SketchEntity tangent;
+    tangent.type = SketchEntity::Type::Line;
+    tangent.p0 = arc.p1;
+    tangent.p1 = arc.p1 + Vec2d(10.0, 0.0);
+    const auto inferred = infer_relations({arc, tangent}, 1);
+    REQUIRE(inferred.size() == 1);
+    CHECK(inferred[0].type == SketchConstraintType::Tangent);
+    CHECK(inferred[0].ea == 0);
+    CHECK(inferred[0].eb == 1);
+
+    // The same line direction at a remote location is not a tangent relation for this arc.
+    SketchEntity remote = tangent;
+    remote.p0 = Vec2d(12.0, 8.0);
+    remote.p1 = Vec2d(17.0, 8.0);
+    CHECK(infer_relations({arc, remote}, 1).empty());
+}
+
+TEST_CASE("Sketch editor reflows a solved EllipseArc along its original sweep", "[SketchEdit]")
+{
+    using Role = SketchPointRole;
+    using Type = SketchConstraintType;
+    using namespace sketch_array_chamfer_contracts;
+
+    const int direction = GENERATE(1, -1);
+    CAPTURE(direction);
+    const double start = direction > 0 ? 2.8 : -2.8;
+    const double initial_end = direction > 0 ? 3.0 : -3.0;
+    const double target_parameter = direction > 0 ? -2.8 : 2.8;
+    const SketchEntity original = ellipse_arc_entity(
+        Vec2d(2.0, -1.0), 6.0, 2.5, 0.4, start, initial_end);
+
+    SketchEntity target;
+    target.type = SketchEntity::Type::Point;
+    target.p0 = ellipse_point(original, target_parameter);
+    std::vector<SketchEntity> entities{original, target};
+
+    auto fix = [](int entity, Role role) {
+        SketchEntityConstraintDef constraint;
+        constraint.type = Type::Fix;
+        constraint.ea = entity;
+        constraint.ra = role;
+        return constraint;
+    };
+    SketchEntityConstraintDef coincident;
+    coincident.type = Type::Coincident;
+    coincident.ea = 0;
+    coincident.ra = Role::P1;
+    coincident.eb = 1;
+    coincident.rb = Role::P0;
+    const std::vector<SketchEntityConstraintDef> constraints{
+        fix(0, Role::Center), fix(0, Role::P0), fix(1, Role::P0), coincident
+    };
+
+    REQUIRE(solve_sketch_entities(entities, constraints));
+    const SketchEntity& solved = entities[0];
+    const Vec2d expected_start = ellipse_point(original, start);
+    const Vec2d expected_end = ellipse_point(original, target_parameter);
+    const double expected_end_angle = target_parameter + (direction > 0 ? 2.0 * M_PI : -2.0 * M_PI);
+    CHECK(solved.type == SketchEntity::Type::EllipseArc);
+    CHECK_THAT((solved.center - original.center).norm(), WithinAbs(0.0, 1e-8));
+    CHECK_THAT((solved.p0 - expected_start).norm(), WithinAbs(0.0, 1e-7));
+    CHECK_THAT((solved.p1 - expected_end).norm(), WithinAbs(0.0, 1e-7));
+    CHECK_THAT(solved.start_angle, WithinAbs(start, 1e-7));
+    CHECK_THAT(solved.end_angle, WithinAbs(expected_end_angle, 1e-7));
+    CHECK_THAT(solved.radius, WithinAbs(original.radius, 1e-12));
+    CHECK_THAT(solved.rminor, WithinAbs(original.rminor, 1e-12));
+    CHECK_THAT(solved.rotation, WithinAbs(original.rotation, 1e-12));
+}
