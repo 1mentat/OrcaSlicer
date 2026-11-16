@@ -22,6 +22,15 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
     steps:
+      # The local validation-upload action and its checker live in the repo;
+      # nothing else here needs the source tree.
+      - name: Checkout upload tooling
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github
+            scripts
+          persist-credentials: false
       - name: Restore test asset
         uses: actions/download-artifact@v8
         with:
