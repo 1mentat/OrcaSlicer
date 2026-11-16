@@ -768,6 +768,85 @@ TEST_CASE("Filament volumetric cap changes feedrate without changing deposited g
     }
 }
 
+namespace motion_flow_source_matrix_cases {
+
+// Source bodies with the registered upper bound (2.0) of the flow ratio and the disabled cap (0.0).
+TEST_CASE("Filament flow ratio matrix includes the registered upper bound",
+          "[MotionFlowVariance][FilamentFlowVariance]")
+{
+    const DynamicPrintConfig baseline = filament_flow_config();
+    const Evidence baseline_evidence = fresh_evidence(baseline);
+    const double minimum_outer_flow = minimum_outer_flow_mm3_per_mm(baseline);
+    REQUIRE(baseline_evidence.roles[outer].moves > 0);
+    REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
+
+    const MatrixCase flow_case{
+        "filament_flow_ratio", coFloats, Signal::outer_feedrate, { 0.75, 1.25, 2.0 }
+    };
+    for (const double value : flow_case.values) {
+        CAPTURE(value);
+        DynamicPrintConfig changed = baseline;
+        set_registry_value(changed, flow_case, value);
+        REQUIRE(changed.option(flow_case.key)->serialize() != baseline.option(flow_case.key)->serialize());
+
+        const Evidence fresh = fresh_evidence(changed);
+        INFO("baseline evidence: " + evidence_summary(baseline_evidence));
+        INFO("fresh evidence: " + evidence_summary(fresh));
+        require_same_geometry(baseline_evidence, fresh);
+        require_ratio_material(baseline_evidence, fresh, value);
+        require_incremental_equivalence(baseline, changed, fresh);
+        const double cap_bound = outer_feedrate_cap_bound(8.0, value, minimum_outer_flow);
+        CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
+
+        if (value < 1.0)
+            CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        else
+            CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
+    }
+}
+
+TEST_CASE("Filament volumetric cap matrix includes zero as the disabled cap",
+          "[MotionFlowVariance][FilamentMaxVolumetricSpeed]")
+{
+    const DynamicPrintConfig baseline = filament_flow_config();
+    const Evidence baseline_evidence = fresh_evidence(baseline);
+    const double minimum_outer_flow = minimum_outer_flow_mm3_per_mm(baseline);
+    REQUIRE(baseline_evidence.roles[outer].moves > 0);
+    REQUIRE(baseline_evidence.roles[outer].feedrate > 0.0);
+
+    const MatrixCase cap_case{
+        "filament_max_volumetric_speed", coFloats, Signal::outer_feedrate, { 0.0, 1.5, 20.0 }
+    };
+    for (const double value : cap_case.values) {
+        CAPTURE(value);
+        DynamicPrintConfig changed = baseline;
+        set_registry_value(changed, cap_case, value);
+        REQUIRE(changed.option(cap_case.key)->serialize() != baseline.option(cap_case.key)->serialize());
+
+        const Evidence fresh = fresh_evidence(changed);
+        INFO("baseline evidence: " + evidence_summary(baseline_evidence));
+        INFO("fresh evidence: " + evidence_summary(fresh));
+        require_same_geometry(baseline_evidence, fresh);
+        require_same_material(baseline_evidence, fresh);
+        require_incremental_equivalence(baseline, changed, fresh);
+        if (value == 0.0) {
+            // Zero disables the volumetric cap, so the configured 120 mm/s
+            // outer-wall speed reaches the G-code without a max-flow clamp.
+            CHECK_THAT(fresh.roles[outer].feedrate, Catch::Matchers::WithinAbs(120.0 * 60.0, 1e-3));
+            CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        } else {
+            const double cap_bound = outer_feedrate_cap_bound(value, 1.0, minimum_outer_flow);
+            CHECK(fresh.roles[outer].feedrate <= cap_bound + 1e-3);
+
+            if (value < 8.0)
+                CHECK(fresh.roles[outer].feedrate < baseline_evidence.roles[outer].feedrate);
+            else
+                CHECK(fresh.roles[outer].feedrate > baseline_evidence.roles[outer].feedrate);
+        }
+    }
+}
+
+} // namespace motion_flow_source_matrix_cases
 
 namespace {
 
