@@ -21,6 +21,11 @@ on:
       - 'scripts/slicer_coverage_reconcile.py'
       - 'scripts/coverage_replay/**'
       - 'scripts/tests/test_coverage_replay.py'
+      - 'scripts/slicer_gcov_coverage.py'
+      - 'scripts/slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_coverage.py'
+      - 'scripts/tests/test_slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_batch_integration.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -42,6 +47,11 @@ on:
       - 'scripts/slicer_coverage_reconcile.py'
       - 'scripts/coverage_replay/**'
       - 'scripts/tests/test_coverage_replay.py'
+      - 'scripts/slicer_gcov_coverage.py'
+      - 'scripts/slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_coverage.py'
+      - 'scripts/tests/test_slicer_catch_batch.py'
+      - 'scripts/tests/test_slicer_gcov_batch_integration.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -89,3 +99,9 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_coverage.py -v
       - name: Test coverage replay reconciliation
         run: python -B -m unittest discover -s scripts/tests -p test_coverage_replay.py -v
+      - name: Test GCOV physical-line backend
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_gcov_coverage.py -v
+      - name: Test Catch batch runner
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_catch_batch.py -v
+      - name: Test GCOV and Catch batch integration
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_gcov_batch_integration.py -v
