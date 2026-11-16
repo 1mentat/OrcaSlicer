@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Emitted-G-code witnesses for mixed-filament gradient sublayer Z, flow scaling, and per-volume region filtering.",
+  "mutants": [
+    {
+      "id": "mixed-gradient-gcode-flow-ratio-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    m_sub_layer_flow_ratio = entry.sub_h / lh;\n                    m_sub_layer_height     = entry.sub_h;\n                    m_nominal_z            = entry.sub_z;",
+      "new": "                    m_sub_layer_flow_ratio = 1.0;\n                    m_sub_layer_height     = entry.sub_h;\n                    m_nominal_z            = entry.sub_z;",
+      "description": "Ignore the emitted sublayer flow multiplier. The positive-E ratio at each independently selected sub-Z must follow the configured gradient ratio.",
+      "test_filter": "MixedGradientGCode"
+    },
+    {
+      "id": "mixed-gradient-gcode-sub-z-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                    m_sub_layer_height     = entry.sub_h;\n                    m_nominal_z            = entry.sub_z;\n                    // Use the same lazy-Z mechanism as change_layer(): set the flag so travel_to",
+      "new": "                    m_sub_layer_height     = entry.sub_h;\n                    m_nominal_z            = print_z;\n                    // Use the same lazy-Z mechanism as change_layer(): set the flag so travel_to",
+      "description": "Place every emitted sublayer at the nominal layer Z. The parser's independent fractional-Z witness must fail while the nominal component remains positive.",
+      "test_filter": "MixedGradientGCode"
+    },
+    {
+      "id": "mixed-gradient-gcode-volume-filter-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "                        if (entry.region_filter) {\n                            subset_storage.resize(src.size());",
+      "new": "                        if (false) {\n                            subset_storage.resize(src.size());",
+      "description": "Skip construction of the per-volume region subset. The per-volume export must retain the short volume's absence in the upper tall-only layers and must emit positive flow for each selected volume.",
+      "test_filter": "MixedGradientGCode"
+    }
+  ]
+}
