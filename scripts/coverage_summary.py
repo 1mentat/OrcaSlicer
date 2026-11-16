@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 
-def render(summary: dict, commit: str, floor: float, worst: int = 25) -> str:
+def render(summary: dict, commit: str, floor: float, platform: str,
+           worst: int = 25) -> str:
     covered, total = summary["line_covered"], summary["line_total"]
     files = sorted(
         summary["files"],
@@ -21,7 +22,7 @@ def render(summary: dict, commit: str, floor: float, worst: int = 25) -> str:
         reverse=True,
     )
     lines = [
-        "## libslic3r line coverage (gcov, Linux x86_64)",
+        f"## libslic3r line coverage (gcov, {platform})",
         "",
         f"**{summary['line_percent']:.2f}%** — {covered} of {total} lines, "
         f"{len(files)} files, floor {floor:g}%",
@@ -48,6 +49,7 @@ def main() -> int:
     parser.add_argument("summary", type=Path)
     parser.add_argument("--commit", default="")
     parser.add_argument("--floor", type=float, default=90.0)
+    parser.add_argument("--platform", default="Linux")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--check", action="store_true",
                         help="exit 1 when line coverage is below the floor")
@@ -55,7 +57,7 @@ def main() -> int:
 
     summary = json.loads(args.summary.read_text())
     if args.out:
-        args.out.write_text(render(summary, args.commit, args.floor))
+        args.out.write_text(render(summary, args.commit, args.floor, args.platform))
     if args.check:
         percent = summary["line_percent"]
         if summary["line_total"] == 0 or percent < args.floor:

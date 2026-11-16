@@ -86,10 +86,12 @@ jobs:
         run: |
           pipx install gcovr==8.3
           mkdir -p coverage/html
+          # Hot loops legitimately exceed gcovr's "suspicious" hit threshold.
           gcovr --root . --filter 'src/libslic3r/' \
             --gcov-executable gcov-13 -j 4 \
             --merge-mode-functions=merge-use-line-min \
             --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+            --gcov-ignore-parse-errors=suspicious_hits.warn_once_per_file \
             --gcov-ignore-errors=no_working_dir_found \
             --txt coverage/coverage.txt \
             --json-summary coverage/summary.json --json-summary-pretty \
@@ -97,6 +99,7 @@ jobs:
             build
           python3 scripts/coverage_summary.py coverage/summary.json \
             --commit "$GITHUB_SHA" --floor "$LINE_FLOOR" \
+            --platform "Linux $(uname -m)" \
             --out coverage/summary.md
           cat coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
 
