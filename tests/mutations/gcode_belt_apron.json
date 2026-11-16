@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "description": "Belt apron export contracts checked through emitted motion, layer metadata and per-band hooks.",
+  "mutants": [
+    {
+      "id": "apron_no_empty_return",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    LayerResult result { {}, 0, false, true };\n    if (layer_tools.extruders.empty())\n        // Nothing to extrude.\n        return result;",
+      "new": "    LayerResult result { {}, 0, false, true };\n    if (! layer_tools.extruders.empty())\n        // Nothing to extrude.\n        return result;",
+      "description": "all apron export cases lose their brim output",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_layer_marker_removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    {\n        char buf[64];\n        gcode += \";\" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + \"\\n\";",
+      "new": "    {\n        char buf[64];\n        gcode += \"\";",
+      "description": "first-object-z apron marker count no longer equals generated prologue bands",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_z_zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        sprintf(buf, \";Z:%g\\n\", print_z);",
+      "new": "        sprintf(buf, \";Z:%g\\n\", 0.0);",
+      "description": "apron Z tags no longer strictly ascend and no longer match band print-z ordering",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_height_zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        const float band_height = float(height);",
+      "new": "        const float band_height = 0.f;",
+      "description": "positive finite HEIGHT tags contract fails",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_before_hook_removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        m_last_height  = band_height;\n    }\n\n    if (! m_config.before_layer_change_gcode.value.empty()) {\n        DynamicConfig config;\n        config.set_key_value(\"layer_num\",   new ConfigOptionInt(m_layer_index + 1));",
+      "new": "        m_last_height  = band_height;\n    }\n\n    if (false) {\n        DynamicConfig config;\n        config.set_key_value(\"layer_num\",   new ConfigOptionInt(m_layer_index + 1));",
+      "description": "custom before-layer hook must run for each apron layer",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_layer_hook_removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (! m_config.layer_change_gcode.value.empty()) {\n        DynamicConfig config;\n        config.set_key_value(\"layer_num\",   new ConfigOptionInt(m_layer_index));",
+      "new": "    if (false) {\n        DynamicConfig config;\n        config.set_key_value(\"layer_num\",   new ConfigOptionInt(m_layer_index));",
+      "description": "custom layer-change hook must run for each apron layer",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_emit_removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        gcode += this->emit_belt_brim_bands(print, layers, single_object_instance_idx, brim_extruder);",
+      "new": "        gcode += std::string();",
+      "description": "positive brim extrusion and wall-filament contracts fail",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_band_filter_inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (band == nullptr || band->fills.empty() || ltp.original_object == nullptr)",
+      "new": "        if (band == nullptr || band->fills.empty() || ltp.original_object != nullptr)",
+      "description": "emit_belt_brim_bands no longer emits valid object-owned bands",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_filament_filter_inverted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        if (! object.has_belt_brim() || static_cast<unsigned int>(object.belt_brim_filament() - 1) != extruder_id)",
+      "new": "        if (! object.has_belt_brim() || static_cast<unsigned int>(object.belt_brim_filament() - 1) == extruder_id)",
+      "description": "single and configured wall-filament apron tools disappear",
+      "test_filter": "GCodeBeltApron"
+    },
+    {
+      "id": "apron_belt_z_zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    m_belt_brim_z = print_z;",
+      "new": "    m_belt_brim_z = 0.;",
+      "description": "first-layer speed/fan and finite apron motion contracts fail",
+      "test_filter": "GCodeBeltApron"
+    }
+  ]
+}

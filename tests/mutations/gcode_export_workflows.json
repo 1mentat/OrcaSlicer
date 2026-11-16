@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "G-code export command, firmware, timelapse, and motion contracts.",
+  "mutants": [
+    {
+      "id": "gcode-custom-temperature-guard",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (! temp_set_by_gcode)",
+      "new": "if (temp_set_by_gcode)",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Invert bed custom-temperature suppression; the custom M140 path must not cause the configured bed command to disappear."
+    },
+    {
+      "id": "gcode-machine-envelope-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if ((flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware || flavor == gcfRepRapFirmware) &&\n        print.config().emit_machine_limits_to_gcode.value == true)",
+      "new": "if (false)",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Disable the production machine-envelope gate; Marlin and RepRap exports must retain their parsed limit commands."
+    },
+    {
+      "id": "gcode-timelapse-template-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!need_insert_timelapse_gcode_for_traditional && !m_config.time_lapse_gcode.value.empty() && !is_BBL_Printer()) {",
+      "new": "if (false) {",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Disable the traditional per-layer timelapse template insertion reached by the ordinary export; the SNAP marker contract must fail."
+    },
+    {
+      "id": "gcode-spiral-vase-construction",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (print.config().spiral_mode.value)",
+      "new": "if (false)",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Suppress SpiralVase construction; the dedicated spiral export contract should distinguish the continuous vase path."
+    },
+    {
+      "id": "gcode-label-object-stop",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (this->config().gcode_label_objects) {\n                    gcode += std::string(\"; stop printing object \") +",
+      "new": "if (false) {\n                    gcode += std::string(\"; stop printing object \") +",
+      "test_filter": "GCodePrintVariance",
+      "description": "Drop object-stop labels in the later layer exporter; the existing paired start/stop contract should fail."
+    },
+    {
+      "id": "gcode-input-shaping-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (print.config().input_shaping_emit.value && flavor != gcfMarlinLegacy) {",
+      "new": "if (false) {",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Disable input-shaping command emission inside the machine-limit block; the explicit Marlin/legacy firmware variance case must fail."
+    },
+    {
+      "id": "gcode-arc-fitting-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured || this->should_disable_arc_fitting()) {",
+      "new": "if (true) {",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Force eligible perimeter output through linear motion; the arc-fitting variance requires a positive G2/G3 delta."
+    },
+    {
+      "id": "gcode-file-start-gate",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (!print.config().file_start_gcode.value.empty())",
+      "new": "if (false)",
+      "test_filter": "GCodeExportWorkflows",
+      "description": "Suppress the configured file-start hook; the lifecycle order contract must fail."
+    }
+  ]
+}
