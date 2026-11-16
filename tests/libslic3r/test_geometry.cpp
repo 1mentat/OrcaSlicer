@@ -1384,7 +1384,7 @@ TEST_CASE("Transformation SVD distinguishes rotated anisotropic skew", "[Geometr
 }
 
 TEST_CASE("Transformation vector mirror setter treats zero as unmirrored and uses only input signs",
-          "[Geometry][Transformation][Mirror]")
+          "[Geometry][Transformation][Mirror][GeometryGap][MathGap]")
 {
     const Vec3d offset(5., -6., 7.);
     Geometry::Transformation transform;
@@ -1842,7 +1842,7 @@ TEST_CASE("Infinite and segment intersections distinguish crossing parallel and 
 }
 
 TEST_CASE("Line perpendicular distance covers degenerate segments and angle predicates classify directions",
-          "[Geometry][Line]")
+          "[Geometry][Line][LineContracts]")
 {
     const Line horizontal(Point(0, 0), Point(4, 0));
     CHECK_THAT(horizontal.perp_distance_to(Point(2, 3)), Catch::Matchers::WithinAbs(3.0, 1e-12));
