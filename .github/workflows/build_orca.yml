@@ -850,7 +850,7 @@ jobs:
         if: runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
         timeout-minutes: 60
         shell: bash
-        run: python3 scripts/focused_targets.py build --build-dir build --config Release --jobs 2
+        run: python3 scripts/focused_targets.py build --build-dir build --config Release --jobs 2 --deadline 3300
 
       # The build has just touched everything it can use, so an object
       # untouched for a week is dead, usually orphaned by a flag change.

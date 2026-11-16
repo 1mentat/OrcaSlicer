@@ -8,8 +8,10 @@ Subcommands: ``check`` (inventory equals CMake-declared set) and ``build``.
 
 from pathlib import Path
 import argparse
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -20,26 +22,30 @@ SUITES = ("fff_print", "libslic3r", "sla_print")
 # Pre-existing explicit-only helper, not a focused Catch test executable.
 NOT_FOCUSED = frozenset({"slicer_settings_inventory"})
 
-_ADD = re.compile(r"add_executable\s*\(\s*([A-Za-z0-9_]+)\s+EXCLUDE_FROM_ALL\b")
-_IF = re.compile(r"^\s*if\s*\(", re.IGNORECASE)
-_ENDIF = re.compile(r"^\s*endif\s*\(", re.IGNORECASE)
+_DECL = re.compile(
+    r"\b(?P<kw>endif|if|add_executable)\s*\(\s*(?P<name>[A-Za-z0-9_]+)?\s*(?P<flag>EXCLUDE_FROM_ALL\b)?",
+    re.IGNORECASE)
 
 
 def cmake_targets(root=ROOT):
-    """Return {target: is_conditional} for focused EXCLUDE_FROM_ALL executables."""
+    """Return {target: is_conditional} for focused EXCLUDE_FROM_ALL executables.
+
+    Matches against whole-file text (comments removed), so declarations split
+    across lines are found; if()/endif() depth marks conditional targets.
+    """
     found = {}
     for suite in SUITES:
-        depth = 0
         text = (Path(root) / "tests" / suite / "CMakeLists.txt").read_text(encoding="utf-8")
-        for line in text.splitlines():
-            line = line.split("#", 1)[0]
-            if _IF.match(line):
+        text = re.sub(r"#[^\n]*", "", text)
+        depth = 0
+        for match in _DECL.finditer(text):
+            keyword = match.group("kw").lower()
+            if keyword == "if":
                 depth += 1
-            elif _ENDIF.match(line):
+            elif keyword == "endif":
                 depth -= 1
-            match = _ADD.search(line)
-            if match and match.group(1) not in NOT_FOCUSED:
-                found[match.group(1)] = depth > 0
+            elif match.group("flag") and match.group("name") not in NOT_FOCUSED:
+                found[match.group("name")] = depth > 0
     return found
 
 
@@ -69,17 +75,27 @@ def check(root=ROOT, inventory=INVENTORY):
 
 def _run(cmd, timeout):
     # Argument lists only, never a shell; names come from the checked-in inventory.
+    # The child leads its own process group so a timeout kills ninja and the
+    # compilers too, not just cmake.
+    kwargs = {"start_new_session": True} if hasattr(os, "killpg") else {}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", **kwargs)
     try:
-        done = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, errors="replace", timeout=timeout)
-        return done.returncode, done.stdout
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out
     except subprocess.TimeoutExpired:
-        return 124, ""
+        if kwargs:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+        out, _ = proc.communicate()
+        return 124, (out or "") + "\n[timed out after %ss]" % timeout
 
 
-def build(build_dir, config, jobs, target_timeout, smoke_timeout):
+def build(build_dir, config, jobs, target_timeout, smoke_timeout, deadline=3300):
     build_dir = Path(build_dir).resolve()
     inventory = load_inventory()
+    end = time.monotonic() + deadline
     code, out = _run(["cmake", "--build", str(build_dir), "--config", config,
                       "--target", "help"], 300)
     if code:
@@ -98,8 +114,13 @@ def build(build_dir, config, jobs, target_timeout, smoke_timeout):
                 print("FAILED %s (required target not configured)" % name)
             continue
         start = time.monotonic()
+        remaining = end - start
+        if remaining <= 0:
+            failed.append(name)
+            print("FAILED %s (not attempted: deadline)" % name)
+            continue
         code, out = _run(["cmake", "--build", str(build_dir), "--config", config,
-                          "--target", name, "-j", str(jobs)], target_timeout)
+                          "--target", name, "-j", str(jobs)], min(target_timeout, remaining))
         if code:
             failed.append(name)
             print("FAILED %s (exit %d, %.0fs); last output:\n%s" % (
@@ -141,12 +162,14 @@ def main(argv=None):
     b.add_argument("--jobs", type=int, default=2)
     b.add_argument("--target-timeout", type=int, default=1500)
     b.add_argument("--smoke-timeout", type=int, default=60)
+    b.add_argument("--deadline", type=int, default=3300)
     args = parser.parse_args(argv)
     if args.cmd == "check":
         problems = check()
         print("\n".join(problems) or "focused target inventory matches CMake")
         return 1 if problems else 0
-    return build(args.build_dir, args.config, args.jobs, args.target_timeout, args.smoke_timeout)
+    return build(args.build_dir, args.config, args.jobs, args.target_timeout, args.smoke_timeout,
+                 args.deadline)
 
 
 if __name__ == "__main__":
