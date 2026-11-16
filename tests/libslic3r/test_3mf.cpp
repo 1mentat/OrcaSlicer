@@ -27,6 +27,8 @@
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include "test_utils.hpp"
 
 #include "libslic3r/Config.hpp"
@@ -9795,3 +9797,3963 @@ TEST_CASE("Both 3MF backends preserve full mirrored affine matrices and world ve
 }
 
 } // namespace bbs_archive_contracts
+
+TEST_CASE("BBS 3MF validates text and shape metadata against its volume context",
+          "[3MF][EmbossMetadata][Regression]")
+{
+    const int variant = GENERATE(0, 1, 2, 3, 4, 5, 6);
+    const char *variant_names[] = {
+        "legacy text info before any object",
+        "legacy text info before an object's first part",
+        "text configuration before any object",
+        "text configuration before an object's first part",
+        "shape configuration before any object",
+        "shape configuration before an object's first part",
+        "legacy text info after current text configuration",
+    };
+    INFO(variant_names[variant]);
+    const bool expect_loaded = variant == 6;
+
+    ScopedTemporaryFile archive(".3mf");
+    store_painted_cube(archive.string());
+    REQUIRE(rewrite_3mf_entries(archive.string(), [variant](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+
+        if (variant == 6) {
+            const size_t part_start = data.find("<part ");
+            if (part_start == std::string::npos)
+                return false;
+            const size_t part_open_end = data.find('>', part_start);
+            if (part_open_end == std::string::npos)
+                return false;
+            data.insert(part_open_end + 1,
+                        "<slic3rpe:text font_descriptor_type=\"file_name\" depth=\"1.25\" use_surface=\"1\" "
+                        "transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/><text_info/>");
+            return true;
+        }
+
+        const std::string tag = variant < 2 ? "text_info" : variant < 4 ? "slic3rpe:text" : "slic3rpe:shape";
+        const std::string element = "<" + tag + "/>";
+        if (variant % 2 == 0) {
+            const size_t config_start = data.find("<config>");
+            if (config_start == std::string::npos)
+                return false;
+            data.insert(config_start + sizeof("<config>") - 1, element);
+        } else {
+            const size_t object_start = data.find("<object ");
+            if (object_start == std::string::npos)
+                return false;
+            const size_t object_open_end = data.find('>', object_start);
+            if (object_open_end == std::string::npos)
+                return false;
+            data.insert(object_open_end + 1, element);
+        }
+        return true;
+    }));
+
+    Model loaded_model;
+    ScopedTemporaryDir backup_dir("orca_emboss_metadata_context");
+    const bool loaded = load_project(archive.string(), loaded_model, backup_dir);
+    CHECK(loaded == expect_loaded);
+    if (expect_loaded && loaded) {
+        REQUIRE(loaded_model.objects.size() == 1);
+        REQUIRE(loaded_model.objects.front()->volumes.size() == 1);
+        const ModelVolume &volume = *loaded_model.objects.front()->volumes.front();
+        CHECK(volume.text_configuration.has_value());
+        REQUIRE(volume.emboss_shape.has_value());
+        CHECK(volume.emboss_shape->projection.use_surface);
+        CHECK_THAT(volume.emboss_shape->projection.depth, Catch::Matchers::WithinAbs(1.25, 1e-6));
+    }
+}
+
+namespace gap_a_formats_3mf {
+
+namespace bbs_archive_contracts {
+
+namespace {
+
+struct LoadedProject
+{
+    DynamicPrintConfig config;
+    PlateDataPtrs       plates;
+    std::vector<Preset*> presets;
+    bool                is_bbl{false};
+    bool                is_orca{false};
+    Semver              version;
+    std::unique_ptr<ScopedTemporaryDir> backup;
+
+    ~LoadedProject();
+};
+
+void make_model(Model& model, bool two_objects = false, bool assembly = false)
+{
+    ModelObject *base = model.add_object();
+    base->name = "base-object";
+    base->module_name = "base-module";
+    ModelVolume *base_volume = base->add_volume(make_cube(10., 10., 10.));
+    base_volume->name = "base-volume";
+    base_volume->set_material_id("PLA");
+    base->add_instance();
+    ModelInstance *second = base->add_instance();
+    second->set_offset({30., 5., 0.});
+    second->set_rotation(Z, Geometry::deg2rad(17.));
+    second->set_scaling_factor({1.1, 0.9, 1.0});
+
+    if (assembly) {
+        Transform3d assembled = Transform3d::Identity();
+        assembled.linear() = Eigen::AngleAxisd(Geometry::deg2rad(23.), Vec3d::UnitZ()).toRotationMatrix();
+        assembled.translation() = Vec3d(4., 6., 8.);
+        second->set_assemble_from_transform(assembled);
+        second->set_offset_to_assembly({1.5, -2.5, 0.75});
+    }
+
+    if (two_objects) {
+        ModelObject *other = model.add_object();
+        other->name = "second-object";
+        other->module_name = "second-module";
+        ModelVolume *other_volume = other->add_volume(make_cube(6., 8., 4.));
+        other_volume->name = "second-volume";
+        other_volume->set_material_id("PETG");
+        other->add_instance({60., 10., 0.}, {1., 1., 1.}, {0., 0., Geometry::deg2rad(11.)}, {1., 1., 1.});
+    }
+
+    model.add_material("PLA")->attributes["filament_type"] = "PLA";
+    model.add_material("PETG")->attributes["filament_type"] = "PETG";
+}
+
+void store_model(const std::string& path, Model& model, DynamicPrintConfig& config,
+                 PlateDataPtrs& plates, SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence,
+                 Export3mfProgressFn callback = nullptr)
+{
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = strategy;
+    params.proFn = std::move(callback);
+    REQUIRE(store_bbs_3mf(params));
+}
+
+bool load_model(const std::string& path, Model& model, LoadedProject& loaded,
+                Import3mfProgressFn callback = nullptr)
+{
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_ext_load");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    const bool result = load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                                     &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                                     std::move(callback), LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    return result;
+}
+
+void make_plate(PlateData& plate, int index, const std::vector<std::pair<int, int>>& objects)
+{
+    plate.plate_index = index;
+    plate.plate_name = "plate-" + std::to_string(index + 1);
+    plate.locked = index == 1;
+    plate.objects_and_instances = objects;
+    plate.printer_model_id = "printer-" + std::to_string(index);
+    plate.nozzle_diameters = "0.4;0.6";
+    plate.nozzle_volume_types = "standard;high_flow";
+    plate.gcode_prediction = "{\"time\":42}";
+    plate.gcode_weight = "12.5";
+    plate.toolpath_outside = index == 1;
+    plate.is_support_used = index == 0;
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF export cancellation removes unfinished archives at late stages",
+          "[3MF][Bbs3mfLateCancellation][Export]")
+{
+    const int target_stage = GENERATE(EXPORT_STAGE_ADD_MODELS, EXPORT_STAGE_FINISH);
+    const bool preserve_existing = GENERATE(false, true);
+    INFO("target export stage " << target_stage);
+    INFO("pre-existing destination " << preserve_existing);
+
+    Model source;
+    make_model(source);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_bbs_late_export_cancel_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+
+    ScopedTemporaryDir output_dir("orca_bbs_late_export_cancel_output");
+    const std::filesystem::path output = std::filesystem::path(output_dir.string()) /
+                                         ("cancelled-" + std::to_string(target_stage) + ".3mf");
+    std::vector<int> stages;
+    StoreParams params;
+    params.path = output.string();
+    params.model = &source;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+
+    std::string existing_archive;
+    if (preserve_existing) {
+        REQUIRE(store_bbs_3mf(params));
+        boost::nowide::ifstream input(output.string(), std::ios::binary);
+        REQUIRE(input.good());
+        existing_archive.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        REQUIRE_FALSE(existing_archive.empty());
+    } else {
+        CHECK_FALSE(std::filesystem::exists(output));
+    }
+
+    bool cancellation_requested = false;
+    bool progress_after_cancellation = false;
+    params.proFn = [&stages, target_stage, &cancellation_requested, &progress_after_cancellation]
+                   (int stage, int, int, bool& cancel) {
+        progress_after_cancellation |= cancellation_requested;
+        stages.push_back(stage);
+        cancel = stage == target_stage;
+        cancellation_requested |= cancel;
+    };
+
+    CHECK_FALSE(store_bbs_3mf(params));
+    REQUIRE(std::find(stages.begin(), stages.end(), target_stage) != stages.end());
+    CHECK(cancellation_requested);
+    CHECK_FALSE(progress_after_cancellation);
+    CHECK_FALSE(std::filesystem::exists(output.string() + ".tmp"));
+
+    if (preserve_existing) {
+        boost::nowide::ifstream input(output.string(), std::ios::binary);
+        REQUIRE(input.good());
+        const std::string preserved{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        CHECK(preserved == existing_archive);
+    } else {
+        CHECK_FALSE(std::filesystem::exists(output));
+    }
+}
+
+} // namespace bbs_archive_contracts
+
+namespace archive_variant_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+using BbsLoaded = bbs_archive_contracts::LoadedProject;
+
+Model make_cube_model()
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "archive-contract-cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    return model;
+}
+
+void store_generic(const std::string &path, Model &model, DynamicPrintConfig *config = nullptr,
+                   const ThumbnailData *thumbnail = nullptr)
+{
+    REQUIRE(store_3mf(path.c_str(), &model, config, false, thumbnail));
+}
+
+void store_bbs(const std::string &path, Model &model, DynamicPrintConfig &config,
+               PlateData &plate, StoreParams *extra = nullptr)
+{
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    if (extra != nullptr) {
+        params.thumbnail_data = extra->thumbnail_data;
+        params.no_light_thumbnail_data = extra->no_light_thumbnail_data;
+        params.top_thumbnail_data = extra->top_thumbnail_data;
+        params.pick_thumbnail_data = extra->pick_thumbnail_data;
+        params.calibration_thumbnail_data = extra->calibration_thumbnail_data;
+    }
+    REQUIRE(store_bbs_3mf(params));
+}
+
+bool load_generic(const std::string &path, Model &model, DynamicPrintConfig &config,
+                  bool check_version = false)
+{
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_3mf(path.c_str(), config, substitutions, &model, check_version);
+}
+
+bool load_bbs(const std::string &path, Model &model, BbsLoaded &loaded,
+              LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+{
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_3mf_variants_load");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                        nullptr, strategy);
+}
+
+std::string read_file(const std::string &path)
+{
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+bool load_bbs_with_backup(const std::string &path, Model &model, BbsLoaded &loaded,
+                          const std::filesystem::path &backup_root)
+{
+    model.set_backup_path(backup_root.string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                        nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+}
+
+void check_metadata_sidecar_traversal_is_confined(const std::string &extension, bool include_png)
+{
+    ScopedTemporaryDir fixture("orca_bbs_metadata_path");
+    const std::filesystem::path fixture_root(fixture.string());
+    const std::filesystem::path archive_path = fixture_root / "project.3mf";
+    const std::filesystem::path store_backup = fixture_root / "store-backup";
+    const std::filesystem::path import_backup = fixture_root / "import-backup";
+    REQUIRE(std::filesystem::create_directories(store_backup));
+    REQUIRE(std::filesystem::create_directories(import_backup / "Metadata"));
+
+    Model source = make_cube_model();
+    source.set_backup_path(store_backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    std::string safe_payload = "metadata-sidecar-contract";
+    if (include_png) {
+        ThumbnailData thumbnail;
+        thumbnail.set(2, 2);
+        std::fill(thumbnail.pixels.begin(), thumbnail.pixels.end(), 0x7f);
+        StoreParams extras;
+        extras.thumbnail_data = {&thumbnail};
+        store_bbs(archive_path.string(), source, config, plate, &extras);
+        REQUIRE(read_3mf_entry(archive_path.string(), safe_payload, "Metadata/plate_1.png"));
+    } else {
+        store_bbs(archive_path.string(), source, config, plate);
+    }
+
+    // The two parent components unwind Metadata and import-backup, landing inside this fixture.
+    const std::string escaped_name = "Metadata/../../escaped" + extension;
+    const std::string safe_name = "Metadata/safe" + extension;
+    REQUIRE(rewrite_3mf_entries(archive_path.string(), [](std::string &, std::string &) { return false; },
+        {{escaped_name, "traversal-probe"}, {safe_name, safe_payload}}));
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs_with_backup(archive_path.string(), loaded_model, loaded, import_backup));
+    REQUIRE(loaded_model.objects.size() == 1);
+
+    const std::filesystem::path escaped_path = fixture_root / ("escaped" + extension);
+    const std::filesystem::path safe_path = import_backup / "Metadata" / ("safe" + extension);
+    CHECK_FALSE(std::filesystem::exists(escaped_path));
+    REQUIRE(std::filesystem::exists(safe_path));
+    CHECK(read_file(safe_path.string()) == safe_payload);
+    CHECK_FALSE(std::filesystem::exists(import_backup / ("safe" + extension)));
+}
+
+bool replace_once(const std::string &path, const std::string &entry,
+                  const std::string &from, const std::string &to)
+{
+    bool replaced = false;
+    const bool rewritten = rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != entry || replaced)
+            return false;
+        const size_t pos = data.find(from);
+        if (pos == std::string::npos)
+            return false;
+        data.replace(pos, from.size(), to);
+        replaced = true;
+        return true;
+    });
+    return rewritten && replaced;
+}
+
+bool insert_before_model_end(const std::string &path, const std::string &metadata)
+{
+    bool inserted = false;
+    const bool rewritten = rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "3D/3dmodel.model" || inserted)
+            return false;
+        const size_t pos = data.rfind("</model>");
+        if (pos == std::string::npos)
+            return false;
+        data.insert(pos, metadata);
+        inserted = true;
+        return true;
+    });
+    return rewritten && inserted;
+}
+
+void store_bbs_base(const std::string &path, Model &model, DynamicPrintConfig &config, PlateData &plate)
+{
+    ScopedTemporaryDir backup("orca_3mf_variants_store");
+    model.set_backup_path(backup.string());
+    store_bbs(path, model, config, plate);
+}
+
+} // namespace
+
+TEST_CASE("BBS 3MF prefers the current CAD recipe over a later legacy duplicate",
+          "[3MFArchiveVariants][Bbs3mfVariants][CADRecipePrecedence][Compatibility]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+
+    const std::string current_recipe = make_cad_recipe();
+    const std::string legacy_recipe = "legacy-recipe-must-not-overwrite-current";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; },
+        {{CAD_RECIPE_ENTRY, current_recipe}, {LEGACY_CAD_RECIPE_ENTRY, legacy_recipe}}));
+
+    std::vector<std::pair<std::string, std::string>> recipe_entries;
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, archive.string()));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+    const mz_uint num_entries = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < num_entries; ++i) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &stat));
+        const std::string name(stat.m_filename);
+        if (name != CAD_RECIPE_ENTRY && name != LEGACY_CAD_RECIPE_ENTRY)
+            continue;
+
+        std::string payload(static_cast<size_t>(stat.m_uncomp_size), '\0');
+        if (!payload.empty())
+            REQUIRE(mz_zip_reader_extract_to_mem(&zip, i, payload.data(), payload.size(), 0));
+        recipe_entries.emplace_back(name, std::move(payload));
+    }
+    REQUIRE(recipe_entries.size() == 2);
+    CHECK(recipe_entries[0].first == CAD_RECIPE_ENTRY);
+    CHECK(recipe_entries[0].second == current_recipe);
+    CHECK(recipe_entries[1].first == LEGACY_CAD_RECIPE_ENTRY);
+    CHECK(recipe_entries[1].second == legacy_recipe);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded));
+    CHECK(loaded_model.cad_recipe == current_recipe);
+}
+
+TEST_CASE("Generic 3MF applies micron units to mesh coordinates", "[3MFArchiveVariants][3MF][Units]")
+{
+    Model source = make_cube_model();
+    const double source_width = source.mesh().bounding_box().max.x() - source.mesh().bounding_box().min.x();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    REQUIRE(replace_once(archive.string(), "3D/3dmodel.model", "unit=\"millimeter\"", "unit=\"micron\""));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    const BoundingBoxf3 bbox = loaded.mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(source_width * .001, 1e-5));
+}
+
+TEST_CASE("Generic 3MF defaults unknown units to millimeters", "[3MFArchiveVariants][3MF][Units]")
+{
+    Model source = make_cube_model();
+    const BoundingBoxf3 expected = source.mesh().bounding_box();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    REQUIRE(replace_once(archive.string(), "3D/3dmodel.model", "unit=\"millimeter\"", "unit=\"unknown-unit\""));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    const BoundingBoxf3 actual = loaded.mesh().bounding_box();
+    CHECK_THAT(double(actual.max.z() - actual.min.z()), Catch::Matchers::WithinAbs(expected.max.z() - expected.min.z(), 1e-5));
+}
+
+TEST_CASE("Generic 3MF check_version rejects a future file version", "[3MFArchiveVariants][3MF][Compatibility]")
+{
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    REQUIRE(replace_once(archive.string(), "3D/3dmodel.model", "slic3rpe:Version3mf\">1", "slic3rpe:Version3mf\">99"));
+
+    Model unchecked;
+    DynamicPrintConfig unchecked_config;
+    CHECK(load_generic(archive.string(), unchecked, unchecked_config, false));
+    Model checked;
+    DynamicPrintConfig checked_config;
+    CHECK_THROWS(load_generic(archive.string(), checked, checked_config, true));
+}
+
+TEST_CASE("Generic 3MF rejects a future supports-painting version when checking compatibility", "[3MFArchiveVariants][3MF][Compatibility]")
+{
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    Model control;
+    DynamicPrintConfig control_config;
+    REQUIRE(load_generic(archive.string(), control, control_config, false));
+    REQUIRE(insert_before_model_end(archive.string(),
+        "<metadata name=\"slic3rpe:FdmSupportsPaintingVersion\">99</metadata>"));
+    Model loaded;
+    DynamicPrintConfig config;
+    CHECK_THROWS(load_generic(archive.string(), loaded, config, true));
+}
+
+TEST_CASE("Generic 3MF rejects a future seam-painting version when checking compatibility", "[3MFArchiveVariants][3MF][Compatibility]")
+{
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    Model control;
+    DynamicPrintConfig control_config;
+    REQUIRE(load_generic(archive.string(), control, control_config, false));
+    REQUIRE(insert_before_model_end(archive.string(),
+        "<metadata name=\"slic3rpe:SeamPaintingVersion\">99</metadata>"));
+    Model loaded;
+    DynamicPrintConfig config;
+    CHECK_THROWS(load_generic(archive.string(), loaded, config, true));
+}
+
+TEST_CASE("Generic 3MF rejects a future multi-material painting version when checking compatibility", "[3MFArchiveVariants][3MF][Compatibility]")
+{
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    Model control;
+    DynamicPrintConfig control_config;
+    REQUIRE(load_generic(archive.string(), control, control_config, false));
+    REQUIRE(insert_before_model_end(archive.string(),
+        "<metadata name=\"slic3rpe:MmPaintingVersion\">99</metadata>"));
+    Model loaded;
+    DynamicPrintConfig config;
+    CHECK_THROWS(load_generic(archive.string(), loaded, config, true));
+}
+
+TEST_CASE("Generic 3MF keeps a non-printable build item non-printable", "[3MFArchiveVariants][3MF][Build]")
+{
+    Model source = make_cube_model();
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source);
+    REQUIRE(replace_once(archive.string(), "3D/3dmodel.model", "printable=\"1\"", "printable=\"0\""));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front()->instances.size() == 1);
+    CHECK_FALSE(loaded.objects.front()->instances.front()->printable);
+}
+
+TEST_CASE("Generic 3MF exports a thumbnail that is a valid PNG archive entry", "[3MFArchiveVariants][3MF][Thumbnail]")
+{
+    Model source = make_cube_model();
+    ThumbnailData thumbnail;
+    thumbnail.set(4, 4);
+    for (size_t i = 0; i < thumbnail.pixels.size(); i += 4) {
+        thumbnail.pixels[i + 0] = 0x12;
+        thumbnail.pixels[i + 1] = 0x34;
+        thumbnail.pixels[i + 2] = 0x56;
+        thumbnail.pixels[i + 3] = 0xff;
+    }
+    ScopedTemporaryFile archive(".3mf");
+    store_generic(archive.string(), source, nullptr, &thumbnail);
+    std::string png;
+    REQUIRE(read_3mf_entry(archive.string(), png, "Metadata/thumbnail.png"));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{png.data(), png.size()}, decoded));
+    REQUIRE(decoded.cols == 4);
+    REQUIRE(decoded.rows == 4);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    REQUIRE(decoded.buf.size() == 4 * 4 * 4);
+    for (size_t i = 0; i < decoded.buf.size(); i += 4) {
+        CHECK(decoded.buf[i + 0] == 0x12);
+        CHECK(decoded.buf[i + 1] == 0x34);
+        CHECK(decoded.buf[i + 2] == 0x56);
+        CHECK(decoded.buf[i + 3] == 0xff);
+    }
+}
+
+TEST_CASE("BBS 3MF confines metadata G-code sidecars to the import backup", "[3MFArchiveVariants][Bbs3mfVariants][Metadata][Security]")
+{
+    check_metadata_sidecar_traversal_is_confined(".gcode", false);
+}
+
+TEST_CASE("BBS 3MF confines metadata thumbnail sidecars to the import backup", "[3MFArchiveVariants][Bbs3mfVariants][Metadata][Security]")
+{
+    check_metadata_sidecar_traversal_is_confined(".png", true);
+}
+
+// The central-directory name and Info-ZIP Unicode Path extra field can differ.
+// Keep both explicit so the outer filename filter cannot stand in for the
+// containment check performed after decoding the extra field.
+void append_extra_u16(std::string &extra, uint16_t value)
+{
+    extra.push_back(static_cast<char>(value & 0xff));
+    extra.push_back(static_cast<char>(value >> 8));
+}
+
+std::string unicode_path_extra(const std::string &stored_name, const std::string &decoded_name,
+                               bool valid_crc = true, unsigned char version = 1)
+{
+    REQUIRE(decoded_name.size() <= std::numeric_limits<uint16_t>::max() - 5);
+    std::string extra;
+    append_extra_u16(extra, 0x7075); // Info-ZIP Unicode Path extra field.
+    append_extra_u16(extra, static_cast<uint16_t>(5 + decoded_name.size()));
+    extra.push_back(static_cast<char>(version));
+    const mz_ulong crc = mz_crc32(0, reinterpret_cast<const unsigned char *>(stored_name.data()), stored_name.size()) ^ (valid_crc ? 0u : 1u);
+    for (unsigned int byte = 0; byte < 4; ++byte)
+        extra.push_back(static_cast<char>((crc >> (8 * byte)) & 0xff));
+    return extra + decoded_name;
+}
+
+void append_entry_with_extra(const std::string &archive_path, const std::string &stored_name,
+                             const std::string &payload, const std::string &extra)
+{
+    REQUIRE(extra.size() <= std::numeric_limits<uint16_t>::max());
+    mz_zip_archive zip{};
+    REQUIRE(mz_zip_reader_init_file(&zip, archive_path.c_str(), 0));
+    ScopeGuard close_zip([&zip] { mz_zip_end(&zip); });
+    REQUIRE(mz_zip_writer_init_from_reader(&zip, archive_path.c_str()));
+    REQUIRE(mz_zip_writer_add_mem_ex_v2(&zip, stored_name.c_str(), payload.data(), payload.size(),
+        nullptr, 0, MZ_DEFAULT_LEVEL | MZ_ZIP_FLAG_ASCII_FILENAME, 0, 0, nullptr,
+        extra.data(), static_cast<mz_uint>(extra.size()), extra.data(), static_cast<mz_uint>(extra.size())));
+    REQUIRE(mz_zip_writer_finalize_archive(&zip));
+}
+
+void append_unicode_auxiliary(const std::string &archive_path, const std::string &decoded_name,
+                              bool trailing_field = true, bool valid_crc = true, unsigned char version = 1,
+                              size_t prefix_extra_bytes = 0)
+{
+    const std::string stored_name = "Auxiliaries/docs/ascii.txt";
+    std::string extra;
+    REQUIRE(prefix_extra_bytes <= std::numeric_limits<uint16_t>::max());
+    if (prefix_extra_bytes != 0) {
+        // Padding exercises a large extra-field payload with short path components.
+        append_extra_u16(extra, 0xcafe);
+        append_extra_u16(extra, static_cast<uint16_t>(prefix_extra_bytes));
+        extra.append(prefix_extra_bytes, 'x');
+    }
+    extra += unicode_path_extra(stored_name, decoded_name, valid_crc, version);
+    if (trailing_field) {
+        append_extra_u16(extra, 0xcafe); // Empty JAR marker after the Unicode field.
+        append_extra_u16(extra, 0);
+    }
+    append_entry_with_extra(archive_path, stored_name, "unicode-auxiliary-contract", extra);
+}
+
+TEST_CASE("BBS 3MF decodes final and long Unicode path metadata", "[3MFArchiveVariants][AuxiliaryUnicodeMetadata]")
+{
+    const bool trailing_field = GENERATE(false, true);
+    const bool long_name = GENERATE(false, true);
+    CAPTURE(trailing_field, long_name);
+    const std::string leaf = long_name ? std::string(130, 'a') + "-é.txt" : "unicode-é.txt";
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/" + leaf, trailing_field);
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(std::filesystem::exists(root / "docs" / leaf));
+    CHECK(read_file((root / "docs" / leaf).string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
+}
+
+TEST_CASE("BBS 3MF ignores Unicode metadata with an invalid checksum or version", "[3MFArchiveVariants][AuxiliaryUnicodeMetadata]")
+{
+    const bool bad_crc = GENERATE(false, true);
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/untrusted.txt", true,
+                             !bad_crc, bad_crc ? 1 : 2);
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    REQUIRE(std::filesystem::exists(root / "docs/ascii.txt"));
+    CHECK(read_file((root / "docs/ascii.txt").string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/untrusted.txt"));
+}
+
+TEST_CASE("BBS 3MF reads complete final Unicode metadata beyond 1024 bytes",
+          "[3MFArchiveVariants][AuxiliaryUnicodeMetadata][UnicodeExtraFraming]")
+{
+    Model source = make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_bbs_base(archive.string(), source, config, plate);
+    append_unicode_auxiliary(archive.string(), "Auxiliaries/docs/unicode-é.txt", false, true, 1, 1020);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded,
+                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
+    const std::filesystem::path root = loaded_model.get_auxiliary_file_temp_path();
+    const std::filesystem::path extracted = root / "docs/unicode-é.txt";
+    REQUIRE(std::filesystem::exists(extracted));
+    CHECK(read_file(extracted.string()) == "unicode-auxiliary-contract");
+    CHECK_FALSE(std::filesystem::exists(root / "docs/ascii.txt"));
+}
+
+} // namespace archive_variant_contracts
+
+namespace stream_archive_contracts {
+
+using namespace bbs_archive_contracts;
+
+namespace {
+
+struct StreamArchive {
+    ScopedTemporaryDir backup{"orca_stream_store"};
+    ScopedTemporaryFile file{".3mf"};
+    Model model;
+    DynamicPrintConfig config{DynamicPrintConfig::full_print_config()};
+    PlateData plate;
+
+    explicit StreamArchive(bool image_paths = false)
+    {
+        make_model(model);
+        model.set_backup_path(backup.string());
+        model.model_info = std::make_shared<ModelInfo>();
+        model.model_info->model_name = "Stream <model>";
+        model.model_info->description = "Metadata & configuration";
+        config.set_deserialize_strict({{"layer_height", 0.24}, {"wall_loops", 3}});
+        make_plate(plate, 0, {{0, 0}, {0, 1}});
+        plate.locked = true;
+        if (image_paths) {
+            plate.pick_file = "source-pick.png";
+            plate.pattern_bbox_file = "source-bounds.json";
+        }
+        PlateDataPtrs plates{&plate};
+        store_model(file.string(), model, config, plates);
+    }
+};
+
+bool load_stream(const std::string &bytes, Model &model, LoadedProject &loaded)
+{
+    // Stream import may materialize the project configuration and thumbnail into
+    // the destination model backup. Give the destination an owned writable path
+    // just as the file importer helper does.
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_stream_load");
+    model.set_backup_path(loaded.backup->string());
+    std::istringstream stream(bytes, std::ios::in | std::ios::binary);
+    return load_gcode_3mf_from_stream(stream, &loaded.config, &model, &loaded.plates, &loaded.version);
+}
+
+bool load_stream_file(const StreamArchive &archive, Model &model, LoadedProject &loaded)
+{
+    return load_stream(archive_variant_contracts::read_file(archive.file.string()), model, loaded);
+}
+
+} // namespace
+
+TEST_CASE("G-code archive streams reject missing relationships and model parts", "[3MF][3MFStream]")
+{
+    const std::string missing = GENERATE(std::string("_rels/.rels"), std::string("3D/3dmodel.model"));
+    StreamArchive archive;
+    REQUIRE(rewrite_3mf_entries(archive.file.string(), [&](std::string &name, std::string &) {
+        if (name != missing) return false;
+        name = "removed/" + name;
+        return true;
+    }));
+    Model model;
+    LoadedProject loaded;
+    CHECK_FALSE(load_stream_file(archive, model, loaded));
+    CHECK(loaded.plates.empty());
+}
+
+} // namespace stream_archive_contracts
+
+namespace legacy_3mf_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+std::string transform_string(double tx = 0., double ty = 0., double tz = 0.)
+{
+    return "1 0 0 0 1 0 0 0 1 " + std::to_string(tx) + " " + std::to_string(ty) + " " + std::to_string(tz);
+}
+
+std::string cube_model_xml(const std::string &application = "ThirdParty",
+                           const std::string &build = "  <item objectid=\"1\" printable=\"1\"/>\n",
+                           bool reverse_winding = false,
+                           const std::string &object_name = "Cube")
+{
+    static const int vertices[][3] = {
+        {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+        {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10}
+    };
+    static const int triangles[][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n";
+    if (!application.empty())
+        xml += " <metadata name=\"Application\">" + application + "</metadata>\n";
+    xml += " <resources>\n  <object id=\"1\" type=\"model\" name=\"" + object_name + "\">\n"
+           "   <mesh>\n    <vertices>\n";
+    for (const auto &vertex : vertices)
+        xml += "     <vertex x=\"" + std::to_string(vertex[0]) + "\" y=\"" + std::to_string(vertex[1]) + "\" z=\"" + std::to_string(vertex[2]) + "\"/>\n";
+    xml += "    </vertices>\n    <triangles>\n";
+    for (const auto &triangle : triangles) {
+        const int v1 = triangle[0];
+        const int v2 = reverse_winding ? triangle[2] : triangle[1];
+        const int v3 = reverse_winding ? triangle[1] : triangle[2];
+        xml += "     <triangle v1=\"" + std::to_string(v1) + "\" v2=\"" + std::to_string(v2) + "\" v3=\"" + std::to_string(v3) + "\"/>\n";
+    }
+    xml += "    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build>\n";
+    xml += build;
+    xml += " </build>\n</model>\n";
+    return xml;
+}
+
+std::string interleaved_multi_volume_model_xml(const std::string &application)
+{
+    static const int vertices[][3] = {
+        {0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0},
+        {0, 0, 10}, {10, 0, 10}, {10, 10, 10}, {0, 10, 10}
+    };
+    static const int triangles[][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {1, 2, 6}, {1, 6, 5},
+        {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}
+    };
+
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n"
+        " <metadata name=\"Application\">" + application + "</metadata>\n"
+        " <resources><object id=\"1\" type=\"model\" name=\"Two volumes\"><mesh><vertices>\n";
+    // Interleave the meshes so each volume's min/max vertex range also contains
+    // its sibling's vertices.
+    for (const auto &vertex : vertices) {
+        for (int volume = 0; volume < 2; ++volume) {
+            xml += "  <vertex x=\"" + std::to_string(vertex[0] + 20 * volume) + "\" y=\"" +
+                   std::to_string(vertex[1]) + "\" z=\"" + std::to_string(vertex[2]) + "\"/>\n";
+        }
+    }
+    xml += " </vertices><triangles>\n";
+    for (int volume = 0; volume < 2; ++volume) {
+        for (const auto &triangle : triangles) {
+            xml += "  <triangle v1=\"" + std::to_string(2 * triangle[0] + volume) + "\" v2=\"" +
+                   std::to_string(2 * triangle[1] + volume) + "\" v3=\"" +
+                   std::to_string(2 * triangle[2] + volume) + "\"/>\n";
+        }
+    }
+    xml += " </triangles></mesh></object></resources>\n"
+           " <build><item objectid=\"1\"/></build>\n</model>\n";
+    return xml;
+}
+
+bool write_archive(const std::string &path, const std::string &model_xml,
+                   const std::string &model_config = "")
+{
+    try {
+        Zipper archive(path);
+        archive.add_entry("3D/3dmodel.model", model_xml.data(), model_xml.size());
+        if (!model_config.empty())
+            archive.add_entry("Metadata/Slic3r_PE_model.config", model_config.data(), model_config.size());
+        archive.finalize();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool load_generic(const std::string &path, Model &model, DynamicPrintConfig &config,
+                  bool check_version = false)
+{
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_3mf(path.c_str(), config, substitutions, &model, check_version);
+}
+
+Model make_cube_model()
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "round-trip cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Legacy importer trims unused volume vertices for affected Prusa prereleases",
+          "[Legacy3MF][Compatibility][Alpha2Geometry]")
+{
+    const auto [application, compacted] = GENERATE(
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha1", true},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha2", true},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0-alpha3", false},
+        std::pair<const char *, bool>{"PrusaSlicer-2.4.0", false},
+        std::pair<const char *, bool>{"ThirdParty-1.0", false});
+    CAPTURE(application);
+
+    const std::string model_config =
+        "<config><object id=\"1\">"
+        "<volume firstid=\"0\" lastid=\"11\"/>"
+        "<volume firstid=\"12\" lastid=\"23\"/>"
+        "</object></config>";
+    ScopedTemporaryFile archive(".3mf");
+    const std::string model_xml = interleaved_multi_volume_model_xml(application);
+    REQUIRE(write_archive(archive.string(), model_xml, model_config));
+
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 2);
+
+    const size_t expected_vertices = compacted ? 8 : 15;
+    for (const ModelVolume *volume : model.objects.front()->volumes)
+        CHECK(volume->mesh().its.vertices.size() == expected_vertices);
+}
+
+TEST_CASE("Legacy non-Prusa multi-instance files split independent model objects", "[Legacy3MF][Components]")
+{
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"" + transform_string(0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(20., 0., 0.) + "\"/>\n";
+    std::string xml = cube_model_xml("", items);
+    const size_t resources = xml.find(" <resources>");
+    REQUIRE(resources != std::string::npos);
+    xml.insert(resources, " <metadata name=\"slic3rpe:Version3mf\">1</metadata>\n");
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), xml));
+    Model model;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), model, config));
+    REQUIRE(model.objects.size() == 2);
+    CHECK(model.objects[0]->instances.size() == 1);
+    CHECK(model.objects[1]->instances.size() == 1);
+    const BoundingBoxf3 bbox = model.mesh().bounding_box();
+    CHECK_THAT(double(bbox.max.x() - bbox.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+TEST_CASE("BBS importer splits a foreign multi-instance archive into independent objects",
+          "[3MF][Bbs3mfForeignMultiInstance]")
+{
+    // store_3mf supplies the normal package relationships and model part. Rewrite only its
+    // Application marker so the public BBS importer takes the foreign-project path.
+    Model source = make_cube_model();
+    source.objects.front()->add_instance()->set_offset(Vec3d(20., 0., 0.));
+    const double expected_volume = its_volume(source.objects.front()->raw_mesh().its);
+    REQUIRE(expected_volume > 0.);
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", "OrcaSlicer-", "ThirdParty-"));
+
+    Model loaded;
+    ScopedTemporaryDir backup("orca_bbs_foreign_multi_load");
+    loaded.set_backup_path(backup.string());
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset*> project_presets;
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    ScopeGuard cleanup([&] {
+        // Detach before the temporary backup directory is destroyed; Model::~Model otherwise
+        // queues cleanup against a path whose owner has already gone out of scope.
+        loaded.set_backup_path("detach");
+        release_PlateData_list(plates);
+        for (Preset *preset : project_presets)
+            delete preset;
+    });
+
+    REQUIRE(load_bbs_3mf(archive.string().c_str(), &config, &substitutions, &loaded, &plates,
+                         &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    CHECK_FALSE(is_bbl_3mf);
+    CHECK_FALSE(is_orca_3mf);
+    REQUIRE(loaded.objects.size() == 2);
+
+    for (const ModelObject *object : loaded.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(!object->volumes.empty());
+        CHECK_THAT(its_volume(object->raw_mesh().its), Catch::Matchers::WithinAbs(expected_volume, 1e-5));
+    }
+
+    // The two source instances span [0, 10] and [20, 30] in world X.  This catches a split
+    // that preserves object count but loses an instance transform.
+    const BoundingBoxf3 world_box = loaded.mesh().bounding_box();
+    CHECK_THAT(double(world_box.max.x() - world_box.min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace legacy_3mf_contracts
+
+namespace bbs_3mf_metadata_contracts {
+
+using namespace Slic3r;
+
+using archive_variant_contracts::BbsLoaded;
+
+using archive_variant_contracts::make_cube_model;
+
+using archive_variant_contracts::read_file;
+
+using archive_variant_contracts::replace_once;
+
+using namespace Catch::Matchers;
+
+using Setup = std::function<void(Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &)>;
+
+void store_followup(const std::string &path, const Setup &setup,
+                    SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+{
+    ScopedTemporaryDir backup("orca_bbs_followup_store");
+    Model model = make_cube_model();
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    // Plate metadata is intentionally a complete print config.  The exporter
+    // reads plate-local options and does not synthesize missing options.
+    plate.config = config;
+    StoreParams extra;
+    setup(model, config, plate, extra, backup);
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+    extra.path = path;
+    extra.model = &model;
+    extra.config = &config;
+    extra.plate_data_list = {&plate};
+    extra.strategy = strategy;
+    REQUIRE(store_bbs_3mf(extra));
+}
+
+bool load_followup(const std::string &path, Model &model, BbsLoaded &loaded,
+                   LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+{
+    // The importer writes Metadata/* payloads below the caller-owned backup
+    // root.  Seed that directory so the public extraction path is exercised,
+    // rather than silently accepting a declared filename after a failed write.
+    loaded.backup = std::make_unique<ScopedTemporaryDir>("orca_bbs_followup_load");
+    std::filesystem::create_directories(std::filesystem::path(loaded.backup->string()) / "Metadata");
+    model.set_backup_path(loaded.backup->string());
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    return load_bbs_3mf(path.c_str(), &loaded.config, &substitutions, &model, &loaded.plates,
+                        &loaded.presets, &loaded.is_bbl, &loaded.is_orca, &loaded.version,
+                        nullptr, strategy);
+}
+
+std::string png_entry(const std::string &path, const std::string &name,
+                      int expected_width, int expected_height)
+{
+    std::string encoded;
+    REQUIRE(read_3mf_entry(path, encoded, name));
+    png::ImageColorscale decoded;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{encoded.data(), encoded.size()}, decoded));
+    REQUIRE(decoded.cols == expected_width);
+    REQUIRE(decoded.rows == expected_height);
+    REQUIRE(decoded.bytes_per_pixel == 4);
+    return std::string(reinterpret_cast<const char *>(decoded.buf.data()), decoded.buf.size());
+}
+
+namespace bbs_export_gap_contracts {
+
+std::vector<std::pair<std::string, std::string>> read_layer_filament_lists(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+    std::vector<std::pair<std::string, std::string>> records;
+    const auto lists = tree.get_child_optional("config.plate.layer_filament_lists");
+    if (!lists)
+        return records;
+    for (const auto &node : *lists) {
+        if (node.first != "layer_filament_list")
+            continue;
+        const auto &attributes = node.second.get_child("<xmlattr>");
+        records.emplace_back(attributes.get<std::string>("filament_list"),
+                             attributes.get<std::string>("layer_ranges"));
+    }
+    return records;
+}
+
+} // namespace bbs_export_gap_contracts
+
+TEST_CASE("BBS slice metadata preserves multiple layer filament ranges", "[3MF][Bbs3mfExportGaps][LayerFilaments]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        plate.layer_filaments[std::vector<unsigned int>{1, 3}] = {{0, 5}, {10, 20}};
+        plate.layer_filaments[std::vector<unsigned int>{2}] = {{5, 10}, {20, 30}};
+    });
+
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    const auto records = bbs_export_gap_contracts::read_layer_filament_lists(slice_info);
+    REQUIRE(records.size() == 2);
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("1 3"), std::string("0 5,10 20"))) != records.end());
+    CHECK(std::find(records.begin(), records.end(), std::make_pair(std::string("2"), std::string("5 10,20 30"))) != records.end());
+
+    ScopedTemporaryFile empty_archive(".3mf");
+    store_followup(empty_archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+    });
+    std::string empty_slice_info;
+    REQUIRE(read_3mf_entry(empty_archive.string(), empty_slice_info, "Metadata/slice_info.config"));
+    CHECK(bbs_export_gap_contracts::read_layer_filament_lists(empty_slice_info).empty());
+}
+
+TEST_CASE("BBS project clamps plate map values at import", "[3mf][Bbs3mfMetadata][PlateMetadata][Maps]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate.config.set_key_value("filament_map", new ConfigOptionInts({0, -4, 2}));
+        plate.config.set_key_value("filament_volume_map", new ConfigOptionInts({0, 2, 3}));
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_map") != nullptr);
+    REQUIRE(plate.config.option<ConfigOptionInts>("filament_volume_map") != nullptr);
+    CHECK(plate.filament_maps == std::vector<int>{1, 1, 2});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 2});
+    CHECK(plate.config.opt<ConfigOptionInts>("filament_volume_map")->values == std::vector<int>{0, 0, 0});
+}
+
+TEST_CASE("BBS project writes physical and mixed filament records", "[3mf][Bbs3mfMetadata][SliceInfo][Filament]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        FilamentInfo physical;
+        physical.id = 1;
+        physical.type = "PLA";
+        physical.color = "#123456";
+        physical.filament_id = "tray-7";
+        physical.used_m = 2.5f;
+        physical.used_g = 6.25f;
+        physical.used_for_object = true;
+        physical.used_for_support = true;
+        physical.group_id = {1, 2};
+        physical.nozzle_diameter = .6;
+        physical.nozzle_volume_type = "High Flow";
+        plate.slice_filaments_info.push_back(physical);
+        plate.mixed_filaments_info.push_back({9, "Mix", "#aabbcc", "2,3"});
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData &plate = *loaded.plates.front();
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    const FilamentInfo &physical = plate.slice_filaments_info.front();
+    CHECK(physical.id == 1);
+    CHECK(physical.type == "PLA");
+    CHECK(physical.color == "#123456");
+    CHECK(physical.filament_id == "tray-7");
+    CHECK_THAT(double(physical.used_m), WithinAbs(2.5, 1e-5));
+    CHECK_THAT(double(physical.used_g), WithinAbs(6.25, 1e-5));
+    CHECK(physical.used_for_object);
+    CHECK(physical.used_for_support);
+    CHECK(physical.group_id == std::vector<int>{1, 2});
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(archive.string(), slice_info, "Metadata/slice_info.config"));
+    CHECK(slice_info.find("<mixed_filament") != std::string::npos);
+    CHECK(slice_info.find("id=\"9\"") != std::string::npos);
+    CHECK(slice_info.find("type=\"Mix\"") != std::string::npos);
+    CHECK(slice_info.find("color=\"#aabbcc\"") != std::string::npos);
+    CHECK(slice_info.find("components=\"2,3\"") != std::string::npos);
+}
+
+TEST_CASE("BBS project restores warning messages without treating them as config", "[3mf][Bbs3mfMetadata][SliceInfo][Warnings]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.is_sliced_valid = true;
+        GCodeProcessorResult::SliceWarning warning;
+        warning.msg = "followup warning";
+        warning.level = 3;
+        plate.warnings.push_back(warning);
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    REQUIRE(loaded.plates.front()->warnings.size() == 1);
+    CHECK(loaded.plates.front()->warnings.front().msg == "followup warning");
+    CHECK(loaded.plates.front()->warnings.front().level == 3);
+}
+
+TEST_CASE("BBS project omits an unavailable G-code source", "[3mf][Bbs3mfMetadata][Gcode][Errors]")
+{
+    ScopedTemporaryDir missing_source("orca_missing_gcode_source");
+    const std::string missing_path = (std::filesystem::path(missing_source.string()) / "absent.gcode").string();
+    REQUIRE_FALSE(std::filesystem::exists(missing_path));
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.gcode_file = missing_path;
+        plate.is_sliced_valid = true;
+    }, SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithGcode | SaveStrategy::WithSliceInfo);
+    std::string payload;
+    CHECK_FALSE(read_3mf_entry(archive.string(), payload, "Metadata/plate_1.gcode"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK_FALSE(std::filesystem::exists(loaded.plates.front()->gcode_file));
+}
+
+TEST_CASE("BBS project loads embedded filament and printer presets", "[3mf][Bbs3mfMetadata][EmbeddedPreset]")
+{
+    ScopedTemporaryFile filament_file(".json");
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_type", new ConfigOptionStrings({"PETG"}));
+    filament.set_key_value("filament_diameter", new ConfigOptionFloats({1.75}));
+    // The importer uses this field as the embedded preset's canonical name.
+    filament.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded filament contract"}));
+    filament.save_to_json(filament_file.string(), "Embedded filament contract", "filament", "0.0.0");
+    ScopedTemporaryFile printer_file(".json");
+    DynamicPrintConfig printer;
+    printer.set_key_value("printer_model", new ConfigOptionString("Contract Printer"));
+    // The importer uses this field as the embedded preset's canonical name.
+    printer.set_key_value("printer_settings_id", new ConfigOptionString("Embedded printer contract"));
+    printer.save_to_json(printer_file.string(), "Embedded printer contract", "printer", "0.0.0");
+
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &config, PlateData &, StoreParams &, ScopedTemporaryDir &) {
+        config.set_key_value("filament_settings_id", new ConfigOptionStrings({"Embedded filament contract"}));
+        config.set_key_value("printer_settings_id", new ConfigOptionString("Embedded printer contract"));
+    });
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {
+        {"Metadata/filament_settings_1.config", read_file(filament_file.string())},
+        {"Metadata/machine_settings_1.config", read_file(printer_file.string())}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    const auto filament_preset = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *p) {
+        return p != nullptr && p->type == Preset::TYPE_FILAMENT;
+    });
+    const auto printer_preset = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *p) {
+        return p != nullptr && p->type == Preset::TYPE_PRINTER;
+    });
+    REQUIRE(filament_preset != loaded.presets.end());
+    REQUIRE(printer_preset != loaded.presets.end());
+    CHECK((*filament_preset)->name == "Embedded filament contract");
+    CHECK((*printer_preset)->name == "Embedded printer contract");
+    REQUIRE((*filament_preset)->config.option<ConfigOptionStrings>("filament_type") != nullptr);
+    CHECK((*filament_preset)->config.opt<ConfigOptionStrings>("filament_type")->values == std::vector<std::string>{"PETG"});
+    REQUIRE((*filament_preset)->config.option<ConfigOptionFloats>("filament_diameter") != nullptr);
+    REQUIRE((*filament_preset)->config.opt<ConfigOptionFloats>("filament_diameter")->values.size() == 1);
+    CHECK_THAT((*filament_preset)->config.opt<ConfigOptionFloats>("filament_diameter")->values.front(), WithinAbs(1.75, 1e-6));
+    REQUIRE((*printer_preset)->config.option<ConfigOptionString>("printer_model") != nullptr);
+    CHECK((*printer_preset)->config.opt_string("printer_model") == "Contract Printer");
+}
+
+namespace {
+
+void store_embedded_identity_entries(const std::string &path, const std::vector<std::string> *filament_ids,
+                                    bool include_print_identity)
+{
+    ScopedTemporaryFile filament_file(".json");
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_type", new ConfigOptionStrings({"PLA"}));
+    filament.set_key_value("filament_diameter", new ConfigOptionFloats({1.75}));
+    if (filament_ids != nullptr)
+        filament.set_key_value("filament_settings_id", new ConfigOptionStrings(*filament_ids));
+    filament.save_to_json(filament_file.string(), "Embedded filament fixture", "filament", "0.0.0");
+
+    ScopedTemporaryFile print_file(".json");
+    DynamicPrintConfig print;
+    print.set_key_value("layer_height", new ConfigOptionFloat(.2));
+    if (include_print_identity)
+        print.set_key_value("print_settings_id", new ConfigOptionString("Valid print sibling"));
+    print.save_to_json(print_file.string(), "Embedded print fixture", "process", "0.0.0");
+
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &, std::string &) { return false; }, {
+        {"Metadata/filament_settings_1.config", read_file(filament_file.string())},
+        {"Metadata/process_settings_probe.config", read_file(print_file.string())}}));
+}
+
+void check_identity_case_cube(const Model &model)
+{
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    CHECK(model.mesh().facets_count() == 12);
+    CHECK_THAT(its_volume(model.mesh().its), WithinAbs(1000., 1e-3));
+}
+
+} // namespace
+
+TEST_CASE("BBS skips an embedded print config without identity while retaining valid filament sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> filament_ids{"Valid filament sibling"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &filament_ids, false);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_FILAMENT);
+    CHECK(loaded.presets.front()->name == "Valid filament sibling");
+    REQUIRE(loaded.presets.front()->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK(loaded.presets.front()->config.opt<ConfigOptionStrings>("filament_settings_id")->values == filament_ids);
+}
+
+TEST_CASE("BBS preserves an existing empty-string filament identity value",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> empty_string_id{""};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &empty_string_id, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 2);
+    const auto filament = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_FILAMENT;
+    });
+    REQUIRE(filament != loaded.presets.end());
+    CHECK((*filament)->name.empty());
+    REQUIRE((*filament)->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK((*filament)->config.opt<ConfigOptionStrings>("filament_settings_id")->values == empty_string_id);
+    CHECK(std::any_of(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_PRINT && preset->name == "Valid print sibling";
+    }));
+}
+
+TEST_CASE("BBS uses the first embedded filament identity name and retains its full identity vector",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> filament_ids{"First embedded filament", "Second embedded filament"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &filament_ids, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 2);
+    const auto filament = std::find_if(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_FILAMENT;
+    });
+    REQUIRE(filament != loaded.presets.end());
+    CHECK((*filament)->name == "First embedded filament");
+    REQUIRE((*filament)->config.option<ConfigOptionStrings>("filament_settings_id") != nullptr);
+    CHECK((*filament)->config.opt<ConfigOptionStrings>("filament_settings_id")->values == filament_ids);
+    CHECK(std::any_of(loaded.presets.begin(), loaded.presets.end(), [](const Preset *preset) {
+        return preset != nullptr && preset->type == Preset::TYPE_PRINT && preset->name == "Valid print sibling";
+    }));
+}
+
+TEST_CASE("BBS project ignores malformed filament sequence JSON without losing the model", "[3mf][Bbs3mfMetadata][Errors][Sequence]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.filament_change_sequence = {0, 1};
+        plate.nozzle_change_sequence = {1};
+    });
+    REQUIRE(replace_once(archive.string(), "Metadata/filament_sequence.json", "{", "not-json"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front()->filament_change_sequence.empty());
+    CHECK(loaded.plates.front()->nozzle_change_sequence.empty());
+}
+
+TEST_CASE("BBS project ignores a sequence plate with no nozzle array", "[3mf][Bbs3mfMetadata][Errors][Sequence]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &) {
+        plate.filament_change_sequence = {0, 1};
+        plate.nozzle_change_sequence = {1};
+    });
+    REQUIRE(replace_once(archive.string(), "Metadata/filament_sequence.json",
+                         "\"nozzle_sequence\":[1]", "\"nozzle_missing\":[1]"));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates.front()->filament_change_sequence.empty());
+    CHECK(loaded.plates.front()->nozzle_change_sequence.empty());
+}
+
+TEST_CASE("BBS project keeps model geometry when project configuration is absent", "[3mf][Bbs3mfMetadata][Errors][Configuration]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &name, std::string &) {
+        if (name == "Metadata/project_settings.config") {
+            name = "Metadata/project_settings.removed";
+            return true;
+        }
+        return false;
+    }));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    CHECK(loaded_model.mesh().facets_count() == 12);
+    CHECK(loaded.config.empty());
+}
+
+TEST_CASE("BBS project skips an invalid layer range object id", "[3mf][Bbs3mfMetadata][Errors][LayerRanges]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string invalid = "<?xml version=\"1.0\"?><objects><object id=\"0\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.25</option></range></object></objects>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/layer_config_ranges.xml", invalid}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->layer_config_ranges.empty());
+}
+
+TEST_CASE("BBS project keeps the first duplicate layer range object", "[3mf][Bbs3mfMetadata][Errors][LayerRanges]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string duplicate = "<?xml version=\"1.0\"?><objects>"
+        "<object id=\"1\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.25</option></range></object>"
+        "<object id=\"1\"><range min_z=\"0\" max_z=\"1\"><option opt_key=\"layer_height\">0.35</option></range></object>"
+        "</objects>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/layer_config_ranges.xml", duplicate}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    REQUIRE(loaded_model.objects.front()->layer_config_ranges.size() == 1);
+    CHECK_THAT(loaded_model.objects.front()->layer_config_ranges.begin()->second.get().opt_float("layer_height"), WithinAbs(.25, 1e-6));
+}
+
+TEST_CASE("BBS project ignores malformed brim point records", "[3mf][Bbs3mfMetadata][Errors][Brim]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string malformed = "version=0\nobject_id=1\nnot-a-coordinate\n";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/brim_ear_points.txt", malformed}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.objects.front()->brim_points.empty());
+}
+
+TEST_CASE("BBS project preserves each custom-gcode mode and typed item", "[3mf][Bbs3mfMetadata][CustomGcode]")
+{
+    const std::string mode = GENERATE("SingleExtruder", "MultiAsSingle", "MultiExtruder");
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {
+    });
+    const std::string xml = "<?xml version=\"1.0\"?><custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.6\" type=\"1\" extruder=\"2\" color=\"#c0ffee\" extra=\"pause-note\" gcode=\"M601\"/>"
+        "<mode value=\"" + mode + "\"/></plate></custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const auto &info = loaded_model.plates_custom_gcodes.at(0);
+    REQUIRE(info.gcodes.size() == 1);
+    CHECK(info.gcodes.front().type == CustomGCode::PausePrint);
+    CHECK(info.gcodes.front().extruder == 2);
+    CHECK(info.gcodes.front().extra == "pause-note");
+    const auto expected = mode == "SingleExtruder" ? CustomGCode::Mode::SingleExtruder :
+        mode == "MultiAsSingle" ? CustomGCode::Mode::MultiAsSingle : CustomGCode::Mode::MultiExtruder;
+    CHECK(info.mode == expected);
+}
+
+TEST_CASE("BBS project uses a safe default for an unknown custom-gcode mode", "[3mf][Bbs3mfMetadata][CustomGcode][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    const std::string xml = "<custom_gcodes_per_layer><plate><plate_info id=\"1\"/>"
+        "<layer top_z=\"0.6\" type=\"3\" extruder=\"1\" color=\"#000000\" extra=\"tool_change\" gcode=\"tool_change\"/>"
+        "<mode value=\"UnknownMode\"/></plate></custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; }, {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    CHECK(loaded_model.plates_custom_gcodes.at(0).mode == CustomGCode::Mode::MultiExtruder);
+}
+
+TEST_CASE("Legacy custom-gcode entries without plate metadata map through the public project importer",
+          "[3mf][Bbs3mfMetadata][LegacyCustomGcode]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+
+    // Older projects placed layers directly below custom_gcodes_per_layer and encoded the
+    // semantic type in the legacy gcode attribute.  Keep all four mappings in one archive so
+    // this checks the public compatibility route, including the root-to-plate-1 fallback.
+    const std::string xml = "<custom_gcodes_per_layer>"
+        "<layer top_z=\"0.6\" extruder=\"1\" color=\"#112233\" gcode=\"M600\"/>"
+        "<layer top_z=\"1.2\" extruder=\"2\" color=\"#223344\" gcode=\"M601\"/>"
+        "<layer top_z=\"1.8\" extruder=\"3\" color=\"#334455\" gcode=\"tool_change\"/>"
+        "<layer top_z=\"2.4\" extruder=\"4\" color=\"#445566\" gcode=\"M117\"/>"
+        "</custom_gcodes_per_layer>";
+    REQUIRE(rewrite_3mf_entries(archive.string(), [](std::string &, std::string &) { return false; },
+                                 {{"Metadata/custom_gcode_per_layer.xml", xml}}));
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.plates_custom_gcodes.size() == 1);
+    const auto &info = loaded_model.plates_custom_gcodes.at(0);
+    REQUIRE(info.gcodes.size() == 4);
+
+    CHECK(info.gcodes[0].type == CustomGCode::ColorChange);
+    CHECK_THAT(info.gcodes[0].print_z, WithinAbs(0.6, 1e-9));
+    CHECK(info.gcodes[0].extruder == 1);
+    CHECK(info.gcodes[0].color == "#112233");
+    CHECK(info.gcodes[0].extra.empty());
+
+    CHECK(info.gcodes[1].type == CustomGCode::PausePrint);
+    CHECK_THAT(info.gcodes[1].print_z, WithinAbs(1.2, 1e-9));
+    CHECK(info.gcodes[1].extruder == 2);
+    CHECK(info.gcodes[1].color == "#223344");
+    CHECK(info.gcodes[1].extra == "#223344");
+
+    CHECK(info.gcodes[2].type == CustomGCode::ToolChange);
+    CHECK_THAT(info.gcodes[2].print_z, WithinAbs(1.8, 1e-9));
+    CHECK(info.gcodes[2].extruder == 3);
+    CHECK(info.gcodes[2].extra.empty());
+
+    CHECK(info.gcodes[3].type == CustomGCode::Custom);
+    CHECK_THAT(info.gcodes[3].print_z, WithinAbs(2.4, 1e-9));
+    CHECK(info.gcodes[3].extruder == 4);
+    CHECK(info.gcodes[3].extra == "M117");
+}
+
+TEST_CASE("BBS project clears the plate pointer collection", "[3mf][Bbs3mfMetadata][Ownership]")
+{
+    std::set<std::pair<int, int>> objects{{0, 0}};
+    PlateDataPtrs plates{new PlateData(0, objects, false), new PlateData(1, objects, true)};
+    REQUIRE(plates.front() != nullptr);
+    REQUIRE(plates.back() != nullptr);
+    release_PlateData_list(plates);
+    CHECK(plates.empty());
+}
+
+TEST_CASE("BBS project published flag accepts exactly the producer marker", "[3mf][Bbs3mfMetadata][Published]")
+{
+    CHECK(is_published_3mf_flag("1"));
+    CHECK_FALSE(is_published_3mf_flag("0"));
+    CHECK_FALSE(is_published_3mf_flag("true"));
+    CHECK_FALSE(is_published_3mf_flag(" 1"));
+    CHECK_FALSE(is_published_3mf_flag("1\n"));
+}
+
+} // namespace bbs_3mf_metadata_contracts
+
+namespace plate_metadata_contracts {
+
+using namespace Slic3r;
+
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+void materials(GCodeProcessorResult& result)
+{
+    result.filament_diameters = {2.f, 1.f, 3.f};
+    result.filament_densities = {1.25f, 2.f, .5f};
+}
+
+std::vector<MultiNozzleUtils::NozzleInfo> two_nozzles() { return {{"0.6", nvtStandard, 0, 0}, {"0.4", nvtHighFlow, 1, 1}}; }
+
+std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> layered_mapping()
+{
+    auto value = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<std::vector<int>>{{0}, {1}, {0}}, two_nozzles(),
+                                                                    std::vector<unsigned int>{0},
+                                                                    std::vector<std::vector<unsigned int>>{{0}, {0}, {0}});
+    REQUIRE(value.has_value());
+    return std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*value);
+}
+
+const FilamentInfo& filament(const PlateData& plate, int id)
+{
+    const auto found = std::find_if(plate.slice_filaments_info.begin(), plate.slice_filaments_info.end(),
+                                    [id](const FilamentInfo& info) { return info.id == id; });
+    REQUIRE(found != plate.slice_filaments_info.end());
+    return *found;
+}
+
+Preset make_preset(Preset::Type type, const std::string& name, double value)
+{
+    Preset preset(type, name);
+    if (type == Preset::TYPE_PRINT) {
+        preset.config.set_key_value("print_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("layer_height", new ConfigOptionFloat(value));
+    } else if (type == Preset::TYPE_FILAMENT) {
+        preset.config.set_key_value("filament_settings_id", new ConfigOptionStrings({name}));
+        preset.config.set_key_value("filament_diameter", new ConfigOptionFloats({value}));
+    } else if (type == Preset::TYPE_PRINTER) {
+        preset.config.set_key_value("printer_settings_id", new ConfigOptionString(name));
+        preset.config.set_key_value("nozzle_diameter", new ConfigOptionFloats({value}));
+    }
+    return preset;
+}
+
+using LoadedPresets = bbs_archive_contracts::LoadedProject;
+
+void roundtrip_presets(std::vector<Preset*> presets,
+                       LoadedPresets& loaded,
+                       SaveStrategy strategy = SaveStrategy::Zip64 | SaveStrategy::Silence)
+{
+    ScopedTemporaryDir backup("orca_embedded_preset_store");
+    ScopedTemporaryFile archive(".3mf");
+    Model source;
+    auto* object = source.add_object();
+    object->add_volume(make_cube(2., 3., 4.));
+    object->add_instance();
+    source.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.plate_index = 0;
+    StoreParams params;
+    params.path            = archive.string();
+    params.model           = &source;
+    params.config          = &config;
+    params.plate_data_list = {&plate};
+    params.project_presets = std::move(presets);
+    params.strategy        = strategy;
+    REQUIRE(store_bbs_3mf(params));
+    // A part name identifies one resource in a 3MF package. The importer can
+    // iterate duplicate ZIP names, so round-trip counts alone miss collisions.
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, archive.string()));
+        const ScopeGuard close([&] { close_zip_reader(&zip); });
+        std::set<std::string> names;
+        for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+            REQUIRE(names.insert(stat.m_filename).second);
+        }
+    }
+    Model imported;
+    REQUIRE(bbs_3mf_metadata_contracts::load_followup(archive.string(), imported, loaded));
+    REQUIRE(imported.objects.size() == 1);
+    CHECK_THAT(imported.objects.front()->raw_mesh().volume(), WithinAbs(24., 1e-4));
+}
+
+} // namespace
+
+TEST_CASE("Plate filament lengths and masses use each filament's physical properties", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}, {1, 2000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 2);
+    CHECK_THAT(filament(plate, 0).used_m, WithinAbs(1. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 0).used_g, WithinAbs(1.25, 1e-6));
+    CHECK_THAT(filament(plate, 1).used_m, WithinAbs(8. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 1).used_g, WithinAbs(4., 1e-6));
+}
+
+TEST_CASE("Sparse filament identifiers select their own diameter and density", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{2, 9000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    CHECK_THAT(filament(plate, 2).used_m, WithinAbs(4. / PI, 1e-6));
+    CHECK_THAT(filament(plate, 2).used_g, WithinAbs(4.5, 1e-6));
+}
+
+TEST_CASE("Zero filament diameter yields a finite zero length while retaining mass", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.filament_diameters[0]                       = 0.f;
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK_THAT(filament(plate, 0).used_m, WithinAbs(0., 0.));
+    CHECK_THAT(filament(plate, 0).used_g, WithinAbs(1.25, 1e-6));
+}
+
+TEST_CASE("Object and support usage flags follow their separate positive-volume records", "[3MF][PlateMetadata]")
+{
+    const bool object_used  = GENERATE(false, true);
+    const bool support_used = GENERATE(false, true);
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder   = {{0, 1000.}, {1, 0.}};
+    result.print_statistics.model_volumes_per_extruder   = {{0, object_used ? 3. : 0.}};
+    result.print_statistics.support_volumes_per_extruder = {{0, support_used ? 7. : 0.}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).used_for_object == object_used);
+    CHECK(filament(plate, 0).used_for_support == support_used);
+    CHECK_FALSE(filament(plate, 1).used_for_object);
+    CHECK_FALSE(filament(plate, 1).used_for_support);
+}
+
+TEST_CASE("Absent processor results leave existing plate metadata intact", "[3MF][PlateMetadata]")
+{
+    PlateData plate;
+    FilamentInfo existing;
+    existing.id     = 7;
+    existing.used_g = 2.f;
+    plate.slice_filaments_info.push_back(existing);
+    plate.warnings.push_back({2, "existing", "E1", {"parameter"}});
+    plate.parse_filament_info(nullptr);
+    REQUIRE(plate.slice_filaments_info.size() == 1);
+    CHECK_THAT(filament(plate, 7).used_g, WithinAbs(2., 0.));
+    REQUIRE(plate.warnings.size() == 1);
+    CHECK(plate.warnings.front().msg == "existing");
+}
+
+TEST_CASE("Plate warnings preserve all fields and own a copy of their parameters", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    result.warnings = {{2, "first", "E42", {"a", "b"}}, {1, "second", "W3", {"c"}}};
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    result.warnings.front().params.front() = "changed";
+    REQUIRE(plate.warnings.size() == 2);
+    CHECK(plate.warnings[0].level == 2);
+    CHECK(plate.warnings[0].msg == "first");
+    CHECK(plate.warnings[0].error_code == "E42");
+    CHECK(plate.warnings[0].params == std::vector<std::string>{"a", "b"});
+    CHECK(plate.warnings[1].level == 1);
+    CHECK(plate.warnings[1].msg == "second");
+    CHECK(plate.warnings[1].error_code == "W3");
+    CHECK(plate.warnings[1].params == std::vector<std::string>{"c"});
+    CHECK(plate.slice_filaments_info.empty());
+}
+
+TEST_CASE("Layered filament mappings retain every used nozzle and hybrid volume type", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 1000.}};
+    result.nozzle_group_result                         = layered_mapping();
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    const auto& info = filament(plate, 0);
+    CHECK(info.group_id == std::vector<int>{0, 1});
+    CHECK_THAT(info.nozzle_diameter, WithinAbs(.4, 1e-8));
+    CHECK(info.nozzle_volume_type == get_nozzle_volume_type_string(nvtHybrid));
+    REQUIRE(plate.nozzle_group_result.has_value());
+    CHECK(plate.nozzle_group_result->get_layer_filament_nozzle_maps() == std::vector<std::vector<int>>{{0}, {1}, {0}});
+    CHECK(plate.nozzle_group_result->is_support_dynamic_nozzle_map());
+}
+
+TEST_CASE("A single assigned nozzle retains its exact nonstandard diameter and volume type", "[3MF][PlateMetadata]")
+{
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 100.}};
+    auto grouping                                      = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<int>{0},
+                                                                                                            std::vector<MultiNozzleUtils::NozzleInfo>{
+                                                                           {"0.25", nvtStandard, 0, 0}},
+                                                                                                            std::vector<unsigned int>{0});
+    REQUIRE(grouping.has_value());
+    result.nozzle_group_result = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(*grouping);
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).group_id == std::vector<int>{0});
+    CHECK_THAT(filament(plate, 0).nozzle_diameter, WithinAbs(.25, 1e-8));
+    CHECK(filament(plate, 0).nozzle_volume_type == get_nozzle_volume_type_string(nvtStandard));
+    REQUIRE(plate.nozzle_group_result.has_value());
+    CHECK_FALSE(plate.nozzle_group_result->is_support_dynamic_nozzle_map());
+}
+
+TEST_CASE("Device-side static grouping supplies metadata without becoming a layered result", "[3MF][PlateMetadata]")
+{
+    FilamentInfo input;
+    input.id       = 0;
+    input.group_id = {0, 1};
+    auto grouping  = MultiNozzleUtils::StaticNozzleGroupResult::create({input}, two_nozzles(), {0, 0}, {0, 1}, false);
+    REQUIRE(grouping.has_value());
+    GCodeProcessorResult result;
+    materials(result);
+    result.print_statistics.total_volumes_per_extruder = {{0, 100.}};
+    result.nozzle_group_result                         = std::make_shared<MultiNozzleUtils::StaticNozzleGroupResult>(*grouping);
+    PlateData plate;
+    plate.parse_filament_info(&result);
+    CHECK(filament(plate, 0).group_id == std::vector<int>{0, 1});
+    CHECK_THAT(filament(plate, 0).nozzle_diameter, WithinAbs(.4, 1e-8));
+    CHECK_FALSE(plate.nozzle_group_result.has_value());
+}
+
+TEST_CASE("Embedded presets round trip their type identity and configured value", "[3MF][PlateMetadata]")
+{
+    const auto type    = GENERATE(Preset::TYPE_PRINT, Preset::TYPE_FILAMENT, Preset::TYPE_PRINTER);
+    const double value = type == Preset::TYPE_PRINT ? .31 : type == Preset::TYPE_FILAMENT ? 1.82 : .25;
+    Preset preset      = make_preset(type, "Embedded semantic contract", value);
+    LoadedPresets loaded;
+    roundtrip_presets({&preset}, loaded);
+    REQUIRE(loaded.presets.size() == 1);
+    const Preset& actual = *loaded.presets.front();
+    CHECK(actual.name == preset.name);
+    CHECK(actual.type == type);
+    CHECK(actual.is_project_embedded);
+    const char* key = type == Preset::TYPE_PRINT ? "layer_height" : type == Preset::TYPE_FILAMENT ? "filament_diameter" : "nozzle_diameter";
+    if (type == Preset::TYPE_PRINT) {
+        REQUIRE(actual.config.option<ConfigOptionFloat>(key) != nullptr);
+        CHECK_THAT(actual.config.opt_float(key), WithinAbs(value, 1e-6));
+    } else {
+        const auto* values = actual.config.option<ConfigOptionFloats>(key);
+        REQUIRE(values != nullptr);
+        REQUIRE(values->values.size() == 1);
+        CHECK_THAT(values->values.front(), WithinAbs(value, 1e-6));
+    }
+}
+
+TEST_CASE("Independent preset counters preserve two entries of every supported type", "[3MF][PlateMetadata]")
+{
+    std::vector<Preset> presets;
+    for (const auto type : {Preset::TYPE_PRINT, Preset::TYPE_FILAMENT, Preset::TYPE_PRINTER})
+        for (int index : {1, 2})
+            presets.push_back(make_preset(type, "preset-" + std::to_string(int(type)) + "-" + std::to_string(index), .1 * index));
+    std::vector<Preset*> inputs{nullptr};
+    for (auto& preset : presets)
+        inputs.push_back(&preset);
+    inputs.push_back(nullptr);
+    LoadedPresets loaded;
+    roundtrip_presets(inputs, loaded);
+    REQUIRE(loaded.presets.size() == presets.size());
+    for (const Preset& expected : presets) {
+        const auto found = std::find_if(loaded.presets.begin(), loaded.presets.end(),
+                                        [&](const Preset* actual) { return actual->name == expected.name; });
+        REQUIRE(found != loaded.presets.end());
+        CHECK((*found)->type == expected.type);
+        CHECK((*found)->is_project_embedded);
+        const char* key = expected.type == Preset::TYPE_PRINT    ? "layer_height" :
+                          expected.type == Preset::TYPE_FILAMENT ? "filament_diameter" :
+                                                                   "nozzle_diameter";
+        if (expected.type == Preset::TYPE_PRINT) {
+            REQUIRE((*found)->config.option<ConfigOptionFloat>(key) != nullptr);
+            CHECK_THAT((*found)->config.opt_float(key), WithinAbs(expected.config.opt_float(key), 1e-6));
+        } else {
+            const auto* actual_values = (*found)->config.option<ConfigOptionFloats>(key);
+            REQUIRE(actual_values != nullptr);
+            REQUIRE(actual_values->values.size() == 1);
+            CHECK_THAT(actual_values->values.front(), WithinAbs(expected.config.option<ConfigOptionFloats>(key)->values.front(), 1e-6));
+        }
+    }
+}
+
+TEST_CASE("Unsupported embedded preset types are omitted without losing supported presets", "[3MF][PlateMetadata]")
+{
+    Preset ignored(Preset::TYPE_SLA_PRINT, "unsupported-SLA");
+    Preset retained = make_preset(Preset::TYPE_PRINT, "retained-print", .28);
+    LoadedPresets loaded;
+    roundtrip_presets({&ignored, nullptr, &retained}, loaded);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->name == retained.name);
+    CHECK_THAT(loaded.presets.front()->config.opt_float("layer_height"), WithinAbs(.28, 1e-6));
+}
+
+} // namespace plate_metadata_contracts
+
+namespace split_model_contracts {
+
+using namespace Slic3r;
+
+using Catch::Matchers::WithinAbs;
+
+using Entry = std::pair<std::string, std::string>;
+
+struct LoadedSplit
+{
+    Model model;
+    bbs_archive_contracts::LoadedProject project;
+};
+
+std::vector<Entry> entries(const std::string& path)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close([&] { close_zip_reader(&zip); });
+    std::vector<Entry> result;
+    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+        if (stat.m_is_directory)
+            continue;
+        std::string data(static_cast<size_t>(stat.m_uncomp_size), '\0');
+        if (!data.empty())
+            REQUIRE(mz_zip_reader_extract_to_mem(&zip, index, data.data(), data.size(), 0));
+        result.emplace_back(stat.m_filename, std::move(data));
+    }
+    return result;
+}
+
+void rewrite(const std::string& path, const std::function<void(std::vector<Entry>&)>& edit)
+{
+    auto contents = entries(path);
+    edit(contents);
+    Zipper zip(path);
+    for (const auto& [name, data] : contents)
+        zip.add_entry(name, data.data(), data.size());
+    zip.finalize();
+}
+
+bool is_part(const std::string& name)
+{
+    return name.find("3D/Objects/") == 0 && name.size() >= 6 && name.substr(name.size() - 6) == ".model";
+}
+
+void replace_text(std::string& text, const std::string& from, const std::string& to)
+{
+    auto where = text.find(from);
+    REQUIRE(where != std::string::npos);
+    text.replace(where, from.size(), to);
+}
+
+struct Fixture
+{
+    ScopedTemporaryDir backup{"orca_split_source"};
+    ScopedTemporaryDir loaded_backup{"orca_split_loaded"};
+    // Restore reads <backup-folder>/.3mf and external parts below that folder.
+    // Its error path preserves the folder, so keep a separate cleanup owner.
+    ScopedTemporaryDir archive_root{"orca_split_archive"};
+    boost::filesystem::path archive = archive_root.path() / "project.3mf";
+    boost::filesystem::path backup_archive = archive_root.path() / ".3mf";
+    Model source;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Fixture()
+    {
+        source.set_backup_path(backup.string());
+        auto* first                                    = source.add_object();
+        first->name                                    = "first-cube";
+        first->add_volume(make_cube(2., 3., 4.))->name = "first-volume";
+        first->add_instance()->set_offset(Vec3d(10., 20., 0.));
+        auto* second                                    = source.add_object();
+        second->name                                    = "second-cube";
+        second->add_volume(make_cube(5., 2., 3.))->name = "second-volume";
+        second->add_instance()->set_offset(Vec3d(30., 0., 0.));
+        config.set_key_value("layer_height", new ConfigOptionFloat(.21));
+    }
+    boost::filesystem::path restore_root() const
+    {
+        return backup_archive.parent_path();
+    }
+
+    boost::filesystem::path backup_part_path(const ModelObject &object) const
+    {
+        return restore_root() / "3D" / "Objects" /
+               (object.name + "_" + std::to_string(source.get_object_backup_id(object)) + ".model");
+    }
+
+    void materialize_backup_parts()
+    {
+        // SaveStrategy::Backup intentionally leaves SplitModel object parts outside the .3mf.
+        // Export the object XML through the ordinary SplitModel path, then package each
+        // part as the standalone ZIP expected at Restore's external fallback path.
+        ScopedTemporaryFile embedded(".3mf");
+        PlateData plate;
+        plate.config                = config;
+        plate.plate_index           = 0;
+        plate.objects_and_instances = {{0, 0}, {1, 0}};
+        StoreParams params;
+        params.path            = embedded.string();
+        params.model           = &source;
+        params.config          = &config;
+        params.plate_data_list = {&plate};
+        params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel;
+        REQUIRE(store_bbs_3mf(params));
+
+        const boost::filesystem::path root = restore_root();
+        size_t part_count = 0;
+        for (const auto &[name, data] : entries(embedded.string())) {
+            if (!is_part(name))
+                continue;
+            const std::string filename = boost::filesystem::path(name).filename().string();
+            const auto separator = filename.rfind('_');
+            REQUIRE(separator != std::string::npos);
+            const std::string object_name = filename.substr(0, separator);
+            const auto object = std::find_if(source.objects.begin(), source.objects.end(),
+                [&](const ModelObject *candidate) { return candidate->name == object_name; });
+            REQUIRE(object != source.objects.end());
+            const std::string target_name = "3D/Objects/" + object_name + "_" +
+                std::to_string(source.get_object_backup_id(**object)) + ".model";
+            const boost::filesystem::path destination = root / target_name;
+            boost::filesystem::create_directories(destination.parent_path());
+            Zipper zip(destination.string());
+            zip.add_entry(target_name, data.data(), data.size());
+            zip.finalize();
+            ++part_count;
+        }
+        REQUIRE(part_count == source.objects.size());
+    }
+
+    void store(SaveStrategy extra = SaveStrategy::Default)
+    {
+        PlateData plate;
+        plate.config                = config;
+        plate.plate_index           = 0;
+        plate.objects_and_instances = {{0, 0}, {1, 0}};
+        StoreParams params;
+        params.path            = (extra & SaveStrategy::Backup ? backup_archive : archive).string();
+        params.model           = &source;
+        params.config          = &config;
+        params.plate_data_list = {&plate};
+        params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | extra;
+        REQUIRE(store_bbs_3mf(params));
+        if (extra & SaveStrategy::Backup)
+            materialize_backup_parts();
+    }
+    bool load(LoadedSplit& result, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig)
+    {
+        result.model.set_backup_path(loaded_backup.string());
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        bool bbl = false, orca = false;
+        Semver version;
+        const boost::filesystem::path &input = (strategy & LoadStrategy::Restore) ? backup_archive : archive;
+        return load_bbs_3mf(input.string().c_str(), &result.project.config, &substitutions, &result.model, &result.project.plates,
+                            &result.project.presets, &bbl, &orca, &version, nullptr, strategy);
+    }
+};
+
+const ModelObject& named(const Model& model, const std::string& name)
+{
+    auto found = std::find_if(model.objects.begin(), model.objects.end(), [&](const ModelObject* object) { return object->name == name; });
+    REQUIRE(found != model.objects.end());
+    return **found;
+}
+
+TEST_CASE("Split model object names survive Unicode archive part encoding", "[3MF][SplitModel]")
+{
+    Fixture f;
+    f.source.objects[0]->name = "Größe-部品";
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    const auto& object = named(loaded.model, "Größe-部品");
+    CHECK_THAT(object.raw_mesh().volume(), WithinAbs(24., 1e-5));
+}
+
+TEST_CASE("Split model part units scale vertex geometry independently of parent units", "[3MF][SplitModel]")
+{
+    const auto unit     = GENERATE(std::string("centimeter"), std::string("inch"), std::string("meter"));
+    const double factor = unit == "centimeter" ? 10. : unit == "inch" ? 25.4 : 1000.;
+    Fixture f;
+    f.store();
+    rewrite(f.archive.string(), [&](std::vector<Entry>& all) {
+        for (auto& [name, data] : all)
+            if (is_part(name))
+                replace_text(data, "unit=\"millimeter\"", "unit=\"" + unit + "\"");
+    });
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    for (const auto* expected : f.source.objects) {
+        const auto& actual = named(loaded.model, expected->name);
+        const auto size    = actual.raw_mesh().bounding_box().size();
+        const auto before  = expected->raw_mesh().bounding_box().size();
+        for (int axis = 0; axis < 3; ++axis)
+            CHECK_THAT(size[axis], WithinAbs(before[axis] * factor, 1e-3));
+        CHECK_THAT(actual.raw_mesh().volume(),
+                   WithinAbs(expected->raw_mesh().volume() * factor * factor * factor, 1e-5 * factor * factor * factor));
+    }
+}
+
+} // namespace split_model_contracts
+
+namespace bbs_thumbnail_downsample_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS plate thumbnails downsample every source block into the small preview", "[3MF][Bbs3mfThumbnailDownsample]")
+{
+    const auto [width, height] = GENERATE(table<int, int>({{256, 256}, {384, 256}}));
+    CAPTURE(width, height);
+    REQUIRE(width % PLATE_THUMBNAIL_SMALL_WIDTH == 0);
+    REQUIRE(height % PLATE_THUMBNAIL_SMALL_HEIGHT == 0);
+    const int sw = width / PLATE_THUMBNAIL_SMALL_WIDTH;
+    const int sh = height / PLATE_THUMBNAIL_SMALL_HEIGHT;
+    REQUIRE(sw > 0);
+    REQUIRE(sh > 0);
+
+    ThumbnailData thumbnail;
+    thumbnail.set(width, height);
+    for (int y = 0; y < thumbnail.height; ++y) {
+        for (int x = 0; x < thumbnail.width; ++x) {
+            const int block_x = x / sw;
+            const int block_y = y / sh;
+            const unsigned char base = static_cast<unsigned char>(20 + 13 * ((block_x + 3 * block_y) % 12));
+            const unsigned char delta = static_cast<unsigned char>((x % sw) * 7 + (y % sh) * 11);
+            const size_t pixel = 4 * (static_cast<size_t>(y) * thumbnail.width + x);
+            thumbnail.pixels[pixel + 0] = static_cast<unsigned char>(base + delta);
+            thumbnail.pixels[pixel + 1] = static_cast<unsigned char>(base + 3 + delta);
+            thumbnail.pixels[pixel + 2] = static_cast<unsigned char>(base + 6 + delta);
+            thumbnail.pixels[pixel + 3] = static_cast<unsigned char>(170 + delta);
+        }
+    }
+
+    std::vector<unsigned char> expected(4u * PLATE_THUMBNAIL_SMALL_WIDTH * PLATE_THUMBNAIL_SMALL_HEIGHT);
+    for (int output_y = 0; output_y < PLATE_THUMBNAIL_SMALL_HEIGHT; ++output_y) {
+        for (int output_x = 0; output_x < PLATE_THUMBNAIL_SMALL_WIDTH; ++output_x) {
+            std::array<int, 4> sums{};
+            for (int dy = 0; dy < sh; ++dy) {
+                for (int dx = 0; dx < sw; ++dx) {
+                    const size_t source = 4 * (static_cast<size_t>(output_y * sh + dy) * thumbnail.width +
+                                                output_x * sw + dx);
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] += thumbnail.pixels[source + channel];
+                }
+            }
+            const size_t output = 4 * (static_cast<size_t>(output_y) * PLATE_THUMBNAIL_SMALL_WIDTH + output_x);
+            for (int channel = 0; channel < 4; ++channel)
+                expected[output + channel] = static_cast<unsigned char>(sums[channel] / (sw * sh));
+        }
+    }
+
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(
+        archive.string(),
+        [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &params, ScopedTemporaryDir &) {
+            plate.plate_thumbnail = thumbnail;
+            params.thumbnail_data = {&thumbnail};
+        });
+
+    const std::string small = bbs_3mf_metadata_contracts::png_entry(
+        archive.string(), "Metadata/plate_1_small.png",
+        PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    REQUIRE(small.size() == expected.size());
+    size_t mismatch = std::string::npos;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (static_cast<unsigned char>(small[i]) != expected[i]) {
+            mismatch = i;
+            break;
+        }
+    }
+    INFO("first RGBA mismatch byte " << mismatch << " of " << expected.size()
+         << " for source " << width << "x" << height << " (sw=" << sw << ", sh=" << sh << ")");
+    REQUIRE(mismatch == std::string::npos);
+}
+
+} // namespace bbs_thumbnail_downsample_contracts
+
+namespace bbs_3mf_metadata_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS selected plate relationships target its generated thumbnails", "[3MF][Bbs3mfMetadata][BbsPlateRelationships]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    ScopedTemporaryDir backup("orca_bbs_plate_relationships");
+    Model model = archive_variant_contracts::make_cube_model();
+    model.add_object(*model.objects.front());
+    REQUIRE(model.objects.size() == 2);
+    REQUIRE(model.objects.back()->instances.size() == 1);
+    model.set_backup_path(backup.string());
+    ScopeGuard detach_backup([&model] { model.set_backup_path("detach"); });
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate0;
+    PlateData plate1;
+    plate0.config = config;
+    plate1.config = config;
+    plate0.plate_index = 0;
+    plate1.plate_index = 1;
+    plate0.objects_and_instances = {{0, 0}};
+    plate1.objects_and_instances = {{1, 0}};
+    PlateDataPtrs plates{&plate0, &plate1};
+
+    ThumbnailData thumbnail0;
+    ThumbnailData thumbnail1;
+    thumbnail0.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    thumbnail1.set(PLATE_THUMBNAIL_SMALL_WIDTH, PLATE_THUMBNAIL_SMALL_HEIGHT);
+    std::fill(thumbnail0.pixels.begin(), thumbnail0.pixels.end(), 0x11);
+    std::fill(thumbnail1.pixels.begin(), thumbnail1.pixels.end(), 0x22);
+    REQUIRE(thumbnail0.is_valid());
+    REQUIRE(thumbnail1.is_valid());
+
+    StoreParams params;
+    params.path = archive.string();
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = plates;
+    params.thumbnail_data = {&thumbnail0, &thumbnail1};
+    params.export_plate_idx = 1;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    std::string relationships;
+    REQUIRE(read_3mf_entry(archive.string(), relationships, "_rels/.rels"));
+    std::stringstream relationship_stream(relationships);
+    boost::property_tree::ptree relationship_tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(relationship_stream, relationship_tree));
+    const auto &relationship_root = relationship_tree.get_child("Relationships");
+    const auto has_relationship = [&](const std::string &type, const std::string &target) {
+        return std::any_of(relationship_root.begin(), relationship_root.end(),
+                           [&](const boost::property_tree::ptree::value_type &child) {
+                               if (child.first != "Relationship")
+                                   return false;
+                               const auto &attributes = child.second.get_child("<xmlattr>");
+                               return attributes.get<std::string>("Type") == type &&
+                                      attributes.get<std::string>("Target") == target;
+                           });
+    };
+    const std::string thumbnail_type = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
+    const std::string middle_type = "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle";
+    const std::string small_type = "http://schemas.bambulab.com/package/2021/cover-thumbnail-small";
+    CHECK(has_relationship(thumbnail_type, "/Metadata/plate_2.png"));
+    CHECK(has_relationship(middle_type, "/Metadata/plate_2.png"));
+    CHECK(has_relationship(small_type, "/Metadata/plate_2_small.png"));
+    CHECK_FALSE(has_relationship(thumbnail_type, "/Metadata/plate_1.png"));
+    CHECK_FALSE(has_relationship(middle_type, "/Metadata/plate_1.png"));
+    CHECK_FALSE(has_relationship(small_type, "/Metadata/plate_1_small.png"));
+
+    const auto check_thumbnail = [&](const std::string &entry, unsigned char expected_channel) {
+        const std::string decoded = png_entry(archive.string(), entry,
+                                               PLATE_THUMBNAIL_SMALL_WIDTH,
+                                               PLATE_THUMBNAIL_SMALL_HEIGHT);
+        REQUIRE(decoded.size() == size_t(PLATE_THUMBNAIL_SMALL_WIDTH) * PLATE_THUMBNAIL_SMALL_HEIGHT * 4);
+        CHECK(std::all_of(decoded.begin(), decoded.end(), [&](char value) {
+            return static_cast<unsigned char>(value) == expected_channel;
+        }));
+    };
+
+    check_thumbnail("Metadata/plate_1.png", 0x11);
+    check_thumbnail("Metadata/plate_1_small.png", 0x11);
+    check_thumbnail("Metadata/plate_2.png", 0x22);
+    check_thumbnail("Metadata/plate_2_small.png", 0x22);
+}
+
+} // namespace bbs_3mf_metadata_contracts
+
+namespace bbs_import_color_contracts {
+
+// Root objects load from 3D/3dmodel.model, while a build item addresses the object in the related
+// 3D/Objects/part.model. Each model owns its color groups; IDs are unique package-wide.
+static std::string tetra_mesh_xml()
+{
+    return R"(<mesh>
+      <vertices>
+        <vertex x="0" y="0" z="0"/>
+        <vertex x="10" y="0" z="0"/>
+        <vertex x="0" y="10" z="0"/>
+        <vertex x="0" y="0" z="10"/>
+      </vertices>
+      <triangles>
+        <triangle v1="0" v2="2" v3="1"/>
+        <triangle v1="0" v2="1" v3="3"/>
+        <triangle v1="0" v2="3" v3="2"/>
+        <triangle v1="1" v2="2" v3="3"/>
+      </triangles>
+    </mesh>)";
+}
+
+static void write_color_group_archive(const std::string &path)
+{
+    const std::string root_model =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="p">
+  <metadata name="Application">OrcaSlicer-2.0.0</metadata>
+  <resources>
+    <m:colorgroup id="22"><m:color color="#2244AAFF"/></m:colorgroup>
+    <m:colorgroup id="33"><m:color color="#CC3322FF"/></m:colorgroup>
+    <object id="200" name="root blue part" type="model" pid="22">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+    <object id="300" name="root reused red part" type="model" pid="33">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+  </resources>
+  <build>
+    <item p:path="/3D/Objects/part.model" objectid="1" printable="1"/>
+    <item objectid="200" printable="1"/>
+    <item objectid="300" printable="1"/>
+  </build>
+</model>)";
+
+    const std::string extension_model =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="p">
+  <metadata name="Application">OrcaSlicer-2.0.0</metadata>
+  <resources>
+    <m:colorgroup id="11"><m:color color="#CC3322FF"/></m:colorgroup>
+    <object id="1" name="extension red part" type="model" pid="11">)" +
+        tetra_mesh_xml() +
+        R"(</object>
+  </resources>
+</model>)";
+
+    const std::string content_types =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+</Types>)";
+    const std::string package_relationships =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" Target="/3D/3dmodel.model" Id="rel-root"/>
+</Relationships>)";
+    const std::string model_relationships =
+        R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" Target="/3D/Objects/part.model" Id="rel-part"/>
+</Relationships>)";
+
+    Zipper archive(path);
+    archive.add_entry("[Content_Types].xml", content_types.data(), content_types.size());
+    archive.add_entry("_rels/.rels", package_relationships.data(), package_relationships.size());
+    archive.add_entry("3D/3dmodel.model", root_model.data(), root_model.size());
+    archive.add_entry("3D/_rels/3dmodel.model.rels", model_relationships.data(), model_relationships.size());
+    archive.add_entry("3D/Objects/part.model", extension_model.data(), extension_model.size());
+    archive.finalize();
+}
+
+static std::set<std::array<int, 3>> normalized_tetra_faces(const TriangleMesh &mesh)
+{
+    std::set<std::array<int, 3>> faces;
+    for (const Vec3i32 &face : mesh.its.indices) {
+        std::array<int, 3> normalized{face[0], face[1], face[2]};
+        std::sort(normalized.begin(), normalized.end());
+        faces.insert(normalized);
+    }
+    return faces;
+}
+
+TEST_CASE("BBS import maps scoped color groups and reuses equal colors publicly",
+          "[3MF][Bbs3mfImportGaps][ColorGroups]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_color_group_archive(archive.string());
+
+    // load_bbs owns its backup directory, plates, and presets through LoadedProject. Declare
+    // it before Model so the model is destroyed before that backup owner at scope exit.
+    archive_variant_contracts::BbsLoaded loaded_project;
+    Model loaded_model;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded_model, loaded_project));
+    REQUIRE(loaded_model.objects.size() == 3);
+
+    const std::set<std::array<int, 3>> expected_faces{{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+    const std::map<std::string, int> expected_extruders{
+        {"extension red part", 1},
+        {"root blue part", 2},
+        {"root reused red part", 1},
+    };
+    std::map<std::string, int> actual_extruders;
+    for (const ModelObject *object : loaded_model.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->volumes.size() == 1);
+        const ModelVolume *volume = object->volumes.front();
+        REQUIRE(volume != nullptr);
+        const TriangleMesh &mesh = volume->mesh();
+        REQUIRE(mesh.facets_count() == 4);
+        CHECK(mesh.its.vertices.size() == 4);
+        CHECK(normalized_tetra_faces(mesh) == expected_faces);
+        CHECK_THAT(its_volume(mesh.its), Catch::Matchers::WithinAbs(1000.0 / 6.0, 1e-3));
+        // BBS consumes the raw color string into this public assignment; Model does not retain
+        // an exposed raw color-group table after import.
+        REQUIRE(object->config.has("extruder"));
+        actual_extruders.emplace(object->name, object->config.opt_int("extruder"));
+    }
+    CHECK(actual_extruders == expected_extruders);
+}
+
+} // namespace bbs_import_color_contracts
+
+namespace bbs_remaining_public_gap_contracts {
+
+using namespace Slic3r;
+
+using archive_variant_contracts::BbsLoaded;
+
+using archive_variant_contracts::load_bbs;
+
+using archive_variant_contracts::make_cube_model;
+
+void store_sliced_archive(const std::string &path, Model &model, DynamicPrintConfig &config,
+                          PlateData &plate, SaveStrategy strategy)
+{
+    ScopedTemporaryDir backup("orca_bbs_remaining_gap_store");
+    model.set_backup_path(backup.string());
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+    plate.config = config;
+
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.strategy = strategy;
+    REQUIRE(store_bbs_3mf(params));
+}
+
+std::string read_slice_info(const std::string &path)
+{
+    std::string slice_info;
+    REQUIRE(read_3mf_entry(path, slice_info, "Metadata/slice_info.config"));
+    return slice_info;
+}
+
+std::map<std::string, std::string> read_model_metadata(const std::string &xml)
+{
+    std::stringstream input(xml);
+    boost::property_tree::ptree tree;
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+
+    std::map<std::string, std::string> metadata;
+    const auto model_node = tree.get_child_optional("model");
+    REQUIRE(static_cast<bool>(model_node));
+    for (const auto &node : *model_node) {
+        if (node.first != "metadata")
+            continue;
+        const auto attributes = node.second.get_child_optional("<xmlattr>");
+        REQUIRE(static_cast<bool>(attributes));
+        const auto name = attributes->get_optional<std::string>("name");
+        REQUIRE(name);
+        metadata[*name] = node.second.data();
+    }
+    return metadata;
+}
+
+TEST_CASE("BBS slice metadata keeps raw XML-escaped names for Bambu printers",
+          "[3MF][BbsRemaining][BbsGcodeObjects]")
+{
+    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
+    GCodeProcessor::s_IsBBLPrinter = true;
+
+    Model model = make_cube_model();
+    model.objects.front()->name = "Raw & <Label>";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfMarlinFirmware));
+
+    PlateData plate;
+    plate.is_sliced_valid = true;
+    ScopedTemporaryFile archive(".3mf");
+    store_sliced_archive(archive.string(), model, config, plate,
+                         SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::WithSliceInfo);
+
+    const std::string slice_info = read_slice_info(archive.string());
+    CHECK(slice_info.find("name=\"Raw &amp; &lt;Label&gt;\"") != std::string::npos);
+    CHECK(slice_info.find("name=\"Raw_Label_id_0_copy_0\"") == std::string::npos);
+}
+
+TEST_CASE("BBS export round-trips XML-sensitive MakerLab and custom metadata",
+          "[3MF][BbsRemaining][BbsMakerLabMetadata]")
+{
+    Model source = make_cube_model();
+    const std::string maker_name = "Maker & <Lab> \"quoted\" 'single' &amp; &quot; &apos; &unknown; literal";
+    const std::string maker_version = "maker-7 & <rev> \"quoted\" 'single' &amp; literal";
+    const std::string workflow_value = "prototype & <inside> \"quoted\" 'single' &amp; literal";
+    const std::string revision_value = "rev <7> &amp;";
+    source.mk_name = maker_name;
+    source.mk_version = maker_version;
+    source.md_name = {"MakerWorkflow", "MakerRevision"};
+    source.md_value = {workflow_value, revision_value};
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ScopedTemporaryFile archive(".3mf");
+    store_sliced_archive(archive.string(), source, config, plate,
+                         SaveStrategy::Zip64 | SaveStrategy::Silence);
+
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    // Parsing the complete model XML is the serialization contract; this deliberately avoids
+    // asserting indentation or element order while still rejecting malformed entity escaping.
+    const auto serialized_metadata = read_model_metadata(model_xml);
+    REQUIRE(serialized_metadata.find("MakerLab") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerLabVersion") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerWorkflow") != serialized_metadata.end());
+    REQUIRE(serialized_metadata.find("MakerRevision") != serialized_metadata.end());
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_bbs(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded_model.model_info != nullptr);
+    const auto &loaded_metadata = loaded_model.model_info->metadata_items;
+    const std::array<std::pair<const char *, std::string>, 4> expected_metadata = {{
+        {"MakerLab", maker_name},
+        {"MakerLabVersion", maker_version},
+        {"MakerWorkflow", workflow_value},
+        {"MakerRevision", revision_value},
+    }};
+    for (const auto &[key, expected] : expected_metadata) {
+        const auto found = loaded_metadata.find(key);
+        REQUIRE(found != loaded_metadata.end());
+        CHECK(found->second == expected);
+    }
+}
+
+} // namespace bbs_remaining_public_gap_contracts
+
+namespace generic_3mf_public_gap_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+Model make_three_object_model()
+{
+    Model model;
+    for (size_t i = 0; i < 3; ++i) {
+        ModelObject *object = model.add_object();
+        object->name = "generic-metadata-object-" + std::to_string(i + 1);
+        object->add_volume(make_cube(10. + double(i), 10., 2.));
+        object->add_instance();
+    }
+    return model;
+}
+
+std::pair<int, std::vector<double>> parse_object_profile(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::vector<double> profile;
+    std::istringstream values(line.substr(separator + 1));
+    std::string value;
+    while (std::getline(values, value, ';'))
+        profile.push_back(std::stod(value));
+    return {object_id, profile};
+}
+
+struct ParsedSupportPoint {
+    Vec3f position;
+    float radius;
+    bool new_island;
+};
+
+std::pair<int, std::vector<ParsedSupportPoint>> parse_support_points(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string header;
+    REQUIRE(std::getline(lines, header));
+    REQUIRE(header == "support_points_format_version=1");
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::istringstream values(line.substr(separator + 1));
+    std::vector<float> numbers;
+    float value = 0.f;
+    while (values >> value)
+        numbers.push_back(value);
+    REQUIRE(numbers.size() % 5 == 0);
+
+    std::vector<ParsedSupportPoint> points;
+    for (size_t i = 0; i < numbers.size(); i += 5)
+        points.push_back({Vec3f(numbers[i], numbers[i + 1], numbers[i + 2]), numbers[i + 3], numbers[i + 4] != 0.f});
+    return {object_id, points};
+}
+
+struct ParsedDrainHole {
+    Vec3f position;
+    Vec3f normal;
+    float radius;
+    float height;
+};
+
+std::pair<int, std::vector<ParsedDrainHole>> parse_drain_holes(const std::string &payload)
+{
+    std::istringstream lines(payload);
+    std::string header;
+    REQUIRE(std::getline(lines, header));
+    REQUIRE(header == "drain_holes_format_version=1");
+    std::string line;
+    REQUIRE(std::getline(lines, line));
+    const size_t separator = line.find('|');
+    REQUIRE(separator != std::string::npos);
+    REQUIRE(line.rfind("object_id=", 0) == 0);
+    const int object_id = std::stoi(line.substr(10, separator - 10));
+
+    std::istringstream values(line.substr(separator + 1));
+    std::vector<float> numbers;
+    float value = 0.f;
+    while (values >> value)
+        numbers.push_back(value);
+    REQUIRE(numbers.size() % 8 == 0);
+
+    std::vector<ParsedDrainHole> holes;
+    for (size_t i = 0; i < numbers.size(); i += 8)
+        holes.push_back({Vec3f(numbers[i], numbers[i + 1], numbers[i + 2]),
+                         Vec3f(numbers[i + 3], numbers[i + 4], numbers[i + 5]),
+                         numbers[i + 6], numbers[i + 7]});
+    return {object_id, holes};
+}
+
+} // namespace
+
+TEST_CASE("Generic 3MF metadata uses one-based model object indexing", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const std::vector<double> expected_profile = {0., 0.12, 0.8, 0.2, 1.6, 0.28};
+    middle->layer_height_profile.set(expected_profile);
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.31));
+    middle->layer_config_ranges[{0.4, 1.2}].assign_config(std::move(range_config));
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+    std::string profile_payload;
+    REQUIRE(read_3mf_entry(archive.string(), profile_payload, "Metadata/Slic3r_PE_layer_heights_profile.txt"));
+    const auto [profile_object_id, serialized_profile] = parse_object_profile(profile_payload);
+    REQUIRE(profile_object_id == 2);
+    REQUIRE(serialized_profile.size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(serialized_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+
+    std::string ranges_payload;
+    REQUIRE(read_3mf_entry(archive.string(), ranges_payload, "Metadata/Prusa_Slicer_layer_config_ranges.xml"));
+    boost::property_tree::ptree ranges_tree;
+    std::istringstream ranges_input(ranges_payload);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(ranges_input, ranges_tree));
+    const auto &objects = ranges_tree.get_child("objects");
+    const boost::property_tree::ptree *object_node = nullptr;
+    size_t object_count = 0;
+    for (const auto &child : objects) {
+        if (child.first == "object") {
+            ++object_count;
+            object_node = &child.second;
+        }
+    }
+    REQUIRE(object_count == 1);
+    REQUIRE(object_node != nullptr);
+    REQUIRE(object_node->get<int>("<xmlattr>.id") == 2);
+    const auto &range_node = object_node->get_child("range");
+    CHECK_THAT(range_node.get<double>("<xmlattr>.min_z"), Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(range_node.get<double>("<xmlattr>.max_z"), Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(static_cast<bool>(range_node.get_child_optional("option")));
+    CHECK(range_node.get_child("option").get<std::string>("<xmlattr>.opt_key") == "layer_height");
+    const std::string serialized_layer_height = range_node.get_child("option").data();
+    REQUIRE_FALSE(serialized_layer_height.empty());
+    CHECK_THAT(std::stod(serialized_layer_height), Catch::Matchers::WithinAbs(0.31, 1e-6));
+
+    // Export must not rewrite the source metadata while applying its persisted format.
+    REQUIRE(middle->layer_height_profile.get().size() == expected_profile.size());
+    for (size_t i = 0; i < expected_profile.size(); ++i)
+        CHECK_THAT(middle->layer_height_profile.get()[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+    REQUIRE(middle->layer_config_ranges.size() == 1);
+    const auto source_range = middle->layer_config_ranges.begin();
+    CHECK_THAT(source_range->first.first, Catch::Matchers::WithinAbs(0.4, 1e-6));
+    CHECK_THAT(source_range->first.second, Catch::Matchers::WithinAbs(1.2, 1e-6));
+    REQUIRE(source_range->second.has("layer_height"));
+    CHECK_THAT(source_range->second.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.31, 1e-6));
+}
+
+TEST_CASE("Generic 3MF preserves SLA support points and island flags", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const std::vector<sla::SupportPoint> expected_support_points = {
+        sla::SupportPoint(1.25f, 2.5f, 3.75f, 0.42f, false),
+        sla::SupportPoint(-4.5f, 5.25f, 6.75f, 0.83f, true),
+    };
+    middle->sla_support_points = expected_support_points;
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(middle->sla_support_points.size() == expected_support_points.size());
+    for (size_t i = 0; i < expected_support_points.size(); ++i) {
+        const auto &expected = expected_support_points[i];
+        const auto &actual = middle->sla_support_points[i];
+        CHECK_THAT(actual.pos.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(actual.pos.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(actual.pos.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(actual.head_front_radius, Catch::Matchers::WithinAbs(expected.head_front_radius, 1e-5));
+        CHECK(actual.is_new_island == expected.is_new_island);
+    }
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_support_points.txt"));
+    const auto [object_id, serialized_points] = parse_support_points(payload);
+    REQUIRE(object_id == 2);
+    REQUIRE(serialized_points.size() == expected_support_points.size());
+    for (size_t i = 0; i < serialized_points.size(); ++i) {
+        const auto &expected = expected_support_points[i];
+        CHECK_THAT(serialized_points[i].position.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(serialized_points[i].position.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(serialized_points[i].position.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(serialized_points[i].radius, Catch::Matchers::WithinAbs(expected.head_front_radius, 1e-5));
+        CHECK(serialized_points[i].new_island == expected.is_new_island);
+    }
+
+}
+
+TEST_CASE("Generic 3MF serializes SLA drain holes with compatibility offset", "[3MF][Generic3MFMetadata]")
+{
+    Model source = make_three_object_model();
+    ModelObject *middle = source.objects[1];
+    const Vec3f source_normal(0.f, 3.f, 4.f);
+    const std::vector<sla::DrainHole> expected_drain_holes = {
+        sla::DrainHole(Vec3f(10.f, 20.f, 30.f), source_normal, 1.25f, 7.5f),
+        sla::DrainHole(Vec3f(-4.f, 8.f, 12.f), Vec3f(2.f, -1.f, 2.f), 2.75f, 3.25f),
+    };
+    middle->sla_drain_holes = expected_drain_holes;
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+    REQUIRE(middle->sla_drain_holes.size() == expected_drain_holes.size());
+    for (size_t i = 0; i < expected_drain_holes.size(); ++i) {
+        const auto &expected = expected_drain_holes[i];
+        const auto &actual = middle->sla_drain_holes[i];
+        CHECK_THAT(actual.pos.x(), Catch::Matchers::WithinAbs(expected.pos.x(), 1e-5));
+        CHECK_THAT(actual.pos.y(), Catch::Matchers::WithinAbs(expected.pos.y(), 1e-5));
+        CHECK_THAT(actual.pos.z(), Catch::Matchers::WithinAbs(expected.pos.z(), 1e-5));
+        CHECK_THAT(actual.normal.x(), Catch::Matchers::WithinAbs(expected.normal.x(), 1e-5));
+        CHECK_THAT(actual.normal.y(), Catch::Matchers::WithinAbs(expected.normal.y(), 1e-5));
+        CHECK_THAT(actual.normal.z(), Catch::Matchers::WithinAbs(expected.normal.z(), 1e-5));
+        CHECK_THAT(actual.radius, Catch::Matchers::WithinAbs(expected.radius, 1e-5));
+        CHECK_THAT(actual.height, Catch::Matchers::WithinAbs(expected.height, 1e-5));
+    }
+    std::string payload;
+    REQUIRE(read_3mf_entry(archive.string(), payload, "Metadata/Slic3r_PE_sla_drain_holes.txt"));
+    const auto [object_id, serialized_holes] = parse_drain_holes(payload);
+    REQUIRE(object_id == 2);
+    REQUIRE(serialized_holes.size() == expected_drain_holes.size());
+    for (size_t i = 0; i < serialized_holes.size(); ++i) {
+        const auto &expected = expected_drain_holes[i];
+        const Vec3f stored_position = expected.pos - expected.normal.normalized();
+        CHECK_THAT(serialized_holes[i].position.x(), Catch::Matchers::WithinAbs(stored_position.x(), 1e-5));
+        CHECK_THAT(serialized_holes[i].position.y(), Catch::Matchers::WithinAbs(stored_position.y(), 1e-5));
+        CHECK_THAT(serialized_holes[i].position.z(), Catch::Matchers::WithinAbs(stored_position.z(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.x(), Catch::Matchers::WithinAbs(expected.normal.x(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.y(), Catch::Matchers::WithinAbs(expected.normal.y(), 1e-5));
+        CHECK_THAT(serialized_holes[i].normal.z(), Catch::Matchers::WithinAbs(expected.normal.z(), 1e-5));
+        CHECK_THAT(serialized_holes[i].radius, Catch::Matchers::WithinAbs(expected.radius, 1e-5));
+        CHECK_THAT(serialized_holes[i].height, Catch::Matchers::WithinAbs(expected.height + 1.f, 1e-5));
+    }
+
+}
+
+TEST_CASE("Generic 3MF writes height profiles only when they contain complete pairs",
+          "[3MF][Generic3MFMetadata]")
+{
+    struct ProfileRow {
+        size_t values;
+        bool stored;
+    };
+    const std::vector<double> full_profile = {0., 0.12, 0.8, 0.2, 1.6, 0.28};
+    const std::array<ProfileRow, 6> rows = {{{0, false}, {2, false}, {3, false},
+                                          {4, true}, {5, false}, {6, true}}};
+    for (const ProfileRow row : rows) {
+        INFO("profile value count " << row.values);
+        Model source = make_three_object_model();
+        std::vector<double> expected_profile(full_profile.begin(), full_profile.begin() + row.values);
+        source.objects[1]->layer_height_profile.set(expected_profile);
+        ScopedTemporaryFile archive(".3mf");
+        REQUIRE(store_3mf(archive.string().c_str(), &source, nullptr, false));
+
+        std::string payload;
+        const bool stored = read_3mf_entry(archive.string(), payload,
+                                          "Metadata/Slic3r_PE_layer_heights_profile.txt");
+        REQUIRE(stored == row.stored);
+        if (stored) {
+            const auto [object_id, profile] = parse_object_profile(payload);
+            REQUIRE(object_id == 2);
+            REQUIRE(profile.size() == expected_profile.size());
+            for (size_t i = 0; i < profile.size(); ++i)
+                CHECK_THAT(profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+        }
+        const auto &source_profile = source.objects[1]->layer_height_profile.get();
+        REQUIRE(source_profile.size() == expected_profile.size());
+        for (size_t i = 0; i < source_profile.size(); ++i)
+            CHECK_THAT(source_profile[i], Catch::Matchers::WithinAbs(expected_profile[i], 1e-6));
+    }
+}
+
+} // namespace generic_3mf_public_gap_contracts
+
+namespace bbs_3mf_profile_validation_contracts {
+
+using namespace Slic3r;
+
+TEST_CASE("BBS 3MF skips malformed layer height profile records",
+          "[3MF][Bbs3mfMetadata][LayerProfile]")
+{
+    Model source;
+    for (size_t i = 0; i < 4; ++i) {
+        ModelObject *object = source.add_object();
+        object->name = "profile-object-" + std::to_string(i + 1);
+        object->add_volume(make_cube(10. + double(i), 10., 2.));
+        object->add_instance();
+    }
+    source.objects[1]->layer_height_profile.set({0., 0.12, 0.8, 0.2, 1.6, 0.28});
+
+    ScopedTemporaryDir backup_dir("orca_bbs_profile_record_store");
+    source.set_backup_path(backup_dir.string());
+    ScopedTemporaryFile archive(".3mf");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path = archive.string();
+    store_params.model = &source;
+    store_params.config = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    const std::string profile_records =
+        "malformed-row\n"
+        "not_an_id|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=0|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=2|0;0.12;0.8;0.2;1.6;0.28\n"
+        "object_id=2|0;0.22;0.8;0.3;1.6;0.38\n"
+        "object_id=4|0;0.42;0.8;0.5;1.6;0.58\n"
+        "object_id=1|0;0.1;0.2;0.3\n"
+        "object_id=3|0;0.1;0.2;0.3;0.4\n";
+    bool replaced_profile = false;
+    REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string &name, std::string &data) {
+        if (name != "Metadata/layer_heights_profile.txt")
+            return false;
+        data = profile_records;
+        replaced_profile = true;
+        return true;
+    }));
+    REQUIRE(replaced_profile);
+
+    Model loaded_model;
+    archive_variant_contracts::BbsLoaded loaded_project;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded_model, loaded_project));
+    REQUIRE(loaded_model.objects.size() == 4);
+
+    const std::array<std::vector<double>, 4> expected_profiles = {{
+        {},
+        {0., 0.12, 0.8, 0.2, 1.6, 0.28},
+        {},
+        {0., 0.42, 0.8, 0.5, 1.6, 0.58},
+    }};
+    for (size_t i = 0; i < expected_profiles.size(); ++i) {
+        REQUIRE(loaded_model.objects[i] != nullptr);
+        CHECK(loaded_model.objects[i]->name == source.objects[i]->name);
+        const auto &actual = loaded_model.objects[i]->layer_height_profile.get();
+        REQUIRE(actual.size() == expected_profiles[i].size());
+        for (size_t j = 0; j < actual.size(); ++j)
+            CHECK_THAT(actual[j], Catch::Matchers::WithinAbs(expected_profiles[i][j], 1e-6));
+    }
+}
+
+} // namespace bbs_3mf_profile_validation_contracts
+
+namespace bbs_backup_contracts {
+
+using namespace Slic3r;
+
+using boost::property_tree::ptree;
+
+namespace {
+
+struct BackupCounts
+{
+    std::size_t worker_callbacks = 0;
+    std::size_t ui_backup_callbacks = 0;
+};
+
+// The callback is copied by the worker before it is invoked.  Owning this state with a
+// shared_ptr keeps a timed-out callback safe until that copied std::function is destroyed.
+struct BackupEvents
+{
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t worker_callbacks = 0;
+    std::size_t ui_backup_callbacks = 0;
+
+    void notify(int type)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (type == 0)
+            ++worker_callbacks;
+        else if (type == 1)
+            ++ui_backup_callbacks;
+        condition.notify_all();
+    }
+
+    BackupCounts snapshot()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return { worker_callbacks, ui_backup_callbacks };
+    }
+};
+
+// A Backup task is a public queue barrier: it is appended after all earlier work, and its
+// type-1 callback is emitted only after the UI task pump has processed that prefix.  The
+// caller remains on the main thread while pumping, so no assertion runs from the worker.
+bool flush_backup_barrier(const std::shared_ptr<BackupEvents> &events,
+                          std::chrono::milliseconds timeout = std::chrono::seconds(5))
+{
+    const BackupCounts before = events->snapshot();
+    const std::size_t target_ui_callbacks = before.ui_backup_callbacks + 1;
+    backup_soon();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // A notification during or just after the pump must trigger another pump.
+        const BackupCounts before_pump = events->snapshot();
+        run_backup_ui_tasks();
+        if (events->snapshot().ui_backup_callbacks >= target_ui_callbacks)
+            return true;
+
+        // Worker callback type 0 wakes this wait so the next iteration can pump the
+        // corresponding UI task.  Type 1 is the completion predicate above.
+        std::unique_lock<std::mutex> lock(events->mutex);
+        events->condition.wait_until(lock, deadline, [&] {
+            return events->ui_backup_callbacks >= target_ui_callbacks ||
+                   events->worker_callbacks > before_pump.worker_callbacks;
+        });
+    }
+    run_backup_ui_tasks();
+    return events->snapshot().ui_backup_callbacks >= target_ui_callbacks;
+}
+
+struct BackupCleanup
+{
+    Model &model;
+    std::shared_ptr<BackupEvents> events;
+
+    ~BackupCleanup()
+    {
+        // RemoveBackup precedes the barrier. Cleanup is bounded best effort after a test
+        // timeout; any worker-held callback still owns its state, and paths are unique.
+        remove_backup(model, true);
+        (void)flush_backup_barrier(events);
+        set_backup_callback({});
+        set_backup_interval(60);
+        model.set_backup_path("detach");
+    }
+};
+
+bool parse_xml_double(const ptree::value_type &node, const char *attribute, double &value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char *end = nullptr;
+    value = std::strtod(raw->c_str(), &end);
+    return end != raw->c_str() && *end == '\0' && std::isfinite(value);
+}
+
+bool parse_xml_index(const ptree::value_type &node, const char *attribute, long &value)
+{
+    const auto raw = node.second.get_optional<std::string>(std::string("<xmlattr>.") + attribute);
+    if (!raw)
+        return false;
+    char *end = nullptr;
+    value = std::strtol(raw->c_str(), &end, 10);
+    return end != raw->c_str() && *end == '\0';
+}
+
+} // namespace
+
+TEST_CASE("BBS backup guards require both mesh and instance state", "[3MF][Bbs3mfBackup][Guard]")
+{
+    const std::string shape = GENERATE("backup disabled", "missing volume", "missing instance");
+    CAPTURE(shape);
+
+    // Declare the directory before Model so cleanup detaches the model before the directory dies.
+    ScopedTemporaryDir backup("orca_bbs_backup_guard_v2");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    object->name = "guarded-backup";
+    object->input_file = "guarded.stl";
+    if (shape != "missing volume")
+        object->add_volume(make_cube(4., 5., 6.));
+    if (shape != "missing instance")
+        object->add_instance();
+    if (shape != "backup disabled")
+        model.set_need_backup();
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{ model, events };
+
+    REQUIRE(flush_backup_barrier(events));
+    const int backup_id = model.get_object_backup_id(*object);
+    const boost::filesystem::path expected = backup.path() / "3D" / "Objects" /
+        (object->name + "_" + std::to_string(backup_id) + ".model");
+
+    const BackupCounts before = events->snapshot();
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after = events->snapshot();
+    CHECK(after.ui_backup_callbacks == before.ui_backup_callbacks + 1);
+    CHECK_FALSE(boost::filesystem::exists(expected));
+}
+
+TEST_CASE("BBS backup writes valid mesh geometry and completes its public lifecycle",
+          "[3MF][Bbs3mfBackup][Snapshot]")
+{
+    ScopedTemporaryDir backup("orca_bbs_backup_snapshot_v2");
+    Model model;
+    model.set_backup_path(backup.string());
+    boost::filesystem::create_directories(backup.path() / "3D" / "Objects");
+
+    ModelObject *object = model.add_object("snapshot-part", "snapshot.stl", make_cube(10., 11., 12.));
+    REQUIRE(object != nullptr);
+    object->add_instance();
+    model.set_need_backup();
+    const int backup_id = model.get_object_backup_id(*object);
+    const std::string entry = "3D/Objects/" + object->name + "_" + std::to_string(backup_id) + ".model";
+    const boost::filesystem::path snapshot = backup.path() / entry;
+
+    const auto events = std::make_shared<BackupEvents>();
+    set_backup_interval(0);
+    set_backup_callback([events](int type) { events->notify(type); });
+    BackupCleanup cleanup{ model, events };
+
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts before = events->snapshot();
+    save_object_mesh(*object);
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after = events->snapshot();
+    CHECK(after.ui_backup_callbacks == before.ui_backup_callbacks + 1);
+
+    REQUIRE(boost::filesystem::exists(snapshot));
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(snapshot.string(), model_xml, entry));
+    ptree tree;
+    std::stringstream model_stream(model_xml);
+    REQUIRE_NOTHROW(boost::property_tree::read_xml(model_stream, tree));
+
+    // A model document can contain component objects before the mesh-bearing resource;
+    // select the actual object with a mesh rather than depending on resource order.
+    const auto resources = tree.get_child_optional("model.resources");
+    REQUIRE(static_cast<bool>(resources));
+    const ptree *mesh_object = nullptr;
+    const ptree *mesh = nullptr;
+    for (const auto &node : *resources) {
+        if (node.first != "object")
+            continue;
+        const auto candidate = node.second.get_child_optional("mesh");
+        if (candidate) {
+            mesh_object = &node.second;
+            mesh = &candidate.get();
+            break;
+        }
+    }
+    REQUIRE(mesh_object != nullptr);
+    REQUIRE(mesh != nullptr);
+    const auto object_id = mesh_object->get_optional<unsigned>("<xmlattr>.id");
+    REQUIRE(object_id);
+    // 3MF resources have positive IDs; the source-derived filename above separately
+    // verifies the backup identifier without depending on its packed internal encoding.
+    CHECK(*object_id > 0u);
+
+    const auto vertices = mesh->get_child_optional("vertices");
+    const auto triangles = mesh->get_child_optional("triangles");
+    REQUIRE(static_cast<bool>(vertices));
+    REQUIRE(static_cast<bool>(triangles));
+
+    std::size_t vertex_count = 0;
+    bool vertex_values_ok = true;
+    double min_x = std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double min_z = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    double max_z = -std::numeric_limits<double>::infinity();
+    for (const auto &node : *vertices) {
+        if (node.first != "vertex")
+            continue;
+        ++vertex_count;
+        double x = 0., y = 0., z = 0.;
+        if (!parse_xml_double(node, "x", x) || !parse_xml_double(node, "y", y) || !parse_xml_double(node, "z", z)) {
+            vertex_values_ok = false;
+            continue;
+        }
+        min_x = std::min(min_x, x); min_y = std::min(min_y, y); min_z = std::min(min_z, z);
+        max_x = std::max(max_x, x); max_y = std::max(max_y, y); max_z = std::max(max_z, z);
+    }
+    CHECK(vertex_count == 8);
+    CHECK(vertex_values_ok);
+    // ModelObject::add_volume defaults to center_geometry_after_creation(), so
+    // the backup mesh stores the 10x11x12 source centered at the origin.
+    CHECK_THAT(min_x, Catch::Matchers::WithinAbs(-5., 1e-6));
+    CHECK_THAT(min_y, Catch::Matchers::WithinAbs(-5.5, 1e-6));
+    CHECK_THAT(min_z, Catch::Matchers::WithinAbs(-6., 1e-6));
+    CHECK_THAT(max_x, Catch::Matchers::WithinAbs(5., 1e-6));
+    CHECK_THAT(max_y, Catch::Matchers::WithinAbs(5.5, 1e-6));
+    CHECK_THAT(max_z, Catch::Matchers::WithinAbs(6., 1e-6));
+
+    bool triangle_indices_ok = true;
+    std::size_t triangle_count = 0;
+    for (const auto &node : *triangles) {
+        if (node.first != "triangle")
+            continue;
+        ++triangle_count;
+        for (const char *attribute : { "v1", "v2", "v3" }) {
+            long index = -1;
+            if (!parse_xml_index(node, attribute, index) || index < 0 || index >= static_cast<long>(vertex_count))
+                triangle_indices_ok = false;
+        }
+    }
+    CHECK(triangle_count == 12);
+    CHECK(triangle_indices_ok);
+
+    put_other_changes();
+    CHECK(has_other_changes(false));
+    CHECK(has_other_changes(true));
+    clear_other_changes(false);
+    CHECK_FALSE(has_other_changes(false));
+    CHECK(has_other_changes(true));
+
+    const BackupCounts before_backup = events->snapshot();
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after_backup = events->snapshot();
+    CHECK(after_backup.ui_backup_callbacks == before_backup.ui_backup_callbacks + 1);
+    CHECK_FALSE(has_other_changes(true));
+
+    remove_backup(model, true);
+    const BackupCounts before_remove_barrier = events->snapshot();
+    REQUIRE(flush_backup_barrier(events));
+    const BackupCounts after_remove_barrier = events->snapshot();
+    CHECK(after_remove_barrier.ui_backup_callbacks == before_remove_barrier.ui_backup_callbacks + 1);
+    CHECK_FALSE(boost::filesystem::exists(backup.path()));
+}
+
+} // namespace bbs_backup_contracts
+
+namespace legacy_3mf_contracts {
+
+TEST_CASE("Legacy importer splits a handcrafted multi-build-item resource", "[3MF][Legacy3MFInstanceSplit]")
+{
+    // No slic3rpe:Version3mf metadata is intentional: this is the m_version == 0
+    // third-party path, with one mesh resource referenced by two build items.
+    const std::string items =
+        "  <item objectid=\"1\" transform=\"" + transform_string(0., 0., 0.) + "\"/>\n"
+        "  <item objectid=\"1\" transform=\"" + transform_string(20., 0., 0.) + "\"/>\n";
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(write_archive(archive.string(), cube_model_xml("ThirdParty", items)));
+
+    Model loaded;
+    DynamicPrintConfig config;
+    REQUIRE(load_generic(archive.string(), loaded, config));
+    REQUIRE(loaded.objects.size() == 2);
+    const std::array<double, 2> expected_raw_min_x{{0., 20.}};
+    for (size_t index = 0; index < loaded.objects.size(); ++index) {
+        const ModelObject *object = loaded.objects[index];
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(object->volumes.size() == 1);
+        const ModelInstance *instance = object->instances.front();
+        REQUIRE(instance != nullptr);
+        CHECK(instance->get_object() == object);
+        CHECK(instance->get_transformation().get_matrix().isApprox(Transform3d::Identity(), 1e-5));
+        CHECK_THAT(double(object->raw_mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(expected_raw_min_x[index], 1e-5));
+        CHECK_THAT(object->raw_mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+    }
+    const BoundingBoxf3 first_box = loaded.objects[0]->bounding_box_exact();
+    const BoundingBoxf3 second_box = loaded.objects[1]->bounding_box_exact();
+    CHECK_THAT(double(first_box.max.x() - first_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.max.x() - second_box.min.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    CHECK_THAT(double(second_box.min.x() - first_box.min.x()), Catch::Matchers::WithinAbs(20., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+}
+
+} // namespace legacy_3mf_contracts
+
+namespace bbs_thumbnail_accessor_followup {
+
+using namespace Slic3r;
+
+namespace {
+
+const char *const k_thumbnail_relationship =
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail";
+
+const char *const k_middle_relationship =
+    "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle";
+
+std::string valid_thumbnail_payload(unsigned char value)
+{
+    Model source = archive_variant_contracts::make_cube_model();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    ThumbnailData thumbnail;
+    thumbnail.set(2, 2);
+    std::fill(thumbnail.pixels.begin(), thumbnail.pixels.end(), value);
+
+    StoreParams extra;
+    extra.thumbnail_data = {&thumbnail};
+    ScopedTemporaryDir backup("orca_bbs_thumbnail_accessor_payload");
+    source.set_backup_path(backup.string());
+    ScopedTemporaryFile source_archive(".3mf");
+    archive_variant_contracts::store_bbs(source_archive.string(), source, config, plate, &extra);
+
+    std::string encoded;
+    REQUIRE(read_3mf_entry(source_archive.string(), encoded, "Metadata/plate_1.png"));
+    REQUIRE(encoded.size() > 8);
+    REQUIRE(encoded.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) == 0);
+    return encoded;
+}
+
+void write_thumbnail_archive(const std::string &path,
+                             const std::string &standard_path,
+                             const std::string &standard_payload,
+                             const std::string &fixed_path_payload,
+                             const std::string &middle_path = {},
+                             const std::string &middle_payload = {})
+{
+    const std::string relationships =
+        R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target=")XML" + standard_path + R"XML(" Id="standard" Type=")XML" +
+        k_thumbnail_relationship + R"XML("/>)XML" +
+        (middle_path.empty() ? std::string() :
+            R"XML(
+  <Relationship Target=")XML" + middle_path + R"XML(" Id="middle" Type=")XML" +
+            k_middle_relationship + R"XML("/>)XML") +
+        R"XML(
+</Relationships>)XML";
+
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry(standard_path.substr(1), standard_payload.data(), standard_payload.size());
+    archive.add_entry("Metadata/plate_1.png", fixed_path_payload.data(), fixed_path_payload.size());
+    if (!middle_path.empty())
+        archive.add_entry(middle_path.substr(1), middle_payload.data(), middle_payload.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS thumbnail accessor prefers the Bambu middle relationship", "[3MF][Bbs3mfThumbnailAccessor]")
+{
+    const std::string standard = valid_thumbnail_payload(0x21);
+    const std::string middle = valid_thumbnail_payload(0x42);
+    const std::string decoy = valid_thumbnail_payload(0x7f);
+    REQUIRE(middle != standard);
+    REQUIRE(decoy != standard);
+    ScopedTemporaryFile archive(".3mf");
+    write_thumbnail_archive(archive.string(), "/Metadata/standard.png", standard, decoy,
+                            "/Metadata/middle.png", middle);
+
+    const std::string selected = bbs_3mf_get_thumbnail(archive.string().c_str());
+    REQUIRE(selected == middle);
+    CHECK(selected != standard);
+}
+
+TEST_CASE("BBS thumbnail accessor falls back to the standard relationship", "[3MF][Bbs3mfThumbnailAccessor]")
+{
+    const std::string standard = valid_thumbnail_payload(0x63);
+    const std::string decoy = valid_thumbnail_payload(0x7f);
+    REQUIRE(decoy != standard);
+    ScopedTemporaryFile archive(".3mf");
+    write_thumbnail_archive(archive.string(), "/Metadata/custom-standard.png", standard, decoy);
+
+    const std::string selected = bbs_3mf_get_thumbnail(archive.string().c_str());
+    CHECK(selected == standard);
+}
+
+} // namespace bbs_thumbnail_accessor_followup
+
+namespace bbs_3mf_import_metadata_contracts {
+
+using namespace Slic3r;
+
+using namespace Catch::Matchers;
+
+namespace {
+
+bool store_calibration_archive(const std::string &path, ThumbnailData &thumbnail,
+                               SaveStrategy strategy)
+{
+    ScopedTemporaryDir backup("orca_3mf_active_next_calibration");
+    Model model = archive_variant_contracts::make_cube_model();
+    model.set_backup_path(backup.string());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PlateData plate;
+    plate.config = config;
+    plate.plate_index = 0;
+    plate.objects_and_instances = {{0, 0}};
+
+    StoreParams params;
+    params.path = path;
+    params.model = &model;
+    params.config = &config;
+    params.plate_data_list = {&plate};
+    params.calibration_thumbnail_data = {&thumbnail};
+    params.strategy = strategy;
+    return store_bbs_3mf(params);
+}
+
+bool has_entry_suffix(const std::string &path, const std::string &suffix)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const ScopeGuard close_zip([&zip] { close_zip_reader(&zip); });
+    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&zip); ++i) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &stat));
+        std::string name(stat.m_filename);
+        std::replace(name.begin(), name.end(), '\\', '/');
+        if (boost::algorithm::iends_with(name, suffix))
+            return true;
+    }
+    return false;
+}
+
+void write_bbs_object_type_other_archive(const std::string &path)
+{
+    const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    std::string model = legacy_3mf_contracts::cube_model_xml("ThirdParty");
+    const size_t type = model.find("type=\"model\"");
+    REQUIRE(type != std::string::npos);
+    model.replace(type, std::string("type=\"model\"").size(), "type=\"other\"");
+
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS accepts a valid 3MF object with the other object type",
+          "[3MF][Bbs3mfImportMetadata][ObjectType]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_bbs_object_type_other_archive(archive.string());
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.objects.front() != nullptr);
+    REQUIRE(loaded.objects.front()->volumes.size() == 1);
+    CHECK(loaded.objects.front()->name == "Cube");
+    CHECK_THAT(loaded.objects.front()->raw_mesh().volume(), Catch::Matchers::WithinRel(1000., 1e-6));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x()), WithinAbs(10., 1e-5));
+}
+
+TEST_CASE("BBS extracts a persisted plate bounding-box JSON file on load",
+          "[3MF][Bbs3mfImportMetadata][PlateBBox]")
+{
+    PlateBBoxData bbox;
+    bbox.bbox_all = {1, 2, 31, 42};
+    bbox.filament_ids = {0, 2};
+    bbox.filament_colors = {"#111111", "#222222"};
+    bbox.bed_type = "Textured PEI Plate";
+    bbox.first_layer_time = 8.5f;
+    bbox.bbox_objs.push_back({7, {1, 2, 31, 42}, 120.f, .2f, "bbox-cube"});
+
+    ScopedTemporaryFile archive(".3mf");
+    bbs_3mf_metadata_contracts::store_followup(
+        archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate,
+                              StoreParams &params, ScopedTemporaryDir &) {
+            plate.pattern_bbox_file = "bbox-source.json";
+            params.id_bboxes = {&bbox};
+        });
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(bbs_3mf_metadata_contracts::load_followup(archive.string(), loaded, state));
+    REQUIRE(state.plates.size() == 1);
+    const PlateData *plate = state.plates.front();
+    REQUIRE(plate != nullptr);
+    REQUIRE_FALSE(plate->pattern_bbox_file.empty());
+    CHECK(plate->pattern_bbox_file.find("Metadata/plate_1.json") != std::string::npos);
+    REQUIRE(std::filesystem::exists(plate->pattern_bbox_file));
+
+    const nlohmann::json persisted = nlohmann::json::parse(
+        archive_variant_contracts::read_file(plate->pattern_bbox_file));
+    const nlohmann::json &bbox_json = persisted.at("bbox_all");
+    REQUIRE(bbox_json.is_array());
+    REQUIRE(bbox_json.size() == bbox.bbox_all.size());
+    for (size_t i = 0; i < bbox.bbox_all.size(); ++i)
+        CHECK_THAT(bbox_json.at(i).get<double>(), WithinAbs(double(bbox.bbox_all[i]), 1e-5));
+    const nlohmann::json &filament_json = persisted.at("filament_ids");
+    REQUIRE(filament_json.is_array());
+    REQUIRE(filament_json.size() == bbox.filament_ids.size());
+    for (size_t i = 0; i < bbox.filament_ids.size(); ++i)
+        CHECK(filament_json.at(i).get<int>() == bbox.filament_ids[i]);
+    REQUIRE(persisted.at("bbox_objects").size() == 1);
+    CHECK(persisted.at("bbox_objects").at(0).at("name").get<std::string>() == "bbox-cube");
+    CHECK_THAT(persisted.at("bbox_objects").at(0).at("area").get<float>(), WithinAbs(120.f, 1e-5));
+}
+
+TEST_CASE("BBS skips invalid calibration thumbnails without rejecting the archive",
+          "[3MF][Bbs3mfImportMetadata][Calibration]")
+{
+    ThumbnailData invalid;
+    invalid.set(2, 2);
+    invalid.pixels.pop_back();
+    REQUIRE_FALSE(invalid.is_valid());
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_calibration_archive(archive.string(), invalid,
+                                       SaveStrategy::Zip64 | SaveStrategy::Silence));
+    CHECK_FALSE(has_entry_suffix(archive.string(), ".png"));
+}
+
+TEST_CASE("BBS omits calibration thumbnails when static archive output is disabled",
+          "[3MF][Bbs3mfImportMetadata][Calibration]")
+{
+    ThumbnailData valid;
+    valid.set(2, 2);
+    std::fill(valid.pixels.begin(), valid.pixels.end(), static_cast<unsigned char>(0x7a));
+
+    ScopedTemporaryFile archive(".3mf");
+    REQUIRE(store_calibration_archive(archive.string(), valid,
+                                       SaveStrategy::Zip64 | SaveStrategy::Silence |
+                                       SaveStrategy::SkipStatic));
+    CHECK_FALSE(has_entry_suffix(archive.string(), ".png"));
+}
+
+} // namespace bbs_3mf_import_metadata_contracts
+
+namespace bbs_model_settings_contracts {
+
+using namespace Slic3r;
+
+using namespace bbs_archive_contracts;
+
+namespace {
+
+void store_archive_with_model_settings(const std::string &path, bool foreign)
+{
+    ScopedTemporaryDir backup("orca_3mf_model_settings_store");
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    store_model(path, source, config, plates);
+
+    if (!foreign)
+        return;
+
+    size_t marker_replacements = 0;
+    bool residual_marker = false;
+    REQUIRE(rewrite_3mf_entries(path, [&marker_replacements, &residual_marker](std::string &name, std::string &data) {
+        if (name != "3D/3dmodel.model")
+            return false;
+
+        const std::array<std::pair<const char *, const char *>, 4> markers{{
+            {"<metadata name=\"Application\">BambuStudio-", "<metadata name=\"Application\">ThirdParty-"},
+            {"<metadata name=\"OrcaSlicer\">", "<metadata name=\"ThirdParty:Generator\">"},
+            {"<metadata name=\"BambuStudio:3mfVersion\">", "<metadata name=\"ThirdParty:Version3mf\">"},
+            {"<metadata name=\"bamboo_slicer:Version3mf\">", "<metadata name=\"ThirdParty:LegacyVersion3mf\">"},
+        }};
+        bool changed = false;
+        for (const auto &[from, to] : markers) {
+            size_t offset = 0;
+            while ((offset = data.find(from, offset)) != std::string::npos) {
+                const std::string from_text(from);
+                const std::string to_text(to);
+                data.replace(offset, from_text.size(), to_text);
+                offset += to_text.size();
+                ++marker_replacements;
+                changed = true;
+            }
+        }
+        for (const auto &[from, to] : markers)
+            if (data.find(from) != std::string::npos)
+                residual_marker = true;
+        return changed;
+    }));
+    REQUIRE(marker_replacements >= 3);
+    REQUIRE_FALSE(residual_marker);
+
+}
+
+void corrupt_model_settings(const std::string &path)
+{
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config")
+            return false;
+        data = "<config><broken";
+        return true;
+    }));
+}
+
+void check_same_box(const BoundingBoxf3 &actual, const BoundingBoxf3 &expected)
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK_THAT(double(actual.min[axis]), Catch::Matchers::WithinAbs(double(expected.min[axis]), 1e-5));
+        CHECK_THAT(double(actual.max[axis]), Catch::Matchers::WithinAbs(double(expected.max[axis]), 1e-5));
+    }
+}
+
+} // namespace
+
+TEST_CASE("BBS rejects malformed model settings in native archives",
+          "[3MF][Bbs3mfImportValidation][Errors]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_archive_with_model_settings(archive.string(), false);
+    corrupt_model_settings(archive.string());
+
+    LoadedProject loaded;
+    Model loaded_model;
+    CHECK_FALSE(load_model(archive.string(), loaded_model, loaded));
+}
+
+TEST_CASE("BBS tolerates malformed model settings in foreign archives",
+          "[3MF][Bbs3mfImportValidation][Errors][Foreign]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_archive_with_model_settings(archive.string(), true);
+
+    // Establish that all generator/version markers were neutralized while the archive is valid.
+    LoadedProject valid_loaded;
+    Model valid_model;
+    REQUIRE(load_model(archive.string(), valid_model, valid_loaded));
+    CHECK_FALSE(valid_loaded.is_bbl);
+    CHECK_FALSE(valid_loaded.is_orca);
+    REQUIRE(valid_model.objects.size() == 2);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+
+    corrupt_model_settings(archive.string());
+
+    LoadedProject loaded;
+    Model loaded_model;
+    REQUIRE(load_model(archive.string(), loaded_model, loaded));
+    CHECK_FALSE(loaded.is_bbl);
+    CHECK_FALSE(loaded.is_orca);
+    REQUIRE(loaded_model.objects.size() == 2);
+    CHECK(loaded_model.mesh().facets_count() == valid_facets);
+    CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+    check_same_box(loaded_model.mesh().bounding_box(), valid_box);
+    for (const ModelObject *object : loaded_model.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == 1);
+        REQUIRE(!object->volumes.empty());
+        CHECK(its_volume(object->raw_mesh().its) > 0.);
+    }
+}
+
+TEST_CASE("BBS LoadModel skips malformed project settings before configuration parsing",
+          "[3MF][Bbs3mfImportValidation][Strategy]")
+{
+    Model source;
+    make_model(source, false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryDir backup("orca_3mf_project_settings_store");
+    source.set_backup_path(backup.string());
+    PlateData plate;
+    make_plate(plate, 0, {{0, 0}});
+    PlateDataPtrs plates{&plate};
+    ScopedTemporaryFile archive(".3mf");
+    store_model(archive.string(), source, config, plates);
+
+    // Load a valid control with the same public strategy before corrupting only project settings.
+    archive_variant_contracts::BbsLoaded valid_loaded;
+    Model valid_model;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), valid_model, valid_loaded,
+                                                 LoadStrategy::LoadModel));
+    CHECK(valid_loaded.config.empty());
+    REQUIRE(valid_model.objects.size() == 1);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+
+    REQUIRE(replace_in_3mf_entry(archive.string(), "project_settings.config", "{", "not-json"));
+
+    archive_variant_contracts::BbsLoaded loaded;
+    Model loaded_model;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded_model, loaded,
+                                                 LoadStrategy::LoadModel));
+    CHECK(loaded.config.empty());
+    REQUIRE(loaded_model.objects.size() == valid_model.objects.size());
+    CHECK(loaded_model.mesh().facets_count() == valid_facets);
+    CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+    check_same_box(loaded_model.mesh().bounding_box(), valid_box);
+}
+
+} // namespace bbs_model_settings_contracts
+
+namespace high_yield_bbs_import_contracts {
+
+using namespace Slic3r;
+
+namespace {
+
+std::string nested_foreign_component_model()
+{
+    return R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+ <metadata name="Application">ThirdParty-1.0</metadata>
+ <resources>
+  <object id="1" type="model">
+   <mesh>
+    <vertices>
+     <vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="10" y="10" z="0"/><vertex x="0" y="10" z="0"/>
+     <vertex x="0" y="0" z="10"/><vertex x="10" y="0" z="10"/><vertex x="10" y="10" z="10"/><vertex x="0" y="10" z="10"/>
+    </vertices>
+    <triangles>
+     <triangle v1="0" v2="2" v3="1"/><triangle v1="0" v2="3" v3="2"/>
+     <triangle v1="4" v2="5" v3="6"/><triangle v1="4" v2="6" v3="7"/>
+     <triangle v1="0" v2="1" v3="5"/><triangle v1="0" v2="5" v3="4"/>
+     <triangle v1="1" v2="2" v3="6"/><triangle v1="1" v2="6" v3="5"/>
+     <triangle v1="2" v2="3" v3="7"/><triangle v1="2" v2="7" v3="6"/>
+     <triangle v1="3" v2="0" v3="4"/><triangle v1="3" v2="4" v3="7"/>
+    </triangles>
+   </mesh>
+  </object>
+  <object id="2" type="model">
+   <components>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 10 0 0"/>
+   </components>
+  </object>
+  <object id="3" type="model">
+   <components>
+    <component objectid="2" transform="1 0 0 0 1 0 0 0 1 20 0 0"/>
+    <component objectid="1" transform="1 0 0 0 1 0 0 0 1 -20 0 0"/>
+   </components>
+  </object>
+ </resources>
+ <build>
+  <item objectid="2" printable="1"/>
+  <item objectid="3" printable="1"/>
+ </build>
+</model>)XML";
+}
+
+void write_nested_foreign_component_archive(const std::string &path)
+{
+    static const std::string relationships = R"XML(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>)XML";
+    const std::string model = nested_foreign_component_model();
+    Zipper archive(path);
+    archive.add_entry("_rels/.rels", relationships.data(), relationships.size());
+    archive.add_entry("3D/3dmodel.model", model.data(), model.size());
+    archive.finalize();
+}
+
+} // namespace
+
+TEST_CASE("BBS foreign import treats a malformed component transform as identity",
+          "[3MF][Bbs3mfComponents][Bbs3mfForeign][Regression]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    write_nested_foreign_component_archive(archive.string());
+
+    const std::string valid_transform = "transform=\"1 0 0 0 1 0 0 0 1 10 0 0\"";
+    const std::string malformed_transform = "transform=\"1 0 0 0 1 0 0 0 1 10 0\"";
+    REQUIRE(replace_in_3mf_entry(archive.string(), "3dmodel.model", valid_transform,
+                                 malformed_transform));
+
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    CHECK(model_xml.find(malformed_transform) != std::string::npos);
+    CHECK(model_xml.find("transform=\"1 0 0 0 1 0 0 0 1 20 0 0\"") != std::string::npos);
+    CHECK(model_xml.find("transform=\"1 0 0 0 1 0 0 0 1 -20 0 0\"") != std::string::npos);
+
+    Model loaded;
+    archive_variant_contracts::BbsLoaded state;
+    REQUIRE(archive_variant_contracts::load_bbs(archive.string(), loaded, state));
+    CHECK_FALSE(state.is_bbl);
+    REQUIRE(loaded.objects.size() == 2);
+
+    const auto find_object_with_volumes = [&loaded](size_t count) {
+        return std::find_if(loaded.objects.begin(), loaded.objects.end(),
+                            [count](const ModelObject *object) {
+                                return object != nullptr && object->volumes.size() == count;
+                            });
+    };
+    const auto wrapped_it = find_object_with_volumes(1);
+    const auto assembly_it = find_object_with_volumes(2);
+    REQUIRE(wrapped_it != loaded.objects.end());
+    REQUIRE(assembly_it != loaded.objects.end());
+
+    const BoundingBoxf3 wrapped_box = (*wrapped_it)->bounding_box_exact();
+    CHECK_THAT(double(wrapped_box.min.x()), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(double(wrapped_box.max.x()), Catch::Matchers::WithinAbs(10., 1e-5));
+    const BoundingBoxf3 assembly_box = (*assembly_it)->bounding_box_exact();
+    CHECK_THAT(double(assembly_box.min.x()), Catch::Matchers::WithinAbs(-20., 1e-5));
+    CHECK_THAT(double(assembly_box.max.x()), Catch::Matchers::WithinAbs(30., 1e-5));
+    CHECK_THAT(double(loaded.mesh().bounding_box().max.x() - loaded.mesh().bounding_box().min.x()),
+               Catch::Matchers::WithinAbs(50., 1e-5));
+}
+
+} // namespace high_yield_bbs_import_contracts
+
+namespace bbs_import_contracts {
+
+using namespace Slic3r;
+
+using archive_variant_contracts::BbsLoaded;
+
+using archive_variant_contracts::read_file;
+
+using bbs_3mf_metadata_contracts::load_followup;
+
+using bbs_3mf_metadata_contracts::store_followup;
+
+namespace {
+
+void mutate_model_mesh(const std::string &path, int fault)
+{
+    bool changed = false;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "3D/3dmodel.model" || changed)
+            return false;
+        const size_t vertices = data.find("<vertices");
+        const size_t triangles = data.find("<triangles", vertices);
+        const size_t triangles_end = data.find("</triangles>", triangles);
+        REQUIRE(vertices != std::string::npos);
+        REQUIRE(triangles != std::string::npos);
+        REQUIRE(triangles_end != std::string::npos);
+        if (fault == 1) {
+            const size_t x = data.find("x=\"", vertices);
+            REQUIRE(x != std::string::npos);
+            const size_t begin = x + 3;
+            const size_t end = data.find('"', begin);
+            REQUIRE(end != std::string::npos);
+            data.replace(begin, end - begin, "nan");
+        } else {
+            const size_t triangle = data.find("<triangle ", triangles);
+            const size_t v3 = data.find("v3=\"", triangle);
+            REQUIRE(triangle != std::string::npos);
+            REQUIRE(v3 != std::string::npos);
+            const size_t begin = v3 + 4;
+            const size_t end = data.find('"', begin);
+            REQUIRE(end != std::string::npos);
+            data.replace(begin, end - begin, "999");
+        }
+        changed = true;
+        return true;
+    }));
+    REQUIRE(changed);
+}
+
+void mutate_model_settings(const std::string &path, int fault)
+{
+    bool changed = false;
+    REQUIRE(rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+        if (name != "Metadata/model_settings.config" || changed)
+            return false;
+        if (fault == 0) {
+            const size_t object = data.find("<object id=\"");
+            const size_t end = data.find("</object>", object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(end != std::string::npos);
+            const size_t id_begin = object + std::string("<object id=\"").size();
+            const size_t id_end = data.find('"', id_begin);
+            REQUIRE(id_end != std::string::npos);
+            const std::string duplicate = "<object id=\"" + data.substr(id_begin, id_end - id_begin) + "\"/>";
+            data.insert(end + std::string("</object>").size(), duplicate);
+        } else if (fault == 1) {
+            const size_t config = data.find("<config");
+            const size_t config_end = data.find('>', config);
+            REQUIRE(config != std::string::npos);
+            REQUIRE(config_end != std::string::npos);
+            data.insert(config_end + 1, "<part id=\"1\" subtype=\"normal\" first_triangle_id=\"0\" last_triangle_id=\"1\"/>");
+        } else {
+            const size_t object = data.find("<object id=\"");
+            const size_t object_end = data.find('>', object);
+            REQUIRE(object != std::string::npos);
+            REQUIRE(object_end != std::string::npos);
+            data.insert(object_end + 1, "<mesh_stat edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>");
+        }
+        changed = true;
+        return true;
+    }));
+    REQUIRE(changed);
+}
+
+void store_settings_archive(const std::string &path, bool foreign)
+{
+    bbs_model_settings_contracts::store_archive_with_model_settings(path, foreign);
+}
+
+} // namespace
+
+TEST_CASE("BBS rejects native archives with invalid vertex and triangle data",
+          "[3MF][BbsImportContracts][Errors]")
+{
+    const int fault = GENERATE(1, 2);
+    CAPTURE(fault);
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+
+    Model valid_model;
+    BbsLoaded valid;
+    REQUIRE(load_followup(archive.string(), valid_model, valid));
+    REQUIRE(valid_model.objects.size() == 1);
+    REQUIRE(valid_model.mesh().facets_count() > 0);
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    REQUIRE(valid_volume > 0.);
+
+    mutate_model_mesh(archive.string(), fault);
+    Model malformed_model;
+    BbsLoaded malformed;
+    bool loaded = true;
+    REQUIRE_NOTHROW(loaded = load_followup(archive.string(), malformed_model, malformed));
+    CHECK_FALSE(loaded);
+    // load_bbs_3mf may have populated the caller-owned Model before a later guard fails;
+    // this case intentionally claims only false/no-throw, while the valid control proves the
+    // fixture contained real positive-volume geometry before mutation.
+}
+
+TEST_CASE("BBS applies native and foreign model-settings error policy",
+          "[3MF][BbsImportContracts][ModelSettings]")
+{
+    const int fault = GENERATE(0, 1, 2);
+    const bool foreign = GENERATE(false, true);
+    ScopedTemporaryFile archive(".3mf");
+    store_settings_archive(archive.string(), foreign);
+
+    Model valid_model;
+    BbsLoaded valid;
+    REQUIRE(load_followup(archive.string(), valid_model, valid));
+    REQUIRE(valid_model.objects.size() == (foreign ? 2 : 1));
+    for (const ModelObject *object : valid_model.objects) {
+        REQUIRE(object != nullptr);
+        REQUIRE(object->instances.size() == (foreign ? 1 : 2));
+    }
+    const size_t valid_facets = valid_model.mesh().facets_count();
+    const double valid_volume = its_volume(valid_model.mesh().its);
+    const BoundingBoxf3 valid_box = valid_model.mesh().bounding_box();
+    REQUIRE(valid_facets > 0);
+    REQUIRE(valid_volume > 0.);
+    CHECK(valid.is_bbl == !foreign);
+
+    mutate_model_settings(archive.string(), fault);
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool result = true;
+    REQUIRE_NOTHROW(result = load_followup(archive.string(), loaded_model, loaded));
+    if (!foreign) {
+        CHECK_FALSE(result);
+    } else {
+        REQUIRE(result);
+        CHECK_FALSE(loaded.is_bbl);
+        REQUIRE(loaded_model.objects.size() == valid_model.objects.size());
+        for (const ModelObject *object : loaded_model.objects) {
+            REQUIRE(object != nullptr);
+            CHECK(object->instances.size() == 1);
+        }
+        CHECK(loaded_model.mesh().facets_count() == valid_facets);
+        CHECK_THAT(its_volume(loaded_model.mesh().its), Catch::Matchers::WithinAbs(valid_volume, 1e-5));
+        for (int axis = 0; axis < 3; ++axis) {
+            CHECK_THAT(double(loaded_model.mesh().bounding_box().min[axis]), Catch::Matchers::WithinAbs(double(valid_box.min[axis]), 1e-5));
+            CHECK_THAT(double(loaded_model.mesh().bounding_box().max[axis]), Catch::Matchers::WithinAbs(double(valid_box.max[axis]), 1e-5));
+        }
+    }
+}
+
+TEST_CASE("BBS imports all declared plate sidecar thumbnails into the load backup",
+          "[3MF][BbsImportContracts][Sidecars]")
+{
+    const std::array<std::string, 4> expected = {"sidecar-plate", "sidecar-no-light", "sidecar-top", "sidecar-pick"};
+    const std::array<std::string, 4> names = {"plate.png", "no-light.png", "top.png", "pick.png"};
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [&](Model &, DynamicPrintConfig &, PlateData &plate, StoreParams &, ScopedTemporaryDir &backup) {
+        std::array<std::string *, 4> fields = {&plate.thumbnail_file, &plate.no_light_thumbnail_file,
+                                                &plate.top_file, &plate.pick_file};
+        for (size_t i = 0; i < names.size(); ++i) {
+            const std::filesystem::path path = std::filesystem::path(backup.string()) / names[i];
+            std::ofstream output(path, std::ios::binary);
+            REQUIRE(output.good());
+            output << expected[i];
+            output.flush();
+            REQUIRE(output.good());
+            *fields[i] = path.string();
+        }
+    });
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    REQUIRE(load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(loaded.plates.size() == 1);
+    const PlateData *plate = loaded.plates.front();
+    REQUIRE(plate != nullptr);
+    const std::array<std::string, 4> extracted = {plate->thumbnail_file, plate->no_light_thumbnail_file,
+                                                  plate->top_file, plate->pick_file};
+    REQUIRE(loaded.backup != nullptr);
+    const std::array<std::string, 4> archived_names = {
+        "plate_1.png", "plate_no_light_1.png", "top_1.png", "pick_1.png"};
+    for (size_t i = 0; i < extracted.size(); ++i) {
+        const auto expected_path = std::filesystem::path(loaded.backup->string()) / "Metadata" / archived_names[i];
+        REQUIRE_FALSE(extracted[i].empty());
+        CHECK(std::filesystem::path(extracted[i]).lexically_normal() == expected_path.lexically_normal());
+        REQUIRE(std::filesystem::exists(extracted[i]));
+        CHECK(read_file(extracted[i]) == expected[i]);
+    }
+    REQUIRE(loaded_model.objects.size() == 1);
+    CHECK(loaded_model.mesh().facets_count() > 0);
+}
+
+TEST_CASE("BBS SkipModel archives package metadata without serialized model resources",
+          "[3MF][BbsImportContracts][SkipModel]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {},
+                   SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipModel);
+    std::string model_xml;
+    REQUIRE(read_3mf_entry(archive.string(), model_xml, "3D/3dmodel.model"));
+    CHECK(model_xml.find("<resources>") != std::string::npos);
+    CHECK(model_xml.find("</resources>") != std::string::npos);
+    CHECK(model_xml.find("<object ") == std::string::npos);
+    CHECK(model_xml.find("<item ") == std::string::npos);
+    CHECK(read_3mf_entry(archive.string(), model_xml, "Metadata/model_settings.config"));
+}
+
+} // namespace bbs_import_contracts
+
+} // namespace gap_a_formats_3mf
