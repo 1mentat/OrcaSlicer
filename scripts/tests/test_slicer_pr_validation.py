@@ -227,6 +227,16 @@ class ParsingTests(unittest.TestCase):
         parsed = slicer_pr_validation._parser().parse_args([*base, "--test-regex", regex])
         self.assertEqual(parsed.test_regex, regex)
 
+    def test_exclude_test_regex_is_optional_and_preserved_by_parser(self):
+        base = ["--harness-base", "base", "--harness-ref", "ref",
+                "--deps-prefix", "/unused"]
+        self.assertIsNone(
+            slicer_pr_validation._parser().parse_args(base).exclude_test_regex)
+        regex = r"^(first_NOT_BUILT|second_NOT_BUILT)$"
+        parsed = slicer_pr_validation._parser().parse_args(
+            [*base, "--exclude-test-regex", regex])
+        self.assertEqual(parsed.exclude_test_regex, regex)
+
     def test_keep_and_reuse_worktree_options_are_mutually_exclusive(self):
         conflicting_options = (
             ("--keep-worktree", "--reuse-worktree-from-report", "prior-report.json"),
@@ -250,6 +260,18 @@ class ParsingTests(unittest.TestCase):
                 result = slicer_pr_validation.main([
                     "--harness-base", "base", "--harness-ref", "ref",
                     "--deps-prefix", "/unused", "--test-regex", regex,
+                ])
+            self.assertEqual(result, 2)
+            run.assert_not_called()
+
+    def test_empty_exclude_test_regex_fails_before_validation(self):
+        for regex in ("", "   "):
+            with self.subTest(regex=regex), \
+                 mock.patch.object(slicer_pr_validation, "run_validation") as run, \
+                 mock.patch("sys.stderr"):
+                result = slicer_pr_validation.main([
+                    "--harness-base", "base", "--harness-ref", "ref",
+                    "--deps-prefix", "/unused", "--exclude-test-regex", regex,
                 ])
             self.assertEqual(result, 2)
             run.assert_not_called()
@@ -292,6 +314,7 @@ class ParsingTests(unittest.TestCase):
             "NotWorking|RequiresApp")
         self.assertEqual(command[command.index("-LE") + 1], "NotWorking|RequiresApp")
         self.assertNotIn("-R", command)
+        self.assertNotIn("-E", command)
 
     def test_nonfinite_phase_timeout_fails_before_validation(self):
         for timeout in ("nan", "inf"):
@@ -384,6 +407,108 @@ class StatusTests(unittest.TestCase):
     def test_baseline_failure_prevents_overall_pass(self):
         report = {"baseline": {"status": "no_tests"}, "heads": [{"status": "pass"}]}
         self.assertEqual(slicer_pr_validation._overall_status(report), ("no_tests", 2))
+
+    def test_qualified_failed_baseline_keeps_overall_status_nonzero(self):
+        report = {
+            "configuration": {"reference_baseline": False},
+            "baseline": {"status": "test_failed"},
+            "baseline_expectation": {"enabled": True, "status": "qualified"},
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(slicer_pr_validation._overall_status(report), ("test_failed", 2))
+
+    def test_rejected_baseline_expectation_blocks_even_a_passing_raw_baseline(self):
+        report = {
+            "baseline": {"status": "pass"},
+            "baseline_expectation": {"enabled": True, "status": "rejected"},
+            "heads": [{"status": "pass"}],
+        }
+        self.assertEqual(
+            slicer_pr_validation._overall_status(report),
+            ("baseline_expectation_invalid", 2),
+        )
+
+    def test_policy_identity_presence_requires_previously_failed_case_to_execute(self):
+        entry = {
+            "status": "pass",
+            "junit_evidence": {"counts": {"tests": 1}},
+            "junit_case_statuses": {"suite::previous pass": "passed"},
+        }
+        slicer_pr_validation._apply_minimum_test_gate(
+            entry, minimum_tests=1,
+            required_identity_cases={
+                "suite::previous pass": "passed",
+                "suite::previous failure": "failed",
+            })
+        self.assertEqual(entry["missing_baseline_expectation_testcases"],
+                         ["suite::previous failure"])
+        self.assertEqual(entry["status"], "test_evidence_incomplete")
+        self.assertFalse(entry["junit_reference_usable"])
+
+    def test_baseline_failure_comparison_distinguishes_inherited_resolved_and_new(self):
+        known = [f"suite::known {index}" for index in range(3)]
+        reference_statuses = {name: "failed" for name in known}
+        reference_statuses["suite::stable"] = "passed"
+        head_statuses = {
+            known[0]: "failed", known[1]: "passed", known[2]: "passed",
+            "suite::stable": "failed",
+        }
+        reference = {
+            "status": "test_failed", "junit_reference_usable": True,
+            "junit_case_statuses": reference_statuses,
+            "failed_test_names": known,
+        }
+        head = {
+            "number": 17, "reference_base_sha": "base",
+            "status": "test_failed", "junit_reference_usable": True,
+            "missing_baseline_expectation_testcases": [],
+            "junit_case_statuses": head_statuses,
+            "failed_test_names": [known[0], "suite::stable"],
+        }
+        head["failure_classification"] = slicer_pr_validation.classify_failure_names(
+            reference, head)
+        self.assertEqual(head["failure_classification"]["inherited"], [known[0]])
+        self.assertEqual(head["failure_classification"]["resolved"], known[1:])
+        self.assertEqual(head["failure_classification"]["new"], ["suite::stable"])
+        report = {
+            "configuration": {"reference_baseline": True},
+            "baseline_expectation": {"status": "qualified"},
+            "references": {"base": reference},
+            "heads": [head],
+        }
+        comparison = slicer_pr_validation._baseline_expectation_comparison(report)
+        self.assertEqual(comparison["status"], "new_failing_testcases")
+        self.assertEqual(comparison["new_failing_testcases_by_head"],
+                         {"17": ["suite::stable"]})
+
+        head["junit_case_statuses"].pop(known[2])
+        head["missing_baseline_expectation_testcases"] = [known[2]]
+        comparison = slicer_pr_validation._baseline_expectation_comparison(report)
+        self.assertEqual(comparison["status"], "incomplete")
+
+    def test_no_new_failure_comparison_can_still_retain_raw_failures(self):
+        reference = {
+            "status": "test_failed", "junit_reference_usable": True,
+            "junit_case_statuses": {"suite::old": "failed"},
+            "failed_test_names": ["suite::old"],
+        }
+        head = {
+            "number": 2, "reference_base_sha": "base", "status": "test_failed",
+            "junit_reference_usable": True, "missing_baseline_expectation_testcases": [],
+            "junit_case_statuses": {"suite::old": "failed"},
+            "failed_test_names": ["suite::old"],
+        }
+        head["failure_classification"] = slicer_pr_validation.classify_failure_names(
+            reference, head)
+        report = {
+            "configuration": {"reference_baseline": True},
+            "baseline_expectation": {"status": "qualified"},
+            "references": {"base": reference}, "heads": [head],
+        }
+        self.assertEqual(
+            slicer_pr_validation._baseline_expectation_comparison(report)["status"],
+            "no_new_failing_testcases",
+        )
 
     def test_a_failed_head_is_not_a_fully_passing_run(self):
         report = {"baseline": {"status": "pass"}, "heads": [
@@ -709,7 +834,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
     """Exercise the count and identity gates through the real _run_tree path."""
 
     @staticmethod
-    def _args(minimum_tests=1, test_regex=None):
+    def _args(minimum_tests=1, test_regex=None, exclude_test_regex=None):
         return Namespace(
             test_timeout=180.0,
             timeout=30.0,
@@ -719,11 +844,13 @@ class MinimumTestIntegrationTests(unittest.TestCase):
             test_jobs=1,
             exclude_labels="",
             test_regex=test_regex,
+            exclude_test_regex=exclude_test_regex,
             deps_prefix="deps",
             uv="uv",
         )
 
-    def _run_tree(self, *, minimum_tests, names, build_result=None, test_regex=None):
+    def _run_tree(self, *, minimum_tests, names, build_result=None, test_regex=None,
+                  exclude_test_regex=None):
         with tempfile.TemporaryDirectory() as temp:
             root_output = Path(temp) / "output"
             worktree = Path(temp) / "worktree"
@@ -760,7 +887,7 @@ class MinimumTestIntegrationTests(unittest.TestCase):
                                    side_effect=fake_phase):
                 return slicer_pr_validation._run_tree(
                     worktree, root_output, "baseline",
-                    self._args(minimum_tests, test_regex),
+                    self._args(minimum_tests, test_regex, exclude_test_regex),
                     ["cmake", "configure"], ["cmake", "build"],
                     commit_sha="a" * 40, tree_sha="b" * 40,
                 )
@@ -772,6 +899,14 @@ class MinimumTestIntegrationTests(unittest.TestCase):
         self.assertEqual(entry["minimum_tests_observed"], 1)
         argv = entry["commands"]["test"]["argv"]
         self.assertEqual(argv[argv.index("-R") + 1], regex)
+
+    def test_exclude_test_regex_reaches_ctest_literally(self):
+        regex = r"^(unused[0-9]{2}_NOT_BUILT|literal\{name\})$"
+        entry = self._run_tree(
+            minimum_tests=1, names=["Alpha"], exclude_test_regex=regex)
+        argv = entry["commands"]["test"]["argv"]
+        self.assertEqual(argv[argv.index("-E") + 1], regex)
+        self.assertNotIn("-R", argv)
 
     def test_count_floor_is_applied_after_junit_parsing(self):
         entry = self._run_tree(minimum_tests=4, names=["one", "two", "three"])
@@ -993,6 +1128,174 @@ class IdentityManifestTests(unittest.TestCase):
             evidence = slicer_pr_validation.read_junit_evidence(junit)
         self.assertFalse(evidence["usable"])
         self.assertEqual(evidence["duplicate_testcase_identities"], ["suite::same"])
+
+
+class BaselineExpectationManifestTests(unittest.TestCase):
+    @staticmethod
+    def _manifest(statuses=None):
+        return {
+            "schema_version": 1,
+            "harness_ref_sha": "a" * 40,
+            "harness_ref_tree_sha": "b" * 40,
+            "tracked_source_index_sha256": hashlib.sha256(b"tracked src").hexdigest(),
+            "testcase_statuses": statuses or {
+                "suite::ordinary pass": "passed",
+                "suite::ordinary failure": "failed",
+            },
+        }
+
+    def test_manifest_binds_exact_source_and_accepts_generic_status_counts(self):
+        manifest = self._manifest()
+        raw = json.dumps(manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "baseline.json"
+            path.write_text(raw, encoding="utf-8")
+            loaded, digest = slicer_pr_validation._load_baseline_expectation_manifest(path)
+        policy = slicer_pr_validation._validate_baseline_expectation_manifest(
+            loaded, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        self.assertEqual(digest, hashlib.sha256(raw.encode("utf-8")).hexdigest())
+        self.assertEqual(policy["testcase_count"], 2)
+        self.assertEqual(policy["status_counts"], {"failed": 1, "passed": 1})
+
+    def test_manifest_rejects_duplicate_keys_unknown_status_and_extra_fields(self):
+        duplicate = (
+            '{"schema_version":1,"harness_ref_sha":"' + "a" * 40 +
+            '","harness_ref_tree_sha":"' + "b" * 40 +
+            '","tracked_source_index_sha256":"' + hashlib.sha256(b"tracked src").hexdigest() +
+            '","testcase_statuses":{"suite::one":"passed","suite::one":"failed"}}'
+        )
+        invalid_documents = [
+            duplicate,
+            json.dumps(self._manifest({"suite::one": "skipped"})),
+            json.dumps(dict(self._manifest(), unrecognized=True)),
+            json.dumps(self._manifest({"suite::one": "passed"})),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "baseline.json"
+            for index, document in enumerate(invalid_documents):
+                with self.subTest(document=index):
+                    path.write_text(document, encoding="utf-8")
+                    with self.assertRaises(slicer_pr_validation.ValidationError):
+                        slicer_pr_validation._load_baseline_expectation_manifest(path)
+
+    def test_manifest_rejects_stale_commit_or_tree(self):
+        manifest = self._manifest()
+        for ref, tree in (("c" * 40, "b" * 40), ("a" * 40, "d" * 40)):
+            with self.subTest(ref=ref, tree=tree):
+                with self.assertRaisesRegex(slicer_pr_validation.ValidationError, "stale"):
+                    slicer_pr_validation._validate_baseline_expectation_manifest(
+                        manifest, harness_ref=ref, harness_ref_tree_sha=tree)
+
+    @staticmethod
+    def _observed_baseline(statuses):
+        counts = {
+            "tests": len(statuses),
+            "failures": sum(status == "failed" for status in statuses.values()),
+            "errors": 0, "skipped": 0, "timeouts": 0,
+        }
+        return {
+            "status": "test_failed",
+            "commands": {
+                "configure": {"returncode": 0, "timed_out": False},
+                "build": {"returncode": 0, "timed_out": False},
+                "test": {"returncode": 8, "timed_out": False},
+            },
+            "test_timeout_source": None,
+            "junit_exists": True,
+            "junit_evidence": {
+                "usable": True, "errors": [], "duplicate_testcase_identities": [],
+                "counts": counts,
+            },
+            "junit_reference_usable": True,
+            "test_log_evidence_available": True,
+            "test_log_evidence_error": None,
+            "no_test_evidence": False,
+            "junit_timeout_evidence": 0,
+            "skipped_test_evidence": 0,
+            "test_evidence": len(statuses),
+            "ctest_summary": {
+                "tests_failed": counts["failures"], "tests_total": counts["tests"],
+            },
+            "junit_case_statuses": dict(statuses),
+        }
+
+    def test_only_exact_ordinary_test_failed_baseline_qualifies(self):
+        manifest = self._manifest()
+        expectation = slicer_pr_validation._validate_baseline_expectation_manifest(
+            manifest, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        source_hash = expectation["tracked_source_index_sha256"]
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "qualified")
+        self.assertEqual(baseline["status"], "test_failed")
+        self.assertEqual(result["expected_testcase_count"], len(expectation["testcase_statuses"]))
+
+    def test_changed_map_or_nonordinary_evidence_never_qualifies(self):
+        manifest = self._manifest()
+        expectation = slicer_pr_validation._validate_baseline_expectation_manifest(
+            manifest, harness_ref="a" * 40, harness_ref_tree_sha="b" * 40)
+        source_hash = expectation["tracked_source_index_sha256"]
+        changed = self._observed_baseline({
+            "suite::ordinary pass": "failed",
+            "suite::ordinary failure": "passed",
+        })
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            changed, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(result["status_mismatches"])
+
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        baseline["junit_evidence"]["counts"]["errors"] = 1
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after=source_hash)
+        self.assertEqual(result["status"], "rejected")
+
+        baseline = self._observed_baseline(expectation["testcase_statuses"])
+        result = slicer_pr_validation._qualify_baseline_expectation(
+            baseline, expectation=expectation,
+            source_hash_before=source_hash, source_hash_after="0" * 64)
+        self.assertEqual(result["status"], "rejected")
+
+        rejected_baselines = []
+        missing = self._observed_baseline({"suite::ordinary pass": "passed"})
+        rejected_baselines.append(missing)
+        extra = self._observed_baseline({
+            **expectation["testcase_statuses"], "suite::unexpected": "passed",
+        })
+        rejected_baselines.append(extra)
+        duplicate = self._observed_baseline(expectation["testcase_statuses"])
+        duplicate["junit_evidence"]["usable"] = False
+        duplicate["junit_evidence"]["duplicate_testcase_identities"] = ["suite::ordinary pass"]
+        rejected_baselines.append(duplicate)
+        missing_log = self._observed_baseline(expectation["testcase_statuses"])
+        missing_log["test_log_evidence_available"] = False
+        missing_log["test_log_evidence_error"] = "missing test log"
+        rejected_baselines.append(missing_log)
+        skipped = self._observed_baseline(expectation["testcase_statuses"])
+        skipped["junit_evidence"]["counts"]["skipped"] = 1
+        skipped["skipped_test_evidence"] = 1
+        rejected_baselines.append(skipped)
+        timed_out = self._observed_baseline(expectation["testcase_statuses"])
+        timed_out["junit_evidence"]["counts"]["timeouts"] = 1
+        timed_out["junit_timeout_evidence"] = 1
+        timed_out["test_timeout_source"] = "junit_case_timeout"
+        rejected_baselines.append(timed_out)
+        contradictory = self._observed_baseline(expectation["testcase_statuses"])
+        contradictory["ctest_summary"]["tests_failed"] = 0
+        rejected_baselines.append(contradictory)
+        failed_build = self._observed_baseline(expectation["testcase_statuses"])
+        failed_build["commands"]["build"]["returncode"] = 1
+        rejected_baselines.append(failed_build)
+        for rejected in rejected_baselines:
+            with self.subTest(baseline=rejected):
+                result = slicer_pr_validation._qualify_baseline_expectation(
+                    rejected, expectation=expectation,
+                    source_hash_before=source_hash, source_hash_after=source_hash)
+                self.assertEqual(result["status"], "rejected")
 
 
 class IdentityManifestIntegrationTests(unittest.TestCase):
@@ -2030,6 +2333,38 @@ class ProcessCaptureTests(unittest.TestCase):
 
 
 class CleanupTests(unittest.TestCase):
+    @staticmethod
+    def _git_reset_fixture(root):
+        root = root.resolve()
+        repo = root / "original"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (repo / "marker.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                              stdout=subprocess.PIPE, text=True).stdout.strip()
+
+        harness_dir = repo / "tests" / "controls"
+        harness_dir.mkdir(parents=True)
+        (harness_dir / "harness.json").write_text("known harness bytes\n", encoding="utf-8")
+        (harness_dir / "harness-link.json").write_text("link placeholder\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tests"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "harness"], cwd=repo, check=True)
+        harness = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                 stdout=subprocess.PIPE, text=True).stdout.strip()
+
+        worktree = root / "worktree"
+        subprocess.run(["git", "worktree", "add", "--detach", str(worktree), harness],
+                       cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        build = worktree / "build"
+        build.mkdir()
+        (build / "cache-sentinel").write_text("keep\n", encoding="utf-8")
+        return repo, worktree, base, harness
+
     def test_reset_operations_are_recorded_and_do_not_touch_original_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             original = Path(temp) / "original"
@@ -2051,6 +2386,101 @@ class CleanupTests(unittest.TestCase):
             removed = slicer_pr_validation._git(original, "worktree", "remove", "--force", str(worktree))
             self.assertEqual(removed.returncode, 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+
+    def test_real_reset_removes_harness_paths_and_preserves_ignored_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, worktree, base, _ = self._git_reset_fixture(Path(temp))
+            operations = slicer_pr_validation._reset_worktree(
+                worktree, base, preserve_build_dir="build", allowed_staged_paths=())
+            self.assertEqual(len(operations), 1)
+            self.assertEqual(operations[0]["returncode"], 0)
+            self.assertNotIn("path_cleanup_diagnostics", operations[0])
+            self.assertIsNone(slicer_pr_validation._reset_operations_failure(operations))
+            self.assertFalse((worktree / "tests/controls/harness.json").exists())
+            self.assertFalse((worktree / "tests/controls/harness-link.json").exists())
+            self.assertEqual((worktree / "build/cache-sentinel").read_text(encoding="utf-8"),
+                             "keep\n")
+            self.assertEqual(subprocess.run(
+                ["git", "status", "--short", "--untracked-files=all"], cwd=worktree,
+                check=True, stdout=subprocess.PIPE, text=True).stdout, "")
+            removed = slicer_pr_validation._git(
+                repo, "worktree", "remove", "--force", str(worktree))
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def test_reset_unlink_warning_is_actionable_and_never_runs_git_clean(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, worktree, base, _ = self._git_reset_fixture(root)
+            external = root / "external-sentinel"
+            external.write_text("outside stays\n", encoding="utf-8")
+            real_git = slicer_pr_validation._git
+            calls = []
+
+            def simulate_permission_failure(git_repo, *git_args, **git_kwargs):
+                calls.append(git_args)
+                result = real_git(git_repo, *git_args, **git_kwargs)
+                if git_args[:2] == ("reset", "--hard"):
+                    stale = worktree / "tests/controls/harness.json"
+                    stale.parent.mkdir(parents=True, exist_ok=True)
+                    stale.write_text("changed bytes must survive\n", encoding="utf-8")
+                    stale_link = stale.parent / "harness-link.json"
+                    stale_link.symlink_to(external)
+                    (worktree / "unexpected-after-reset.txt").write_text(
+                        "unknown state must survive\n", encoding="utf-8")
+                    return slicer_pr_validation.CommandResult(
+                        ["git", *git_args], result.returncode, result.duration_seconds,
+                        result.stdout,
+                        "warning: unable to unlink old 'tests/controls/harness.json': Permission denied\n"
+                        "warning: unable to unlink old 'tests/controls/harness-link.json': Permission denied\n",
+                    )
+                return result
+
+            try:
+                with mock.patch.object(slicer_pr_validation, "_git",
+                                       side_effect=simulate_permission_failure):
+                    operations = slicer_pr_validation._reset_worktree(worktree, base)
+                failure = slicer_pr_validation._reset_operations_failure(operations)
+                self.assertIn("incomplete path cleanup", failure)
+                self.assertIn("Permission denied", failure)
+                self.assertEqual(len(operations), 1)
+                self.assertEqual(operations[0]["returncode"], 0)
+                self.assertEqual(len(operations[0]["path_cleanup_diagnostics"]), 2)
+                self.assertEqual(calls, [("reset", "--hard", base)])
+                self.assertEqual((worktree / "tests/controls/harness.json").read_text(
+                    encoding="utf-8"), "changed bytes must survive\n")
+                self.assertTrue((worktree / "tests/controls/harness-link.json").is_symlink())
+                self.assertEqual(external.read_text(encoding="utf-8"), "outside stays\n")
+                self.assertTrue((worktree / "unexpected-after-reset.txt").is_file())
+                self.assertEqual((worktree / "build/cache-sentinel").read_text(encoding="utf-8"),
+                                 "keep\n")
+            finally:
+                removed = real_git(repo, "worktree", "remove", "--force", str(worktree))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def test_real_reset_permission_warning_is_recorded_and_keeps_build(self):
+        if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("directory permission denial requires an unprivileged POSIX user")
+        with tempfile.TemporaryDirectory() as temp:
+            repo, worktree, base, _ = self._git_reset_fixture(Path(temp))
+            harness_dir = worktree / "tests/controls"
+            try:
+                harness_dir.chmod(0o555)
+                operations = slicer_pr_validation._reset_worktree(worktree, base)
+                self.assertEqual(len(operations), 1)
+                self.assertEqual(operations[0]["returncode"], 0)
+                self.assertTrue(any("unable to unlink" in item
+                                    for item in operations[0]["path_cleanup_diagnostics"]))
+                self.assertIn("incomplete path cleanup",
+                              slicer_pr_validation._reset_operations_failure(operations))
+                self.assertTrue((harness_dir / "harness.json").is_file())
+                self.assertEqual((harness_dir / "harness.json").read_text(encoding="utf-8"),
+                                 "known harness bytes\n")
+                self.assertTrue((worktree / "build/cache-sentinel").is_file())
+            finally:
+                harness_dir.chmod(0o755)
+                removed = slicer_pr_validation._git(
+                    repo, "worktree", "remove", "--force", str(worktree))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
 
     def test_invalid_commit_ref_is_reported_without_guessing(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2242,6 +2672,20 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         }]), encoding="utf-8")
         return snapshot
 
+    def _write_baseline_expectation_manifest(self, root, repo, harness_ref, statuses):
+        tree = self._git(repo, "rev-parse", f"{harness_ref}^{{tree}}").stdout.strip()
+        source_hash, source_result = slicer_pr_validation._tracked_source_index_hash(repo)
+        self.assertEqual(source_result.returncode, 0)
+        path = root / "baseline-expectation.json"
+        path.write_text(json.dumps({
+            "schema_version": 1,
+            "harness_ref_sha": harness_ref,
+            "harness_ref_tree_sha": tree,
+            "tracked_source_index_sha256": source_hash,
+            "testcase_statuses": statuses,
+        }), encoding="utf-8")
+        return path
+
     def _make_seed_worktree(self, root, repo, ref, *, build_dir="build"):
         worktree = root / "seed" / "repo"
         worktree.parent.mkdir()
@@ -2250,6 +2694,46 @@ class RunValidationOrchestrationTests(unittest.TestCase):
         build.mkdir()
         (build / "cache.marker").write_text("retained build cache\n", encoding="utf-8")
         return worktree.resolve()
+
+    def test_tracked_state_is_independent_of_git_object_abbreviation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _, _, _ = self._fixture(Path(temp))
+            path = repo / "tests/harness.txt"
+            path.write_text("changed harness\n", encoding="utf-8")
+            self._git(repo, "config", "core.abbrev", "8")
+            before = slicer_pr_validation._tracked_worktree_state(repo)
+            self._git(repo, "config", "core.abbrev", "10")
+            self.assertEqual(before, slicer_pr_validation._tracked_worktree_state(repo))
+            path.write_text("different harness\n", encoding="utf-8")
+            after = slicer_pr_validation._tracked_worktree_state(repo)
+            self.assertEqual(before["status"], after["status"])
+            self.assertNotEqual(before["tracked_diff_sha256"], after["tracked_diff_sha256"])
+
+    def test_reuse_accepts_legacy_abbreviated_diff_without_accepting_content_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, harness_ref, _ = self._fixture(root)
+            worktree = self._make_seed_worktree(root, repo, harness_ref)
+            path = worktree / "tests/harness.txt"
+            path.write_text("changed harness\n", encoding="utf-8")
+            self._git(repo, "config", "core.abbrev", "8")
+            expected = slicer_pr_validation._tracked_worktree_state(worktree, build_dir="build")
+            legacy_diff = subprocess.run(
+                ["git", "diff", "--binary", "--abbrev=8", "HEAD", "--"],
+                cwd=worktree, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            expected["tracked_diff_sha256"] = hashlib.sha256(legacy_diff.stdout).hexdigest()
+            previous = {"worktree": {"final_state": expected}}
+            self._git(repo, "config", "core.abbrev", "10")
+            current = slicer_pr_validation._validate_reusable_worktree(
+                repo, worktree, previous, "build", root / "new-output")
+            self.assertEqual(current["index_tree_sha"], expected["index_tree_sha"])
+            path.write_text("different harness\n", encoding="utf-8")
+            changed = slicer_pr_validation._tracked_worktree_state(worktree, build_dir="build")
+            self.assertEqual(changed["status"], expected["status"])
+            with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                        "tracked tree/status differs"):
+                slicer_pr_validation._validate_reusable_worktree(
+                    repo, worktree, previous, "build", root / "other-output")
 
     @staticmethod
     def _fake_native_phases():
@@ -2928,6 +3412,137 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             "failed_test_names": [],
         }
 
+    @staticmethod
+    def _baseline_policy_run(name, statuses, *, status=None):
+        counts = {
+            "tests": len(statuses),
+            "failures": sum(value == "failed" for value in statuses.values()),
+            "errors": 0, "skipped": 0, "timeouts": 0,
+        }
+        actual_status = status or ("test_failed" if counts["failures"] else "pass")
+        return {
+            "name": name,
+            "status": actual_status,
+            "junit_exists": True,
+            "junit_evidence": {
+                "usable": True, "errors": [], "duplicate_testcase_identities": [],
+                "counts": counts,
+            },
+            "junit_reference_usable": actual_status in {"pass", "test_failed"},
+            "junit_case_statuses": dict(statuses),
+            "failed_test_names": sorted(
+                identity for identity, value in statuses.items() if value == "failed"),
+            "test_log_evidence_available": True,
+            "test_log_evidence_error": None,
+            "test_evidence": len(statuses),
+            "ctest_summary": {
+                "tests_failed": counts["failures"], "tests_total": counts["tests"],
+            },
+            "no_test_evidence": False,
+            "junit_timeout_evidence": 0,
+            "skipped_test_evidence": 0,
+            "test_timeout_source": None,
+            "commands": {
+                "configure": {"returncode": 0, "timed_out": False},
+                "build": {"returncode": 0, "timed_out": False},
+                "test": {"returncode": 8 if counts["failures"] else 0,
+                          "timed_out": False},
+            },
+            "minimum_tests_observed": len(statuses),
+            "minimum_tests_ok": True,
+            "missing_baseline_testcases": [],
+        }
+
+    def test_qualified_failed_baseline_runs_exact_comparisons_without_hiding_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            expected = {
+                "suite::baseline pass": "passed",
+                "suite::previous failure": "failed",
+                "suite::previous failure now resolved": "failed",
+            }
+            manifest = self._write_baseline_expectation_manifest(
+                root, repo, harness_ref, expected)
+            args = self._args(repo, snapshot, root / "evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.baseline_expectation_manifest = str(manifest)
+            names = []
+
+            def run_tree(worktree, output, name, _args, _configure, _build, **_kwargs):
+                names.append(name)
+                if name == "baseline":
+                    return self._baseline_policy_run(name, expected)
+                if name == "reference":
+                    reference_statuses = dict(expected)
+                    reference_statuses["suite::new failure"] = "passed"
+                    return self._baseline_policy_run(name, reference_statuses)
+                head_statuses = {
+                    "suite::baseline pass": "passed",
+                    "suite::previous failure": "failed",
+                    "suite::previous failure now resolved": "passed",
+                    "suite::new failure": "failed",
+                }
+                return self._baseline_policy_run(name, head_statuses)
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree", side_effect=run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((Path(args.output_dir) / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(names, ["baseline", "reference", "pr-1"])
+            self.assertEqual(report["baseline"]["status"], "test_failed")
+            self.assertEqual(report["baseline"]["failed_test_names"],
+                             ["suite::previous failure",
+                              "suite::previous failure now resolved"])
+            self.assertEqual(report["baseline_expectation"]["status"], "qualified")
+            self.assertEqual(report["status"], "test_failed")
+            self.assertEqual(report["baseline_failure_comparison"]["status"],
+                             "new_failing_testcases")
+            self.assertEqual(report["baseline_failure_comparison"]["new_failing_testcases_by_head"],
+                             {"1": ["suite::new failure"]})
+            self.assertEqual(report["heads"][0]["failure_classification"]["inherited"],
+                             ["suite::previous failure"])
+            self.assertEqual(report["heads"][0]["failure_classification"]["resolved"],
+                             ["suite::previous failure now resolved"])
+
+    def test_policy_status_map_change_blocks_comparison_and_preserves_raw_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            expected = {
+                "suite::baseline pass": "passed",
+                "suite::previous failure": "failed",
+            }
+            manifest = self._write_baseline_expectation_manifest(
+                root, repo, harness_ref, expected)
+            args = self._args(repo, snapshot, root / "evidence")
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            args.baseline_expectation_manifest = str(manifest)
+            names = []
+
+            def changed_baseline(_worktree, _output, name, _args, _configure, _build, **_kwargs):
+                names.append(name)
+                return self._baseline_policy_run(name, {
+                    "suite::baseline pass": "failed",
+                    "suite::previous failure": "passed",
+                }, status="test_failed")
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=changed_baseline):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((Path(args.output_dir) / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 2)
+            self.assertEqual(names, ["baseline"])
+            self.assertEqual(report["baseline"]["status"], "test_failed")
+            self.assertEqual(report["baseline_expectation"]["status"], "rejected")
+            self.assertTrue(report["baseline_expectation"]["status_mismatches"])
+            self.assertEqual(report["references"], {})
+            self.assertEqual(report["status"], "baseline_expectation_invalid")
+
     def test_no_reference_mode_does_not_run_or_require_reference_entries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2946,6 +3561,45 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             self.assertEqual(report["reference"]["status"], "not_run")
             self.assertEqual([call.args[2] for call in run_tree.call_args_list],
                              ["baseline", "pr-1"])
+
+    def test_configure_defaults_focused_discovery_off_and_preserves_explicit_override(self):
+        for override in (None, "ON"):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo, base, harness_ref, head = self._fixture(root)
+                snapshot = self._write_snapshot(root, head, base)
+                output = root / "evidence"
+                args = self._args(repo, snapshot, output)
+                args.harness_base = base
+                args.harness_ref = harness_ref
+                args.reference_baseline = False
+                args.cmake_arg = ([] if override is None else [
+                    f"-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY={override}",
+                ])
+                captured_configure_args = []
+
+                def capture_configure(_worktree, _output, _name, _args,
+                                      configure_args, _build_args, **_kwargs):
+                    captured_configure_args.append(list(configure_args))
+                    return self._fake_run_tree(
+                        _worktree, _output, _name, _args, configure_args, _build_args,
+                        **_kwargs)
+
+                with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                       side_effect=capture_configure):
+                    self.assertEqual(slicer_pr_validation.run_validation(args), 0)
+                report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+                configure_args = report["commands"]["configure"]
+                focused_args = [arg for arg in configure_args
+                                if arg.startswith("-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=")]
+                self.assertEqual(focused_args,
+                                 ["-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=OFF"]
+                                 if override is None else [
+                                     "-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=OFF",
+                                     "-DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON",
+                                 ])
+                self.assertEqual(captured_configure_args,
+                                 [configure_args, configure_args])
 
     def test_each_snapshot_base_drives_reference_and_is_reported(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -3784,6 +4438,25 @@ class RunValidationOrchestrationTests(unittest.TestCase):
                     self._git(repo, "worktree", "remove", "--force", str(worktree))
                     worktree.parent.rmdir()
 
+    def test_report_records_exclude_test_regex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base, harness_ref, head = self._fixture(root)
+            snapshot = self._write_snapshot(root, head, base)
+            output = root / "evidence"
+            args = self._args(repo, snapshot, output)
+            args.harness_base = base
+            args.harness_ref = harness_ref
+            regex = r"^(libnest2d_tests_NOT_BUILT-b12d07c|slic3rutils_tests_NOT_BUILT-b12d07c)$"
+            args.exclude_test_regex = regex
+
+            with mock.patch.object(slicer_pr_validation, "_run_tree",
+                                   side_effect=self._fake_run_tree):
+                result = slicer_pr_validation.run_validation(args)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 0)
+            self.assertEqual(report["configuration"]["exclude_test_regex"], regex)
+
     def test_default_cleanup_still_removes_worktree_and_build(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3807,6 +4480,7 @@ class RunValidationOrchestrationTests(unittest.TestCase):
             worktree = Path(report["worktree"]["path"])
             self.assertEqual(result, 0)
             self.assertEqual(report["configuration"]["keep_worktree"], False)
+            self.assertIsNone(report["configuration"]["exclude_test_regex"])
             self.assertTrue(report["cleanup"]["removed"])
             self.assertTrue(report["cleanup"]["parent_removed"])
             self.assertFalse(worktree.exists())
@@ -3819,7 +4493,7 @@ class OverlayResolutionTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=repo, check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    def _fixture(self, root):
+    def _fixture(self, root, *, add_add=False):
         repo = root / "repo"
         repo.mkdir()
         self._git(repo, "init", "-q")
@@ -3828,7 +4502,10 @@ class OverlayResolutionTests(unittest.TestCase):
         self._git(repo, "config", "user.name", "Test")
         (repo / "tests").mkdir()
         path = repo / "tests/overlay.txt"
-        path.write_bytes(b"value=base\n")
+        if add_add:
+            (repo / "README.txt").write_text("base without overlay file\n", encoding="utf-8")
+        else:
+            path.write_bytes(b"value=base\n")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "base")
         base = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
@@ -3837,6 +4514,7 @@ class OverlayResolutionTests(unittest.TestCase):
         self._git(repo, "commit", "-qm", "harness")
         harness = self._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
         self._git(repo, "checkout", "-qb", "pr", base)
+        path.parent.mkdir(exist_ok=True)
         path.write_bytes(b"value=pr\n")
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-qm", "pr")
@@ -3857,7 +4535,9 @@ class OverlayResolutionTests(unittest.TestCase):
             mode, blob, stage = left.split()
             self.assertEqual(listed, "tests/overlay.txt")
             stages[stage] = blob
-        self.assertEqual(set(stages), {"1", "2", "3"})
+        self.assertEqual(set(stages), {"2", "3"} if add_add else {"1", "2", "3"})
+        if add_add:
+            stages["1"] = None
         self._git(repo, "reset", "--hard", head)
         manifest_dir = root / "manifest"
         manifest_dir.mkdir()
@@ -3892,6 +4572,51 @@ class OverlayResolutionTests(unittest.TestCase):
             self.assertEqual(result["status"], "resolved")
             self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"value=resolved\n")
             self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout, b"")
+
+    def test_add_add_resolution_pins_absent_base_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(
+                Path(temp), add_add=True)
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertTrue(result["applied"])
+            self.assertEqual(result["status"], "resolved")
+            self.assertEqual((repo / "tests/overlay.txt").read_bytes(), b"value=resolved\n")
+            self.assertEqual(self._git(repo, "diff", "--name-only", "--diff-filter=U").stdout, b"")
+
+    def test_null_stage_cannot_hide_a_present_merge_base(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(Path(temp))
+            raw = json.loads(manifest_path.read_text())
+            raw["resolutions"][0]["paths"][0]["stage_blobs"]["1"] = None
+            manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+            manifest, _ = slicer_pr_validation._load_overlay_resolution_manifest(
+                manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
+            result = slicer_pr_validation._apply_overlay_patch(
+                repo, patch, patch_sha256=patch_sha, base_sha=base, head_sha=head,
+                resolution_manifest=manifest)
+            self.assertFalse(result["applied"])
+            self.assertEqual(result["status"], "overlay_resolution_invalid")
+            self.assertIn("stages mismatch", result["resolution_error"])
+            self.assertIn(b"<<<<<<< ours", (repo / "tests/overlay.txt").read_bytes())
+
+    def test_resolution_requires_both_added_file_stages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, base, harness, head, patch, patch_sha, manifest_path, args = self._fixture(
+                Path(temp), add_add=True)
+            original = manifest_path.read_text()
+            for stage in ("2", "3"):
+                with self.subTest(stage=stage):
+                    raw = json.loads(original)
+                    raw["resolutions"][0]["paths"][0]["stage_blobs"][stage] = None
+                    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaisesRegex(slicer_pr_validation.ValidationError,
+                                                "invalid Git blob ID"):
+                        slicer_pr_validation._load_overlay_resolution_manifest(
+                            manifest_path, patch_sha256=patch_sha, scope="test-only", includes=[])
 
     def test_matching_overlay_with_wrong_head_fails_closed_and_leaves_conflict(self):
         with tempfile.TemporaryDirectory() as temp:
