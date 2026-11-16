@@ -1334,6 +1334,9 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
                                               const std::vector<int>      &filament_map,
                                               const std::vector<std::set<int>>& unprintable_filament_types );
         void apply_config(const PrintConfig& config);
+        // Convert a 1-based filament->extruder map to 0-based extruder ids. Every entry must lie in
+        // [1, MAXIMUM_EXTRUDER_NUMBER]; otherwise the map is rejected with Slic3r::RuntimeError.
+        static std::vector<int> to_zero_based_extruder_map(const std::vector<int>& one_based_map);
         void set_print(Print* print) { m_print = print; }
         // Locates extrusions in the objects and bodies it numbers, those objects listed beforehand.
         void set_mass_locator(MassLocator locator, std::vector<GCodeProcessorResult::ObjectMass> objects)
@@ -1391,6 +1394,8 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
 
     private:
         void register_commands();
+        // Size the per-extruder tables so every extruder id in m_filament_maps is addressable.
+        void cover_mapped_extruders();
         void apply_config(const DynamicPrintConfig& config);
         void apply_config_simplify3d(const std::string& filename);
         void apply_config_superslicer(const std::string& filename);
