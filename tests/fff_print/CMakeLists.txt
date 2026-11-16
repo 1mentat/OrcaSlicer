@@ -240,8 +240,10 @@ endif()
 add_executable(fff_print_wipe_tower_tests EXCLUDE_FROM_ALL
     fff_print_tests.cpp
     test_helpers.cpp
-    test_wipe_tower.cpp)
+    test_wipe_tower.cpp
+    ../libslic3r/test_wipe_tower.cpp)
 target_link_libraries(fff_print_wipe_tower_tests test_common libslic3r Catch2::Catch2WithMain)
+target_include_directories(fff_print_wipe_tower_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET fff_print_wipe_tower_tests PROPERTY FOLDER "tests")
 orcaslicer_copy_test_dlls(fff_print_wipe_tower_tests)
 slicer_enable_llvm_source_coverage(fff_print_wipe_tower_tests)
@@ -318,6 +320,7 @@ add_executable(fff_print_composite_focused_tests EXCLUDE_FROM_ALL
     test_gcode_motion_settings.cpp
     test_wipe.cpp
     test_wipe_tower.cpp
+    ../libslic3r/test_wipe_tower.cpp
     test_interlocking.cpp
     test_fill.cpp
     ../libslic3r/test_arachne_walls.cpp
