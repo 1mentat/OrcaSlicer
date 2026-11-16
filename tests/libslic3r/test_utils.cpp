@@ -1022,6 +1022,24 @@ TEST_CASE("Published model links accept the canonical site roots over http and h
     CHECK_FALSE(is_thingiverse_link("https://makerworld.com"));
 }
 
+namespace utils_contracts {
+TEST_CASE("Published model links accept only their canonical URL forms", "[Utils][UtilsContracts]")
+{
+    CHECK(is_printables_link("https://printables.com"));
+    CHECK(is_printables_link("HTTP://PRINTABLES.COM"));
+    CHECK_FALSE(is_printables_link("https://printables.com/model/1"));
+    CHECK(is_makerworld_link("https://makerworld.com"));
+    // Adapted: the source asserted CHECK_FALSE(is_makerworld_link("https://makerworld.com/model/1")) when only the bare
+    // site root matched. Main (85b3335002, Utils.hpp:323-335) classifies the HTTP(S) origin and accepts resource paths;
+    // alternate hosts stay rejected (see "MakerWorld links reject alternate authorities and malformed HTTP origins").
+    // Every other assertion is the source's, unchanged.
+    CHECK(is_makerworld_link("https://makerworld.com/model/1"));
+    CHECK(is_thingiverse_link("https://www.thingiverse.com"));
+    CHECK_FALSE(is_thingiverse_link("https://thingiverse.com"));
+}
+} // namespace utils_contracts
+
+
 TEST_CASE("is_printables_link matches the dot in its host name literally", "[utils]") {
     CHECK_FALSE(is_printables_link("https://printablesXcom"));
 }
