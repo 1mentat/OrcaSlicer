@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "Preset difference reporting, selected parent resolution, and reset file ownership through public collections.",
+  "mutants": [
+    {
+      "id": "preset-dirty-options-deep-flag-inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "std::vector<std::string> PresetCollection::dirty_options(const Preset *edited, const Preset *reference, const bool deep_compare /*= false*/)\n{\n    std::vector<std::string> changed;\n    if (edited != nullptr && reference != nullptr) {\n        // Only compares options existing in both configs.\n        changed = deep_compare ?\n                deep_diff(edited->config, reference->config) :\n                reference->config.diff(edited->config);",
+      "new": "std::vector<std::string> PresetCollection::dirty_options(const Preset *edited, const Preset *reference, const bool deep_compare /*= false*/)\n{\n    std::vector<std::string> changed;\n    if (edited != nullptr && reference != nullptr) {\n        // Only compares options existing in both configs.\n        changed = !deep_compare ?\n                deep_diff(edited->config, reference->config) :\n                reference->config.diff(edited->config);",
+      "expected_matches": 1,
+      "test_filter": "PresetDiff",
+      "ordinary_assertion_only": true,
+      "description": "Swap the public deep_compare dispatch. The paired per-index deep and whole-option shallow literals must distinguish the two public modes."
+    },
+    {
+      "id": "preset-deep-diff-new-index-guard-inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (is_new_index) {",
+      "new": "if (!is_new_index) {",
+      "expected_matches": 1,
+      "test_filter": "PresetDeepDiff",
+      "ordinary_assertion_only": true,
+      "description": "Suppress reporting of a grown vector index. The nullable growth row requires the new #2 entry while retaining a shallow whole-option control."
+    },
+    {
+      "id": "preset-selected-parent-always-null",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "return (preset == nullptr/* || preset->is_default || preset->is_external*/) ? nullptr : preset;",
+      "new": "return nullptr;",
+      "expected_matches": 1,
+      "test_filter": "PresetParent",
+      "ordinary_assertion_only": true,
+      "description": "Drop the resolved inherited parent. The child-parent pointer identity and name assertions must fail."
+    },
+    {
+      "id": "preset-reset-gate-inverted",
+      "path": "src/libslic3r/Preset.cpp",
+      "old": "if (m_presets.size() > m_num_default_presets) {",
+      "new": "if (m_presets.size() < m_num_default_presets) {",
+      "expected_matches": 1,
+      "test_filter": "PresetReset",
+      "ordinary_assertion_only": true,
+      "description": "Skip reset when a user preset is present. The public size, selected-default, and removed-preset assertions must fail."
+    }
+  ]
+}
