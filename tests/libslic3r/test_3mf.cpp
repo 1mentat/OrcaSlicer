@@ -7624,7 +7624,8 @@ struct MakerMetadata
 // Stores a minimal archive carrying the MakerLab fields and two custom metadata entries and
 // returns the model-level metadata the importer reads back; also checks that the serialized
 // model is well-formed XML with exactly one metadata element per key.
-std::map<std::string, std::string> round_trip(const MakerMetadata& values, int cycles = 1)
+std::map<std::string, std::string> round_trip(const MakerMetadata& values, int cycles = 1,
+                                              std::vector<std::string>* maker_lab_elements = nullptr)
 {
     REQUIRE(cycles > 0);
     ScopedTemporaryDir backup("orca_bbs_maker_metadata_store");
@@ -7659,6 +7660,15 @@ std::map<std::string, std::string> round_trip(const MakerMetadata& values, int c
         std::stringstream input(model_xml);
         boost::property_tree::ptree tree;
         REQUIRE_NOTHROW(boost::property_tree::read_xml(input, tree));
+        if (maker_lab_elements) {
+            // The serialized bytes of the MakerLab element, before any XML parser decodes them.
+            const std::string open_tag = "<metadata name=\"MakerLab\">";
+            const size_t begin = model_xml.find(open_tag);
+            REQUIRE(begin != std::string::npos);
+            const size_t end = model_xml.find("</metadata>", begin);
+            REQUIRE(end != std::string::npos);
+            maker_lab_elements->push_back(model_xml.substr(begin, end - begin));
+        }
         std::map<std::string, int> element_count;
         for (const auto& node : tree.get_child("model"))
             if (node.first == "metadata")
@@ -7736,6 +7746,37 @@ TEST_CASE("BBS metadata preserves mixed quote characters and literal quote entit
             CHECK(found->second == entry.second);
         }
     }
+}
+
+TEST_CASE("BBS metadata keeps literal amp and lt text in MakerLab and custom keys across saves", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    // Literal entity text and markup in the Maker fields and in the MakerWorkflow/MakerRevision
+    // custom keys (md_name/md_value on the first save, seeded metadata_items afterwards).
+    const MakerMetadata values{"Maker &amp; <Lab> &lt;x&gt;", "v &amp;amp; <1>", "flow &amp; &lt; literal <b>",
+                               "rev &lt;7&gt; &amp;"};
+    for (int cycles : {1, 2, 3}) {
+        CAPTURE(cycles);
+        const auto metadata = round_trip(values, cycles);
+        for (const auto &entry : std::map<std::string, std::string>{
+                 {"MakerLab", values.maker_name}, {"MakerLabVersion", values.maker_version},
+                 {"MakerWorkflow", values.workflow}, {"MakerRevision", values.revision}}) {
+            INFO(entry.first);
+            const auto found = metadata.find(entry.first);
+            REQUIRE(found != metadata.end());
+            CHECK(found->second == entry.second);
+        }
+    }
+}
+
+TEST_CASE("BBS MakerLab element text is byte-identical between a fresh save and a re-save", "[3MF][Bbs3mfMakerLabMetadata]")
+{
+    const MakerMetadata values{"Maker \"double\" &quot; 'single' &apos; &amp; <Lab>", "version &amp; 'one'", "flow", "rev"};
+    std::vector<std::string> elements;
+    round_trip(values, 3, &elements);
+    REQUIRE(elements.size() == 3);
+    // Cycle 1 writes from mk_name; cycles 2 and 3 write the seeded imported value.
+    CHECK(elements[1] == elements[0]);
+    CHECK(elements[2] == elements[0]);
 }
 
 } // namespace bbs_maker_metadata_contracts
