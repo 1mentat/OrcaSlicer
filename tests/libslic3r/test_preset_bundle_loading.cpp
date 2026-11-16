@@ -12061,7 +12061,7 @@ TEST_CASE("AMS map merges record all project slots pointing at one physical tray
 
 namespace preset_ams_sync_contracts {
 
-TEST_CASE("AMS empty input preserves existing project names and colors", "[PresetBundleLoading][PresetAmsEmptyInput]")
+TEST_CASE("AMS empty input preserves existing project names and colors", "[PresetBundleLoading][PresetAmsEmptyInput][Preset][PresetBundleAmsVariance]")
 {
     PresetBundle bundle;
     project_slots(bundle, {"Existing"}, {"#ABCDEF"});
