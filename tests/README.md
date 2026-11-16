@@ -117,7 +117,7 @@ A direct Catch2 binary exits with 42 (`TestFailureExitCode` in `catch2/src/catch
 
 `tests/settings_coverage.json` is the evidence map for `scripts/settings_inventory.py`. The script derives every registered option from `PrintConfigDef` in `src/libslic3r/PrintConfig.cpp`; an option without an entry is reported `uncovered`. An entry names a `test` file, a `tag` that must appear in that file, and the `dimensions` it exercises: `enum_values`, `boolean_values`, `boundary_values`, `representative_values`, `nullable_behavior`, `pipeline_oracle`, `interaction_matrix`, `fixture_only` (and `schema_roundtrip` for registry-wide serialization evidence).
 
-The option's type determines which dimensions are required (for example `boundary_values` and `pipeline_oracle` for numeric options). An entry that lacks one is reported `declared_partial` with the missing dimensions. The `reason` states what the named test asserts and what it does not claim. An entry may add `auxiliary_tests` (`test` and `tag` pairs) when several cases together provide the evidence. The report is static: it shows that a named test exists, not that it passed.
+The option's type determines which dimensions are required (for example `boundary_values` and `pipeline_oracle` for bounded numeric options; numeric scalars with no registered min/max need `representative_values` instead, while numeric vectors keep `boundary_values`). An entry that lacks one is reported `declared_partial` with the missing dimensions. The `reason` states what the named test asserts and what it does not claim. An entry may add `auxiliary_tests` (`test` and `tag` pairs) when several cases together provide the evidence. The report is static: it shows that a named test exists, not that it passed.
 
 Rules for editing it:
 
