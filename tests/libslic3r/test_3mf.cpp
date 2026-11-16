@@ -9886,6 +9886,19 @@ struct LoadedProject
     ~LoadedProject();
 };
 
+void release_presets(std::vector<Preset*>& presets)
+{
+    for (Preset *preset : presets)
+        delete preset;
+    presets.clear();
+}
+
+LoadedProject::~LoadedProject()
+{
+    release_PlateData_list(plates);
+    release_presets(presets);
+}
+
 void make_model(Model& model, bool two_objects = false, bool assembly = false)
 {
     ModelObject *base = model.add_object();
