@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Sequential spiral-vase public export mutations for rising motion, smoothing, and flow transitions.",
+  "mutants": [
+    {
+      "id": "spiral-sequential-filter-disabled",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in)->LayerResult {\n            if (in.nop_layer_result)\n                return in;\n            spiral_mode.enable(in.spiral_vase_enable);",
+      "new": "        [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in)->LayerResult {\n            if (in.nop_layer_result)\n                return in;\n            spiral_mode.enable(false);",
+      "test_filter": "SpiralSequential",
+      "description": "Disabling the sequential spiral filter removes the required rising-Z deposition witness and must fail the public sequential export case."
+    },
+    {
+      "id": "spiral-sequential-smoothing-reset",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (m_spiral_vase) {\n        float nozzle_diameter  = EXTRUDER_CONFIG(nozzle_diameter);\n        float max_xy_smoothing = m_config.get_abs_value(\"spiral_mode_max_xy_smoothing\", nozzle_diameter);\n        this->m_spiral_vase->set_max_xy_smoothing(max_xy_smoothing);\n    }\n    const auto spiral_mode = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,\n        [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in)->LayerResult {",
+      "new": "    if (m_spiral_vase) {\n        float nozzle_diameter  = EXTRUDER_CONFIG(nozzle_diameter);\n        float max_xy_smoothing = m_config.get_abs_value(\"spiral_mode_max_xy_smoothing\", nozzle_diameter);\n        max_xy_smoothing = 0.f; // mutation: discard configured sequential smoothing\n        this->m_spiral_vase->set_max_xy_smoothing(max_xy_smoothing);\n    }\n    const auto spiral_mode = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,\n        [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in)->LayerResult {",
+      "test_filter": "SpiralSequential",
+      "description": "Resetting the sequential-only smoothing limit to zero must break equivalence with the by-layer 1000% smoothing reference and remove the measured difference from the sequential zero-smoothing control."
+    }
+  ]
+}

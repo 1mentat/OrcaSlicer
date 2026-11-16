@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Small perimeter speed resolves absolute and percent values and honors threshold disabling.",
+  "mutants": [
+    {
+      "id": "gc-small-perimeter-percent-resolution-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "            small_peri_speed = NOZZLE_CONFIG(small_perimeter_speed).get_abs_value(NOZZLE_CONFIG(outer_wall_speed));",
+      "new": "            small_peri_speed = NOZZLE_CONFIG(small_perimeter_speed).value;",
+      "description": "The percent row must resolve 35% against the configured 50 mm/s outer-wall speed. Reading the raw value emits 35 mm/s and fails the independent parsed feed oracle; the absolute row remains a retained control.",
+      "test_filter": "SmallPerimeterSpeed"
+    },
+    {
+      "id": "gc-small-perimeter-threshold-gate-ignored",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    if (speed == -1 && loop.length() <= SMALL_PERIMETER_LENGTH(NOZZLE_CONFIG(small_perimeter_threshold))) {",
+      "new": "    if (speed == -1) {",
+      "description": "The zero-threshold control must retain ordinary outer-wall speed. Removing the loop-length/threshold predicate applies the 15 mm/s small speed despite small_perimeter_threshold=0 and fails the control row.",
+      "test_filter": "SmallPerimeterSpeed"
+    }
+  ]
+}

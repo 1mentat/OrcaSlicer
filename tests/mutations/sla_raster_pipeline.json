@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Public SL1 archive rasterization preserves stepped layer masks and physical geometry.",
+  "mutants": [
+    {
+      "id": "sla-raster-draw-skipped",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "            raster.draw(poly);",
+      "new": "            (void) poly;",
+      "test_filter": "^SLARasterPipeline$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Skip drawing every transformed slice while retaining the raster callback and archive lifecycle. The stepped model area and mask assertions must fail as an ordinary physical-output assertion."
+    },
+    {
+      "id": "sla-raster-wrong-layer-index",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        PrintLayer& printlayer = m_print->m_printer_input[idx];",
+      "new": "        PrintLayer& printlayer = m_print->m_printer_input[0];",
+      "test_filter": "^SLARasterPipeline$",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "description": "Use the first transformed print layer for every raster callback. The two lower masks may remain equal, but the required upper 16 mm2 / distinct-mask layer must fail as an ordinary assertion."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Bounded SLA feature mutants checked by hollowing, pad, and manual-support geometry contracts.",
+  "mutants": [
+    {
+      "id": "sla-features-disable-hollowing",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "if (! po.m_config.hollowing_enable.getBool())",
+      "new": "if (po.m_config.hollowing_enable.getBool())",
+      "description": "Reverse the hollowing feature guard so an enabled hollowing configuration skips generation.",
+      "test_filter": "SLAFeatures"
+    },
+    {
+      "id": "sla-features-disable-pad",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "if(po.m_config.pad_enable.getBool())",
+      "new": "if(!po.m_config.pad_enable.getBool())",
+      "description": "Reverse the pad feature guard so an enabled pad configuration takes the removal path.",
+      "test_filter": "SLAFeatures"
+    },
+    {
+      "id": "sla-features-disable-supports",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "if(!po.m_config.supports_enable.getBool()) return;",
+      "new": "if(po.m_config.supports_enable.getBool()) return;",
+      "description": "Reverse the support-point guard so enabled manual support points are ignored.",
+      "test_filter": "SLAFeatures"
+    }
+  ]
+}

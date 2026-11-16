@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "sla-pad-wall-thickness-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    pcfg.wall_thickness_mm = c.pad_wall_thickness.getFloat();",
+      "new": "    pcfg.wall_thickness_mm = c.pad_wall_height.getFloat();",
+      "description": "Use pad wall height instead of the registered pad wall thickness. The three public pipeline rows require z-span = wall_height + configured wall_thickness and therefore distinguish the mapping.",
+      "test_filter": "SLAPadThicknessVariance",
+      "expected_oracle": "SLA pad wall thickness controls pad height"
+    },
+    {
+      "id": "sla-pad-brim-size-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    pcfg.brim_size_mm = c.pad_brim_size.getFloat();",
+      "new": "    pcfg.brim_size_mm = c.pad_wall_height.getFloat();",
+      "description": "Use pad wall height instead of the registered pad brim size. The three public pipeline rows require strictly increasing X/Y pad footprints as the configured brim grows.",
+      "test_filter": "SLAPadBrimVariance",
+      "expected_oracle": "SLA pad brim size expands the pad footprint"
+    }
+  ]
+}
