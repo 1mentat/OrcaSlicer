@@ -90,10 +90,10 @@ bytes. Promoted data still expires; promotion does not create a permanent archiv
 The validation upload action checks actual selected bytes before upload and
 requires finite retention. It records work-item, checkout SHA, owner, expiry and
 size in the CI summary without changing artifact names or download layout.
-GitHub-hosted jobs use provider disposal for local scratch. Self-hosted uploads
-require a managed payload; they cannot assume a runner will discard its disk.
-The action never skips its preflight, so a self-hosted job without an artifact
-manager context cannot call it: such jobs use `actions/upload-artifact`
+GitHub-hosted jobs use provider disposal for local scratch. Uploads through the
+action from a self-hosted runner require a managed payload; they cannot assume a
+runner will discard its disk. The action never skips its preflight, so a
+self-hosted job without an artifact manager context cannot call it: such jobs use `actions/upload-artifact`
 directly, guarded by `runner.environment`, and apply the same retention. On
 hosted runners where git cannot read the checkout (containers, a checkout
 below the workspace root), the receipt records the `source-sha` input instead.
