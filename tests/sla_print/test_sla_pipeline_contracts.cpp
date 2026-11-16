@@ -2100,9 +2100,65 @@ HollowRun run_hollowing_config(DynamicPrintConfig config,
     return result;
 }
 
+HollowRun run_hollowing(double min_thickness)
+{
+    DynamicPrintConfig config = sla_config(1.0);
+    config.set_key_value("hollowing_enable", new ConfigOptionBool(true));
+    config.set_key_value("hollowing_min_thickness", new ConfigOptionFloat(min_thickness));
+    config.set_key_value("hollowing_quality", new ConfigOptionFloat(0.2));
+    config.set_key_value("hollowing_closing_distance", new ConfigOptionFloat(0.25));
+
+    SlaCubeFixture fixture(std::move(config), make_cube(20.0, 20.0, 10.0));
+    REQUIRE(fixture.apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    REQUIRE(fixture.model.objects.size() == 1);
+    const ModelObject *source = fixture.model.objects.front();
+    REQUIRE(source != nullptr);
+    REQUIRE(std::abs(static_cast<double>(source->raw_mesh().volume())) > 0.);
+    INFO("hollowing validation: " << fixture.print.validate().string);
+    REQUIRE(fixture.print.validate().string.empty());
+
+    PrintBase::TaskParams task;
+    task.to_object_step = slaposHollowing;
+    fixture.print.set_task(task);
+    fixture.print.process();
+
+    REQUIRE(fixture.print.objects().size() == 1);
+    const SLAPrintObject *object = fixture.print.objects().front();
+    REQUIRE(object != nullptr);
+    REQUIRE(object->is_step_done(slaposHollowing));
+    // Compare in the same public print-object coordinate frame.
+    const auto source_bbox = object->transformed_mesh().bounding_box();
+    REQUIRE(source_bbox.defined);
+    const indexed_triangle_set &interior = object->hollowed_interior_mesh();
+    REQUIRE_FALSE(interior.empty());
+
+    TriangleMesh interior_mesh(interior);
+    const auto bbox = interior_mesh.bounding_box();
+    const double bounds_tolerance = 0.05;
+    CHECK(bbox.min.x() >= source_bbox.min.x() - bounds_tolerance);
+    CHECK(bbox.max.x() <= source_bbox.max.x() + bounds_tolerance);
+    CHECK(bbox.min.y() >= source_bbox.min.y() - bounds_tolerance);
+    CHECK(bbox.max.y() <= source_bbox.max.y() + bounds_tolerance);
+    CHECK(bbox.min.z() >= source_bbox.min.z() - bounds_tolerance);
+    CHECK(bbox.max.z() <= source_bbox.max.z() + bounds_tolerance);
+    HollowRun result;
+    result.volume = std::abs(static_cast<double>(interior_mesh.volume()));
+    result.width = bbox.max.x() - bbox.min.x();
+    result.depth = bbox.max.y() - bbox.min.y();
+    REQUIRE(std::isfinite(result.volume));
+    REQUIRE(std::isfinite(result.width));
+    REQUIRE(std::isfinite(result.depth));
+    REQUIRE(result.volume > 0.);
+    REQUIRE(result.width > 0.);
+    REQUIRE(result.depth > 0.);
+    return result;
+}
+
+// Source-branch overload (used by the ported hollowing cases): permissive about an empty interior and
+// reports vertex data. Main's one-argument run_hollowing above keeps its original oracle unchanged.
 HollowRun run_hollowing(double min_thickness,
-                        double quality = 0.2,
-                        double closing_distance = 0.25,
+                        double quality,
+                        double closing_distance,
                         TriangleMesh mesh = {},
                         double expected_sphere_radius = 0.)
 {
@@ -2613,6 +2669,96 @@ struct RasterRun
 };
 
 RasterRun run_raster_export(ExportProfile profile = {})
+{
+    DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
+    config.set_key_value("material_print_speed", new ConfigOptionEnum<SLAMaterialSpeed>(profile.material_speed));
+    config.set_key_value("sla_material_settings_id", new ConfigOptionString(profile.material_name));
+    config.set_key_value("printer_model", new ConfigOptionString(profile.printer_model));
+    config.set_key_value("printer_variant", new ConfigOptionString(profile.printer_variant));
+    config.set_key_value("printer_settings_id", new ConfigOptionString(profile.printer_profile));
+    config.set_key_value("sla_print_settings_id", new ConfigOptionString(profile.print_profile));
+    config.set_key_value("layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("initial_layer_height", new ConfigOptionFloat(1.0));
+    config.set_key_value("display_width", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_height", new ConfigOptionFloat(32.0));
+    config.set_key_value("display_pixels_x", new ConfigOptionInt(128));
+    config.set_key_value("display_pixels_y", new ConfigOptionInt(128));
+    config.set_key_value("display_orientation",
+                         new ConfigOptionEnum<SLADisplayOrientation>(sladoLandscape));
+    config.set_key_value("display_mirror_x", new ConfigOptionBool(false));
+    config.set_key_value("display_mirror_y", new ConfigOptionBool(false));
+    config.set_key_value("gamma_correction", new ConfigOptionFloat(0.0));
+
+    // SLAPrint::apply supplies the pinned display configuration to this default
+    // archive through SLAArchive::apply; no second printer-config copy is needed.
+    SL1Archive archive;
+    SLAPrint print;
+    // The archive is attached before apply so the public rasterize step is enabled
+    // by the same lifecycle used by BackgroundSlicingProcess.
+    print.set_printer(&archive);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    REQUIRE(object != nullptr);
+    // make_cube() uses vertices from (0,0,0) to (size_x,size_y,size_z);
+    // the explicit upper-volume translation therefore keeps both tier centers
+    // at (4,4) while placing the union inside the 32 mm raster bed.
+    object->add_volume(make_cube(8.0, 8.0, 2.0));
+    TriangleMesh upper = make_cube(4.0, 4.0, 2.0);
+    upper.translate(Vec3f(2.f, 2.f, 1.99f));
+    object->add_volume(std::move(upper));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    const auto apply_status = print.apply(model, std::move(config));
+    REQUIRE(apply_status != SLAPrint::APPLY_STATUS_UNCHANGED);
+    INFO("SLA raster validation: " << print.validate().string);
+    REQUIRE(print.validate().string.empty());
+
+    print.process();
+    REQUIRE(print.finished());
+    // minZ=0, maxZ=3.99, and 1 mm initial/layer heights produce the public
+    // slice centers 0.5, 1.5, and 2.5; the next center is above maxZ.
+    REQUIRE(print.print_layers().size() == 3);
+    for (std::size_t i = 1; i < print.print_layers().size(); ++i)
+        REQUIRE(print.print_layers()[i - 1].level() < print.print_layers()[i].level());
+
+    const auto transformed_box = print.objects().front()->transformed_mesh().bounding_box();
+    CHECK_THAT(transformed_box.min.x(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.y(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.min.z(), Catch::Matchers::WithinAbs(0.0, 1e-5));
+    CHECK_THAT(transformed_box.max.x(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.y(), Catch::Matchers::WithinAbs(8.0, 1e-5));
+    CHECK_THAT(transformed_box.max.z(), Catch::Matchers::WithinAbs(3.99, 1e-4));
+
+    ScopedTemporaryFile output(".sl1");
+    archive.export_print(output.string(), print, "raster-contract");
+
+    ArchiveReader reader(output.string());
+    REQUIRE(reader.is_open());
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "config.ini", nullptr, 0) >= 0);
+    REQUIRE(mz_zip_reader_locate_file(&reader.archive.arch, "prusaslicer.ini", nullptr, 0) >= 0);
+
+    RasterRun result;
+    const auto config_ini = read_entry(reader, "config.ini");
+    result.config_ini.assign(reinterpret_cast<const char *>(config_ini.data()), config_ini.size());
+    result.levels.reserve(print.print_layers().size());
+    result.layers.reserve(print.print_layers().size());
+    for (const auto &layer : print.print_layers())
+        result.levels.push_back(layer.level());
+
+    constexpr std::size_t pixels = 128;
+    constexpr double pixel_mm = 32.0 / double(pixels);
+    for (std::size_t i = 0; i < result.levels.size(); ++i) {
+        const std::string name = string_printf("raster-contract%.5d.png", int(i));
+        result.layers.emplace_back(summarize_png(read_entry(reader, name), pixels, pixel_mm));
+    }
+    return result;
+}
+
+// Source-branch variant: also imports the exported SLA archive so its stored profile can be checked.
+// Main's run_raster_export above is unchanged for its existing callers.
+RasterRun run_raster_export_with_archive_import(ExportProfile profile = {})
 {
     DynamicPrintConfig config = sla_correction_variance_contracts::correction_config();
     config.set_key_value("material_print_speed", new ConfigOptionEnum<SLAMaterialSpeed>(profile.material_speed));
@@ -3821,11 +3967,11 @@ TEST_CASE("SLA SL1 archive preserves material metadata through public config imp
     };
 
     const sla_raster_active_contracts::ExportProfile defaults;
-    check_imported_metadata(sla_raster_active_contracts::run_raster_export(defaults), defaults);
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(defaults), defaults);
 
     auto density_minimum = defaults;
     density_minimum.material_density = 0.0;
-    check_imported_metadata(sla_raster_active_contracts::run_raster_export(density_minimum),
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(density_minimum),
                             density_minimum);
 
     auto representative = defaults;
@@ -3833,7 +3979,7 @@ TEST_CASE("SLA SL1 archive preserves material metadata through public config imp
     representative.material_colour = "#1673C9";
     representative.material_type = "ToughFlex 93";
     representative.material_vendor = "Résine 雪";
-    check_imported_metadata(sla_raster_active_contracts::run_raster_export(representative),
+    check_imported_metadata(sla_raster_active_contracts::run_raster_export_with_archive_import(representative),
                             representative);
 }
 
