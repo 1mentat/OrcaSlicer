@@ -1678,7 +1678,7 @@ TEST_CASE("datum plane: offset + tilt resolution and sketching on it", "[CadDocu
     REQUIRE(only_plane.bodies.empty());
 }
 
-TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][datum]")
+TEST_CASE("CadDocument tangent datum touches a cylinder with an outward normal and turns counter-clockwise with its angle", "[CadDocument][CadDocumentDatumPlaneAdvanced][datum]")
 {
     CadDocument doc;
     const int sketch = doc.add_sketch(SketchShape::Circle, SketchPlane::XY(),
@@ -6102,7 +6102,7 @@ TEST_CASE("thicken surface fills the corners of a closed-loop wall", "[CadDocume
     }
 }
 
-TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][surface]")
+TEST_CASE("Thickening a flat sheet grows along its normal, or against it when flipped", "[CadDocument][CadDocumentThickenSurface][surface]")
 {
     auto make_plate = [](bool flip) {
         CadDocument d;
