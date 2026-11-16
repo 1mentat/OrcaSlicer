@@ -139,7 +139,7 @@ void make_box(CadDocument& doc, int& sketch, int& extrude)
 
 } // namespace cad_feature_editing
 
-TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument]")
+TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument][CadDocumentReplacement]")
 {
     CadDocument doc;
     int sketch = -1, extrude = -1;
@@ -2811,7 +2811,7 @@ TEST_CASE("CadDocument import features replay into independent bodies", "[CadDoc
     REQUIRE(body_triangle_counts[1] == doc.display_body_meshes[1].its.indices.size());
 }
 
-TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step]")
+TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step][CadDocumentStepExport]")
 {
     const int scenario = GENERATE(0, 1, 2);
     CAPTURE(scenario);
@@ -9986,7 +9986,7 @@ constexpr double legacy_height = 4.0;
 constexpr double legacy_depth = 0.3;
 
 TEST_CASE("Saved legacy external threads retain crests outside the reference cylinder",
-          "[CadDocument][thread]")
+          "[CadDocument][thread][CadLegacyThread]")
 {
     CadDocument source;
     const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
@@ -10018,7 +10018,7 @@ TEST_CASE("Saved legacy external threads retain crests outside the reference cyl
 }
 
 TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
-          "[CadDocument][thread]")
+          "[CadDocument][thread][CadLegacyThread]")
 {
     constexpr double stock_radius = 6.0;
     CadDocument source;
@@ -10060,7 +10060,7 @@ TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groov
 
 } // namespace cad_legacy_thread_contracts
 
-TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean]")
+TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean][CadDocumentBooleanIntersect]")
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
@@ -10099,7 +10099,7 @@ TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[
     CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
 }
 
-TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean]")
+TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean][CadDocumentBooleanIntersect]")
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
@@ -10132,7 +10132,7 @@ TEST_CASE("CadDocument extrude intersection clips the active body to the tool", 
     CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
 }
 
-TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean][CadDocumentSweepBoolean]")
 {
     const std::vector<BooleanMode> modes = {
         BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
@@ -10202,7 +10202,7 @@ TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume"
     }
 }
 
-TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean][CadDocumentLoftBoolean]")
 {
     const std::vector<BooleanMode> modes = {
         BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
