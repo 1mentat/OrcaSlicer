@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Sequential height boundaries and belt-brim/spiral incompatibility through public Print validation.",
+  "mutants": [
+    {
+      "id": "sequential-print-height-equality-rejected",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (height < inst->print_object->max_z())",
+      "new": "if (height <= inst->print_object->max_z())",
+      "description": "Changing the strict over-height boundary to inclusive must make the exact rod and lid equality controls fail; below/above rows preserve the expected geometry oracle.",
+      "test_filter": "PrintValidationSequentialHeight",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "belt-brim-spiral-conflict-not-rejected",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (m_config.spiral_mode.value)",
+      "new": "if (false)",
+      "description": "Removing the spiral-mode guard must allow only the belt-brim plus spiral-on matrix cell that the test requires to be rejected; the other three cells remain controls.",
+      "test_filter": "PrintValidationBeltBrimSpiral",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

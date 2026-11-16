@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public cache-processing flow and object-step contracts with a recomputation control.",
+  "mutants": [
+    {
+      "id": "print-process-cache-guard-forced",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    if (!use_cache) {\n        // Fire the SlicingPipeline hook for `obj` iff it just (re)computed `pstep` this pass.",
+      "new": "    if (true) {\n        // Fire the SlicingPipeline hook for `obj` iff it just (re)computed `pstep` this pass.",
+      "description": "Force normal slicing despite a loaded cache. The calibrated positive path flow must survive only when cache processing is requested.",
+      "test_filter": "PrintCacheProcess"
+    },
+    {
+      "id": "print-process-cache-pos-ironing-incomplete",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "                if (obj->set_started(posIroning))\n                    obj->set_done(posIroning);\n                if (obj->set_started(posContouring))",
+      "new": "                if (obj->set_started(posIroning))\n                    (void)0;\n                if (obj->set_started(posContouring))",
+      "description": "Leave cached ironing state started but unfinished. The cache-processing contract requires this step to be complete.",
+      "test_filter": "PrintCacheProcess"
+    }
+  ]
+}

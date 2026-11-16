@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "test_filter": "PrintValidationPublicBoundary",
+  "description": "Public Print validation rejects incompatible spiral copies and prime-tower layering and warns when support enforcers are inactive.",
+  "mutants": [
+    {
+      "id": "print-validation-spiral-copy-threshold-raised",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)",
+      "new": "if (total_copies_count > 2 && m_config.print_sequence != PrintSequence::ByObject)",
+      "test_filter": "PrintValidationPublicBoundary",
+      "description": "Two spiral-vase copies in by-layer sequence must be rejected; the one-copy control remains valid."
+    },
+    {
+      "id": "print-validation-prime-tower-layer-mismatch-tolerance-widened",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON",
+      "new": "std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > 1.",
+      "test_filter": "PrintValidationPublicBoundary",
+      "description": "A two-object prime-tower print must reject a 0.1 mm per-object layer-height mismatch and preserve the equal-height positive control."
+    },
+    {
+      "id": "print-validation-unused-support-enforcer-guard-inverted",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (! object->has_support()) {",
+      "new": "if (object->has_support()) {",
+      "test_filter": "PrintValidationPublicBoundary",
+      "description": "An unused support-enforcer volume warns when support is disabled, while enabling support suppresses the warning; a blocker never warns."
+    }
+  ]
+}

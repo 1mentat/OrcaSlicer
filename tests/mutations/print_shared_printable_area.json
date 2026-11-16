@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Public Print geometry contracts for per-extruder printable regions, their unprintable complements, and shared reachable area.",
+  "mutants": [
+    {
+      "id": "print-shared-area-single-nozzle-fallback-gate",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "    if (m_config.nozzle_diameter.size() < 2 || extruder_printable_areas.empty())",
+      "new": "    if (m_config.nozzle_diameter.size() < 1 || extruder_printable_areas.empty())",
+      "description": "Changing the single-nozzle fallback threshold makes a one-nozzle print with one custom area return that area instead of the configured full printable bed; the dedicated single-nozzle geometry row rejects the changed bounds and area.",
+      "test_filter": "PrintSharedPrintableArea"
+    },
+    {
+      "id": "print-shared-area-union-replaces-intersection",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "        shared_printable_polys = intersection(shared_printable_polys, Polygons{Polygon::new_scale(extruder_printable_areas[i])});",
+      "new": "        shared_printable_polys = union_(shared_printable_polys, Polygons{Polygon::new_scale(extruder_printable_areas[i])});",
+      "description": "Replacing the common reachable region intersection with a union expands the two-overlapping-rectangle shared area from the analytic 20..80 mm overlap to the full 0..100 mm union; the independent bounds and area oracle rejects it.",
+      "test_filter": "PrintSharedPrintableArea"
+    }
+  ]
+}

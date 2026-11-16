@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "The public PressureEqualizer contract checks both values of extrusion_rate_smoothing_external_perimeter_only on external and internal tagged flow transitions, while preserving emitted extrusion, XY path, and endpoint geometry in absolute and relative E modes.",
+  "mutants": [
+    {
+      "id": "pressure-equalizer-external-only-setting-forced-true",
+      "path": "src/libslic3r/GCode/PressureEqualizer.cpp",
+      "old": "m_extrusion_rate_smoothing_external_perimeter_only = bool(config.extrusion_rate_smoothing_external_perimeter_only.value);",
+      "new": "m_extrusion_rate_smoothing_external_perimeter_only = true;",
+      "expected_matches": 1,
+      "test_filter": "Pressure smoothing honors the external-only setting for tagged roles",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "description": "Force the consumer to external-only behavior even when the public setting is false. The false-setting internal-perimeter row must fail the ordinary smoothed-transition assertions."
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "Three exact-anchor semantic mutations for Print preflight validation contracts.",
+  "case_filters": [
+    "By-object validation rejects objects inside the bed keep-out area",
+    "Layered validation honors bed and clumping keep-out areas",
+    "Estimated prime tower validation distinguishes safe, model, bed, and clumping footprints",
+    "Belt purge tower validation distinguishes By-object, By-layer, and disabled settings"
+  ],
+  "mutants": [
+    {
+      "id": "print-validation-bed-exclusion-intersection-bypassed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (!intersection(exclude_polys, convex_hull_no_offset).empty()) {",
+      "new": "if (false && !intersection(exclude_polys, convex_hull_no_offset).empty()) {",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "By-object validation rejects objects inside the bed keep-out area",
+      "description": "Bypass the By-object bed-exclusion intersection; the test must fail through the ordinary error type, exact message, and instance-identity assertions."
+    },
+    {
+      "id": "print-validation-disabled-wrapping-still-blocks-layered-object",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "if (print_config.enable_wrapping_detection.value && !intersection(wrapping_poly, volume_hull).empty()) {",
+      "new": "if (!intersection(wrapping_poly, volume_hull).empty()) {",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Layered validation honors bed and clumping keep-out areas",
+      "description": "Ignore enable_wrapping_detection in the layered keep-out check; the explicitly disabled wrapping control must be rejected by ordinary clean-result assertions."
+    },
+    {
+      "id": "print-validation-belt-purge-sequence-guard-reversed",
+      "path": "src/libslic3r/Print.cpp",
+      "old": "m_config.enable_belt_purge_tower.value\n        && m_config.print_sequence == PrintSequence::ByObject\n        && extruders.size() > 1",
+      "new": "m_config.enable_belt_purge_tower.value\n        && m_config.print_sequence != PrintSequence::ByObject\n        && extruders.size() > 1",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "Belt purge tower validation distinguishes By-object, By-layer, and disabled settings",
+      "description": "Reverse the By-object purge-warning sequence guard; the By-layer enabled/disabled controls must distinguish the unexpected warning using ordinary assertions."
+    }
+  ]
+}
