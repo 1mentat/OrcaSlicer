@@ -1,9 +1,10 @@
 # NEVER MERGE. One-shot, read-only diagnostic for the Flatpak system runtime update failure
 # ("Failed to update org.gnome.Sdk: Invalid cross-device link") seen on ubuntu-24.04 hosted runners.
 # Work item: flatpak-sdk-exdev-diag-20261116. It checks nothing out and builds nothing: it records
-# filesystem and overlay metadata, then runs only the exact `flatpak update` operations that
-# flatpak-builder runs against the system installation (see flatpak-builder src/builder-manifest.c
-# builder_manifest_update_single_dep), with verbose output and bounded time/output.
+# filesystem and overlay metadata, then runs only the exact operation flatpak-builder runs against
+# the system installation (src/builder-manifest.c builder_manifest_update_single_dep):
+# `flatpak --system update --subpath= -y --noninteractive org.gnome.Sdk/x86_64/50`, plus -v for
+# diagnostics, with bounded time and output. The related-ref updates happen inside that transaction.
 name: Flatpak SDK update diagnostic
 
 on:
@@ -37,6 +38,7 @@ jobs:
       - name: Record identities and filesystem layout (read-only)
         shell: bash
         run: |
+          set +e +o pipefail
           set -u
           echo "work item: flatpak-sdk-exdev-diag-20261116"
           echo "workflow ref: ${GITHUB_REF} sha: ${GITHUB_SHA} run: ${GITHUB_RUN_ID} attempt: ${GITHUB_RUN_ATTEMPT}"
@@ -74,29 +76,20 @@ jobs:
             printf '%s=' "$p"; cat "/sys/module/overlay/parameters/$p" 2>&1 | head -1
           done
 
-      - name: Run the bound Flatpak runtime update operations (bounded)
+      - name: Run the bound Flatpak system SDK update (bounded)
+        if: ${{ !cancelled() }}
         timeout-minutes: 10
         shell: bash
         run: |
-          set -u -o pipefail
-          fail=0
-          refs=(
-            "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08"
-            "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08-extra"
-            "runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra"
-            "runtime/org.gnome.Sdk.Locale/x86_64/50"
-            "runtime/org.gnome.Sdk/x86_64/50"
-          )
-          for ref in "${refs[@]}"; do
-            echo "=== flatpak update --subpath= -y --noninteractive --verbose $ref"
-            log="$(mktemp)"
-            timeout --kill-after=10 120 flatpak update --subpath= -y --noninteractive --verbose "$ref" >"$log" 2>&1
-            rc=$?
-            tail -c 358400 "$log"
-            echo "=== exit status for $ref: $rc"
-            rm -f "$log"
-            if [ "$rc" -ne 0 ]; then fail=1; fi
-          done
-          echo "--- system runtimes after the update attempts"
+          set +e +o pipefail
+          set -u
+          echo "=== flatpak --system update --subpath= -y --noninteractive -v org.gnome.Sdk/x86_64/50"
+          log="$(mktemp)"
+          timeout --kill-after=15 480 flatpak --system update --subpath= -y --noninteractive -v org.gnome.Sdk/x86_64/50 >"$log" 2>&1
+          rc=$?
+          tail -c 1572864 "$log"
+          echo "=== exit status: $rc (124 = timeout)"
+          rm -f "$log"
+          echo "--- system runtimes after the update attempt"
           flatpak list --system --runtime -d --columns=ref,origin,installation 2>&1 | head -40
-          exit "$fail"
+          exit "$rc"
