@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Bounded semantic probes for the bridge/infill boundary batch. Run only through scripts/slicer_mutation.py; no native run has been performed by this preparation task.",
+  "mutants": [
+    {
+      "id": "bridge-density-ignored",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "old": "params.density = layerm->region().config().bridge_density.get_abs_value(1.0);",
+      "new": "params.density = 1.0;",
+      "description": "Ignore the configured external bridge density; the registered 10% and 125% rows must not retain their endpoint geometry/volume contracts.",
+      "test_filter": "BridgeInfillBoundary"
+    },
+    {
+      "id": "bridge-flow-fixed-to-nominal",
+      "path": "src/libslic3r/LayerRegion.cpp",
+      "old": "    const double                      bridge_flow_ratio = region_config.bridge_flow;",
+      "new": "    const double                      bridge_flow_ratio = 1.0;",
+      "description": "Ignore the configured external bridge flow; the 0.5, 1.0 and 2.0 physical outputs must no longer separate.",
+      "test_filter": "BridgeInfillBoundary"
+    },
+    {
+      "id": "internal-bridge-flow-fixed-to-nominal",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "        _mm3_per_mm *= m_config.internal_bridge_flow;",
+      "new": "        _mm3_per_mm *= 1.0;",
+      "description": "Ignore the internal bridge flow multiplier; the emitted E ratio must no longer reach the configured 1.35 and 2.0 values.",
+      "test_filter": "BridgeInfillBoundary"
+    },
+    {
+      "id": "locked-zag-depth-ignored",
+      "path": "src/libslic3r/Fill/FillRectilinear.cpp",
+      "old": "    double    overlap_threshold = params.infill_lock_depth;",
+      "new": "    double    overlap_threshold = 0.0;",
+      "description": "Ignore the locked-zag overlap depth; the 0.8 and 100 mm rows must no longer increase the measured locked-fill geometry.",
+      "test_filter": "BridgeInfillBoundary"
+    }
+  ]
+}

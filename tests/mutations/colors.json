@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Bounded ColorUtils mutants for validating deterministic color-distance, clustering, and nearest-center contracts.",
+  "mutants": [
+    {
+      "id": "colorutils-squared-distance-blue-term",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "return dr * dr + dg * dg + db * db;",
+      "new": "return dr * dr + dg * dg - db * db;",
+      "description": "Drop the blue-channel contribution from the documented squared RGB metric.",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "colorutils-kmeans-empty-guard",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "if (k == 0 || colors.empty())",
+      "new": "if (k == 0 && colors.empty())",
+      "description": "Allow a non-empty input with zero requested clusters to enter k-means instead of returning an empty result.",
+      "test_filter": "ColorUtils"
+    },
+    {
+      "id": "colorutils-nearest-color-comparator",
+      "path": "src/libslic3r/TextureToColor/ColorUtils.cpp",
+      "old": "double dist = calc_rgb_color_difference_by_ciede2000(colors[i], color);\n        if (dist < min_dist) {",
+      "new": "double dist = calc_rgb_color_difference_by_ciede2000(colors[i], color);\n        if (dist > min_dist) {",
+      "description": "Reverse nearest-color selection so exact and nearby centers no longer receive their closest IDs.",
+      "test_filter": "ColorUtils"
+    }
+  ]
+}

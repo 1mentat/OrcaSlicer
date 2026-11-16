@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "description": "Color conversion, arithmetic, and picking checksum contracts.",
+  "mutants": [
+    {
+      "id": "color-rgb-constructor-red-channel-clamp",
+      "path": "src/libslic3r/Color.cpp",
+      "old": ": m_data({ std::clamp(r, 0.0f, 1.0f), std::clamp(g, 0.0f, 1.0f), std::clamp(b, 0.0f, 1.0f) })",
+      "new": ": m_data({ std::clamp(r, 0.0f, 0.5f), std::clamp(g, 0.0f, 1.0f), std::clamp(b, 0.0f, 1.0f) })",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-rgba-constructor-alpha-clamp",
+      "path": "src/libslic3r/Color.cpp",
+      "old": ": m_data({ std::clamp(r, 0.0f, 1.0f), std::clamp(g, 0.0f, 1.0f), std::clamp(b, 0.0f, 1.0f), std::clamp(a, 0.0f, 1.0f) })",
+      "new": ": m_data({ std::clamp(r, 0.0f, 1.0f), std::clamp(g, 0.0f, 1.0f), std::clamp(b, 0.0f, 1.0f), std::clamp(a, 0.0f, 0.5f) })",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-rgb-addition-upper-bound",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "ColorRGB ColorRGB::operator + (const ColorRGB& other) const\n{\n\tColorRGB ret;\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tret.m_data[i] = std::clamp(m_data[i] + other.m_data[i], 0.0f, 1.0f);\n\t}\n\treturn ret;\n}",
+      "new": "ColorRGB ColorRGB::operator + (const ColorRGB& other) const\n{\n\tColorRGB ret;\n\tfor (size_t i = 0; i < 3; ++i) {\n\t\tret.m_data[i] = std::clamp(m_data[i] + other.m_data[i], 0.0f, 0.5f);\n\t}\n\treturn ret;\n}",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-rgba-multiply-preserves-alpha",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "\tret.m_data[3] = this->m_data[3];",
+      "new": "\tret.m_data[3] = value * this->m_data[3];",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-complementary-preserves-alpha",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "return { 1.0f - color.r(), 1.0f - color.g(), 1.0f - color.b(), color.a() };",
+      "new": "return { 1.0f - color.r(), 1.0f - color.g(), 1.0f - color.b(), 1.0f - color.a() };",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-saturation-scales-hsv-saturation",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "\ts = std::clamp(s * factor, 0.0f, 1.0f);",
+      "new": "\ts = std::clamp(s + factor, 0.0f, 1.0f);",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-opposite-hue-offset",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "\th += 65.0f; // 65 instead 60 to avoid circle values",
+      "new": "\th += 60.0f; // 65 instead 60 to avoid circle values",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-rgb-hex-byte-decoding",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "            for (unsigned int i = 0; i < 3; ++i) {\n                const int digit1 = hex_digit_to_int(*c++);\n                const int digit2 = hex_digit_to_int(*c++);\n                if (digit1 != -1 && digit2 != -1)\n                    color_out.set(i, float(digit1 * 16 + digit2) * INV_255);\n            }",
+      "new": "            for (unsigned int i = 0; i < 3; ++i) {\n                const int digit1 = hex_digit_to_int(*c++);\n                const int digit2 = hex_digit_to_int(*c++);\n                if (digit1 != -1 && digit2 != -1)\n                    color_out.set(i, float(digit1 + digit2) * INV_255);\n            }",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-hex-encoding-blue-channel",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "\t::sprintf(buffer, \"#%02X%02X%02X\", color.r_uchar(), color.g_uchar(), color.b_uchar());",
+      "new": "\t::sprintf(buffer, \"#%02X%02X%02X\", color.r_uchar(), color.g_uchar(), color.g_uchar());",
+      "test_filter": "Color"
+    },
+    {
+      "id": "color-picking-checksum-final-xor",
+      "path": "src/libslic3r/Color.cpp",
+      "old": "\tb ^= 0x55;",
+      "new": "\tb ^= 0xAA;",
+      "test_filter": "Color"
+    }
+  ]
+}

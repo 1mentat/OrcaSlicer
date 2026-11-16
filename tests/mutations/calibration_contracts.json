@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "description": "CalibPressureAdvance assertion-only mutation audit; extents mutation targets the public print_extents path.",
+  "mutants": [
+    {
+      "id": "pa-min-speed-floor",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    const double general_suggested_min_speed   = 100.0;",
+      "new": "    const double general_suggested_min_speed   = 80.0;",
+      "description": "The calibration speed floor must remain 100 mm/s when the configured volumetric limit permits it.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "line-long-constant",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    double line_long     = 40.0 + std::min(bed_width - 120.0, 0.0);",
+      "new": "    double line_long = 30.0 + std::min(bed_width - 120.0, 0.0);",
+      "description": "The public extents must reserve the documented long segment length and narrow it only for beds below 120 mm.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "extents-box-width",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    double box_width     = m_draw_numbers ? (number_spacing() * 8) : 0.0;",
+      "new": "    double box_width     = m_draw_numbers ? (number_spacing() * 7) : 0.0;",
+      "description": "The reported extents must include all eight calibration-number columns when number drawing is enabled.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "line-pressure-step",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "        gcode << writer.set_pressure_advance(start_pa + i * step_pa);",
+      "new": "        gcode << writer.set_pressure_advance(start_pa);",
+      "description": "Each generated PA line must receive its requested stepped value.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "pattern-pressure-step",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "            gcode << m_writer->set_pressure_advance(m_params.start + (j * m_params.step));",
+      "new": "            gcode << m_writer->set_pressure_advance(m_params.start);",
+      "description": "Each PA pattern slot must emit the corresponding stepped pressure-advance value.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "pattern-flow-speed",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    double speed = speed_perimeter();",
+      "new": "    double speed = speed_first_layer();",
+      "description": "The pattern flow label is derived from the configured perimeter speed used by its pattern walls.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "draw-number-branch",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    if (m_draw_numbers) {",
+      "new": "    if (!m_draw_numbers) {",
+      "description": "The line generator must add the number annotation box only when drawing is enabled.",
+      "test_filter": "CalibrationContracts"
+    },
+    {
+      "id": "bbl-machine-flag",
+      "path": "src/libslic3r/calib.cpp",
+      "old": "    m_writer->set_is_bbl_machine(is_bbl_machine);",
+      "new": "    m_writer->set_is_bbl_machine(false);",
+      "description": "The public BBL switch must reach the writer so it emits BBL pressure-advance syntax.",
+      "test_filter": "CalibrationContracts"
+    }
+  ]
+}

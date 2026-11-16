@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "description": "Physical material matching and measured color recipe contracts.",
+  "mutants": [
+    {
+      "id": "recipe-hex-seven-character-boundary-rejected",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (hex.size() < 7 || hex[0] != '#')",
+      "new": "if (hex.size() <= 7 || hex[0] != '#')",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-physical-exact-color-selection-reversed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (color_decompose_rgb_to_hex(cand_rgb) == target_hex)",
+      "new": "if (color_decompose_rgb_to_hex(cand_rgb) != target_hex)",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-single-preferred-candidate-fallback-removed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (candidates.size() < 2)\n        candidates = physical_filaments;",
+      "new": "if (candidates.size() < 1)\n        candidates = physical_filaments;",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-standard-mode-filter-reversed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (entry.mode != mode)",
+      "new": "if (entry.mode == mode)",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-standard-material-filter-reversed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (require_material_match && !material_matches(entry.material, preferred_material_type))",
+      "new": "if (require_material_match && material_matches(entry.material, preferred_material_type))",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-measured-component-count-boundary-rejected",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (component_hexes.size() < 2 || component_hexes.size() != ratios.size())",
+      "new": "if (component_hexes.size() <= 2 || component_hexes.size() != ratios.size())",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-measured-ratio-normalization-direction-reversed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (sum > 0 && sum != 100)",
+      "new": "if (sum > 0 && sum == 100)",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-measured-minimum-ratio-boundary-rejected",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (r < 20 || r > 80) { out_of_range = true; break; }",
+      "new": "if (r <= 20 || r > 80) { out_of_range = true; break; }",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-two-component-interpolation-axis-swapped",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "const double x = static_cast<double>(in_ratios[0]);",
+      "new": "const double x = static_cast<double>(in_ratios[1]);",
+      "test_filter": "ColorDecomposeRecipe"
+    },
+    {
+      "id": "recipe-measured-source-acceptance-reversed",
+      "path": "src/libslic3r/ColorDecomposeRecipe.cpp",
+      "old": "if (entry.source != \"measured\" && entry.source != \"interpolated\")",
+      "new": "if (entry.source == \"measured\" || entry.source == \"interpolated\")",
+      "test_filter": "ColorDecomposeRecipe"
+    }
+  ]
+}
