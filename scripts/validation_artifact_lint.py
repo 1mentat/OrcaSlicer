@@ -456,6 +456,14 @@ def _lint_upload_action(repo_root: Path, action_path: Path, retention_days: int,
     return findings
 
 
+def _is_upload_wrapper(uses: object) -> bool:
+    """Recognize the local wrapper by path, wherever its checkout is mounted."""
+    if not isinstance(uses, str) or not uses.startswith("."):
+        return False  # Remote actions (owner/repo@ref) are never the local wrapper.
+    parts = [part for part in uses.split("/") if part not in ("", ".")]
+    return parts[-3:] == [".github", "actions", "validation-upload"]
+
+
 def _lint_wrapper_callers(repo_root: Path, workflow_paths: list[Path], retention_default: int,
                           max_bytes: int) -> list[str]:
     findings = []
@@ -475,7 +483,7 @@ def _lint_wrapper_callers(repo_root: Path, workflow_paths: list[Path], retention
             if not isinstance(steps, list):
                 continue
             for number, step in enumerate(steps, 1):
-                if not isinstance(step, dict) or step.get("uses") != "./.github/actions/validation-upload":
+                if not isinstance(step, dict) or not _is_upload_wrapper(step.get("uses")):
                     continue
                 location = f"{workflow}: job '{job_id}' wrapper step {number}"
                 if step.get("continue-on-error") not in (None, False):

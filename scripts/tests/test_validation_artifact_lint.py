@@ -401,6 +401,29 @@ class ValidationArtifactLintTests(unittest.TestCase):
             self.assertTrue(any("retention-days must be 1..30" in item for item in findings))
             self.assertTrue(any("max-bytes must be 1..4294967296" in item for item in findings))
 
+    def test_prefixed_wrapper_paths_are_checked_like_the_plain_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflows, _, _ = self._registry_repo(root)
+            document = yaml.safe_load(workflows[0].read_text(encoding="utf-8"))
+            step = document["jobs"]["caller"]["steps"][0]
+            for uses in ("./slicer/.github/actions/validation-upload", "./upload-tooling/.github/actions/validation-upload"):
+                step["uses"] = uses
+                step.pop("continue-on-error", None)
+                workflows[0].write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+                self.assertEqual(lint_producer_registry(root, workflows), [], uses)
+                step["continue-on-error"] = True
+                step["with"]["retention-days"] = 31
+                workflows[0].write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+                findings = lint_producer_registry(root, workflows)
+                self.assertTrue(any("cannot ignore validation preflight failures" in item for item in findings), uses)
+                self.assertTrue(any("retention-days must be 1..30" in item for item in findings), uses)
+                step["with"]["retention-days"] = 30
+            # An unrelated action whose path merely resembles the wrapper is not checked.
+            step["uses"] = "./.github/actions/validation-upload-other"
+            workflows[0].write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+            self.assertEqual(lint_producer_registry(root, workflows), [])
+
 
 if __name__ == "__main__":
     unittest.main()
