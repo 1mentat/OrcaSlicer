@@ -42,13 +42,15 @@ class FocusedTargetInventoryTests(unittest.TestCase):
         self.assertIn("in inventory, not CMake: ghost_tests", problems)
 
     def harness(self, inventory, help_text, cache=None, make=(), pre=(), clock=None,
-                deadline=3300, link=None):
+                deadline=3300, link=None, setup=None):
         """Run build() against a temp tree; `make` names get an exe when 'built'."""
         calls = []
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         tests = Path(directory) / "tests" / "x"
         tests.mkdir(parents=True)
+        if setup:
+            setup(tests)
         for name in pre:
             (tests / name).write_bytes(b"")
         if cache is not None:
@@ -119,6 +121,33 @@ class FocusedTargetInventoryTests(unittest.TestCase):
         self.assertIn("pre-existing output", text)
         self.assertTrue((tests / "a_tests").exists())
         self.assertFalse(any("--target" in c[0] and c[0][-1] != "help" for c in calls[1:]))
+
+    def test_empty_configure_time_object_dirs_are_normal(self):
+        def before(tests):
+            (tests / "CMakeFiles" / "a_tests.dir" / "Release").mkdir(parents=True)
+        code, text, _, tests = self.harness({"a_tests": None}, "a_tests: phony\n",
+                                            make=("a_tests",), setup=before)
+        self.assertEqual(code, 0, text)
+        self.assertIn("built=1", text)
+        self.assertFalse((tests / "CMakeFiles" / "a_tests.dir").exists())
+
+    def test_regular_file_in_object_dir_is_pre_existing(self):
+        def before(tests):
+            objects = tests / "CMakeFiles" / "a_tests.dir" / "Release"
+            objects.mkdir(parents=True)
+            (objects / "a.o").write_bytes(b"x")
+        code, text, _, tests = self.harness({"a_tests": None}, "a_tests: phony\n",
+                                            make=("a_tests",), setup=before)
+        self.assertEqual(code, 1)
+        self.assertIn("pre-existing output", text)
+        self.assertTrue((tests / "CMakeFiles" / "a_tests.dir" / "Release" / "a.o").exists())
+
+    def test_runner_oserror_fails_target_not_traceback(self):
+        with mock.patch.object(focused_targets.slicer_process, "run_captured",
+                               side_effect=PermissionError("denied")):
+            code, text = focused_targets._run(["nope"], 5)
+        self.assertEqual(code, 127)
+        self.assertIn("denied", text)
 
     def test_symlinked_executable_is_failed_without_smoke_or_delete(self):
         with tempfile.TemporaryDirectory() as outside:

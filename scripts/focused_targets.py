@@ -99,6 +99,9 @@ def _run(cmd, timeout, tail=TAIL_BYTES):
                     cmd, timeout=timeout, output_file=handle).returncode
             except subprocess.TimeoutExpired:
                 code = 124
+            except OSError as error:  # e.g. missing exec permission
+                code = 127
+                handle.write(("cannot run: %s\n" % error).encode())
         with open(log, "rb") as handle:
             if tail is not None:
                 handle.seek(max(0, log.stat().st_size - tail))
@@ -162,8 +165,11 @@ def build(build_dir, config, jobs, target_timeout, smoke_timeout, deadline=3300)
             else:
                 fail(name, "required target not configured")
             continue
-        objects = tests.rglob("CMakeFiles/%s.dir" % name)
-        if any(True for _ in tests.rglob(name)) or any(True for _ in objects):
+        # CMake creates empty CMakeFiles/<name>.dir/<config> directories at
+        # configure time; only an executable or a regular file counts as output.
+        if any(True for _ in tests.rglob(name)) or any(
+                p.is_symlink() or p.is_file()
+                for d in tests.rglob("CMakeFiles/%s.dir" % name) for p in d.rglob("*")):
             fail(name, "pre-existing output; nothing deleted")
             continue
         start = time.monotonic()
