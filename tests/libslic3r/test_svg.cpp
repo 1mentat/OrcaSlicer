@@ -294,7 +294,7 @@ TEST_CASE("SVG writes line arrows, text, legends and comments", "[SVG]")
     CHECK(text(comments.front()) == "metadata");
 }
 
-TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG]")
+TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG][SVGExportContracts]")
 {
     ScopedTemporaryDir directory("orca-svg-open");
     const boost::filesystem::path nested_output = directory.path() / "nested" / "output.svg";
@@ -325,7 +325,7 @@ TEST_CASE("SVG creates nested output paths and reports an unopenable destination
     CHECK_FALSE(unopenable_with_bbox.is_opened());
 }
 
-TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG]")
+TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG][SVGExportContracts]")
 {
     const Surface top(stTop, square(1., 1., 8., 8.));
     const Surface holed(stInternal, square_with_hole());
@@ -362,7 +362,7 @@ TEST_CASE("SVG surface value and pointer collections preserve filled and outline
     CHECK(outlines == expected_outlines);
 }
 
-TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG]")
+TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG][SVGExportContracts]")
 {
     // Zero margin and no Y flip: SVG coordinates are millimetres * 10.
     const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
@@ -422,7 +422,7 @@ TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinate
     check_coordinates(attr(paths[4], "d"), {30., 15., 40., 15.});
 }
 
-TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG]")
+TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG][SVGExportContracts]")
 {
     const ExPolygons with_hole{square_with_hole()};
     const ExPolygons plain{square(20., 2., 28., 10.)};
