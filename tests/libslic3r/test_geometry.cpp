@@ -1828,6 +1828,36 @@ TEST_CASE("Transformation skew reset removes shear while keeping offset and volu
     CHECK_THAT(transform.get_matrix().linear().determinant(), WithinAbs(24., 1e-9));
 }
 
+TEST_CASE("Transformation resets preserve offset and the selected geometric components",
+          "[Geometry][Transformation][TransformContract]")
+{
+    const double angle = 0.37;
+    Matrix3d rotation;
+    rotation << std::cos(angle), -std::sin(angle), 0.,
+                std::sin(angle),  std::cos(angle), 0.,
+                0.,               0.,              1.;
+    const Vec3d scale(4., 3., 2.);
+    const Vec3d offset(-8., 6., 11.);
+    Transform3d matrix = Transform3d::Identity();
+    matrix.linear() = rotation * scale.asDiagonal();
+    matrix.translation() = offset;
+
+    Geometry::Transformation rotation_cleared(matrix);
+    rotation_cleared.reset_rotation();
+    const Matrix3d expected_unrotated = scale.asDiagonal();
+    check_linear_and_offset(rotation_cleared.get_matrix(), expected_unrotated, offset);
+
+    Geometry::Transformation skew_cleared(matrix);
+    skew_cleared.reset_skew();
+    const double volume_preserving_uniform_scale = std::cbrt(scale.prod());
+    check_linear_and_offset(
+        skew_cleared.get_matrix(), rotation * (volume_preserving_uniform_scale * Matrix3d::Identity()), offset);
+
+    Geometry::Transformation cleared(matrix);
+    cleared.reset();
+    CHECK(cleared.get_matrix().isApprox(Transform3d::Identity(), 1e-12));
+}
+
 TEST_CASE("Transforming a 3D line applies rotation and translation to both endpoints",
           "[Geometry][Line]")
 {
