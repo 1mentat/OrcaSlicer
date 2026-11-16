@@ -14,8 +14,13 @@ on:
       - 'scripts/tests/test_slicer_pr_validation.py'
       - 'scripts/settings_inventory.py'
       - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/slicer_coverage.py'
+      - 'scripts/tests/test_slicer_coverage.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/slicer_coverage_reconcile.py'
+      - 'scripts/coverage_replay/**'
+      - 'scripts/tests/test_coverage_replay.py'
       - '.github/workflows/python-tooling-tests.yml'
   push:
     paths:
@@ -30,8 +35,13 @@ on:
       - 'scripts/tests/test_slicer_pr_validation.py'
       - 'scripts/settings_inventory.py'
       - 'scripts/tests/test_settings_inventory.py'
+      - 'scripts/slicer_coverage.py'
+      - 'scripts/tests/test_slicer_coverage.py'
       - 'scripts/slicer_mutation.py'
       - 'scripts/tests/test_slicer_mutation.py'
+      - 'scripts/slicer_coverage_reconcile.py'
+      - 'scripts/coverage_replay/**'
+      - 'scripts/tests/test_coverage_replay.py'
       - '.github/workflows/python-tooling-tests.yml'
 
 permissions:
@@ -75,3 +85,7 @@ jobs:
         run: python -B -m unittest discover -s scripts/tests -p test_slicer_mutation.py -v
       - name: Test settings inventory declarations and metadata
         run: python -B -m unittest discover -s scripts/tests -p test_settings_inventory.py -v
+      - name: Test coverage report boundary
+        run: python -B -m unittest discover -s scripts/tests -p test_slicer_coverage.py -v
+      - name: Test coverage replay reconciliation
+        run: python -B -m unittest discover -s scripts/tests -p test_coverage_replay.py -v
