@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_commit": "6f0bb45ef3534a4a4e6154fafa7d92ae85f1d40f",
+  "description": "Bounded public FFF mutation for the raft-aware early-layer wall speed ramp.",
+  "test_source": "tests/fff_print/test_gcode_motion_settings.cpp",
+  "test_source_sha256": "8a9d6c79c16d470fa1a32a77e54c047a6cfcc72e9109193836c2e1e53b11248a",
+  "production_source": "src/libslic3r/GCode.cpp",
+  "production_source_sha256": "875766b0177490db1698eac2aa716e49c8166ad8a4f9fb58dfb9144bfee986db",
+  "mutants": [
+    {
+      "id": "gcode-raft-wall-speed-ramp-bypassed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed,\n                                                     (double) (_layer - m_config.raft_layers) / m_config.slow_down_layers));",
+      "new": "speed = std::min(speed, speed);",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "test_filter": "^GCodeRaftSpeed$",
+      "description": "Bypass the raft-aware interpolation. The public layer-Z feed oracle expects 33.3 and 46.7 mm/s after the first object layer, so nominal 60 mm/s at either layer must fail ordinary assertions."
+    }
+  ]
+}

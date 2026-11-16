@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Validate that object XML beyond the first archive extraction callback is parsed.",
+  "mutants": [
+    {
+      "id": "amf-archive-later-xml-chunks-ignored",
+      "path": "src/libslic3r/Format/AMF.cpp",
+      "old": "            CallbackData* data = (CallbackData*)pOpaque;\n",
+      "new": "            CallbackData* data = (CallbackData*)pOpaque;\n            if (file_ofs > 0)\n                return n;\n",
+      "expected_matches": 1,
+      "test_filter": "^AMFArchive$",
+      "expected_test_count": 18,
+      "ordinary_assertion_only": true,
+      "description": "Skip XML parsing after the first miniz callback but report each buffer consumed; object fields must still load when their XML starts after 150k padding.",
+      "expected_oracle": "The stream case fails an ordinary load or geometry assertion when the object XML is never parsed."
+    }
+  ]
+}

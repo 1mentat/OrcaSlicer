@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "names": [
+    "FocusedMotionSettings::Small support perimeter speed scales exported base and interface support"
+  ],
+  "control_regex": "^FocusedMotionSettings::Small support perimeter speed scales exported base and interface support$"
+}

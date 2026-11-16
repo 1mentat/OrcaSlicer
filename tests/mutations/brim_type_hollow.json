@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "description": "Protect inner/outer ring selection and automatic width using emitted brim geometry. All three probes are killed by ordinary assertions; baseline and restored 52-case controls pass.",
+  "mutants": [
+    {
+      "id": "inner-only-omits-hole-ring",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "const bool         has_inner_brim = brim_type == btInnerOnly || brim_type == btOuterAndInner || use_inner_brim_ears;",
+      "new": "const bool         has_inner_brim = brim_type == btOuterAndInner || use_inner_brim_ears;",
+      "description": "Drop ordinary inner_only selection. The hollow-shell case requires emitted G1 brim-segment midpoints inside the actual sliced hole and none outside model bounds; combined mode also adds the inner ring while retaining the outer ring.",
+      "test_filter": "^BrimTypeHollowBoundaries$"
+    },
+    {
+      "id": "outer-and-inner-omits-outer-ring",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "const bool         has_outer_brim = brim_type == btOuterOnly || brim_type == btOuterAndInner || brim_type == btAutoBrim || brim_type == btLeadingEdgeOnly || use_auto_brim_ears || use_brim_ears;",
+      "new": "const bool         has_outer_brim = brim_type == btOuterOnly || brim_type == btAutoBrim || brim_type == btLeadingEdgeOnly || use_auto_brim_ears || use_brim_ears;",
+      "description": "Drop the outer selector for outer_and_inner. The hollow-shell case requires emitted segment midpoints both inside the actual hole and outside model bounds, while outer_only has exterior segments only.",
+      "test_filter": "^BrimTypeHollowBoundaries$"
+    },
+    {
+      "id": "auto-brim-skips-derived-width",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "bool               has_brim_auto = object->config().brim_type == btAutoBrim;",
+      "new": "bool               has_brim_auto = false;",
+      "description": "Disable Auto width derivation while leaving its outer selector intact. On the separate 120x120x30 hollow fixture, the default-reference geometry yields width above the omission and flow-quantization gates; Auto must emit G1 brim segments outside model bounds while explicit outer_only width zero emits none.",
+      "test_filter": "^BrimTypeHollowBoundaries$"
+    }
+  ]
+}

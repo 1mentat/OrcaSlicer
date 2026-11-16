@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "description": "X2D profile-template consumption of auxiliary-fan slot arrays and inclusive layer boundary.",
+  "mutants": [
+    {
+      "id": "first-x-layer-fan-speed-binding-zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    this->placeholder_parser().set(\"first_x_layer_fan_speed\", new ConfigOptionFloats(m_config.first_x_layer_fan_speed));",
+      "new": "    this->placeholder_parser().set(\"first_x_layer_fan_speed\", new ConfigOptionFloats(m_config.first_x_layer_fan_speed.size(), 0.0));",
+      "description": "Replace the configured first-layer fan-speed array with zeros; the X2D layer and toolchange template PWM endpoint assertions must fail.",
+      "test_filter": "AuxiliaryFanTemplates",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "close-additional-fan-first-layers-binding-zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    this->placeholder_parser().set(\"close_additional_fan_first_x_layers\", new ConfigOptionInts(m_config.close_additional_fan_first_x_layers));",
+      "new": "    this->placeholder_parser().set(\"close_additional_fan_first_x_layers\", new ConfigOptionInts(m_config.close_additional_fan_first_x_layers.size(), 0));",
+      "description": "Replace the configured first-X-layer array with zeros; the X2D selected-slot fan ramp assertions must fail.",
+      "test_filter": "AuxiliaryFanTemplates",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "additional-fan-full-speed-layer-binding-zero",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "    this->placeholder_parser().set(\"additional_fan_full_speed_layer\", new ConfigOptionInts(m_config.additional_fan_full_speed_layer));",
+      "new": "    this->placeholder_parser().set(\"additional_fan_full_speed_layer\", new ConfigOptionInts(m_config.additional_fan_full_speed_layer.size(), 0));",
+      "description": "Replace the configured full-speed layer array with zeros; the X2D selected-slot fan ramp assertions must fail.",
+      "test_filter": "AuxiliaryFanTemplates",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "x2d-close-layer-inclusive-boundary-exclusive",
+      "path": "resources/profiles/BBL/machine/Bambu Lab X2D 0.4 nozzle template layer_change_gcode.json",
+      "old": "layer_num + 1 <= close_additional_fan_first_x_layers[current_filament_id]",
+      "new": "layer_num + 1 < close_additional_fan_first_x_layers[current_filament_id]",
+      "description": "Make the shipped X2D close-layer comparison exclusive; the physical layer-1000 P2/P10 assertion must fail.",
+      "test_filter": "AuxiliaryFanTemplateBoundaries",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true
+    }
+  ]
+}

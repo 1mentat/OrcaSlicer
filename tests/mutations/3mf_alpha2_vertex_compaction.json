@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Legacy 3MF prerelease vertex-compaction boundary at PrusaSlicer 2.4 alpha3.",
+  "mutants": [
+    {
+      "id": "alpha3-incorrectly-compacts-volume-vertices",
+      "path": "src/libslic3r/Format/3mf.cpp",
+      "old": "*m_prusaslicer_generator_version < *Semver::parse(\"2.4.0-alpha3\"))",
+      "new": "*m_prusaslicer_generator_version <= *Semver::parse(\"2.4.0-alpha3\"))",
+      "expected_matches": 1,
+      "description": "Alpha1 and alpha2 import compactly, but alpha3 must retain the interleaved 15-vertex range in each split volume.",
+      "test_filter": "^Legacy importer trims unused volume vertices for affected Prusa prereleases$",
+      "ordinary_assertion_only": true,
+      "source_anchor_sha256": "7b46608a33d724bba8b934787dd10967213314ff4cb144fc0fdc7a950369bb79"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Nullable filament lift-enforcement enum routing through validated Print exports.",
+  "mutants": [
+    {
+      "id": "filament-retract-lift-enforce-nullable-override-not-routed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    };",
+      "new": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    };",
+      "description": "Remove the raw retract_lift_enforce key from the sorted override allowlist. Explicit filament surface policies must stop controlling emitted lift moves while typed nil still inherits the machine policy.",
+      "test_filter": "FilamentRetractionOverrides",
+      "ordinary_assertion_only": true,
+      "expected_matches": 1
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Painted brim ear compensation and matching-island consumer probes. Use fff_print_skirt_brim_tests with tests/controls/skirt_brim.json.",
+  "mutants": [
+    {
+      "id": "painted-efc-projection-ignored",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "if (use_efc_outline) {\n            if (efc_outline == nullptr) {",
+      "new": "if (false) {\n            if (efc_outline == nullptr) {",
+      "description": "Skip projecting the painted ear center to the post-EFC outline while retaining EFC for the base brim. The enabled/disabled geometry relation and the compensated-outline radius witness should fail.",
+      "test_filter": "^PaintedBrimEfc$"
+    },
+    {
+      "id": "painted-efc-global-island-selected",
+      "path": "src/libslic3r/Brim.cpp",
+      "old": "if (closest_point_on_matching_island(\n                        raw_outline,\n                        *efc_outline,\n                        Point(pt_x, pt_y),\n                        closest_point))",
+      "new": "if (closest_point_on_expolygons(\n                        *efc_outline,\n                        Point(pt_x, pt_y),\n                        closest_point))",
+      "description": "Select the nearest point from all compensated islands instead of restricting the projection to the raw island containing the painted point. In the two-island fixture, the adjacent island is geometrically closer but must not receive the ear.",
+      "test_filter": "^PaintedBrimEfc$"
+    }
+  ]
+}

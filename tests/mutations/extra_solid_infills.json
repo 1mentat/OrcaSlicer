@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "description": "Extra solid infill layer selection, internal bridge conversion, and one-based layer indexing.",
+  "mutants": [
+    {
+      "id": "extra-solid-infill-selection-bypassed",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "            if (!region_config.extra_solid_infills.value.empty() &&\n                check_layer_id_pattern(region_config.extra_solid_infills.value, i)) {",
+      "new": "            if (false) {",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "expected_test_count": 1,
+      "description": "Bypass the configured extra-solid layer selection; per-layer surface, extrusion-path, and G-code role assertions must detect missing bridge and solid infill.",
+      "test_filter": "ExtraSolidInfills"
+    },
+    {
+      "id": "extra-solid-infill-index-shifted",
+      "path": "src/libslic3r/PrintObject.cpp",
+      "old": "check_layer_id_pattern(region_config.extra_solid_infills.value, i)",
+      "new": "check_layer_id_pattern(region_config.extra_solid_infills.value, i + 1)",
+      "expected_matches": 1,
+      "ordinary_assertion_only": true,
+      "expected_test_count": 1,
+      "description": "Shift the zero-based PrintObject index before the helper converts it to the documented one-based pattern ID.",
+      "test_filter": "ExtraSolidInfills"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary output assertion probes for signed z_offset and registered normal z_hop endpoints in public FFF G-code export.",
+  "mutants": [
+    {
+      "id": "z-offset-layer-transition-omits-offset",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "coordf_t z = print_z + m_config.z_offset.value;  // in unscaled coordinates",
+      "new": "coordf_t z = print_z;  // in unscaled coordinates",
+      "expected_matches": 1,
+      "description": "Omit the configured signed offset from layer-transition nominal Z; later-layer deposition endpoints must retain the pointwise offset relation.",
+      "test_filter": "ZCoordinateSettingsPipeline",
+      "ordinary_assertion_only": true
+    },
+    {
+      "id": "z-hop-normal-lift-hardcoded-default",
+      "path": "src/libslic3r/GCodeWriter.cpp",
+      "old": "        double below = this->config.retract_lift_below.get_at(extruder_id);\n        if (m_pos.z() >= above && (m_pos.z() <= below || below == 0.))\n            target_lift = this->config.z_hop.get_at(filament_id);\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "new": "        double below = this->config.retract_lift_below.get_at(extruder_id);\n        if (m_pos.z() >= above && (m_pos.z() <= below || below == 0.))\n            target_lift = 0.4;\n    }\n    // BBS\n    if (m_lifted == 0 && m_to_lift == 0 && target_lift > 0) {",
+      "expected_matches": 1,
+      "description": "Replace the lazy normal lift height with the default constant; the registered 5 mm endpoint must be observed in emitted lift deltas.",
+      "test_filter": "ZCoordinateSettingsPipeline",
+      "ordinary_assertion_only": true
+    }
+  ]
+}

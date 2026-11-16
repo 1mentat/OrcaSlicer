@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Source mutations for the public fan speed-up time and early-layer speed ramp contracts.",
+  "mutants": [
+    {
+      "id": "fan-speedup-delay-zeroed",
+      "path": "src/libslic3r/GCode/FanMover.cpp",
+      "old": "if (nb_seconds_delay > 0 && (!only_overhangs || current_role == ExtrusionRole::erOverhangPerimeter)) {",
+      "new": "if (false && (!only_overhangs || current_role == ExtrusionRole::erOverhangPerimeter)) {",
+      "test_filter": "^FanSpeedupTime$",
+      "description": "Disable the buffered fan lead-time scheduling branch in the one FanMover implementation file; the 0.5 s public row must advance the ordinary PWM102 event."
+    },
+    {
+      "id": "early-layer-ramp-denominator-incremented",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "Slic3r::lerp(first_layer_speed, speed,\n                                (double) (_layer) / m_config.slow_down_layers));",
+      "new": "Slic3r::lerp(first_layer_speed, speed,\n                                (double) (_layer) / (m_config.slow_down_layers + 1)));",
+      "test_filter": "^SlowDownLayerCount$",
+      "description": "Increase the non-raft ramp denominator by one. The 3-layer public row expects 3600 and 5400 mm/min on layer indices 1 and 2."
+    }
+  ]
+}

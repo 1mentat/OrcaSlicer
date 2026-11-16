@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Ordinary-assertion probe for preserving nested BBS 3MF metadata sidecar destinations.",
+  "mutants": [
+    {
+      "id": "bbs3mf_metadata_sidecar_destination_flattened",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "boost::filesystem::path(m_backup_path + \"/\" + src_file)",
+      "new": "boost::filesystem::path(m_backup_path + \"/\" + boost::filesystem::path(src_file).filename().string())",
+      "description": "Flatten a safe sidecar destination to its basename. Both new cases require the nested Metadata/ path; the ordinary path-presence REQUIRE fails for each.",
+      "test_filter": "Security"
+    }
+  ]
+}

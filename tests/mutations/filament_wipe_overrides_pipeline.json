@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Nullable filament wipe, distance, and retract-before/after override routing through validated Print exports.",
+  "mutants": [
+    {
+      "id": "filament-wipe-nullable-override-not-routed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "new": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "description": "Remove only the wipe Boolean from the sorted nullable filament override allowlist. The boolean pipeline case must fail its emitted wipe marker assertions.",
+      "test_filter": "FilamentWipeOverrides"
+    },
+    {
+      "id": "filament-wipe-distance-nullable-override-not-routed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "new": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "description": "Remove only wipe_distance from the sorted nullable filament override allowlist. The path-length pipeline case must fail its requested-distance assertions.",
+      "test_filter": "FilamentWipeOverrides"
+    },
+    {
+      "id": "filament-retract-before-wipe-nullable-override-not-routed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "new": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "description": "Remove only retract_before_wipe from the sorted nullable filament override allowlist. The pre-wipe retraction partition case must fail its emitted E-move assertions.",
+      "test_filter": "FilamentWipeOverrides"
+    },
+    {
+      "id": "filament-retract-after-wipe-nullable-override-not-routed",
+      "path": "src/libslic3r/PrintConfig.cpp",
+      "old": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_after_wipe\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "new": "    m_extruder_retract_keys = {\n        \"deretraction_speed\",\n        \"long_retractions_when_cut\",\n        \"retract_before_wipe\",\n        \"retract_length_toolchange\",\n        \"retract_lift_above\",\n        \"retract_lift_below\",\n        \"retract_lift_enforce\",\n        \"retract_restart_extra\",\n        \"retract_restart_extra_toolchange\",\n        \"retract_when_changing_layer\",\n        \"retraction_distances_when_cut\",\n        \"retraction_length\",\n        \"retraction_minimum_travel\",\n        \"retraction_speed\",\n        \"travel_slope\",\n        \"wipe\",\n        \"wipe_distance\",\n        \"z_hop\",\n        \"z_hop_types\"\n    }",
+      "description": "Remove only retract_after_wipe from the sorted nullable filament override allowlist. The post-wipe retraction partition case must fail its emitted E-move assertions.",
+      "test_filter": "FilamentWipeOverrides"
+    }
+  ]
+}

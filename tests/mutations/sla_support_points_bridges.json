@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "description": "SLA support point density and maximum bridges per pillar functional pipeline probes.",
+  "mutants": [
+    {
+      "id": "sla-support-point-density-mapping-ignored",
+      "path": "src/libslic3r/SLAPrintSteps.cpp",
+      "old": "        config.density_relative = float(cfg.support_points_density_relative / 100.f);",
+      "new": "        config.density_relative = 1.f;",
+      "description": "Ignore configured SLA support point density and force its default fraction. The registered zero row must retain the empty completed support-point/tree state and throw SlicingError for an unprintable empty elevated support slice.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportPointDensity$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary zero-density REQUIRE_THROWS_AS assertion fails because the forced default produces printable support and SLAPrint::process completes."
+    },
+    {
+      "id": "sla-support-max-bridges-mapping-ignored",
+      "path": "src/libslic3r/SLAPrint.cpp",
+      "old": "    scfg.max_bridges_on_pillar = unsigned(c.support_max_bridges_on_pillar.getInt());",
+      "new": "    scfg.max_bridges_on_pillar = 3;",
+      "description": "Ignore the configured cap and force the default. The zero and upper endpoint rows must preserve their independent public builder graph counts through the SLAPrint pipeline mapping.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportMaxBridges$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary SLAPrint config-map or support graph assertions fail for the forced minimum and maximum rows."
+    },
+    {
+      "id": "sla-support-point-projection-boundary-rays-regressed",
+      "path": "src/libslic3r/AABBTreeIndirect.hpp",
+      "old": "        Scalar tmin = (box.min().x() - origin.x()) * inv_dir.x();\n\t\t// A parallel ray on a closed slab boundary computes 0 * infinity here.\n\t\t// Treat that slab as unconstrained so the other axes decide intersection.\n\t\tif (std::isnan(tmin))\n\t\t\ttmin = -std::numeric_limits<Scalar>::infinity();\n\t\tScalar tymax = (box.max().y() - origin.y()) * inv_dir.y();\n\t\tif (tmin > tymax)\n\t\t\treturn false;\n        Scalar tmax = (box.max().x() - origin.x()) * inv_dir.x();\n\t\tif (std::isnan(tmax))\n\t\t\ttmax = std::numeric_limits<Scalar>::infinity();\n",
+      "new": "        Scalar tmin = (box.min().x() - origin.x()) * inv_dir.x();\n\t\tScalar tymax = (box.max().y() - origin.y()) * inv_dir.y();\n\t\tif (tmin > tymax)\n\t\t\treturn false;\n        Scalar tmax = (box.max().x() - origin.x()) * inv_dir.x();\n",
+      "description": "Remove the NaN guards for x-slab parallel rays on closed boundaries. The deterministic generated-point projection and direct boundary-ray controls must keep fixed-seed support points on mesh while outside and away rays miss.",
+      "expected_matches": 1,
+      "test_filter": "^SLASupportPointProjection$",
+      "expected_test_count": 1,
+      "ordinary_assertion_only": true,
+      "expected_oracle": "The ordinary projection test fails for x-min/x-max boundary ray hits or the fixed-seed generated-point on-mesh distance assertions when the guards are removed."
+    }
+  ]
+}

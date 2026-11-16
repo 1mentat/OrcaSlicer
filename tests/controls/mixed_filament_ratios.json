@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "names": [
+    "Mixed filament alternates whole layers when the option is off",
+    "Mixed filament empty sublayer ratios use equal component weights",
+    "Mixed filament sublayer ratios stay paired with permuted components",
+    "Sub-layer splitting emits the scaled sub-heights into G-code",
+    "Whole-layer mixing emits only the nominal layer height"
+  ],
+  "control_regex": "^(Mixed filament alternates whole layers when the option is off|Mixed filament empty sublayer ratios use equal component weights|Mixed filament sublayer ratios stay paired with permuted components|Sub-layer splitting emits the scaled sub-heights into G-code|Whole-layer mixing emits only the nominal layer height)$"
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Writer-emitted belt coordinates must retain configured frame and slicing angles, including signed endpoints and inactive gates. Four probes fail ordinary physical-projection assertions; all 30 normal controls pass before and after restoration.",
+  "mutants": [
+    {
+      "id": "belt-frame-decouple-ignored",
+      "path": "src/libslic3r/GCode/MachineFrameTransform.cpp",
+      "old": "const double angle_deg = config.belt_frame_tilt_decouple.value\n        ? config.belt_frame_tilt_angle.value\n        : config.belt_slice_rotation_angle.value;",
+      "new": "const double angle_deg = config.belt_slice_rotation_angle.value;",
+      "description": "Ignore the independent machine-frame angle while decoupling is enabled.",
+      "test_filter": "^belt$"
+    },
+    {
+      "id": "belt-frame-angle-clamped-45",
+      "path": "src/libslic3r/GCode/MachineFrameTransform.cpp",
+      "old": "const double angle_deg = config.belt_frame_tilt_decouple.value\n        ? config.belt_frame_tilt_angle.value\n        : config.belt_slice_rotation_angle.value;",
+      "new": "const double angle_deg = config.belt_frame_tilt_decouple.value\n        ? std::copysign(std::fmin(std::abs(config.belt_frame_tilt_angle.value), 45.0), config.belt_frame_tilt_angle.value)\n        : config.belt_slice_rotation_angle.value;",
+      "description": "Clamp the decoupled frame angle to +/-45 degrees before building the machine transform.",
+      "test_filter": "^belt$"
+    },
+    {
+      "id": "belt-slice-angle-ignored-45",
+      "path": "src/libslic3r/BeltTransform.cpp",
+      "old": "double angle_deg = config.belt_slice_rotation_angle.value;",
+      "new": "double angle_deg = 45.;",
+      "description": "Ignore the configured preslice angle in the writer back-transform and always invert 45 degrees.",
+      "test_filter": "^belt$"
+    },
+    {
+      "id": "belt-slice-angle-clamped-45",
+      "path": "src/libslic3r/BeltTransform.cpp",
+      "old": "double angle_deg = config.belt_slice_rotation_angle.value;",
+      "new": "double angle_deg = std::copysign(std::fmin(std::abs(config.belt_slice_rotation_angle.value), 45.0), config.belt_slice_rotation_angle.value);",
+      "description": "Clamp the configured preslice angle used by the writer back-transform to +/-45 degrees.",
+      "test_filter": "^belt$"
+    }
+  ]
+}

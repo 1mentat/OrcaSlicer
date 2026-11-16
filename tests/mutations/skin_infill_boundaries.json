@@ -1,0 +1,30 @@
+{
+  "description": "Two bounded consumer probes for locked-zag skin depth and positive density boundary controls.",
+  "mutants": [
+    {
+      "description": "Clamp skin_infill_depth values below 2 mm to the default; the selected zero-depth vs default-depth fill partition must collapse.",
+      "id": "skin-depth-values-below-default-clamped-to-2mm",
+      "intended_failed_case": "Locked-zag skin density and depth exercise safe boundary points",
+      "new": "params.skin_infill_depth = scale_(std::max(2.f, float(region_config.skin_infill_depth)));",
+      "new_sha256": "15d7f4e1e867f524ace67a3870ba2d885c334d482c937113cdf0508d2ec95e1b",
+      "old": "params.skin_infill_depth = scale_(region_config.skin_infill_depth);",
+      "old_sha256": "da0a102ecbdf024a4ff9628df378094232812898ef302fc04404bb7ea46e51b1",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "source_sha256": "ddce90378b697e5cd44396bd4c9dd62e9ece4a776c5e713d5573b61c6fbc13a4",
+      "test_filter": "SkinInfillBoundary"
+    },
+    {
+      "description": "Cap skin density at 70%; the selected maximum-density row must cease to exceed the 70% sentinel.",
+      "id": "skin-density-above-70-clamped-to-70-percent",
+      "intended_failed_case": "Locked-zag skin density and depth exercise safe boundary points",
+      "new": "append_density_param(lock_param.skin_density_params, float(0.01 * std::min(70.f, float(region_config.skin_infill_density))), surface.expolygon);",
+      "new_sha256": "147a59d6ac5f860ec8cca27d2d92260cf321e618b180002d04ed9b2d9a5f0137",
+      "old": "append_density_param(lock_param.skin_density_params, float(0.01 * region_config.skin_infill_density), surface.expolygon);",
+      "old_sha256": "f110bdde057d7460d958e445e502e540ee6a5d2213036bf32db6435866ea0a74",
+      "path": "src/libslic3r/Fill/Fill.cpp",
+      "source_sha256": "ddce90378b697e5cd44396bd4c9dd62e9ece4a776c5e713d5573b61c6fbc13a4",
+      "test_filter": "SkinInfillBoundary"
+    }
+  ],
+  "schema_version": 1
+}
