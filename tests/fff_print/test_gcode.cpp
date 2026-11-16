@@ -14,6 +14,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/calib.hpp"
 #include <catch2/catch_all.hpp>
+#include "nlohmann/json.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeWriter.hpp"
