@@ -1455,6 +1455,27 @@ TEST_CASE("Repetier saved positions become the origin of the next move", "[GCode
     CHECK_THAT(extrusions.front()->feedrate, WithinAbs(10.0, 1e-4));
 }
 
+namespace repetier_file_source_cases {
+
+// The file-processing half of the source case: process_file may split a move into several vertices.
+TEST_CASE("Repetier saved positions become the origin of the next move when processed from a file",
+          "[GCodeProcessor][GCodeProcessorRepetierRegression]")
+{
+    const std::string gcode = "M83\nG90\nG1 X10 Y20 Z0.2 F600\nM401\nG1 X30 Y40 Z1.2 F1200\nM402\nG1 X15 Y25 Z0.2 E1\n";
+
+    // File processing can represent a move with several vertices; inspect the final extrusion vertex for its endpoint.
+    const auto file_result = process_file(gcode, RunOptions{gcfRepetier, true});
+    const auto extrusion = std::find_if(file_result.moves.rbegin(), file_result.moves.rend(),
+                                        [](const GCodeProcessorResult::MoveVertex &move) { return move.type == EMoveType::Extrude; });
+    REQUIRE(extrusion != file_result.moves.rend());
+    CHECK_THAT(extrusion->position.x(), WithinAbs(15.0, 1e-4));
+    CHECK_THAT(extrusion->position.y(), WithinAbs(25.0, 1e-4));
+    CHECK_THAT(extrusion->travel_dist, WithinAbs(std::sqrt(50.0), 1e-4));
+    CHECK_THAT(extrusion->feedrate, WithinAbs(10.0, 1e-4));
+}
+
+} // namespace repetier_file_source_cases
+
 TEST_CASE("Unknown-axis G92 preserves XYZ origins while bare G92 resets them", "[GCodeProcessor][GCodeProcessorDeep][GCodeProcessorUnknownAxis]")
 {
     const std::string prefix = "M83\nG90\nG1 X10 Y20 Z0.2 E1 F600\n";

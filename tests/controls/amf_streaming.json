@@ -14,11 +14,11 @@
     "FocusedAMF::AMF uniform scale expands to every axis",
     "FocusedAMF::AMF constellation copies preserve independent placement and printability",
     "FocusedAMF::AMF missing constellation targets do not duplicate known geometry",
-    "FocusedAMF::AMF empty constellation instances preserve uninstanced geometry",
+    "FocusedAMF::AMF empty constellation instances still load the object geometry",
     "FocusedAMF::AMF material attributes retain Unicode and entity decoding",
     "FocusedAMF::AMF archives reject triangle references outside the vertex list",
     "FocusedAMF::AMF archives reject a volume without triangles",
-    "FocusedAMF::AMF archived metadata requires its type attribute",
+    "FocusedAMF::AMF archived object metadata requires its type attribute",
     "FocusedAMF::AMF normalizes inward triangle winding to positive volume"
   ]
 }

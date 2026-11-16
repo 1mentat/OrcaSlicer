@@ -151,7 +151,7 @@ void check_coordinates(const std::string &data, const std::vector<double> &expec
 
 } // namespace
 
-TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG]")
+TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const ExPolygons shapes{square_with_hole()};
@@ -172,7 +172,7 @@ TEST_CASE("SVG exports an expolygon hole with independent outline colors", "[SVG
     check_x_range(attr(paths[2], "d"), 60., 120.);
 }
 
-TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG]")
+TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const ExPolygons shapes{square(0., 0., 10., 8.)};
@@ -205,14 +205,14 @@ TEST_CASE("SVG attributes preserve opacity legends and point markers", "[SVG]")
     CHECK(text(texts.front()) == "fixture legend");
 }
 
-TEST_CASE("SVG skips an empty attribute export without creating a file", "[SVG]")
+TEST_CASE("SVG skips an empty attribute export without creating a file", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     SVG::export_expolygons(output.string(), std::vector<std::pair<ExPolygons, SVG::ExPolygonAttributes>>{});
     CHECK_FALSE(boost::filesystem::exists(output.path()));
 }
 
-TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG]")
+TEST_CASE("SVG emits grid lines only when the requested step fits", "[SVG][SLASVGFormatExtended]")
 {
     ScopedTemporaryFile output(".svg");
     const BoundingBox box(Point(0, 0), Point(scaled(10.), scaled(10.)));
@@ -294,7 +294,7 @@ TEST_CASE("SVG writes line arrows, text, legends and comments", "[SVG]")
     CHECK(text(comments.front()) == "metadata");
 }
 
-TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG]")
+TEST_CASE("SVG creates nested output paths and reports an unopenable destination", "[SVG][SVGExportContracts]")
 {
     ScopedTemporaryDir directory("orca-svg-open");
     const boost::filesystem::path nested_output = directory.path() / "nested" / "output.svg";
@@ -325,7 +325,7 @@ TEST_CASE("SVG creates nested output paths and reports an unopenable destination
     CHECK_FALSE(unopenable_with_bbox.is_opened());
 }
 
-TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG]")
+TEST_CASE("SVG surface value and pointer collections preserve filled and outline paths", "[SVG][SVGExportContracts]")
 {
     const Surface top(stTop, square(1., 1., 8., 8.));
     const Surface holed(stInternal, square_with_hole());
@@ -362,7 +362,7 @@ TEST_CASE("SVG surface value and pointer collections preserve filled and outline
     CHECK(outlines == expected_outlines);
 }
 
-TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG]")
+TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinates", "[SVG][SVGExportContracts]")
 {
     // Zero margin and no Y flip: SVG coordinates are millimetres * 10.
     const BoundingBox box(Point(0, 0), Point(scaled(20.), scaled(20.)));
@@ -422,7 +422,7 @@ TEST_CASE("SVG primitive collections retain tapered widths and scaled coordinate
     check_coordinates(attr(paths[4], "d"), {30., 15., 40., 15.});
 }
 
-TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG]")
+TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[SVG][SVGExportContracts]")
 {
     const ExPolygons with_hole{square_with_hole()};
     const ExPolygons plain{square(20., 2., 28., 10.)};
@@ -478,7 +478,7 @@ TEST_CASE("SVG attribute export applies contour fallbacks and wraps legends", "[
     CHECK_THAT(centers[3].second - centers[0].second, WithinAbs(-13., 1e-4));
 }
 
-TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG]")
+TEST_CASE("SVG filled paths suppress outlines while open paths retain visible stroke widths", "[SVG][SVGStrokeWidth]")
 {
     ScopedTemporaryFile output(".svg");
     const Polygon polygon({Point(scaled(1.), scaled(1.)), Point(scaled(5.), scaled(1.)),

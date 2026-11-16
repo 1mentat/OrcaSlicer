@@ -18,7 +18,7 @@
       "old": "            best_direction = machine_cool_dir;",
       "new": "            best_direction = -machine_cool_dir;",
       "expected_matches": 1,
-      "test_filter": "Parallel fan orientation keeps the configured axis for a symmetric solid",
+      "test_filter": "Parallel fan orientation keeps the configured axis when no overhang favours a direction",
       "description": "The symmetric fallback must preserve the configured fan axis when the exposed-overhang score has no directional preference."
     }
   ]

@@ -853,6 +853,24 @@ jobs:
         shell: bash
         run: python3 scripts/focused_targets.py build --build-dir build --config Release --jobs 2 --deadline 3300
 
+      # `--list-tests` above does not prove CTest registration. Re-run CMake in
+      # the same build directory with focused discovery on (only the focused
+      # targets' `if (SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY)` blocks depend
+      # on it), link only the wipe-tower target, and require every name in
+      # tests/controls/wipe_tower.json to be registered once against that
+      # binary and to pass. Runs last among the build-dir steps, so it cannot
+      # alter anything shipped. Non-blocking: its result is evidence (the
+      # FOCUSED_CONTROL_SUMMARY line in the step log; a failing exit code still
+      # shows as a step annotation), so a tooling mistake cannot skip the
+      # unit-test jobs that need this leg. Promote to blocking once it has run
+      # green on a hosted runner.
+      - name: Check focused wipe-tower CTest control
+        if: runner.os == 'Linux' && !vars.SELF_HOSTED && inputs.arch != 'aarch64'
+        timeout-minutes: 45
+        continue-on-error: true
+        shell: bash
+        run: python3 scripts/focused_control_check.py --build-dir build --config Release --jobs 2
+
       # The build has just touched everything it can use, so an object
       # untouched for a week is dead, usually orphaned by a flag change.
       - name: Compiler cache statistics

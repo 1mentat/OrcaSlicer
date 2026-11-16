@@ -3040,6 +3040,31 @@ bool GCodeProcessor::check_multi_extruder_gcode_valid(const int                 
     return valid;
 }
 
+std::vector<int> GCodeProcessor::to_zero_based_extruder_map(const std::vector<int>& one_based_map)
+{
+    // Range-check before subtracting so no input can overflow or index outside the extruder tables.
+    std::vector<int> zero_based(one_based_map.size());
+    for (size_t i = 0; i < one_based_map.size(); ++i) {
+        if (one_based_map[i] < 1 || one_based_map[i] > static_cast<int>(MAXIMUM_EXTRUDER_NUMBER))
+            throw Slic3r::RuntimeError(format("Invalid filament_map entry %1% for filament %2%: expected an extruder number in [1, %3%].",
+                                              one_based_map[i], i + 1, MAXIMUM_EXTRUDER_NUMBER));
+        zero_based[i] = one_based_map[i] - 1;
+    }
+    return zero_based;
+}
+
+void GCodeProcessor::cover_mapped_extruders()
+{
+    if (m_filament_maps.empty())
+        return;
+    const size_t extruder_count = static_cast<size_t>(*std::max_element(m_filament_maps.begin(), m_filament_maps.end())) + 1;
+    // Extruders beyond the declared nozzle list have no known volume; physical ids default to identity.
+    if (m_nozzle_volume.size() < extruder_count)
+        m_nozzle_volume.resize(extruder_count, 0.f);
+    for (size_t i = m_physical_extruder_map.size(); i < extruder_count; ++i)
+        m_physical_extruder_map.push_back(static_cast<int>(i));
+}
+
 void GCodeProcessor::apply_config(const PrintConfig& config)
 {
     m_parser.apply_config(config);
@@ -3110,9 +3135,10 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     // Preserve explicit mappings; pad only missing entries with the master extruder.
     if (filament_map.size() < filament_count)
         filament_map.resize(filament_count, config.master_extruder_id.value);
+    const std::vector<int> zero_based_map = to_zero_based_extruder_map(filament_map);
 
     for (size_t i = 0; i < filament_count; ++ i) {
-        m_extruder_offsets[i] = to_3d(config.extruder_offset.get_at(filament_map[i] - 1).cast<float>().eval(), 0.f);
+        m_extruder_offsets[i] = to_3d(config.extruder_offset.get_at(zero_based_map[i]).cast<float>().eval(), 0.f);
         m_extruder_colors[i]            = static_cast<unsigned char>(i);
         // Orca: pre-heat bookkeeping reads the filament's first per-variant column by design;
         // it feeds estimation-side heat-up modelling only, never the emitted commands.
@@ -3184,8 +3210,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     auto filament_maps = config.option<ConfigOptionInts>("filament_map");
     if (filament_maps != nullptr) {
         // Use the same master-extruder fallback already resolved for filament offsets.
-        m_filament_maps = filament_map;
-        std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
+        m_filament_maps = zero_based_map;
+        cover_mapped_extruders();
     }
 
     const ConfigOptionBool* spiral_vase = config.option<ConfigOptionBool>("spiral_mode");
@@ -3407,7 +3433,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const auto *master_extruder = config.option<ConfigOptionInt>("master_extruder_id");
     if (m_filament_maps.size() < m_result.filaments_count)
         m_filament_maps.resize(m_result.filaments_count, master_extruder != nullptr ? master_extruder->value : 1);
-    std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
+    m_filament_maps = to_zero_based_extruder_map(m_filament_maps);
+    cover_mapped_extruders();
 
     //BBS
     const ConfigOptionFloats* filament_costs = config.option<ConfigOptionFloats>("filament_cost");
@@ -3825,10 +3852,6 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
 
             apply_config(config);
         }
-        else if (m_producer == EProducer::Simplify3D)
-            apply_config_simplify3d(filename);
-        else if (m_producer == EProducer::SuperSlicer)
-            apply_config_superslicer(filename);
     }
 
     // process gcode
@@ -3943,135 +3966,9 @@ std::vector<std::pair<CustomGCode::Type, std::pair<float, float>>> GCodeProcesso
     return ret;
 }
 
-ConfigSubstitutions load_from_superslicer_gcode_file(const std::string& filename, DynamicPrintConfig& config, ForwardCompatibilitySubstitutionRule compatibility_rule)
-{
-    // for reference, see: ConfigBase::load_from_gcode_file()
-
-    boost::nowide::ifstream ifs(filename);
-
-    auto                      header_end_pos = ifs.tellg();
-    ConfigSubstitutionContext substitutions_ctxt(compatibility_rule);
-    size_t                    key_value_pairs = 0;
-
-    ifs.seekg(0, ifs.end);
-    auto file_length = ifs.tellg();
-    auto data_length = std::min<std::fstream::pos_type>(65535, file_length - header_end_pos);
-    ifs.seekg(file_length - data_length, ifs.beg);
-    std::vector<char> data(size_t(data_length) + 1, 0);
-    ifs.read(data.data(), data_length);
-    ifs.close();
-    key_value_pairs = ConfigBase::load_from_gcode_string_legacy(config, data.data(), substitutions_ctxt);
-
-    if (key_value_pairs < 80)
-        throw Slic3r::RuntimeError(format("Suspiciously low number of configuration values extracted from %1%: %2%", filename, key_value_pairs));
-
-    return std::move(substitutions_ctxt.substitutions);
-}
-
-void GCodeProcessor::apply_config_superslicer(const std::string& filename)
-{
-    DynamicPrintConfig config;
-    config.apply(FullPrintConfig::defaults());
-    load_from_superslicer_gcode_file(filename, config, ForwardCompatibilitySubstitutionRule::EnableSilent);
-    apply_config(config);
-}
-
 float GCodeProcessor::get_first_layer_time(PrintEstimatedStatistics::ETimeMode mode) const
 {
     return (mode < PrintEstimatedStatistics::ETimeMode::Count) ? m_time_processor.machines[static_cast<size_t>(mode)].first_layer_time : 0.0f;
-}
-
-void GCodeProcessor::apply_config_simplify3d(const std::string& filename)
-{
-    struct BedSize
-    {
-        double x{ 0.0 };
-        double y{ 0.0 };
-
-        bool is_defined() const { return x > 0.0 && y > 0.0; }
-    };
-
-    BedSize bed_size;
-    bool    producer_detected = false;
-
-    const bool parse_ok = m_parser.parse_file_raw(filename, [this, &bed_size, &producer_detected](GCodeReader& reader, const char* begin, const char* end) {
-
-        auto extract_double = [](const std::string_view cmt, const std::string& key, double& out) {
-            size_t pos = cmt.find(key);
-            if (pos != cmt.npos) {
-                pos = cmt.find(',', pos);
-                if (pos != cmt.npos) {
-                    out = string_to_double_decimal_point(cmt.substr(pos+1));
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        auto extract_floats = [](const std::string_view cmt, const std::string& key, std::vector<float>& out) {
-            size_t pos = cmt.find(key);
-            if (pos != cmt.npos) {
-                pos = cmt.find(',', pos);
-                if (pos != cmt.npos) {
-                    const std::string_view data_str = cmt.substr(pos + 1);
-                    std::vector<std::string> values_str;
-                    boost::split(values_str, data_str, boost::is_any_of("|,"), boost::token_compress_on);
-                    for (const std::string& s : values_str) {
-                        out.emplace_back(static_cast<float>(string_to_double_decimal_point(s)));
-                    }
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        begin = skip_whitespaces(begin, end);
-        end   = remove_eols(begin, end);
-        if (begin != end) {
-            if (*begin == ';') {
-                // Comment.
-                begin = skip_whitespaces(++ begin, end);
-                if (begin != end) {
-                    std::string_view comment(begin, end - begin);
-                    if (producer_detected) {
-                        if (bed_size.x == 0.0 && comment.find("strokeXoverride") != comment.npos)
-                            extract_double(comment, "strokeXoverride", bed_size.x);
-                        else if (bed_size.y == 0.0 && comment.find("strokeYoverride") != comment.npos)
-                            extract_double(comment, "strokeYoverride", bed_size.y);
-                        else if (comment.find("filamentDiameters") != comment.npos) {
-                            m_result.filament_diameters.clear();
-                            extract_floats(comment, "filamentDiameters", m_result.filament_diameters);
-                        } else if (comment.find("filamentDensities") != comment.npos) {
-                            m_result.filament_densities.clear();
-                            extract_floats(comment, "filamentDensities", m_result.filament_densities);
-                        } else if (comment.find("extruderDiameter") != comment.npos) {
-                            std::vector<float> extruder_diameters;
-                            extract_floats(comment, "extruderDiameter", extruder_diameters);
-                            m_result.filaments_count = extruder_diameters.size();
-                        }
-                    } else if (boost::starts_with(comment, "G-Code generated by Simplify3D(R)"))
-                        producer_detected = true;
-                }
-            } else {
-                // Some non-empty G-code line detected, stop parsing config comments.
-                reader.quit_parsing();
-            }
-        }
-    });
-    if (! parse_ok)
-        throw Slic3r::RuntimeError(std::string("Cannot read G-code file: ") + filename);
-
-    if (m_result.filaments_count == 0)
-        m_result.filaments_count = std::max<size_t>(1, std::min(m_result.filament_diameters.size(), m_result.filament_densities.size()));
-
-    if (bed_size.is_defined()) {
-        m_result.printable_area = {
-            { 0.0, 0.0 },
-            { bed_size.x, 0.0 },
-            { bed_size.x, bed_size.y },
-            { 0.0, bed_size.y }
-        };
-    }
 }
 
 void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool producers_enabled)
@@ -4585,465 +4482,13 @@ bool GCodeProcessor::process_producers_tags(const std::string_view comment)
 {
     switch (m_producer)
     {
-    case EProducer::Slic3rPE:
-    case EProducer::Slic3r:
-    case EProducer::SuperSlicer:
     case EProducer::OrcaSlicer: { return process_bambuslicer_tags(comment); }
-    case EProducer::Cura:        { return process_cura_tags(comment); }
-    case EProducer::Simplify3D:  { return process_simplify3d_tags(comment); }
-    case EProducer::CraftWare:   { return process_craftware_tags(comment); }
-    case EProducer::ideaMaker:   { return process_ideamaker_tags(comment); }
-    case EProducer::KissSlicer:  { return process_kissslicer_tags(comment); }
     default:                     { return false; }
     }
 }
 
 bool GCodeProcessor::process_bambuslicer_tags(const std::string_view comment)
 {
-    return false;
-}
-
-bool GCodeProcessor::process_cura_tags(const std::string_view comment)
-{
-    // TYPE -> extrusion role
-    std::string tag = "TYPE:";
-    size_t pos = comment.find(tag);
-    if (pos != comment.npos) {
-        const std::string_view type = comment.substr(pos + tag.length());
-        if (type == "SKIRT")
-            set_extrusion_role(erSkirt);
-        else if (type == "WALL-OUTER")
-            set_extrusion_role(erExternalPerimeter);
-        else if (type == "WALL-INNER")
-            set_extrusion_role(erPerimeter);
-        else if (type == "SKIN")
-            set_extrusion_role(erSolidInfill);
-        else if (type == "FILL")
-            set_extrusion_role(erInternalInfill);
-        else if (type == "SUPPORT")
-            set_extrusion_role(erSupportMaterial);
-        else if (type == "SUPPORT-INTERFACE")
-            set_extrusion_role(erSupportMaterialInterface);
-        else if (type == "PRIME-TOWER")
-            set_extrusion_role(erWipeTower);
-        else {
-            set_extrusion_role(erNone);
-            BOOST_LOG_TRIVIAL(warning) << "GCodeProcessor found unknown extrusion role: " << type;
-        }
-
-        if (m_extrusion_role == erExternalPerimeter)
-            m_seams_detector.activate(true);
-
-        return true;
-    }
-
-    // flavor
-    tag = "FLAVOR:";
-    pos = comment.find(tag);
-    if (pos != comment.npos) {
-        const std::string_view flavor = comment.substr(pos + tag.length());
-        if (flavor == "BFB")
-            m_flavor = gcfMarlinLegacy; // is this correct ?
-        else if (flavor == "Mach3")
-            m_flavor = gcfMach3;
-        else if (flavor == "Makerbot")
-            m_flavor = gcfMakerWare;
-        else if (flavor == "UltiGCode")
-            m_flavor = gcfMarlinLegacy; // is this correct ?
-        else if (flavor == "Marlin(Volumetric)")
-            m_flavor = gcfMarlinLegacy; // is this correct ?
-        else if (flavor == "Griffin")
-            m_flavor = gcfMarlinLegacy; // is this correct ?
-        else if (flavor == "Repetier")
-            m_flavor = gcfRepetier;
-        else if (flavor == "RepRap")
-            m_flavor = gcfRepRapFirmware;
-        else if (flavor == "Marlin")
-            m_flavor = gcfMarlinLegacy;
-        else
-            BOOST_LOG_TRIVIAL(warning) << "GCodeProcessor found unknown flavor: " << flavor;
-
-        return true;
-    }
-
-    // layer
-    tag = "LAYER:";
-    pos = comment.find(tag);
-    if (pos != comment.npos) {
-        ++m_layer_id;
-        return true;
-    }
-
-    return false;
-}
-
-bool GCodeProcessor::process_simplify3d_tags(const std::string_view comment)
-{
-    // extrusion roles
-
-    // in older versions the comments did not contain the key 'feature'
-    std::string_view cmt = comment;
-    size_t pos = cmt.find(" feature");
-    if (pos == 0)
-        cmt.remove_prefix(8);
-
-    // ; skirt
-    pos = cmt.find(" skirt");
-    if (pos == 0) {
-        set_extrusion_role(erSkirt);
-        return true;
-    }
-
-    // ; outer perimeter
-    pos = cmt.find(" outer perimeter");
-    if (pos == 0) {
-        set_extrusion_role(erExternalPerimeter);
-        m_seams_detector.activate(true);
-        return true;
-    }
-
-    // ; inner perimeter
-    pos = cmt.find(" inner perimeter");
-    if (pos == 0) {
-        set_extrusion_role(erPerimeter);
-        return true;
-    }
-
-    // ; gap fill
-    pos = cmt.find(" gap fill");
-    if (pos == 0) {
-        set_extrusion_role(erGapFill);
-        return true;
-    }
-
-    // ; infill
-    pos = cmt.find(" infill");
-    if (pos == 0) {
-        set_extrusion_role(erInternalInfill);
-        return true;
-    }
-
-    // ; solid layer
-    pos = cmt.find(" solid layer");
-    if (pos == 0) {
-        set_extrusion_role(erSolidInfill);
-        return true;
-    }
-
-    // ; bridge
-    pos = cmt.find(" bridge");
-    if (pos == 0) {
-        set_extrusion_role(erBridgeInfill);
-        return true;
-    }
-
-    // ; internal bridge
-    pos = cmt.find(" internal bridge");
-    if (pos == 0) {
-        set_extrusion_role(erInternalBridgeInfill);
-        return true;
-    }
-
-    // ; support
-    pos = cmt.find(" support");
-    if (pos == 0) {
-        set_extrusion_role(erSupportMaterial);
-        return true;
-    }
-
-    // ; dense support
-    pos = cmt.find(" dense support");
-    if (pos == 0) {
-        set_extrusion_role(erSupportMaterialInterface);
-        return true;
-    }
-
-    // ; prime pillar
-    pos = cmt.find(" prime pillar");
-    if (pos == 0) {
-        set_extrusion_role(erWipeTower);
-        return true;
-    }
-
-    // ; ooze shield
-    pos = cmt.find(" ooze shield");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // Missing mapping
-        return true;
-    }
-
-    // ; raft
-    pos = cmt.find(" raft");
-    if (pos == 0) {
-        set_extrusion_role(erSupportMaterial);
-        return true;
-    }
-
-    // ; internal single extrusion
-    pos = cmt.find(" internal single extrusion");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // Missing mapping
-        return true;
-    }
-
-    // geometry
-    // ; tool
-    std::string tag = " tool";
-    pos = cmt.find(tag);
-    if (pos == 0) {
-        const std::string_view data = cmt.substr(pos + tag.length());
-        std::string h_tag = "H";
-        size_t h_start = data.find(h_tag);
-        size_t h_end = data.find_first_of(' ', h_start);
-        std::string w_tag = "W";
-        size_t w_start = data.find(w_tag);
-        size_t w_end = data.find_first_of(' ', w_start);
-        if (h_start != data.npos) {
-            if (!parse_number(data.substr(h_start + 1, (h_end != data.npos) ? h_end - h_start - 1 : h_end), m_forced_height))
-                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
-        }
-        if (w_start != data.npos) {
-            if (!parse_number(data.substr(w_start + 1, (w_end != data.npos) ? w_end - w_start - 1 : w_end), m_forced_width))
-                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
-        }
-
-        return true;
-    }
-
-    // ; layer
-    tag = " layer";
-    pos = cmt.find(tag);
-    if (pos == 0) {
-        // skip lines "; layer end"
-        const std::string_view data = cmt.substr(pos + tag.length());
-        size_t end_start = data.find("end");
-        if (end_start == data.npos)
-            ++m_layer_id;
-
-        return true;
-    }
-
-    return false;
-}
-
-bool GCodeProcessor::process_craftware_tags(const std::string_view comment)
-{
-    // segType -> extrusion role
-    std::string tag = "segType:";
-    size_t pos = comment.find(tag);
-    if (pos != comment.npos) {
-        const std::string_view type = comment.substr(pos + tag.length());
-        if (type == "Skirt")
-            set_extrusion_role(erSkirt);
-        else if (type == "Perimeter")
-            set_extrusion_role(erExternalPerimeter);
-        else if (type == "HShell")
-            set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        else if (type == "InnerHair")
-            set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        else if (type == "Loop")
-            set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        else if (type == "Infill")
-            set_extrusion_role(erInternalInfill);
-        else if (type == "Raft")
-            set_extrusion_role(erSkirt);
-        else if (type == "Support")
-            set_extrusion_role(erSupportMaterial);
-        else if (type == "SupportTouch")
-            set_extrusion_role(erSupportMaterial);
-        else if (type == "SoftSupport")
-            set_extrusion_role(erSupportMaterialInterface);
-        else if (type == "Pillar")
-            set_extrusion_role(erWipeTower);
-        else {
-            set_extrusion_role(erNone);
-            BOOST_LOG_TRIVIAL(warning) << "GCodeProcessor found unknown extrusion role: " << type;
-        }
-
-        if (m_extrusion_role == erExternalPerimeter)
-            m_seams_detector.activate(true);
-
-        return true;
-    }
-
-    // layer
-    pos = comment.find(" Layer #");
-    if (pos == 0) {
-        ++m_layer_id;
-        return true;
-    }
-
-    return false;
-}
-
-bool GCodeProcessor::process_ideamaker_tags(const std::string_view comment)
-{
-    // TYPE -> extrusion role
-    std::string tag = "TYPE:";
-    size_t pos = comment.find(tag);
-    if (pos != comment.npos) {
-        const std::string_view type = comment.substr(pos + tag.length());
-        if (type == "RAFT")
-            set_extrusion_role(erSkirt);
-        else if (type == "WALL-OUTER")
-            set_extrusion_role(erExternalPerimeter);
-        else if (type == "WALL-INNER")
-            set_extrusion_role(erPerimeter);
-        else if (type == "SOLID-FILL")
-            set_extrusion_role(erSolidInfill);
-        else if (type == "FILL")
-            set_extrusion_role(erInternalInfill);
-        else if (type == "BRIDGE")
-            set_extrusion_role(erBridgeInfill);
-        else if (type == "INTERNAL BRIDGE")
-            set_extrusion_role(erInternalBridgeInfill);
-        else if (type == "SUPPORT")
-            set_extrusion_role(erSupportMaterial);
-        else {
-            set_extrusion_role(erNone);
-            BOOST_LOG_TRIVIAL(warning) << "GCodeProcessor found unknown extrusion role: " << type;
-        }
-
-        if (m_extrusion_role == erExternalPerimeter)
-            m_seams_detector.activate(true);
-
-        return true;
-    }
-
-    // geometry
-    // width
-    tag = "WIDTH:";
-    pos = comment.find(tag);
-    if (pos != comment.npos) {
-        if (!parse_number(comment.substr(pos + tag.length()), m_forced_width))
-            BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
-        return true;
-    }
-
-    // height
-    tag = "HEIGHT:";
-    pos = comment.find(tag);
-    if (pos != comment.npos) {
-        if (!parse_number(comment.substr(pos + tag.length()), m_forced_height))
-            BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
-        return true;
-    }
-
-    // layer
-    pos = comment.find("LAYER:");
-    if (pos == 0) {
-        ++m_layer_id;
-        return true;
-    }
-
-    return false;
-}
-
-bool GCodeProcessor::process_kissslicer_tags(const std::string_view comment)
-{
-    // extrusion roles
-
-    // ; 'Raft Path'
-    size_t pos = comment.find(" 'Raft Path'");
-    if (pos == 0) {
-        set_extrusion_role(erSkirt);
-        return true;
-    }
-
-    // ; 'Support Interface Path'
-    pos = comment.find(" 'Support Interface Path'");
-    if (pos == 0) {
-        set_extrusion_role(erSupportMaterialInterface);
-        return true;
-    }
-
-    // ; 'Travel/Ironing Path'
-    pos = comment.find(" 'Travel/Ironing Path'");
-    if (pos == 0) {
-        set_extrusion_role(erIroning);
-        return true;
-    }
-
-    // ; 'Support (may Stack) Path'
-    pos = comment.find(" 'Support (may Stack) Path'");
-    if (pos == 0) {
-        set_extrusion_role(erSupportMaterial);
-        return true;
-    }
-
-    // ; 'Perimeter Path'
-    pos = comment.find(" 'Perimeter Path'");
-    if (pos == 0) {
-        set_extrusion_role(erExternalPerimeter);
-        m_seams_detector.activate(true);
-        return true;
-    }
-
-    // ; 'Pillar Path'
-    pos = comment.find(" 'Pillar Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        return true;
-    }
-
-    // ; 'Destring/Wipe/Jump Path'
-    pos = comment.find(" 'Destring/Wipe/Jump Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        return true;
-    }
-
-    // ; 'Prime Pillar Path'
-    pos = comment.find(" 'Prime Pillar Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        return true;
-    }
-
-    // ; 'Loop Path'
-    pos = comment.find(" 'Loop Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        return true;
-    }
-
-    // ; 'Crown Path'
-    pos = comment.find(" 'Crown Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone); // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        return true;
-    }
-
-    // ; 'Solid Path'
-    pos = comment.find(" 'Solid Path'");
-    if (pos == 0) {
-        set_extrusion_role(erNone);
-        return true;
-    }
-
-    // ; 'Stacked Sparse Infill Path'
-    pos = comment.find(" 'Stacked Sparse Infill Path'");
-    if (pos == 0) {
-        set_extrusion_role(erInternalInfill);
-        return true;
-    }
-
-    // ; 'Sparse Infill Path'
-    pos = comment.find(" 'Sparse Infill Path'");
-    if (pos == 0) {
-        set_extrusion_role(erSolidInfill);
-        return true;
-    }
-
-    // geometry
-
-    // layer
-    pos = comment.find(" BEGIN_LAYER_");
-    if (pos == 0) {
-        ++m_layer_id;
-        return true;
-    }
-
     return false;
 }
 

@@ -262,7 +262,7 @@ TEST_CASE("AMF constellation axis scales and mirrors remain distinct", "[AMF][AM
     }
 }
 
-TEST_CASE("AMF uniform scale expands to every axis", "[AMF]")
+TEST_CASE("AMF uniform scale expands to every axis", "[AMF][AMFArchive]")
 {
     ScopedTemporaryFile f(".amf");
     write_file(f.string(), document(instance("<scale>2.5</scale>")));
@@ -305,7 +305,7 @@ TEST_CASE("AMF missing constellation targets do not duplicate known geometry", "
     CHECK(m.objects[0]->instances.empty());
 }
 
-TEST_CASE("AMF empty constellation instances still load the object geometry", "[AMF]")
+TEST_CASE("AMF empty constellation instances still load the object geometry", "[AMF][AMFArchive]")
 {
     ScopedTemporaryFile f(".amf");
     write_file(f.string(), document(instance("")));

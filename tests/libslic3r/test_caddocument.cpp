@@ -139,7 +139,7 @@ void make_box(CadDocument& doc, int& sketch, int& extrude)
 
 } // namespace cad_feature_editing
 
-TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument]")
+TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "[CadDocument][CadDocumentReplacement]")
 {
     CadDocument doc;
     int sketch = -1, extrude = -1;
@@ -168,7 +168,7 @@ TEST_CASE("Editing an Extrude preserves its feature identity and sketch link", "
     CHECK_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(800.0, 0.02));
 }
 
-TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument]")
+TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter sets", "[CadDocument][CadDocumentReplacement]")
 {
     CadDocument doc;
     int sketch = -1, extrude = -1;
@@ -217,6 +217,43 @@ TEST_CASE("Editing a rectangular sketch and Extrude transfers both parameter set
     CHECK_THAT(props.center_of_mass.y(), Catch::Matchers::WithinAbs(0.0, 1e-6));
     cad_feature_editing::require_mesh_volume_inputs(doc.display_mesh);
     REQUIRE_THAT(double(doc.display_mesh.volume()), Catch::Matchers::WithinRel(9.0 * M_PI * 4.0, 0.02));
+}
+
+TEST_CASE("Editing a rectangular sketch and Extrude keeps the original rectangular edit contract",
+          "[CadDocument][CadDocumentReplacement]")
+{
+    // Keep the original rectangular edit contract alongside the circle and moved-plane coverage.
+    CadDocument rectangle_doc;
+    const int rectangle_sketch = rectangle_doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
+                                                           10.0, 10.0, 0.0, "Profile");
+    const int rectangle_extrude = rectangle_doc.add_extrude(rectangle_sketch, 5.0, false,
+                                                            BooleanMode::New, "Solid");
+    REQUIRE(rectangle_doc.recompute());
+    REQUIRE(rectangle_doc.error.empty());
+    REQUIRE(rectangle_doc.bodies.size() == 1);
+
+    CadFeature rectangle_edit;
+    rectangle_edit.type      = CadFeatureType::Extrude;
+    rectangle_edit.shape     = SketchShape::Rectangle;
+    rectangle_edit.plane     = SketchPlane::XY();
+    rectangle_edit.width     = 12.0;
+    rectangle_edit.height    = 8.0;
+    rectangle_edit.distance  = 4.0;
+    rectangle_edit.symmetric = false;
+    rectangle_edit.mode      = BooleanMode::New;
+    REQUIRE(rectangle_doc.replace_sketch_extrude(rectangle_sketch, rectangle_extrude, rectangle_edit));
+    REQUIRE(rectangle_doc.recompute());
+    REQUIRE(rectangle_doc.error.empty());
+    REQUIRE(rectangle_doc.bodies.size() == 1);
+    REQUIRE(rectangle_doc.display_mesh.facets_count() > 0);
+    CHECK(rectangle_doc.features[rectangle_sketch].name == "Profile");
+    CHECK(rectangle_doc.features[rectangle_sketch].type == CadFeatureType::Sketch);
+    CHECK(rectangle_doc.features[rectangle_extrude].name == "Solid");
+    CHECK(rectangle_doc.features[rectangle_extrude].type == CadFeatureType::Extrude);
+    CHECK_THAT(rectangle_doc.features[rectangle_sketch].width, Catch::Matchers::WithinAbs(12.0, 1e-9));
+    CHECK_THAT(rectangle_doc.features[rectangle_sketch].height, Catch::Matchers::WithinAbs(8.0, 1e-9));
+    CHECK_THAT(rectangle_doc.features[rectangle_extrude].distance, Catch::Matchers::WithinAbs(4.0, 1e-9));
+    CHECK_THAT(double(rectangle_doc.display_mesh.volume()), Catch::Matchers::WithinRel(384.0, 0.02));
 }
 
 TEST_CASE("Feature replacement rejects bad indices and rolls back a failed rebuild", "[CadDocument]")
@@ -2811,7 +2848,7 @@ TEST_CASE("CadDocument import features replay into independent bodies", "[CadDoc
     REQUIRE(body_triangle_counts[1] == doc.display_body_meshes[1].its.indices.size());
 }
 
-TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step]")
+TEST_CASE("STEP export preserves imported solids and applies per-body rigid transforms", "[CadDocument][step][CadDocumentStepExport]")
 {
     const int scenario = GENERATE(0, 1, 2);
     CAPTURE(scenario);
@@ -9986,7 +10023,7 @@ constexpr double legacy_height = 4.0;
 constexpr double legacy_depth = 0.3;
 
 TEST_CASE("Saved legacy external threads retain crests outside the reference cylinder",
-          "[CadDocument][thread]")
+          "[CadDocument][thread][CadLegacyThread]")
 {
     CadDocument source;
     const int thread = source.add_thread(legacy_radius, legacy_pitch, legacy_height,
@@ -10018,7 +10055,7 @@ TEST_CASE("Saved legacy external threads retain crests outside the reference cyl
 }
 
 TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groove",
-          "[CadDocument][thread]")
+          "[CadDocument][thread][CadLegacyThread]")
 {
     constexpr double stock_radius = 6.0;
     CadDocument source;
@@ -10060,7 +10097,7 @@ TEST_CASE("Saved legacy internal threads cut a bore and an outward helical groov
 
 } // namespace cad_legacy_thread_contracts
 
-TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean]")
+TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[CadDocument][boolean][CadDocumentBooleanIntersect]")
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
@@ -10099,7 +10136,7 @@ TEST_CASE("CadDocument body Boolean intersection keeps the analytic overlap", "[
     CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
 }
 
-TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean]")
+TEST_CASE("CadDocument extrude intersection clips the active body to the tool", "[CadDocument][boolean][CadDocumentBooleanIntersect]")
 {
     CadDocument doc;
     const int base_sketch = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(),
@@ -10132,7 +10169,7 @@ TEST_CASE("CadDocument extrude intersection clips the active body to the tool", 
     CHECK_THAT(bb.max.z(), Catch::Matchers::WithinAbs(10.0, 0.05));
 }
 
-TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean][CadDocumentSweepBoolean]")
 {
     const std::vector<BooleanMode> modes = {
         BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect
@@ -10202,7 +10239,7 @@ TEST_CASE("CadDocument sweep Boolean modes preserve the analytic overlap volume"
     }
 }
 
-TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean]")
+TEST_CASE("CadDocument loft Boolean modes preserve the analytic overlap volume", "[CadDocument][boolean][CadDocumentLoftBoolean]")
 {
     const std::vector<BooleanMode> modes = {
         BooleanMode::Add, BooleanMode::Cut, BooleanMode::Intersect

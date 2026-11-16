@@ -2,6 +2,8 @@
 
 Rules for writing tests under `tests/`. [CATCH2.md](CATCH2.md) is the Catch2 reference. Building and running the suites is covered on the wiki, at <https://www.orcaslicer.com/wiki/developer_reference/how_to_test.html>.
 
+For coverage, mutation and settings-inventory runs, see [README.md](README.md#validation-runs).
+
 ## The suites
 
 - `libslic3r`: the core library. Geometry, meshes, file formats, config and presets, Clipper, algorithms, data structures.
@@ -21,6 +23,8 @@ Tests are off by default, so the build has to be told to include them.
 - Linux: `./build_linux.sh -t`, then `ctest --test-dir build/tests -C Release`
 
 Rebuild a single suite with `cmake --build build --config Release --target <suite>_tests`. Visual Studio, Xcode and the Ninja Multi-Config generator that `build_linux.sh` uses are all multi-configuration, so `ctest` needs `-C` on every platform; without it, tests registered with plain `add_test()` lose their labels and report "Not Run".
+
+Use that CMake command for warm-build checks too. A bare Ninja target can select Debug and appear to require a full rebuild; select `build-Release.ninja` explicitly when invoking Ninja directly.
 
 ## Where a test goes
 
@@ -45,9 +49,19 @@ Check these before writing your own setup or output-parsing code.
 - Add further tags where they help: a narrower one to slice a large file (`[Rotcalip]`, `[Placer]`), a shared one for something spanning files (`[Python]`, `[H2C]`, `[Regression]`), or `[NotWorking]` / `[.]` to disable or hide a test. Say why in a comment if you disable or hide.
 - Prefer a flat `TEST_CASE` per behavior, with `GENERATE` for parameterized cases. Reserve `SCENARIO` / `GIVEN` / `WHEN` / `THEN` for genuine shared setup that branches into a few close variations.
 - Set the config keys your test depends on, and derive the expected values from what you set. A 20mm cube sliced at `layer_height` 2 is 10 layers, and the test should state both parts. If a number in your assertion comes from a key you never set, the test is also testing that default.
+- For numeric or Boolean `DynamicPrintConfig` values, use the initializer-list overload, such as `config.set_deserialize_strict({{"layer_height", 0.2}})`. The two-argument overload takes serialized text.
+- Before the first native run of a new valid `Print` fixture, require `print.validate().string.empty()` before processing or export, and capture the validation string with `INFO` so an invalid fixture explains its failure. Pin either a `layer_change_gcode` reset (`G92 E0`) for relative extrusion or absolute extrusion explicitly. Omit the guard only when invalid configuration is the behavior being tested.
+- Use at least two real motion blocks per flush interval in GCodeProcessor fixtures that compare motion estimates with configured feed floors or filament delays. Single-block zero-delay and positive-delay histories can take different buffering paths; test that short-stream behavior separately when it is the contract.
+- For GCodeProcessor buffer or post-processing fixtures using the static config overload, size `filament_map` for every selected filament ID. Expanding `filament_diameter` alone leaves the default one-entry map unchanged; explicitly map multiple filaments to their configured extruder, as `preheat_config()` in `test_gcode_processor.cpp` does.
+- Use registered canonical setting keys in behavior fixtures. `set_deserialize_strict()` may discard obsolete or unknown names; use legacy names only when migration is the behavior being tested.
+- Confirm which static config class owns a setting before testing overrides. A key registered as nullable may belong to `GCodeConfig` or `PrintConfig` and have no object-level override. Trace nil resolution through the actual preset or variant merge, then pass that resolved config to the pipeline; nil does not always mean inheritance or restoration.
 - Assert the defining property, not an incidental value. "Skirt present" or "at least 2 brim loops" survives a refactor; exact coordinates and byte counts do not.
+- Compare total path length when checking ironing spacing. A connected serpentine can remain one extrusion path at different spacings.
 - Name a regression test for the behavior it protects, never for an issue or PR number.
 - When asserting on G-code, match the meaningful token such as `; skirt` rather than whole lines, whitespace or comment wording. Depend on ordering only when ordering is the contract.
+- Before writing a settings test, read the actual consumer and the registered value domain, and confirm the fixture activates the behavior, including angle and geometry prerequisites. Distinguish object deposition from cooling, purge, skirt and brim output, and use the consumer's angular domain when comparing directions.
+
+Update only the intended entries in `settings_coverage.json`, preserving unchanged text and Unicode escaping. Check both the semantic key delta and the textual diff; a whole-file JSON rewrite can create unrelated changes.
 
 ## Catch2 rules that cause real breakage
 
@@ -56,3 +70,9 @@ Check these before writing your own setup or output-parsing code.
 - Never combine conditions with `&&` or `||` inside one assertion. Split them so Catch2 can print both operands on failure.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
+- Copy only the required tracked files, or use `git archive`, when staging a private candidate. Never recursively copy a checkout containing ignored build outputs or dependency builds; those can exhaust the host disk before native validation starts.
+- Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
+- Derive runtime inventories from the built executable and CTest, not a source regex: declarations inside `#if 0` are not registered. Focused targets that link `test_helpers.cpp` also include `Scenario: init_print functionality`.
+- BDD scenarios and `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
+- Catch normalizes tag order. Compare tag tokens rather than their source ordering when checking inventories.
+- Commas in case names are Catch filter separators. Do not concatenate unescaped names into a filter; use tags or an unfiltered run with an exact inventory check.

@@ -229,6 +229,45 @@ const std::string BBL_PROFILE_DESCRIPTION_TAG       = "ProfileDescription";
 const std::string BBL_PROFILE_USER_ID_TAG           = "ProfileUserId";
 const std::string BBL_PROFILE_USER_NAME_TAG         = "ProfileUserName";
 
+// Header and MakerLab keys that OrcaSlicer and Bambu Studio 01.04 and later write escaped twice (the
+// writer escapes the value when it fills the metadata map and again when the map is written). Only for
+// these keys, and only for those producers, may the reader's second decode include &quot; and &apos;.
+// Writer history: Bambu Studio and SoftFever builds up to 1.3.4 escaped each value once; 01.04.00.17 and
+// 1.4.0 and later escape twice; the Application key became OrcaSlicer at 01.05.00.60. Builds labelled
+// 01.03.01.01 straddle the writer change, so they keep the legacy decode.
+
+// The version part of a `BambuStudio-<version>` Application tag. Every historical value is one to four
+// dot-separated numbers of up to four digits (01.04.00.17); Semver::parse cannot read four parts, so the
+// string is checked here and any other shape, suffixes included, counts as legacy. True from 1.4 on.
+static bool bambu_studio_escapes_header_twice(const std::string &version)
+{
+    int    components[4] = {0, 0, 0, 0};
+    size_t index         = 0; // component being read
+    size_t digits        = 0; // digits read in it
+    for (const char c : version) {
+        if (c >= '0' && c <= '9') {
+            if (++digits > 4)
+                return false;
+            components[index] = components[index] * 10 + (c - '0');
+        } else if (c == '.' && digits > 0) {
+            if (++index == 4)
+                return false; // a fifth component
+            digits = 0;
+        } else {
+            return false;
+        }
+    }
+    // An empty component (empty string, trailing dot) or a lone major number is not a version.
+    return digits > 0 && index >= 1 && (components[0] > 1 || (components[0] == 1 && components[1] >= 4));
+}
+
+static bool is_reserved_metadata_key(const std::string &key)
+{
+    return key == BBL_MODEL_NAME_TAG || key == BBL_ORIGIN_TAG || key == BBL_DESIGNER_TAG || key == BBL_DESIGNER_COVER_FILE_TAG ||
+           key == BBL_DESCRIPTION_TAG || key == BBL_COPYRIGHT_TAG || key == BBL_COPYRIGHT_NORMATIVE_TAG || key == BBL_LICENSE_TAG ||
+           key == BBL_MAKERLAB_TAG || key == BBL_MAKERLAB_VERSION_TAG;
+}
+
 const std::string MODEL_FOLDER = "3D/";
 const std::string MODEL_EXTENSION = ".model";
 const std::string MODEL_FILE = "3D/3dmodel.model"; // << this is the only format of the string which works with CURA
@@ -1219,6 +1258,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         IdToSlaDrainHolesMap    m_sla_drain_holes;*/
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
         std::string m_curr_metadata_name;
+        // Parser text of the header and MakerLab metadata in document order, kept until the producer is known.
+        std::vector<std::pair<std::string, std::string>> m_reserved_metadata_raw;
+        // The Application tag names a producer that escapes the header and MakerLab keys twice.
+        bool m_application_escapes_header_twice { false };
         std::string m_curr_characters;
         std::string m_name;
         std::string m_sub_model_path;
@@ -1363,6 +1406,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         bool _handle_start_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_metadata();
+        void _resolve_reserved_metadata();
 
         bool _handle_start_text_configuration(const char** attributes, unsigned int num_attributes);
         bool _handle_start_shape_configuration(const char **attributes, unsigned int num_attributes);
@@ -3680,6 +3724,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!m_sub_model_path.empty())
             return true;
 
+        // Every metadata element of the main model, including the producer tag, has been read.
+        _resolve_reserved_metadata();
+
         // deletes all non-built or non-instanced objects
         for (const IdToModelObjectMap::value_type& object : m_objects) {
             if (object.second >= int(m_model->objects.size())) {
@@ -4010,7 +4057,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
     bool _BBS_3MF_Importer::_handle_start_component(const char** attributes, unsigned int num_attributes)
     {
-        std::string path      = xml_unescape(bbs_get_attribute_value_string(attributes, num_attributes, PPATH_ATTR));
+        std::string path      = bbs_get_attribute_value_string(attributes, num_attributes, PPATH_ATTR);
         int         object_id = bbs_get_attribute_value_int(attributes, num_attributes, OBJECTID_ATTR);
         Transform3d transform = bbs_get_transform_from_3mf_specs_string(bbs_get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
 
@@ -4092,6 +4139,37 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             throw version_error(error_msg);
     }
 
+    // Re-decode the header and MakerLab values once the producer is known. OrcaSlicer and Bambu Studio
+    // 01.04 and later escape these keys twice (writer-side layer, then the XML write), so the second
+    // decode may include the quote entities there. Other producers, older Bambu Studio versions and files
+    // without a recognized producer tag keep the legacy lt/gt/amp decode applied while reading.
+    void _BBS_3MF_Importer::_resolve_reserved_metadata()
+    {
+        if (m_orca_slicer_version || m_application_escapes_header_twice) {
+            // Document order, so a repeated key or Copyright/CopyRight keeps the precedence the
+            // reader had while parsing: the last assignment wins.
+            for (const auto &[key, raw] : m_reserved_metadata_raw) {
+                const std::string value = xml_unescape(raw);
+                model_info.metadata_items[key] = value;
+                if (key == BBL_MODEL_NAME_TAG)
+                    model_info.model_name = value;
+                else if (key == BBL_ORIGIN_TAG)
+                    model_info.origin = value;
+                else if (key == BBL_DESIGNER_TAG)
+                    m_designer = value;
+                else if (key == BBL_DESIGNER_COVER_FILE_TAG)
+                    model_info.cover_file = value;
+                else if (key == BBL_DESCRIPTION_TAG)
+                    model_info.description = value;
+                else if (key == BBL_LICENSE_TAG)
+                    model_info.license = value;
+                else if (key == BBL_COPYRIGHT_TAG || key == BBL_COPYRIGHT_NORMATIVE_TAG)
+                    model_info.copyright = value;
+            }
+        }
+        m_reserved_metadata_raw.clear();
+    }
+
     bool _BBS_3MF_Importer::_handle_end_metadata()
     {
         if ((m_curr_metadata_name == BBS_3MF_VERSION)||(m_curr_metadata_name == BBS_3MF_VERSION1)) {
@@ -4109,10 +4187,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (boost::starts_with(m_curr_characters, "BambuStudio-")) {
                 m_is_bbl_3mf = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(12));
+                m_application_escapes_header_twice = bambu_studio_escapes_header_twice(m_curr_characters.substr(12));
             }
             else if (boost::starts_with(m_curr_characters, "OrcaSlicer-")) {
                 m_is_bbl_3mf = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(11));
+                m_application_escapes_header_twice = true;
             }
         } else if (m_curr_metadata_name == ORCASLICER_TAG) {
             // OrcaSlicer version tag (written from OrcaSlicer 2.3.2 onwards)
@@ -4134,52 +4214,52 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             check_painting_version(m_mm_painting_version, MM_PAINTING_VERSION,
                 _(L("The selected 3MF contains multi-material painted object using a newer version of OrcaSlicer and is not compatible.")));*/
         } else if (m_curr_metadata_name == BBL_MODEL_ID_TAG) {
-            m_model_id = xml_unescape(m_curr_characters);
+            m_model_id = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_MODEL_NAME_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found model name = " << m_curr_characters;
-            model_info.model_name = xml_unescape(m_curr_characters);
+            model_info.model_name = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_ORIGIN_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found model name = " << m_curr_characters;
-            model_info.origin = xml_unescape(m_curr_characters);
+            model_info.origin = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_DESIGNER_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found designer = " << m_curr_characters;
-            m_designer = xml_unescape(m_curr_characters);
+            m_designer = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_DESIGNER_USER_ID_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found designer_user_id = " << m_curr_characters;
-            m_designer_user_id = xml_unescape(m_curr_characters);
+            m_designer_user_id = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_DESIGNER_COVER_FILE_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found designer_cover = " << m_curr_characters;
-            model_info.cover_file = xml_unescape(m_curr_characters);
+            model_info.cover_file = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_DESCRIPTION_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found description = " << m_curr_characters;
-            model_info.description = xml_unescape(m_curr_characters);
+            model_info.description = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_LICENSE_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found license = " << m_curr_characters;
-            model_info.license = xml_unescape(m_curr_characters);
+            model_info.license = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_COPYRIGHT_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found CopyRight = " << m_curr_characters;
-            model_info.copyright = xml_unescape(m_curr_characters);
+            model_info.copyright = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_COPYRIGHT_NORMATIVE_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found Copyright = " << m_curr_characters;
-            model_info.copyright = xml_unescape(m_curr_characters);
+            model_info.copyright = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_REGION_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found region = " << m_curr_characters;
-            m_contry_code = xml_unescape(m_curr_characters);
+            m_contry_code = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_PROFILE_TITLE_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found profile_title = " << m_curr_characters;
-            m_profile_title = xml_unescape(m_curr_characters);
+            m_profile_title = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_PROFILE_COVER_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found profile_cover = " << m_curr_characters;
-            m_profile_cover = xml_unescape(m_curr_characters);
+            m_profile_cover = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_PROFILE_DESCRIPTION_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found profile_description = " << m_curr_characters;
-            m_Profile_description = xml_unescape(m_curr_characters);
+            m_Profile_description = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_PROFILE_USER_ID_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found profile_user_id = " << m_curr_characters;
-            m_profile_user_id = xml_unescape(m_curr_characters);
+            m_profile_user_id = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         }else if (m_curr_metadata_name == BBL_PROFILE_USER_NAME_TAG) {
             BOOST_LOG_TRIVIAL(trace) << "design_info, load_3mf found profile_user_name = " << m_curr_characters;
-            m_profile_user_name = xml_unescape(m_curr_characters);
+            m_profile_user_name = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
         } else if (m_curr_metadata_name == BBL_CREATION_DATE_TAG) {
             ;
         } else if (m_curr_metadata_name == BBL_MODIFICATION_TAG) {
@@ -4188,8 +4268,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             ;
         }
         if (!m_curr_metadata_name.empty()) {
-            BOOST_LOG_TRIVIAL(info) << "load_3mf found metadata key = " << m_curr_metadata_name << ", value = " << xml_unescape(m_curr_characters);
-            model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters);
+            BOOST_LOG_TRIVIAL(info) << "load_3mf found metadata key = " << m_curr_metadata_name << ", value = " << xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
+            model_info.metadata_items[m_curr_metadata_name] = xml_unescape(m_curr_characters, XmlUnescapePolicy::Legacy);
+            // Whether the quote entities may be decoded depends on the producer, which can appear
+            // after this key. Keep the parser's text and decide in _resolve_reserved_metadata().
+            if (is_reserved_metadata_key(m_curr_metadata_name))
+                m_reserved_metadata_raw.emplace_back(m_curr_metadata_name, m_curr_characters);
         }
 
         return true;
@@ -4550,7 +4634,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 m_curr_plater->plate_index = atoi(value.c_str());
             }
             else if (key == PLATER_NAME_ATTR) {
-                m_curr_plater->plate_name = xml_unescape(value.c_str());
+                // Written with a single xml_escape; the XML parser has already decoded it once.
+                m_curr_plater->plate_name = value;
             }
             else if (key == LOCK_ATTR)
             {
@@ -7073,12 +7158,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 origin       = model.model_info->origin;
                 BOOST_LOG_TRIVIAL(trace) << "design_info, save_3mf found designer_cover = " << design_cover;
             }
+            // The final XML write escapes metadata text again. Keep the legacy amp/lt/gt
+            // layer for existing readers, but let the XML parser decode quotes once.
+            // Literal entity spellings are protected by xml_escape before replacement.
+            const auto escape_metadata_text = [](const std::string &value) {
+                std::string escaped = xml_escape(value);
+                boost::replace_all(escaped, "&quot;", "\"");
+                boost::replace_all(escaped, "&apos;", "'");
+                return escaped;
+            };
             // remember to use metadata_item_map to store metadata info
             std::map<std::string, std::string> metadata_item_map;
             if (!sub_model) {
                 // update metadat_items
                 if (model.model_info && model.model_info.get()) {
-                    metadata_item_map = model.model_info.get()->metadata_items;
+                    // The importer stores decoded text, so a seeded value needs the same two
+                    // escape layers as a fresh one. Without them a literal entity in a re-saved
+                    // key loses a layer on every save, and MakerLab differs by whether mk_name is set.
+                    for (const auto &[key, value] : model.model_info.get()->metadata_items)
+                        metadata_item_map[key] = escape_metadata_text(value);
                 }
 
                 metadata_item_map[BBL_MODEL_NAME_TAG]           = xml_escape(name);
@@ -7125,15 +7223,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (!m_minimal_published)
                 metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 
-            // The final XML write escapes this text again. Keep the legacy amp/lt/gt
-            // layer for existing readers, but let the XML parser decode quotes once.
-            // Literal entity spellings are protected by xml_escape before replacement.
-            const auto escape_metadata_text = [](const std::string &value) {
-                std::string escaped = xml_escape(value);
-                boost::replace_all(escaped, "&quot;", "\"");
-                boost::replace_all(escaped, "&apos;", "'");
-                return escaped;
-            };
             if (!model.mk_name.empty()) {
                 metadata_item_map[BBL_MAKERLAB_TAG] = escape_metadata_text(model.mk_name);
                 BOOST_LOG_TRIVIAL(info) << "saved mk_name " << model.mk_name;

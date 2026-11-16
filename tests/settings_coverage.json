@@ -4863,7 +4863,7 @@
         "representative_values",
         "pipeline_oracle"
       ],
-      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered, so this remains partial rather than claiming a complete numeric boundary matrix."
+      "reason": "The accepted public infill-anchor cases exercise the documented 0 no-anchor behavior and positive absolute values, compare requested 1.2 mm against the 0.6 mm clamp, and compare absolute values with equivalent percentages. Independent sparse-path length and endpoint-contact measurements distinguish the outputs. Zero is a documented semantic boundary; no numeric min/max range is registered. These representative fixtures do not exhaust the unbounded numeric domain or arbitrary geometries."
     },
     "min_skirt_length": {
       "test": "tests/fff_print/test_skirt_brim.cpp",
@@ -5923,9 +5923,871 @@
       "tag": "[WipeTowerFilamentDistanceBoundaries]",
       "dimensions": [
         "boundary_values",
+        "representative_values",
         "pipeline_oracle"
       ],
       "reason": "The full SEMM Print export checks the tooltip-defined negative, zero, and positive sign partition at -5, 0, and +5 mm with parking fixed at 40 mm, keeping every effective loading distance positive. Parsed loading E phases total 35, 40, and 45 mm in the emitted 20/70/10 split; the unload-plus-park return remains 40 mm. Each export requires positive object-model deposition with conserved summed model-feature E length and XY path, and planned wipe toolchange spans retain matching layer/tool associations and Y span. Zero is a semantic sign boundary, not a registered minimum; no numeric extremes are claimed."
+    },
+    "support_points_density_relative": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportPointDensity]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 with default 100 and no maximum. On an elevated cube, source tracing shows 0% yields no generated points and an empty support mesh; SLAPrint then rejects the object with SlicingError for an unprintable empty elevated support slice. The test asserts that typed rejection, unfinished print state, completed support-point/tree steps, and empty products at 0. At representative 25% and the implicit default 100%, the same public fixture must finish with nonempty generated points, more points at default than 25, and finite new-island points whose coordinates stay within the transformed mesh bounds and whose head radius matches configuration. A separate deterministic projection test seeds the public generator with 5 using real SLAPrint model slices/heights, checks parallel boundary-ray hit/miss behavior, and requires generated points to remain on the mesh. No upper-bound claim is made because none is registered."
+    },
+    "support_max_bridges_on_pillar": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportMaxBridges]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..50 with default 3. Six manual heads on a 2\u00d73 grid stay within the configured bridge-length and base-radius predicates while avoiding head overlap. The test applies and validates 0, 3, and 50 through SLAPrint, builds the production SupportTreeConfig from the object config, and compares the completed SLAPrint support-mesh volume with the direct public SupportTreeBuildsteps output. Builder graph assertions check valid heads, head-to-pillar routing, per-pillar bridge caps, and the observed bridge clusters: zero permits an unbounded cluster but the bridge gate prevents links, default 3 forms two three-head clusters, and 50 forms one six-head cluster."
+    },
+    "support_max_pillar_link_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportMaxPillarLinkDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0, no maximum, and default 10.0. The public SLAPrint two-head fixture fixes head spacing at 3 mm, support pillar diameter at 2 mm, and object elevation at 8 mm (below the 15 mm solo-pillar threshold); support_max_bridge_length is held at 2.5 mm so bridge clustering is separately constrained. At 0 and 2.9 mm, the production mapped SupportTreeConfig must produce zero linked pillars; at 3.1 mm and the implicit default 10 mm, both pillars must link. The direct public SupportTreeBuildsteps graph count is rebuilt from SLAPrintObject::config() and its transformed mesh, and its support mesh volume must match the completed SLAPrint support mesh. This exercises the config mapping and interconnect distance consumer; it makes no claim about a nonexistent upper endpoint."
+    },
+    "bottle_cost": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum/default 0 and representative 2.5, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
+    "bottle_volume": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum 50, representative 500 and default 1000, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
+    "bottle_weight": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLABottleMetadata]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum with no maximum. The public SLAPrint lifecycle test applies minimum 0, representative 2.5 and default 1, checks CHANGED for changed metadata and UNCHANGED on immediate repetition, and retains completed print/object stages, exact model slices, layer levels, material volumes, layer timing order and total time. This covers metadata storage and pipeline independence at these values. No bottle price, mass, unit conversion or filename behavior is claimed."
+    },
+    "material_density": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 with default 1 and no maximum. The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves 0, 1 and 1.25 in the imported DynamicPrintConfig. This claim is limited to archive persistence; no resin-mass, geometry, GUI, or slicing-consumer behavior is claimed."
+    },
+    "material_colour": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves the registered default #29B2B2 and a representative valid hex color #1673C9 in the imported DynamicPrintConfig. This claim is limited to archive persistence; GUI color presentation and slicing effects are not claimed."
+    },
+    "material_type": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The open coString setting round-trips its registered default Tough and the custom value ToughFlex 93 through public SLAPrint export and import_sla_archive into DynamicPrintConfig. This claim covers archive persistence only; material filtering or slicing behavior is not claimed."
+    },
+    "material_vendor": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAMaterialArchive]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public SLAPrint-to-SL1Archive export and import_sla_archive round-trip preserves the default empty vendor and representative Unicode value R\u00e9sine \u96ea in the imported DynamicPrintConfig. This claim is limited to archive persistence; vendor UI, lookup, and slicing behavior are not claimed."
+    },
+    "support_base_safety_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportBaseSafetyDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..10 mm with default 1 mm. In a public SLAPrint around-object-pad fixture, a manual support under an island 20 mm above the bed routes around a separate ground-level model footprint. The test keeps pad object gap at 0.25 mm so the tree's 0.5 mm fallback at configured zero passes public validation. It checks the zero fallback mapping, implicit default, representative 4 mm and registered 10 mm maximum through the resolved SupportTreeConfig, then requires the public support-mesh X extent to differ between default and representative settings and again between representative and maximum. The tree's route direction is not assumed to be monotonic. This claim is limited to this pad fixture; other model layouts and support-tree interactions are unclaimed."
+    },
+    "hollowing_min_thickness": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 1..10 mm with default 3 mm. Public SLAPrint hollowing checks the 1 mm lower endpoint and 10 mm upper endpoint on a 20x20x10 mm box; the upper endpoint has no closed interior because the inward offset exceeds the box 5 mm inradius. The existing 1-vs-3 mm contract remains, and a default-config sphere run checks the 3 mm default. Other shapes and the full numeric interval are unclaimed."
+    },
+    "hollowing_quality": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers quality 0..1 with default 0.5, and Hollowing.cpp maps it to voxel scales 3.5..8. A spherical public SLAPrint fixture checks endpoint mesh sampling through vertex count and checks radial RMS error against the 1 mm inward-offset surface with voxel-derived bounds; the default-config sphere also exercises 0.5. Claims are limited to this sphere and do not assert general monotonic geometric error."
+    },
+    "hollowing_closing_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAHollowingVariance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..10 mm with default 2 mm. Public SLAPrint hollowing checks closing 0 and 10 mm at thickness 1 mm on a 20x20x10 mm box: 0 retains the interior, while 10 places the requested thickness-plus-closing level set beyond the 5 mm inradius and leaves no interior. The default-config sphere exercises 2 mm. Drain-hole-specific closing-distance behavior remains unclaimed because SLAPrint::Steps::drill_holes() is disabled."
+    },
+    "hole_to_polyhole_max_edges": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[PolyholeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The validated Print pipeline slices a circular through-hole at 3 mm radius with a 0.4 mm nozzle and compares per-layer hole vertex counts under edge caps 3, 6, and 50; the minimum cap yields exactly 3 vertices per layer, cap 6 exactly 6, and the uncapped-by-this-limit run is strictly between 6 and 50. Disabled controls at caps 3 and 50 keep equal geometry. Claims only these values, this fixture, and this nozzle; no upper registered bound or broader radius/nozzle behavior is claimed."
+    },
+    "hole_to_polyhole_threshold": {
+      "test": "tests/fff_print/test_boolean_settings.cpp",
+      "tag": "[PolyholeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The validated Print pipeline slices an elliptical through-hole with 3.0/3.3 mm radii and checks actual per-layer slice-surface hole counts. Zero and 1% reject conversion against disabled geometry; 0.5 mm, 20%, and literal 10 mm convert to six edges, exercising radius-relative percent resolution and the literal cap. Claims only these encodings and this fixture; no continuous range or percent maximum is claimed."
+    },
+    "lightning_overhang_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The [LightningSettings] case \"Lightning overhang angle shrinks unsupported internal area at a stepped roof\" varies only this angle. The sparse Lightning Print pipeline is exercised on the same stepped mesh at the registered 5 and 85 degree endpoints while the other two Lightning angles stay at 45 degrees. The test checks finite nonnegative unsupported-overhang areas, a per-layer nested-area relation, a strict total-area reduction, and a nontrivial change in measured sparse extrusion path length. The claim is scoped to this step fixture and sparse-infill consumer; support-Lightning and other interactions are not covered."
+    },
+    "lightning_prune_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The [LightningSettings] case \"Lightning prune angle trims branches across the flat step base\" varies this angle. The sparse Lightning Print pipeline exercises the registered 5 and 85 degree endpoints in a 2 by 2 prune/straightening matrix on the stepped mesh. Measured sparse path length across the flat internal-fill base decreases at both straightening endpoints when prune moves from 5 to 85 degrees; active-path guards establish the low-prune comparisons. The high-prune rows check that later straightening does not resurrect pruned path length. The claim is scoped to this geometry and pairwise matrix, not arbitrary branching trees or support-Lightning."
+    },
+    "lightning_straightening_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[LightningSettings]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The [LightningSettings] case \"Lightning straightening angle reduces branch detours across the flat step base\" varies this angle. The sparse Lightning Print pipeline exercises the registered 5 and 85 degree endpoints on the stepped mesh. Endpoint-chord detour in measured sparse paths over the flat internal-fill base decreases at 85 degrees, both with the other angles at 45 degrees and in the 2 by 2 prune/straightening matrix. This is a fixture-specific geometric relation; arbitrary branching trees and support-Lightning are not covered."
+    },
+    "filament_flush_temp": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentFlushSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "The shipped X2D change-filament template is rendered through tower and direct-route G-code. Regular flush temperature checks the registered 0 and 1500 endpoints: zero resolves to the filament's recommended nozzle-range upper temperature (245/255 in the two-filament fixture), while explicit 1500 remains 1500. Child-preset nil inheritance and an explicit 1500 child value are also checked in emitted rows. The fixture uses one two-filament reversed physical map; other templates, tool counts, and temperature interactions are unclaimed.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_gcode.cpp",
+          "tag": "[FilamentFlushNilResolution]"
+        }
+      ]
+    },
+    "filament_flush_temp_fast": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentFlushSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The Fast prime-volume path emits the configured fast temperatures, including the registered 0 and 1500 endpoints; zero resolves to the incoming filament's recommended nozzle-range upper temperature. Changing the fast vector while using Default leaves the checked flush parameters and object deposition unchanged, establishing that Fast-only routing. The fast vector is explicit, so nil handling for this option is untested; Saving mode and other templates/tool counts are not claimed."
+    },
+    "filament_flush_volumetric_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentFlushSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Exported M620.10 flush-feed parameters check the registered 0 and 200 mm\u00b3/s endpoints: zero falls back to each filament's configured maximum volumetric speed, while 200 is converted independently to filament feed using 1.75 mm diameter. Child-preset nil inheritance and an explicit 16 mm\u00b3/s child value are checked in the emitted rows. The result is scoped to the two-filament fixture and does not claim all feed caps or templates.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_gcode.cpp",
+          "tag": "[FilamentFlushNilResolution]"
+        }
+      ]
+    },
+    "filament_cooling_before_tower": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[FilamentFlushSettings]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "Configured 10/25 \u00b0C drops and child-preset nil/explicit resolution are checked against incoming nozzle temperature in exported tool-change rows. The oracle also verifies zero cooling for first-layer and contact rows, and a direct-route control with no tower interface has no tower-cooling drop. This option has no registered numeric bounds; the fixture does not claim its broader numeric range, arbitrary tower layouts, or all mode interactions.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_gcode.cpp",
+          "tag": "[FilamentFlushNilResolution]"
+        }
+      ]
+    },
+    "retract_length_toolchange": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[RetractionE]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The shipped X2D template's mapped tool-change retract is checked for configured values 0 and 12.5 mm with filament_map={2,1}; each emitted row must select the expected physical-filament value, including through the template's pressure-retract placeholders. A valid two-filament Type1 tower export also checks the zero slot emits no toolchange E retract and the positive slot emits the configured 2.4 mm retract. These two-element vectors cover zero/positive element behavior on this mapping; malformed or empty vectors, other mappings, and other templates remain unclaimed."
+    },
+    "retract_restart_extra": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[RetractionE]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A valid two-filament Type1 tower Print checks the ordinary retract/recovery E moves for a two-element vector with 0 and 0.2 mm values: both tools retract 0.8 mm, while their emitted unretracts are 0.8 and 1.0 mm. This covers zero/positive element behavior through the G-code pipeline for this fixture; malformed or empty vectors and other maps are not claimed."
+    },
+    "retract_restart_extra_toolchange": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[RetractionE]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A direct GCodeWriter test configures two filament columns with toolchange restart extras 0 and 0.35 mm. The zero-length slot emits no retract or recovery; the positive slot emits a 2.4 mm toolchange retract and 2.75 mm recovery, distinguishing the toolchange extra from the separate ordinary restart extra of 0.2 mm. Other maps and malformed vectors are not claimed."
+    },
+    "preheat_time": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPreheat]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The XL G-code post processor exercises the registered 0 and 120 second endpoints plus 60 seconds. It checks the emitted preheat command count, positive time window, rewritten extrusion records, and output line IDs. Other printer models are not claimed."
+    },
+    "preheat_steps": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GcpPreheat]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The XL G-code post processor exercises the registered 1 and 10 step endpoints with preheat enabled. It checks the emitted command count and descending time schedule against the rewritten output. Other printer models are not claimed."
+    },
+    "extra_solid_infills": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[ExtraSolidInfills]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On a ten-layer cube, empty and malformed controls leave internal layers sparse; direct helper calls check one-based IDs 1 through 10 for an explicit list, finite-span list, and repeating span. Pipeline assertions cover internal IDs 2 through 9: selected singleton/span-start layers emit internal-bridge paths, their immediately lower support layers retain sparse paths and add internal-solid paths, later selected layers in a span emit regular internal-solid paths, and remaining layers stay sparse. The test compares surface classes, extrusion paths, and G-code roles. It does not claim every string pattern or shell interaction."
+    },
+    "top_layer_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FillAngleSettingsPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Top-surface extrusion paths are checked at 0, 53, and 360 degrees. The registered -1 minimum is exercised as the documented automatic mode: the top path follows solid_infill_direction when that base changes from 0 to 43 degrees. Other top patterns and alignment interactions are not claimed."
+    },
+    "bottom_layer_direction": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[FillAngleSettingsPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Bottom-surface extrusion paths are checked at 0, 77, and 360 degrees. The registered -1 minimum is exercised as the documented automatic mode: the bottom path follows solid_infill_direction when that base changes from 0 to 43 degrees. Other bottom patterns and alignment interactions are not claimed."
+    },
+    "max_resonance_avoidance_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ResonanceAvoidanceGCode]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public six-layer cube G-code pipeline sets the registered zero minimum boundary and compares max speeds of 0 and 80 mm/s. Parsed finite positive outer-wall feeds on layers 1\u20135 follow the source rule: a requested 50 mm/s passes through above max=0 and selects max=80 above its midpoint when max=80. Other speed-band values and interactions are not claimed."
+    },
+    "min_resonance_avoidance_speed": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ResonanceAvoidanceGCode]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public six-layer cube G-code pipeline sets the registered zero minimum boundary and compares minimum speeds of 0 and 15 mm/s with max fixed at 60. Parsed finite positive outer-wall feeds on layers 1\u20135 follow the strict midpoint rule: 35 mm/s selects max=60 at min=0 and min=15 when the midpoint rises to 37.5. Other speed-band values and interactions are not claimed."
+    },
+    "z_offset": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[ZCoordinateSettingsPipeline]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The ZCoordinateSettingsPipeline public Print export compares zero with signed +0.1 and -0.1 mm offsets. For every positive-XY deposition endpoint, raw machine Z shifts by the requested signed offset while layer identity, XY endpoints, extrusion deltas, path count, and total deposited material remain equal; first-layer and later-layer witnesses are required. z_offset has no registered numeric bounds, so no boundary or full-domain claim is made."
+    },
+    "display_pixels_x": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterResolution]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises the registered minimum 100x100, unchanged defaults 2560x1440, and asymmetric 128x160 pixels with a fixed 5x4 mm rectangle. Independent encoded dimensions, active pixel counts, physical width/height, and 20 square mm area are checked with landscape orientation and mirrors disabled. Numeric domains have no registered upper endpoint; this is not a full joint-settings claim."
+    },
+    "display_pixels_y": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterResolution]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises the registered minimum 100x100, unchanged defaults 2560x1440, and asymmetric 128x160 pixels with a fixed 5x4 mm rectangle. Independent encoded dimensions, active pixel counts, physical width/height, and 20 square mm area are checked with landscape orientation and mirrors disabled. Numeric domains have no registered upper endpoint; this is not a full joint-settings claim."
+    },
+    "gamma_correction": {
+      "test": "tests/libslic3r/test_sl1.cpp",
+      "tag": "[SL1RasterGamma]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Public SL1 PNG export exercises gamma 0 (threshold), 0.5, and registered maximum/default 1 on independently specified quarter- and three-quarter-pixel rectangle edges. Decoded grayscale values follow threshold or 255*pow(coverage,gamma), within two quantization levels, with full-interior and empty-exterior controls."
+    },
+    "bridge_angle": {
+      "test": "tests/fff_print/test_fill.cpp",
+      "tag": "[ExternalBridgeDirection]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "The validated [ExternalBridgeDirection] Print cases compare bridge-surface angles and actual printed interior spans modulo pi for absolute 1, 30, 90, and 180 degree values; zero remains automatic. A rotated 37 degree model checks alignment off/on, and relative 30/120 degree offsets are compared with the separately observed automatic direction. Zero stays automatic under relative/alignment switches. These selected numeric points and interactions do not claim exhaustive behavior across the full range."
+    },
+    "filament_volume_map": {
+      "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+      "tag": "[PresetBundleFullFffShortMap]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A two-filament hybrid-printer composition passes the explicit one-entry map [High Flow] and preserves a reversed filament map [2,1]. The composed per-filament variant strings and independently assigned volumetric speeds must be High Flow/22 for the first material and Standard/13 for the padded second material. The [PresetBundleFullFffSingleVariant] case also selects nozzle 2 at High Flow with one filament and requires the composed High Flow variant and speed 22. These cases cover the short-vector and single-filament shapes with these two registered nozzle-volume values only; other map lengths and numeric domains are not claimed.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/libslic3r/test_preset_bundle_loading.cpp",
+          "tag": "[PresetBundleFullFffSingleVariant]"
+        }
+      ]
+    },
+    "close_additional_fan_first_x_layers": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[AuxiliaryFanTemplateBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change template exercise the registered 0 and 1000 layer endpoints plus representative values in two distinct filament slots. Marked template contexts require P2/P10 output to follow the selected current_filament_id; the 1000-layer transition requires the first-X-layer pair at physical layer 1000 and no pair at physical layer 1001. Positive invariant outer-wall XY/E paths guard object deposition. Scope is this shipped template fixture with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_cooling.cpp",
+          "tag": "[AuxiliaryFanTemplates]"
+        }
+      ]
+    },
+    "additional_fan_full_speed_layer": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[AuxiliaryFanTemplateBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change template exercise the registered 0 and 1000 layer endpoints plus representative ramp values in two distinct filament slots. Marked template contexts require the expected P2/P10 PWM ramp for each observed selected filament and layer; the full-speed endpoint ramps at physical layer 999 and enters the terminal M142 branch at physical layer 1000. Positive invariant outer-wall XY/E paths guard object deposition. Scope is this shipped template fixture with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_cooling.cpp",
+          "tag": "[AuxiliaryFanTemplates]"
+        }
+      ]
+    },
+    "first_x_layer_fan_speed": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[AuxiliaryFanTemplates]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "With the cold-chamber branch pinned below 40 C, real Print exports through the shipped Bambu Lab X2D 0.4 nozzle layer-change and change-filament templates exercise the registered 0% and 100% first-layer fan-speed endpoints in two distinct filament slots. Marked contexts require the exact ordered P2/P10 PWM pair for the selected current_filament_id and next_filament_id at a filament change. Positive invariant outer-wall XY/E paths guard object deposition. Scope is these shipped template consumers with two filament slots, not complete dual-nozzle machine behavior or generic printer fan policy."
+    },
+    "machine_max_printed_mass": {
+      "test": "tests/fff_print/test_gcode.cpp",
+      "tag": "[MachinePrintedMass]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The case selects the registered 0 g minimum, a 0.001 g over-limit value, and the 2000 g value used by the A2L profile. It checks error bit 11 against the threshold while requiring the same positive extrusion count, XY path, and filament total for every export. This claim excludes flushed-mass subtraction and device dispatch."
+    },
+    "make_overhang_printable_angle": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[OverhangAngleVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..90 degrees with default 55. On the 20-layer stepped overhang fixture, enabling printable-overhang treatment and changing the angle from 0 to 55 degrees must change extrusion geometry while incremental reslicing matches fresh slicing and restoration. At the registered 90-degree endpoint, toggling the feature must leave geometry unchanged, matching the consumer's early return. No intermediate-angle monotonicity is claimed."
+    },
+    "top_surface_expansion_margin": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[TopExpansionMarginVariance]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a 0..10 mm range with default 0. On the 60 mm base with a centered 54 mm raised island, 2 mm top expansion, solid top fill, three top layers, one top wall and Arachne, margins 0 and 10 must produce different top extrusion paths. The public Print snapshot requires fresh and incremental reslicing to agree and config restoration to reproduce the original; no intermediate-margin monotonicity is claimed."
+    },
+    "fuzzy_skin_octaves": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 1, 4, and 10 octave values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
+    "fuzzy_skin_persistence": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 0.01, 0.5, and 1.0 persistence values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
+    "fuzzy_skin_scale": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[FuzzySkinNoiseParametersPipeline]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print pipeline independently varies the registered 0.1, 1.0, and 500 mm feature-size values for classic external Perlin fuzzy skin. It compares emitted perimeter-point transverse offsets at safe reference projections with a separately configured Libnoise Perlin field, confirms the resolved region value, and checks the registered minimum/default/maximum. Sample positions are not claimed to be deterministic. Overhang clipping is disabled to isolate Perlin displacement; other noise types and overhang interactions are not claimed."
+    },
+    "support_object_first_layer_gap": {
+      "test": "tests/fff_print/test_support_material.cpp",
+      "tag": "[SupportObjectFirstLayerGap]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The registered 0 and 10 mm endpoints and a 2 mm representative value are applied to valid normal(auto) Prints of the same 45-degree ramp with raft_first_layer_expansion pinned at 20 mm. Parsed bed-support extrusion requires first-layer path length to decrease from 0 to 2 to 10 mm, while every later support layer keeps equal length across all rows. This isolates first-layer trimming from the ordinary 0.35 mm support_object_xy_distance; other support geometries remain unclaimed."
+    },
+    "seam_gap": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Zero, the registered 10% default, and a 0.6 mm representative value change both the public seam-gap statistic and positive-E outer-wall path length. No maximum is registered."
+    },
+    "scarf_angle_threshold": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A sharp square is admitted at the 0-degree minimum and rejected at the 180-degree maximum, with the registered 155-degree default observed. This does not enumerate all integer values."
+    },
+    "scarf_joint_speed": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 1 mm/s minimum and 10 mm/s representative are read from emitted rising outer-wall G-code feedrates with outer-wall speed pinned at 60 mm/s. The 100% default exceeds the representative but is reduced by the filament volumetric-speed cap; no maximum is registered."
+    },
+    "scarf_joint_flow_ratio": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamSlopeSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The 0 and 2 endpoints plus default 1 are checked by rising outer-wall G-code E/XY. Continuous values between the endpoints are not exhaustively tested."
+    },
+    "scarf_overhang_threshold": {
+      "test": "tests/fff_print/test_precise_seam.cpp",
+      "tag": "[SeamOverhangThreshold]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A public conditional-scarf G-code export uses a 2 mm square frustum whose perimeter expands 0.3 mm per side per 0.2 mm layer. Threshold 0 bypasses the estimated-overhang gate and emits scarf distance; the registered 40% default suppresses the ramp; 100% of the pinned 0.45 mm outer-wall width admits the same ramp as threshold 0. The test preserves layer count and pre-export geometry across rows. No maximum is registered, so 100% is a representative value rather than an upper-bound claim."
+    },
+    "material_correction_z": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[MaterialCorrectionZ]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On a 10x10x4 mm cube with the other correction axes at 1, the public SLAPrint pipeline checks factors 0.75, 1.0 and 1.25: X/Y extents remain fixed while Z becomes 3, 4 and 5 mm. The registered zero minimum and any rejection of an invalid effective scale are not exercised, and no upper bound is registered or claimed."
+    },
+    "filament_retract_lift_enforce": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentRetractionOverrides]",
+      "dimensions": [
+        "enum_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "One five-layer cube is exported for typed nil plus all four enum values through Print::apply. Nil inherits machine Bottom Only; each explicit policy overrides a deliberately different machine policy. Top Only emits only 1.4 mm lift targets, Bottom Only emits only 0.6 mm targets, Top and Bottom equals their union, and All Surfaces includes both plus intermediate lifts. Deposited motion remains equal across rows. Multiple-filament and variant combinations are not claimed."
+    },
+    "skeleton_infill_density": {
+      "test": "tests/fff_print/test_settings_variance.cpp",
+      "tag": "[LockedZagZeroDensity]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public classic-wall LockedZag fixture pins skin depth to 0 mm so the interior footprint is skeleton. Density 0% requires no internal-infill paths after Print::validate; the 1%, 25%, and 100% rows require finite positive fill and deposition and strictly increase path-length and flow-length evidence. This covers the registered 0\u2013100% density bounds for this fixed fixture; other patterns and geometry interactions remain unclaimed.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_settings_variance.cpp",
+          "tag": "[LockedZagDensityBoundary]"
+        }
+      ]
+    },
+    "fan_speedup_time": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[FanSpeedupTime]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public [FanSpeedupTime] case compares 0 with 0.5 s on the same stepped base/stem/cap model. It requires the first rising ironing PWM 102 event to move earlier in physical path distance and elapsed time with 0.5 s, while emitted XY path length and deposited filament remain conserved. This covers selected representative values and the fan-scheduling pipeline; other fan targets, negative inputs, and the unbounded positive domain are not claimed."
+    },
+    "extruder_printable_height": {
+      "test": "tests/fff_print/test_multifilament.cpp",
+      "tag": "[PrintObjectGeometric]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Validated two-nozzle Print fixtures classify actual active filament roles against the registered zero and one-thousand mm limits, including swapped per-nozzle limits and a maximum-limit control. The exact top printed Z remains eligible at equality and becomes blocked at the next representable double below it; the existing 0.6/100 mm example remains. These are bounded four-mm-cube, two-nozzle geometry-classification oracles, not a claim about every geometry, tool assignment, or nozzle count. The native registry reports this option non-nullable."
+    },
+    "slow_down_layers": {
+      "test": "tests/fff_print/test_cooling.cpp",
+      "tag": "[SlowDownLayerCount]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public [SlowDownLayerCount] case exercises the registered minimum 0, gate-edge value 1, and representative 3 on an 8 x 8 x 1.2 mm cube. Values 0 and 1 retain the nominal feed on layer index 1; value 3 emits 3600 and 5400 mm/min on indices 1 and 2, then returns to 7200 mm/min at index 3. The rows preserve XY path and deposited filament. This covers selected counts in the non-raft path; raft behavior and larger counts are not claimed."
+    },
+    "pad_max_merge_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLAPadMaxMergeDistance]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers a minimum of 0 mm, default 50 mm and no maximum. A public SLAPrint pad fixture has two 10x10 mm model islands separated by 30 mm (40 mm between their centroids). With fixed wall, brim and slope settings, the public pad-mesh midsection has two islands at 0 mm, while representative 40 mm and the implicit 50 mm default join them into one. The claim is limited to this fixture and pad-generation stage; no upper endpoint or general layout behavior is claimed."
+    },
+    "brim_object_gap": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimEarsGapBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public outer-only brim fixture compares omitted/default and explicit 0 mm with 1 and the registered 2 mm maximum. It parses emitted brim-comment positive-E G1 XY moves and measures their closest physical clearance from the independently sliced first-layer model bounds. Default matches explicit minimum; each positive step increases that separation while the model bounds remain unchanged. This validates only the fixed outer-only 5 mm brim fixture and these values, not other brim types or interactions."
+    },
+    "brim_ears_detection_length": {
+      "test": "tests/fff_print/test_skirt_brim.cpp",
+      "tag": "[BrimEarsGapBoundaries]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The public Print fixture uses a triangular prism whose sliced rightmost tip has a 126.87 degree interior angle (about a 53.13 degree turn). A test-local 130 degree brim_ears_max_angle makes that corner eligible: Brim.cpp passes 50 degrees to Polygon::convex_points. The 0.5 mm outward tip is below the positive 1 mm Douglas-Peucker tolerance. The requested 5 mm brim width is quantized by Brim.cpp to floor(5/(2\u00d70.45708))\u00d72\u00d70.45708\u22484.57080 mm. Brim.cpp then sets the ear radius to quantized width minus object gap minus flow spacing, about 4.11372 mm. The 4.9 mm point-to-segment window is about 0.78628 mm beyond that construction radius. With the nib removed, adjacent cube-corner ear circles are at least sqrt(10\u00b2+0.5\u00b2)-4.11372\u22485.8988 mm from the nib tip, beyond the 4.9 mm window. Public slice bounds must show the expected 20.5 mm X by 20.0 mm Y footprint. Zero/default-1/positive-2 outputs must keep model bounds unchanged and finite positive brim deposition. No maximum or broader angle/shape interaction is claimed."
+    },
+    "belt_frame_tilt_angle": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[belt]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -89.9/+89.9 limits on both X/Y belt axes. With decoupling enabled, slicing stays at 30 degrees; independent physical height/feed projections distinguish the frame angle. Coupled, disabled-belt, None/Z-axis and zero-angle controls retain their actual activation semantics. The frame angle must not be ignored when decoupled or clamped to 45 degrees. This is a real GCodeWriter endpoint contract with independently presliced input, not a full Print export or arbitrary angle-interaction claim."
+    },
+    "belt_slice_rotation_angle": {
+      "test": "tests/fff_print/test_gcodewriter.cpp",
+      "tag": "[belt]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Writer-emitted G1 XYZ/E endpoints cover omitted and explicit 45-degree defaults, zero, -30/+30, and the registered -180/+180 limits on X/Y belt axes. Coupled frame tilt deliberately ignores an extreme decoupled-angle value. Independently rotated input and physical height/feed projections test real writer output; +/-180 degrees undo preslicing while the near-zero-sine frame gate stays inactive. The inverse rotation must not be a constant default or clamped to 45 degrees. This writer-level contract does not claim full mesh slicing or Print export for every angle."
+    },
+    "filter_out_gap_fill": {
+      "test": "tests/fff_print/test_perimeters.cpp",
+      "tag": "[GapFillFilterSettings]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The classic-wall Print pipeline processes the same 20 mm square tube with a 1 mm wall at the default 0 mm no-filter threshold and at 100 mm, above every gap path in this bounded fixture. These are semantic extremes for this fixture, not registered numeric endpoints: the option declares neither a minimum nor a maximum. Zero emits gap fill on the middle layer; 100 mm removes it while contour, hole, and inner wall classes stay unchanged on all 25 layers. Other wall generators, infill gap paths, and intermediate thresholds remain unclaimed."
+    },
+    "has_scarf_joint_seam": {
+      "test": "tests/fff_print/test_gcode_processor.cpp",
+      "tag": "[GCodeProcessorScarfSeam]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "interaction_matrix"
+      ],
+      "reason": "All four scarf-seam/spiral-mode Boolean pairs are applied through the public static processor configuration and through public G-code file import, whose CONFIG_BLOCK loader creates the dynamic configuration. False/false emits no seam; each other pair emits the seam at the expected rising outer-wall midpoint. Each row retains five finite positive-extrusion endpoints. This covers processor seam tracking, not scarf mesh generation or full Print export geometry."
+    },
+    "filament_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentWipeOverrides]",
+      "dimensions": [
+        "boolean_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance and explicit false/true overrides against opposing machine wipe states. Parsed wipe markers and path length distinguish enabled from disabled wiping while positive deposited material remains unchanged. This one-filament fixture does not claim other wipe interactions or multiple-tool mapping."
+    },
+    "filament_wipe_distance": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentWipeOverrides]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance of a 2 mm machine path, an explicit 0.75 mm replacement, and explicit zero disabling emitted wiping while the machine wipe gate remains enabled. Parsed path, wipe-time retraction, and feedrate reach the requested positive distances; deposition is preserved. Other distances and multi-tool mapping are not claimed."
+    },
+    "filament_retract_before_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentWipeOverrides]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance at 0%, explicit 100% over machine 0%, and explicit 0% over machine 100%. Parsed pre-wipe and wipe-time E moves account for the configured 0.8 mm retraction, with the other percentage pinned to zero. Interior percentages and combined percentage interactions are not claimed."
+    },
+    "filament_retract_after_wipe": {
+      "test": "tests/fff_print/test_wipe.cpp",
+      "tag": "[FilamentWipeOverrides]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle",
+        "nullable_behavior"
+      ],
+      "reason": "A real Print export checks nil inheritance at 0%, explicit 100% over machine 0%, and explicit 0% over machine 100%. Parsed post-wipe and wipe-time E moves account for the configured 0.8 mm retraction, with the other percentage pinned to zero. Interior percentages and combined percentage interactions are not claimed."
+    },
+    "filament_mixed_components": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[MixedComponents]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A validated Print export uses components 2,1 with positive non-unit ratios 2,3. Parsed component material IDs must preserve the weights through ID sorting: material 1 receives weight 0.6 and ends 0.08 mm below each nominal layer; material 2 receives weight 0.4 and ends at the nominal layer. Both deposit positive XY/E paths, while the virtual mixed slot does not. A separate empty-ratio fixture uses component order 1,2 with equal weights. These selected supported lists and this fixed geometry do not claim arbitrary component strings or permutations."
+    },
+    "filament_mixed_sublayer_ratios": {
+      "test": "tests/fff_print/test_mixed_filament.cpp",
+      "tag": "[SublayerRatios]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "Validated Print exports check that positive ratios 2,3 normalize to input component weights 0.4,0.6, while an empty string falls back to equal 0.5,0.5 weights. Parsed deposited material IDs, sublayer Z positions and positive XY/E fractions supply independent oracles; the existing 60/40 and whole-layer controls remain. Other ratio strings, counts, rejected inputs and geometry interactions are unclaimed.",
+      "auxiliary_tests": [
+        {
+          "test": "tests/fff_print/test_mixed_filament.cpp",
+          "tag": "[MixedComponents]"
+        }
+      ]
+    },
+    "min_feature_size": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths taper fixture pins a 0.4 mm nozzle and compares min_feature_size 0% with 25% (0.1 mm). In the independently defined x=0.25\u20130.40 mm band the taper is 0.05\u20130.08 mm thick: the zero setting emits positive finite in-bounds path length and width area, while the 25% threshold removes the band. This covers the registered minimum and this representative threshold on one fixture; other nozzle sizes and full Print export are not claimed."
+    },
+    "min_bead_width": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths taper fixture pins a 0.4 mm nozzle and compares the registered 0% minimum with 85% (0.34 mm). The independently clipped taper witness averages below 0.10 mm at zero and stays at least 0.338 mm at the configured floor; emitted centerlines remain finite, positive, and within the fixture bounding box with 0.05 mm tolerance. No maximum is registered, and other nozzle sizes or full Print export are not claimed."
+    },
+    "initial_layer_min_bead_width": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths fixture compares initial-layer 0% with regular-layer 50% (0.20 mm) on a pinned 0.4 mm nozzle and checks layer 0 against layer 1. The thin taper witness remains below 0.10 mm on layer 0 and reaches at least 0.198 mm on layer 1; equal initial/regular settings produce matching first/later witness widths. This covers the registered minimum and selected 50% control; no maximum is registered and full Print export is not claimed."
+    },
+    "min_length_factor": {
+      "test": "tests/libslic3r/test_arachne_walls.cpp",
+      "tag": "[ArachneThresholds]",
+      "dimensions": [
+        "boundary_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The direct WallToolPaths fixture checks registered 0 and 25 endpoints on a 2.0 by 0.1 mm rectangle. At 0 the output contains one finite open odd path with positive length and width at least 0.199 mm; at 25 it removes the path, while top/bottom mode retains identical positive path output for both values. The zero endpoint is passed unconditionally through the non-nullable setting to avoid treating numeric zero as absence. Other geometries and full Print export are not claimed."
+    },
+    "support_points_minimal_distance": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0 mm as the minimum and 1 mm as the default. The public SLAPrint fixture processes 0, default 1, and representative 8 mm profiles; each must emit at least two finite new-island support points whose pairwise 3D spacing respects the configured minimum. The 8 mm profile activates the production spacing floor at density 100. This claims no upper bound."
+    },
+    "support_head_front_diameter": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0 mm as the minimum and 0.4 mm as the default. The test processes the 0 mm boundary and requires finite points with exactly zero radius plus finite support output if any is produced; default 0.4 and representative 1.2 mm profiles are processed, with 1.2 mm producing 0.6 mm-radius points. make_support_cfg must map the same diameter to a 0.6 mm tree front radius, and the public SupportTreeBuildsteps support mesh must match the completed pipeline mesh for the representative profile. No upper bound is registered."
+    },
+    "support_head_width": {
+      "test": "tests/sla_print/test_sla_pipeline_contracts.cpp",
+      "tag": "[SLASupportDimensions]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "PrintConfig.cpp registers 0..20 mm with default 1 mm. The minimum 0 is exercised through public SupportTreeBuildsteps head/mesh geometry using fixed generated points. The maximum 20 is first confirmed to fail SLAPrint validation when elevation is too low, then processed with elevation derived from the registered head dimensions plus 1 mm; completed steps, mapped config, finite support points and finite support-mesh vertices are required, without assuming positive support volume. At representative 0.5 mm, the public builder support mesh matches SLAPrint output. Holding points, model mesh and radii fixed, increasing width to 1.5 mm must increase valid-head width and aggregate head-only mesh volume from `sla::get_mesh`; total support volume is not assumed to increase because wider heads shorten pillars."
+    },
+    "small_support_perimeter_speed": {
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SmallSupportPerimeterSpeed]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "A valid public Print export applies a 25% small-support speed to base and interface support moves while keeping first-layer support at its configured infill speed. With a 1000 mm threshold, all observed later-layer support feed samples use the expected 25% rates; the zero-threshold control restores the independent base/interface rates while support sample count, Z and XY path stay equal. This covers the percentage encoding on this overhang fixture; minimum absolute speed, other encodings, and nullable ModelObject inheritance are not claimed."
+    },
+    "small_support_perimeter_threshold": {
+      "test": "tests/fff_print/test_gcode_motion_settings.cpp",
+      "tag": "[SmallSupportPerimeterSpeed]",
+      "dimensions": [
+        "boundary_values",
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "The same valid support Print uses the registered 0 mm minimum to disable the small-support speed and a 1000 mm threshold to activate it for the observed support paths. The output oracle checks the resulting base/interface feed rates and equal support sample count, Z and XY path. Nil behavior and other thresholds or support geometries are not claimed."
+    },
+    "xy_contour_compensation": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[XYSizeCompensation]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On a valid hollow-cube Print, zero establishes the middle-layer baseline and +/-0.2 mm changes the outer X width by +/-0.4 mm. A two-nozzle painted Print suppresses the same positive compensation, retaining the baseline outer width. Multi-region slices and elephant-foot interactions remain untested."
+    },
+    "xy_hole_compensation": {
+      "test": "tests/fff_print/test_print.cpp",
+      "tag": "[XYSizeCompensation]",
+      "dimensions": [
+        "representative_values",
+        "pipeline_oracle"
+      ],
+      "reason": "On a valid hollow-cube Print, zero establishes the middle-layer baseline and +/-0.5 mm changes the cavity X width by +/-1.0 mm. A two-nozzle painted Print suppresses the same positive compensation, retaining the baseline cavity width. Multi-region slices and elephant-foot interactions remain untested."
     }
   }
 }

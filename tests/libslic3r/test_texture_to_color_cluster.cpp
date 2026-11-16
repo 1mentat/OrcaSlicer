@@ -253,7 +253,7 @@ TEST_CASE("ClusterAndSmooth requests a repair decision for an open mesh",
 // reorientation from dropping and refilling the conflicting face; the RepairMesh tests prove the
 // in-place case.
 TEST_CASE("ClusterAndSmooth returns a closed, consistently wound mesh for an inconsistently wound tetrahedron",
-          "[TextureToColor]")
+          "[TextureToColor][TextureToColorExtended][TextureToColorOptions]")
 {
     TriMesh input = closed_tetrahedron();
     std::swap(input.indices[0][1], input.indices[0][2]);

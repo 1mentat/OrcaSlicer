@@ -1008,7 +1008,7 @@ void check_translated_entity(const SketchEntity &actual, const SketchEntity &sou
     }
 }
 
-TEST_CASE("Linear sketch arrays translate every entity type and preserve the source", "[SketchEdit]")
+TEST_CASE("Linear sketch arrays translate every entity type and preserve the source", "[SketchEdit][SketchArrayChamfer]")
 {
     std::vector<SketchEntity> source = {
         line_entity(Vec2d(-3., 1.), Vec2d(4., 1.)),
@@ -1042,7 +1042,7 @@ TEST_CASE("Linear sketch arrays translate every entity type and preserve the sou
     check_source_unchanged(source, original);
 }
 
-TEST_CASE("Polar sketch arrays rotate every typed entity around a pivot and then translate", "[SketchEdit]")
+TEST_CASE("Polar sketch arrays rotate every typed entity around a pivot and then translate", "[SketchEdit][SketchArrayChamfer]")
 {
     const Vec2d pivot(1., -2.);
     const double angle_step = M_PI / 2.;
@@ -1136,7 +1136,7 @@ TEST_CASE("Polar sketch arrays rotate every typed entity around a pivot and then
     check_source_unchanged(source, original);
 }
 
-TEST_CASE("Chamfers trim both legs by the requested setback", "[SketchEdit]")
+TEST_CASE("Chamfers trim both legs by the requested setback", "[SketchEdit][SketchArrayChamfer]")
 {
     const SketchEntity a = line_entity(Vec2d(0., 0.), Vec2d(10., 0.));
     const SketchEntity b = line_entity(Vec2d(0., 10.), Vec2d(0., 0.));
@@ -1161,7 +1161,7 @@ TEST_CASE("Chamfers trim both legs by the requested setback", "[SketchEdit]")
     check_point(b.p1, Vec2d(0., 0.));
 }
 
-TEST_CASE("Chamfer rejects parallel, invalid, and overrun legs without mutating outputs", "[SketchEdit]")
+TEST_CASE("Chamfer rejects parallel, invalid, and overrun legs without mutating outputs", "[SketchEdit][SketchArrayChamfer]")
 {
     const int scenario = GENERATE(0, 1, 2, 3, 4);
     SketchEntity a = line_entity(Vec2d(0., 0.), Vec2d(10., 0.));

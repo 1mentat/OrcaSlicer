@@ -1364,6 +1364,23 @@ TEST_CASE("Measure handles perpendicular planes sharing their intersection origi
     CHECK_THAT(result.angle->angle, WithinAbs(0.5 * PI, 1e-8));
 }
 
+TEST_CASE("Geometry projection covers oblique normals and alternate basis", "[Measure][MeasureGeometryExtended]")
+{
+    const Vec3d origin(2.0, -3.0, 4.0);
+    const Vec3d normal(1.0, 2.0, 3.0);
+    const Vec3d point(5.0, 7.0, -1.0);
+    Vec3d projected;
+    REQUIRE(get_point_projection_to_plane(point, origin, normal, projected));
+    CHECK_THAT((projected - origin).dot(normal), WithinAbs(0.0, 1e-8));
+    CHECK_THAT((point - projected).cross(normal).norm(), WithinAbs(0.0, 1e-8));
+
+    const Vec3d x_aligned = get_one_point_in_plane(origin, Vec3d::UnitX());
+    CHECK_THAT((x_aligned - origin).dot(Vec3d::UnitX()), WithinAbs(0.0, 1e-8));
+    CHECK_THAT((x_aligned - origin).norm(), WithinAbs(1.0, 1e-8));
+    const Vec3d oblique = get_one_point_in_plane(origin, normal);
+    CHECK_THAT((oblique - origin).dot(normal), WithinAbs(0.0, 1e-8));
+}
+
 TEST_CASE("Affine feature transforms preserve representation policy", "[Measure][MeasureGeometryExtended]")
 {
     Transform3d affine = Transform3d::Identity();

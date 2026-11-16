@@ -2366,6 +2366,101 @@ TEST_CASE("Support ironing spacing changes ironing density",
     CHECK(dense.stats.e_length > wide.stats.e_length);
 }
 
+namespace support_ironing_boundary_source_cases {
+
+// Source bodies that keep the boundary samples (maximum flow, clamped and maximum spacing).
+
+TEST_CASE("Support ironing flow boundary scales ironing material at fixed geometry",
+          "[SupportIroningSettings][SupportIroningBoundary][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport low = slice_support_ironing("rectilinear", 10.0, 0.10);
+    const SupportIroningExport high = slice_support_ironing("rectilinear", 25.0, 0.10);
+    const SupportIroningExport maximum = slice_support_ironing("rectilinear", 100.0, 0.10);
+    require_positive_support_ironing(low);
+    require_positive_support_ironing(high);
+    require_positive_support_ironing(maximum);
+    require_same_support_geometry(low, high);
+    require_same_support_geometry(low, maximum);
+    REQUIRE(low.stats.layers == high.stats.layers);
+    REQUIRE(low.stats.moves == high.stats.moves);
+    REQUIRE(maximum.stats.moves == low.stats.moves);
+    CHECK_THAT(maximum.stats.xy_length, Catch::Matchers::WithinAbs(
+        low.stats.xy_length, maximum.stats.xy_error_bound + low.stats.xy_error_bound));
+    CHECK_THAT(high.stats.xy_length, Catch::Matchers::WithinAbs(low.stats.xy_length,
+        low.stats.xy_error_bound + high.stats.xy_error_bound));
+    REQUIRE(low.interface_width > 0.0);
+    REQUIRE(low.interface_height > 0.0);
+    CHECK_THAT(high.interface_width, Catch::Matchers::WithinAbs(low.interface_width, 0.0));
+    CHECK_THAT(high.interface_height, Catch::Matchers::WithinAbs(low.interface_height, 0.0));
+    CHECK_THAT(maximum.interface_width, Catch::Matchers::WithinAbs(low.interface_width, 0.0));
+    CHECK_THAT(maximum.interface_height, Catch::Matchers::WithinAbs(low.interface_height, 0.0));
+    REQUIRE(maximum.stats.layers == low.stats.layers);
+
+    const double low_height = low.interface_height * 0.01 * 10.0;
+    const double high_height = high.interface_height * 0.01 * 25.0;
+    const double expected_ratio = flow_area(low.interface_width, high_height) /
+                                  flow_area(low.interface_width, low_height);
+    const double expected = low.stats.e_length * expected_ratio;
+    const double tolerance = high.stats.e_error_bound + expected_ratio * low.stats.e_error_bound +
+        64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(expected), std::abs(high.stats.e_length)});
+    REQUIRE(tolerance < std::abs(expected - low.stats.e_length));
+    CHECK_THAT(high.stats.e_length, Catch::Matchers::WithinAbs(expected, tolerance));
+
+    const double maximum_ratio = flow_area(maximum.interface_width, maximum.interface_height) /
+                                 flow_area(low.interface_width, low_height);
+    const double maximum_expected = low.stats.e_length * maximum_ratio;
+    const double maximum_tolerance = maximum.stats.e_error_bound +
+        maximum_ratio * low.stats.e_error_bound + 64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(maximum_expected), std::abs(maximum.stats.e_length)});
+    REQUIRE(maximum_tolerance < std::abs(maximum_expected - low.stats.e_length));
+    CHECK_THAT(maximum.stats.e_length,
+               Catch::Matchers::WithinAbs(maximum_expected, maximum_tolerance));
+}
+
+
+TEST_CASE("Support ironing spacing boundaries change ironing density",
+          "[SupportIroningSettings][SupportIroningBoundary][SupportSettingsVariance][SupportMaterial]")
+{
+    require_ironing_registry();
+    const SupportIroningExport minimum = slice_support_ironing("rectilinear", 10.0, 0.0);
+    const SupportIroningExport clamped = slice_support_ironing("rectilinear", 10.0, 0.05);
+    const SupportIroningExport dense = slice_support_ironing("rectilinear", 10.0, 0.08);
+    const SupportIroningExport wide = slice_support_ironing("rectilinear", 10.0, 0.30);
+    const SupportIroningExport maximum = slice_support_ironing("rectilinear", 10.0, 1.0);
+    require_positive_support_ironing(minimum);
+    require_positive_support_ironing(clamped);
+    require_positive_support_ironing(dense);
+    require_positive_support_ironing(wide);
+    require_positive_support_ironing(maximum);
+    require_same_support_geometry(dense, minimum);
+    require_same_support_geometry(dense, clamped);
+    require_same_support_geometry(dense, wide);
+    require_same_support_geometry(dense, maximum);
+    REQUIRE(minimum.stats.layers == clamped.stats.layers);
+    REQUIRE(minimum.stats.layers == dense.stats.layers);
+    REQUIRE(minimum.stats.layers == wide.stats.layers);
+    REQUIRE(minimum.stats.layers == maximum.stats.layers);
+    REQUIRE(minimum.stats.moves == clamped.stats.moves);
+    CHECK_THAT(minimum.stats.xy_length, Catch::Matchers::WithinAbs(
+        clamped.stats.xy_length, minimum.stats.xy_error_bound + clamped.stats.xy_error_bound));
+    CHECK_THAT(minimum.stats.e_length, Catch::Matchers::WithinAbs(
+        clamped.stats.e_length, minimum.stats.e_error_bound + clamped.stats.e_error_bound));
+    REQUIRE(dense.stats.layers == wide.stats.layers);
+    CHECK(minimum.stats.moves > dense.stats.moves);
+    CHECK(minimum.stats.xy_length > dense.stats.xy_length);
+    CHECK(minimum.stats.e_length > dense.stats.e_length);
+    CHECK(dense.stats.moves > wide.stats.moves);
+    CHECK(dense.stats.xy_length > wide.stats.xy_length);
+    CHECK(dense.stats.e_length > wide.stats.e_length);
+    CHECK(wide.stats.moves > maximum.stats.moves);
+    CHECK(wide.stats.xy_length > maximum.stats.xy_length);
+    CHECK(wide.stats.e_length > maximum.stats.e_length);
+}
+
+} // namespace support_ironing_boundary_source_cases
+
 } // namespace support_ironing_settings_candidate
 
 namespace independent_support_layer_height_contracts {

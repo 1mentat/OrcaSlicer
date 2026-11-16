@@ -898,6 +898,23 @@ TEST_CASE("Arachne one millimeter transition keeps low-angle wedge widths positi
     CHECK(summary.minimum_width_mm > 0.);
 }
 
+// Known baseline defect: the 1 mm transition at the high-angle endpoint currently
+// produces a negative generated width. Keep the positive-width contract executing.
+// Catch2's !shouldfail makes an unexpected pass fail too, requiring this marker to
+// be removed with the fix. This case is diagnostic evidence, not validated behavior.
+TEST_CASE("Arachne one millimeter high-angle transition keeps wedge widths positive",
+          "[Arachne][ArachneWallTransitionKnownDefect][KnownBaselineDefect][!shouldfail]")
+{
+    using namespace arachne_wall_transition_contracts;
+    const WallToolPathsParams params = params_for(wall_config(250., 25., 59., 1, 0.005, 0.005));
+    const WallSummary summary = generate(transition_wedge_outline(), params);
+
+    CHECK_THAT(params.wall_transition_length, Catch::Matchers::WithinAbs(1., 1e-6));
+    REQUIRE(summary.lines > 0);
+    CHECK(summary.finite);
+    CHECK(summary.inside_fixture);
+    CHECK(summary.minimum_width_mm > 0.);
+}
 
 namespace arachne_skeletal_public_contracts {
 
