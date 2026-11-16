@@ -1,0 +1,18 @@
+{
+  "description": "Organic collision-cache lower-bound lookup for a requested radius on one layer.",
+  "mutants": [
+    {
+      "description": "Ignore the maximum requested radius. The direct cache contract must fail its exact-small-radius lookup through an ordinary assertion.",
+      "expected_matches": 1,
+      "expected_test_count": 1,
+      "id": "tree-model-volumes-collision-lower-bound-zero-request",
+      "new": "return m_collision_cache.get_lower_bound_area({ 0, layer_id });",
+      "old": "return m_collision_cache.get_lower_bound_area({ max_radius, layer_id });",
+      "ordinary_assertion_only": true,
+      "path": "src/libslic3r/Support/TreeModelVolumes.cpp",
+      "source_anchor_sha256": "bad54cc981b8b25cfd742e0a734adf64e69679365b3dd3121673a4de7c790bb8",
+      "test_filter": "^TreeModelVolumes$"
+    }
+  ],
+  "schema_version": 1
+}
