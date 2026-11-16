@@ -133,6 +133,20 @@ jobs:
           path: slicer
           lfs: 'false'
 
+      # The upload action comes from this workflow's own commit, not the
+      # tested build's: older builds (build_run_id / build_branch) predate it
+      - &checkout-upload-tooling
+        name: Check out the upload tooling at the workflow's commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: upload-tooling
+          sparse-checkout: |
+            .github
+            scripts
+          persist-credentials: false
+          lfs: 'false'
+
       - &extract-appimage
         name: Download and extract the Linux AppImage
         env:
@@ -192,7 +206,7 @@ jobs:
 
       - name: Upload the override report
         if: always()
-        uses: ./slicer/.github/actions/validation-upload
+        uses: ./upload-tooling/.github/actions/validation-upload
         with:
           source-sha: ${{ needs.build.outputs.head_sha }}
           name: override-report-shard${{ matrix.shard }}
@@ -218,6 +232,7 @@ jobs:
     steps:
       - *checkout-suite
       - *checkout-slicer
+      - *checkout-upload-tooling
       - *extract-appimage
 
       - name: Install display tooling and the AppImage's host runtime
@@ -256,7 +271,7 @@ jobs:
 
       - name: Upload the scorecard and evidence
         if: always()
-        uses: ./slicer/.github/actions/validation-upload
+        uses: ./upload-tooling/.github/actions/validation-upload
         with:
           source-sha: ${{ needs.build.outputs.head_sha }}
           name: parity-scorecard
