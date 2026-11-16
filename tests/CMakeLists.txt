@@ -36,7 +36,39 @@ if (NOT SLICER_TEST_PROCESSORS MATCHES "^[0-9]+$")
 endif()
 
 
+set(SLICER_TEST_GNU_LTO_JOBS "0" CACHE STRING
+    "GNU LTO jobs for Release test links; 0 preserves existing linker flags")
+if (NOT "${SLICER_TEST_GNU_LTO_JOBS}" MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "SLICER_TEST_GNU_LTO_JOBS must be a non-negative integer (0 preserves existing linker flags)")
+endif ()
+if (SLICER_TEST_GNU_LTO_JOBS GREATER 0 AND
+    NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    message(FATAL_ERROR "SLICER_TEST_GNU_LTO_JOBS requires the GNU C++ compiler")
+endif ()
+
+option(SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY
+    "Register focused test targets with unique CTest names" OFF)
+
+option(SLICER_FAST_FOCUSED_TEST_COMPILE
+    "Use -O1 for Release C++ sources in excluded focused test executables" OFF)
+if (SLICER_FAST_FOCUSED_TEST_COMPILE)
+    if (MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"
+        OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        message(FATAL_ERROR
+            "SLICER_FAST_FOCUSED_TEST_COMPILE does not support the MSVC frontend, including clang-cl")
+    elseif (NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+        message(FATAL_ERROR
+            "SLICER_FAST_FOCUSED_TEST_COMPILE requires a GNU or native Clang compiler")
+    endif ()
+endif ()
+
 add_library(test_common INTERFACE)
+if (SLICER_TEST_GNU_LTO_JOBS GREATER 0)
+    target_link_options(test_common INTERFACE
+        "$<$<CONFIG:Release>:-flto=${SLICER_TEST_GNU_LTO_JOBS}>")
+endif ()
+
 target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" PROFILES_DIR=R"\(${PROFILES_DIR}\)" CATCH_CONFIG_FAST_COMPILE)
 target_include_directories(test_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -161,5 +193,26 @@ add_subdirectory(filament_group)
 # writes on Linux only. src/ is added before tests/, so the target is known here.
 if (UNIX AND NOT APPLE AND TARGET OrcaSlicer)
     add_subdirectory(cli)
+endif ()
+
+
+# Keep this opt-in limited to standalone test executables. Their target-level
+# Release option follows CMAKE_CXX_FLAGS_RELEASE, so -O1 overrides -O3 there.
+if (SLICER_FAST_FOCUSED_TEST_COMPILE)
+    foreach (_test_suite IN ITEMS libslic3r fff_print sla_print)
+        get_property(_suite_targets
+            DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${_test_suite}"
+            PROPERTY BUILDSYSTEM_TARGETS)
+        foreach (_target IN LISTS _suite_targets)
+            get_target_property(_target_type "${_target}" TYPE)
+            get_target_property(_exclude_from_all "${_target}" EXCLUDE_FROM_ALL)
+            if (_target_type STREQUAL "EXECUTABLE"
+                AND _exclude_from_all
+                AND _target MATCHES "_tests$")
+                target_compile_options("${_target}" PRIVATE
+                    "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O1>")
+            endif ()
+        endforeach ()
+    endforeach ()
 endif ()
 
