@@ -95,6 +95,7 @@ jobs:
           CANARY_ROOT="$RUNNER_TEMP/flatpak-canary"
           case "$RUNNER_TEMP" in /__w/_temp) ;; *) echo "unexpected RUNNER_TEMP: $RUNNER_TEMP"; exit 2 ;; esac
           [ ! -e "$CANARY_ROOT" ] || { echo "canary root already exists; refusing"; exit 2; }
+          [ ! -L /var/lib/flatpak ] || { echo "/var/lib/flatpak is a symlink; refusing"; exit 2; }
           need_mb=$(du -sx --block-size=1M /var/lib/flatpak | cut -f1)
           avail_mb=$(df -Pm "$RUNNER_TEMP" | awk 'NR==2{print $4}')
           need_total=$(( need_mb * 2 + 8192 ))
@@ -103,7 +104,6 @@ jobs:
           mkdir -m 700 "$CANARY_ROOT" || exit 2
           : > "$CANARY_ROOT/.owner-$GITHUB_RUN_ID"
           mkdir -m 700 "$CANARY_ROOT/cache"
-          [ ! -L /var/lib/flatpak ] || { echo "/var/lib/flatpak is a symlink; refusing"; exit 2; }
           list_state() { flatpak --system list --runtime -d --columns=ref,origin,commit 2>&1 | sort; }
           # ---- pristine starting snapshot, taken and verified BEFORE anything mutates the original
           echo "=== SNAPSHOT /var/lib/flatpak -> $CANARY_ROOT/system"
@@ -136,7 +136,8 @@ jobs:
           loc="$(FLATPAK_SYSTEM_DIR="$export_dir" FLATPAK_SYSTEM_CACHE_DIR="$export_cache" flatpak info --system --show-location "$REF" 2>&1 | head -1)"
           echo "deployment location: $loc"
           case "$loc" in "$export_dir"/*) echo "LOCATION OK: under the job-private copy" ;; *) echo "LOCATION MISMATCH: not under the private copy"; snap_ok=0 ;; esac
-          if [ "$(stat -L -c %d "$loc" 2>/dev/null)" = "$(stat -L -c %d /var/lib/flatpak)" ]; then echo "DEVICE CHECK FAILED: candidate is on the same device as /var/lib/flatpak"; snap_ok=0; else echo "DEVICE CHECK OK: candidate deployment is on a different device than /var/lib/flatpak"; fi
+          cand_dev=$(stat -L -c %d -- "$loc" 2>/dev/null); orig_dev=$(stat -L -c %d /var/lib/flatpak 2>/dev/null)
+          if [ -n "$cand_dev" ] && [ -n "$orig_dev" ] && [ "$cand_dev" != "$orig_dev" ]; then echo "DEVICE CHECK OK ($cand_dev vs $orig_dev)"; else echo "DEVICE CHECK FAILED ('$cand_dev' vs '$orig_dev')"; snap_ok=0; fi
           for path in "$export_dir" "$export_cache"; do stat -f -c '%n fstype=%T' "$path"; stat -c '%n dev=%d' "$path"; done
           # ---- control: original path
           echo "=== CONTROL (original path /var/lib/flatpak): flatpak --system update --subpath= -y --noninteractive -v $REF"
@@ -166,7 +167,8 @@ jobs:
           fi
           echo "=== CANDIDATE exit status: $cand_rc (124 = timeout; 98 = invalid; 96 = no time)"
           if [ "$snap_ok" != 1 ]; then verdict="invalid (snapshot/location gate failed)"
-          elif [ "$cand_rc" != 0 ]; then verdict="candidate does not mitigate (or timed out)"
+          elif [ "$cand_rc" = 124 ]; then verdict="inconclusive (candidate timed out)"
+          elif [ "$cand_rc" != 0 ]; then verdict="candidate does not mitigate"
           elif [ "$control_rc" != 0 ]; then verdict="discriminating: control failed, candidate passed"
           else verdict="inconclusive (healthy host: both paths passed)"; fi
           echo "RESULT control_rc=$control_rc candidate_rc=$cand_rc snapshot_ok=$snap_ok"
