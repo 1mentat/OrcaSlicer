@@ -11106,6 +11106,43 @@ void check_identity_case_cube(const Model &model)
 
 } // namespace
 
+TEST_CASE("BBS skips an empty embedded filament identity array while retaining valid sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    const std::vector<std::string> empty_ids;
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), &empty_ids, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_PRINT);
+    CHECK(loaded.presets.front()->name == "Valid print sibling");
+}
+
+TEST_CASE("BBS skips an embedded filament config without identity while retaining valid sibling and model",
+          "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
+{
+    ScopedTemporaryFile archive(".3mf");
+    store_followup(archive.string(), [](Model &, DynamicPrintConfig &, PlateData &, StoreParams &, ScopedTemporaryDir &) {});
+    store_embedded_identity_entries(archive.string(), nullptr, true);
+
+    Model loaded_model;
+    BbsLoaded loaded;
+    bool load_ok = false;
+    REQUIRE_NOTHROW(load_ok = load_followup(archive.string(), loaded_model, loaded));
+    REQUIRE(load_ok);
+    check_identity_case_cube(loaded_model);
+    REQUIRE(loaded.presets.size() == 1);
+    CHECK(loaded.presets.front()->type == Preset::TYPE_PRINT);
+    CHECK(loaded.presets.front()->name == "Valid print sibling");
+}
+
 TEST_CASE("BBS skips an embedded print config without identity while retaining valid filament sibling and model",
           "[3mf][Bbs3mfMetadata][EmptyFilamentIdentity]")
 {
