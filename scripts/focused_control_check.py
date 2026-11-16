@@ -135,11 +135,12 @@ def check(args: argparse.Namespace, scratch: Path) -> tuple[int, dict[str, Any]]
     try:
         completed = slicer_process.run_captured(discovery_cmd, cwd=root, timeout=args.list_timeout)
         output, code = completed.stdout or "", completed.returncode
+        errors = completed.stderr or ""
     except subprocess.TimeoutExpired:
-        output, code = "[timed out after %ss]" % args.list_timeout, 124
+        output, errors, code = "[timed out after %ss]" % args.list_timeout, "", 124
     except OSError as error:
-        output, code = "cannot run: %s" % error, 127
-    list_log.write_text(output, encoding="utf-8")
+        output, errors, code = "cannot run: %s" % error, "", 127
+    list_log.write_text(output + errors, encoding="utf-8")
     try:
         if code:
             raise ValueError("ctest --show-only exit %d" % code)
@@ -195,10 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--cmake", default="cmake")
     p.add_argument("--ctest", default="ctest")
     p.add_argument("--configure-timeout", type=int, default=300)
-    p.add_argument("--build-timeout", type=int, default=1500)
+    p.add_argument("--build-timeout", type=int, default=900)
     p.add_argument("--list-timeout", type=int, default=60)
     p.add_argument("--test-timeout", type=int, default=300)
-    p.add_argument("--run-timeout", type=int, default=600)
+    p.add_argument("--run-timeout", type=int, default=900)
     args = p.parse_args(argv)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="focused-control-") as scratch:

@@ -125,8 +125,10 @@ python scripts/validation_runner.py ...runner options as above... -- \
 CTest registration matches its control inventory. It reconfigures the existing build with
 focused discovery on, links only that target, and requires each name in
 `tests/controls/wipe_tower.json` to be registered once, against the focused binary, and
-to pass when run by exact name. It never lowers the control count; extra registered names
-are reported but tolerated.
+to pass when run by exact name. It fails if any control name is missing; extra registered
+names are reported but tolerated. The hosted leg runs it as a non-blocking check, so its
+result is the `FOCUSED_CONTROL_SUMMARY` line in the step log and a step annotation, and a
+failure does not skip the leg's later steps or the unit-test jobs that follow it.
 
 The `--target` mode, which reads an exact control inventory from `tests/controls/`,
 needs an already configured build that persists between runs and cannot configure it
