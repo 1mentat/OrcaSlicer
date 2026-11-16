@@ -1,0 +1,122 @@
+name: libslic3r coverage
+
+# Line coverage of src/libslic3r, measured with GCC gcov on Linux x86_64 and
+# reported with gcovr. Runs nightly and on demand; it is not a pull request
+# check. The job fails when total line coverage drops below the floor.
+#
+# To check a result by hand: download the "libslic3r-coverage" artifact and open
+# html/index.html (per-file, per-line), or read coverage.txt. To reproduce it,
+# run the "Build" to "Report" steps below on Ubuntu 24.04.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/libslic3r-coverage-**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LINE_FLOOR: 90
+
+jobs:
+  coverage:
+    name: gcov line coverage (Linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+          useCloudCache: true
+
+      - name: Apt-Install Dependencies
+        uses: ./.github/actions/apt-install-deps
+
+      # Same key and path as build_check_cache.yml, so the dependencies the main
+      # Linux build already cached are reused. They are C and C++ libraries built
+      # against libstdc++, which GCC links as well as Clang does.
+      - name: Restore cached deps
+        id: deps
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+
+      - name: Build deps (cache miss)
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: ./build_linux.sh -drlL
+
+      - name: Build
+        env:
+          # GCC (no -l), headless, precompiled headers off (-p) so every object
+          # is compiled with the coverage flags.
+          ORCA_EXTRA_BUILD_ARGS: >-
+            -DSLIC3R_GUI=OFF
+            -DSLICER_ENABLE_GCC_GCOV_COVERAGE=ON
+        run: ./build_linux.sh -trp
+
+      - name: Test
+        id: test
+        # Same selection as scripts/run_unit_tests.sh. A failing test does not
+        # stop the report; it fails the job at the end instead.
+        run: |
+          set +e
+          ctest --test-dir build/tests --build-config Release \
+            -LE "NotWorking|RequiresApp" --no-tests=error \
+            --output-junit "$PWD/ctest_results.xml" --output-on-failure -j 4 \
+            > ctest.log 2>&1
+          status=$?
+          tail -n 40 ctest.log
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        run: |
+          pipx install gcovr==8.3
+          mkdir -p coverage/html
+          gcovr --root . --filter 'src/libslic3r/' \
+            --gcov-executable gcov-13 -j 4 \
+            --merge-mode-functions=merge-use-line-min \
+            --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+            --gcov-ignore-errors=no_working_dir_found \
+            --txt coverage/coverage.txt \
+            --json-summary coverage/summary.json --json-summary-pretty \
+            --html-details coverage/html/index.html \
+            build
+          python3 scripts/coverage_summary.py coverage/summary.json \
+            --commit "$GITHUB_SHA" --floor "$LINE_FLOOR" \
+            --out coverage/summary.md
+          cat coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: libslic3r-coverage
+          path: |
+            coverage
+            ctest.log
+            ctest_results.xml
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Enforce
+        run: |
+          python3 scripts/coverage_summary.py coverage/summary.json \
+            --floor "$LINE_FLOOR" --check
+          if [ "${{ steps.test.outputs.status }}" != "0" ]; then
+            echo "::error::unit tests failed under coverage (see ctest.log in the artifact)"
+            exit 1
+          fi
