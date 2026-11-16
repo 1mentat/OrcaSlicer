@@ -194,7 +194,7 @@ void check_positive_oriented_contours(const ExPolygons &shape)
 
 } // namespace
 
-TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broad contour", "[Emboss][EmbossHealing]")
+TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broad contour", "[Emboss][EmbossHealing][EmbossSpikeFollowup]")
 {
     const ExPolygon broad = broad_triangle();
     const double broad_area = broad.area();
@@ -206,7 +206,7 @@ TEST_CASE("Healing removes a sharp duplicate-point island and preserves the broa
     CHECK_THAT(shape.front().area(), WithinAbs(broad_area, 4.));
 }
 
-TEST_CASE("Healing retains a non-spike duplicate-point island as a separate contour", "[Emboss][EmbossHealing]")
+TEST_CASE("Healing retains a non-spike duplicate-point island as a separate contour", "[Emboss][EmbossHealing][EmbossSpikeFollowup]")
 {
     const ExPolygon broad = broad_triangle();
     const double broad_area = broad.area();
@@ -223,7 +223,7 @@ TEST_CASE("Healing retains a non-spike duplicate-point island as a separate cont
     CHECK_THAT(shape.front().area(), WithinAbs(blunt_area, 4.));
 }
 
-TEST_CASE("Healing leaves a shape without duplicate points unchanged", "[Emboss][EmbossHealing]")
+TEST_CASE("Healing leaves a shape without duplicate points unchanged", "[Emboss][EmbossHealing][EmbossSpikeFollowup]")
 {
     ExPolygons shape{broad_triangle()};
     const ExPolygons original = shape;
