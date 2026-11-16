@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "mutants": [
+    {
+      "id": "bbs-foreign-multi-instance-split-gate-bypassed",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "        if (!m_is_bbl_3mf && !_is_published_3mf()) {\n            // if the 3mf was not produced by OrcaSlicer and there is more than one instance,\n            // split the object in as many objects as instances",
+      "new": "        if (false) {\n            // if the 3mf was not produced by OrcaSlicer and there is more than one instance,\n            // split the object in as many objects as instances",
+      "description": "The foreign multi-instance path must split the two source instances; bypassing its production gate leaves one object with two instances.",
+      "test_filter": "Bbs3mfForeignMultiInstance"
+    },
+    {
+      "id": "bbs-foreign-multi-instance-volume-build-omitted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                        if (!_generate_volumes_new(*new_model_object, object_id_list, *volumes_ptr, config_substitutions))\n                            return false;",
+      "new": "                        if (false && !_generate_volumes_new(*new_model_object, object_id_list, *volumes_ptr, config_substitutions))\n                            return false;",
+      "description": "The clone volume build must run for each split object; retaining the call syntactically while forcing the condition false leaves the clone empty, and the public nonempty/raw-volume witness catches the omission.",
+      "test_filter": "Bbs3mfForeignMultiInstance"
+    },
+    {
+      "id": "bbs-foreign-multi-instance-clone-front-instance",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "                        new_model_object->add_instance(*model_object->instances.back());",
+      "new": "                        new_model_object->add_instance(*model_object->instances.front());",
+      "description": "Each clone must receive the trailing source instance being split off; copying the front instance repeatedly loses the second world offset while the original delete still terminates the loop.",
+      "test_filter": "Bbs3mfForeignMultiInstance"
+    }
+  ]
+}

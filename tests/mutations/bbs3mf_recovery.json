@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Behavioral mutation checks for Bbs3mfRecovery public contracts.",
+  "mutants": [
+    {
+      "id": "bbs-recovery-existing-archive-gate-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "    if (!boost::filesystem::exists(file3mf))\n        return false;",
+      "new": "    if (boost::filesystem::exists(file3mf))\n        return false;",
+      "description": "A staged .3mf must be accepted and returned through the public restore probe.",
+      "test_filter": "Bbs3mfRecovery"
+    },
+    {
+      "id": "bbs-recovery-live-lock-comparison-inverted",
+      "path": "src/libslic3r/Format/bbs_3mf.cpp",
+      "old": "            if (get_process_name(boost::lexical_cast<int>(pid)) ==\n                get_process_name(0)) {",
+      "new": "            if (get_process_name(boost::lexical_cast<int>(pid)) !=\n                get_process_name(0)) {",
+      "description": "A lock owned by the current process must suppress restore and report the lock sentinel.",
+      "test_filter": "Bbs3mfRecovery"
+    }
+  ]
+}
