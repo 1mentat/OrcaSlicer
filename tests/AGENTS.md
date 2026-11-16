@@ -24,6 +24,8 @@ Tests are off by default, so the build has to be told to include them.
 
 Rebuild a single suite with `cmake --build build --config Release --target <suite>_tests`. Visual Studio, Xcode and the Ninja Multi-Config generator that `build_linux.sh` uses are all multi-configuration, so `ctest` needs `-C` on every platform; without it, tests registered with plain `add_test()` lose their labels and report "Not Run".
 
+Use that CMake command for warm-build checks too. A bare Ninja target can select Debug and appear to require a full rebuild; select `build-Release.ninja` explicitly when invoking Ninja directly.
+
 ## Where a test goes
 
 - Pick the suite by the production code the test exercises, not by how the test is written.
@@ -68,6 +70,7 @@ Update only the intended entries in `settings_coverage.json`, preserving unchang
 - Never combine conditions with `&&` or `||` inside one assertion. Split them so Catch2 can print both operands on failure.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
+- Copy only the required tracked files, or use `git archive`, when staging a private candidate. Never recursively copy a checkout containing ignored build outputs or dependency builds; those can exhaust the host disk before native validation starts.
 - Count Catch2 JUnit `<testcase>` nodes and check their exact names. The bundled JUnit reporter's `tests` attribute counts assertions.
 - Derive runtime inventories from the built executable and CTest, not a source regex: declarations inside `#if 0` are not registered. Focused targets that link `test_helpers.cpp` also include `Scenario: init_print functionality`.
 - BDD scenarios and `DYNAMIC_SECTION` can emit additional JUnit entries for section paths. Declare the expected root and section names explicitly when validating a focused run.
