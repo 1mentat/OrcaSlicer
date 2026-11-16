@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Wipe before the external loop behavior mutants.",
+  "mutants": [
+    {
+      "id": "wipe-before-external-loop-config-gate-removed",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if (m_config.wipe_before_external_loop.value && !paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 && paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {",
+      "new": "if (!paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 && paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {",
+      "description": "Remove the public wipe_before_external_loop setting gate. The disabled two-wall export should then emit the pre-external-loop move and fail its absence oracle.",
+      "test_filter": "WipeBeforeExternalLoop"
+    },
+    {
+      "id": "wipe-before-external-loop-single-touch-accepted",
+      "path": "src/libslic3r/GCode.cpp",
+      "old": "if(discoveredTouchingLines > 1){",
+      "new": "if(discoveredTouchingLines > 0){",
+      "description": "Emit after only one perimeter entity touches the de-retraction point. The wide-inner control is selected so only the external path is within the source nozzle-radius search.",
+      "test_filter": "WipeBeforeExternalLoop"
+    }
+  ]
+}

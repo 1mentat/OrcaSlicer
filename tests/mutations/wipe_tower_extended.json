@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "description": "WipeTower2 flush accounting and direct planning contracts.",
+  "mutants": [
+    {
+      "id": "wipe-tower2-extraction-purge-gate",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    if (purge) {",
+      "new": "    if (!purge) {",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-extraction-nozzle-max-fold",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "                wipe_volumes[i][j] = std::max<float>(wipe_volumes[i][j], float(block[size_t(i) * number_of_extruders + j]) * scale);",
+      "new": "                wipe_volumes[i][j] = float(block[size_t(i) * number_of_extruders + j]) * scale;",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-old-matrix-fallback",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "        number_of_extruders = (unsigned int)(sqrt(raw_matrix.size()) + EPSILON);",
+      "new": "        number_of_extruders = 1;",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-empty-estimate-guard",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    if (wipe_volumes.empty()) // an empty flush matrix would make the average below 0/0",
+      "new": "    if (!wipe_volumes.empty()) // an empty flush matrix would make the average below 0/0",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-semm-estimate-scale",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    maximum *= 0.6;",
+      "new": "    maximum *= 1.0;",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-gap-wall-cone-gate",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    return config.prime_tower_skip_points.value && config.wipe_tower_wall_type.value != wtwCone;",
+      "new": "    return config.prime_tower_skip_points.value && config.wipe_tower_wall_type.value == wtwCone;",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-temperature-wait-semm-gate",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    return config.wait_for_temp_on_wipe_tower.value && !config.single_extruder_multi_material.value;",
+      "new": "    return config.wait_for_temp_on_wipe_tower.value && config.single_extruder_multi_material.value;",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-plan-same-tool-guard",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "    if (old_tool == new_tool)\t// new layer without toolchanges - we are done",
+      "new": "    if (old_tool != new_tool)\t// new layer without toolchanges - we are done",
+      "test_filter": "WipeTowerExtended"
+    },
+    {
+      "id": "wipe-tower2-nozzle-flush-scale",
+      "path": "src/libslic3r/GCode/WipeTower2.cpp",
+      "old": "            const double              scale = multiplier->get_at(nozzle_id);",
+      "new": "            const double              scale = multiplier->get_at(0);",
+      "test_filter": "WipeTowerExtended"
+    }
+  ]
+}
