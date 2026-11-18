@@ -268,8 +268,11 @@ TEST_CASE("FilamentGroup golden regression", "[filament_group][golden]") {
         // A slower search still scores the same above, since it searches just as far, but in slicing
         // it would mean fewer restarts fit in the wall clock and so worse groupings. Loose on
         // purpose, so it never becomes a proxy for how loaded the runner is.
+        // Skipped in coverage builds, where instrumentation alone slows the search several times.
+#ifndef SLICER_FG_COVERAGE_TIMING_DIAGNOSTIC_ONLY
         const double throughput_ceiling_ms = 10.0 * ClusteringBudget{}.timeout_ms;
         REQUIRE(result.elapsed_ms < throughput_ceiling_ms);
+#endif
     }
 }
 
