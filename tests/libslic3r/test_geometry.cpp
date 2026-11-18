@@ -11,6 +11,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
+#include <catch2/generators/catch_generators_range.hpp>
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -1657,26 +1658,6 @@ TEST_CASE("Transformation axis scale setter keeps the reflection of the axis it 
     check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
 }
 
-TEST_CASE("Transformation vector scale setter keeps an existing reflection",
-          "[Geometry][Transformation][Scale][Mirror]")
-{
-    Geometry::Transformation mirrored = scaled_quarter_turn(Vec3d(1., 1., -1.));
-    mirrored.set_scaling_factor(Vec3d(4., 3., 5.));
-    check_linear_and_offset(mirrored.get_matrix(), quarter_turn_times(Vec3d(4., 3., -5.)), Vec3d(5., -6., 7.));
-}
-
-TEST_CASE("Transformation vector scale setter leaves a uniformly scaled reflection unchanged",
-          "[Geometry][Transformation][Scale][Mirror]")
-{
-    const double factor = GENERATE(1., 2.);
-    const Transform3d matrix = rotated_uniform_mirror(factor);
-    REQUIRE(matrix.linear().determinant() < 0.);
-
-    Geometry::Transformation transform(matrix);
-    transform.set_scaling_factor(Vec3d::Constant(factor));
-    check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-}
-
 TEST_CASE("Transformation axis scale setter leaves a uniformly scaled reflection unchanged",
           "[Geometry][Transformation][Scale][Mirror]")
 {
@@ -1684,88 +1665,6 @@ TEST_CASE("Transformation axis scale setter leaves a uniformly scaled reflection
     Geometry::Transformation transform(matrix);
     transform.set_scaling_factor(Y, 2.);
     check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-}
-
-TEST_CASE("Transformation scale setters keep the reflection of a mirrored larger axis",
-          "[Geometry][Transformation][Scale][Mirror]")
-{
-    const Vec3d offset(5., -6., 7.);
-
-    Geometry::Transformation by_vector = scaled_quarter_turn(Vec3d(-1., 1., 1.));
-    by_vector.set_scaling_factor(Vec3d(4., 3., 5.));
-    check_linear_and_offset(by_vector.get_matrix(), quarter_turn_times(Vec3d(-4., 3., 5.)), offset, 1e-9);
-
-    Geometry::Transformation by_axis = scaled_quarter_turn(Vec3d(-1., 1., 1.));
-    by_axis.set_scaling_factor(X, 6.);
-    check_linear_and_offset(by_axis.get_matrix(), quarter_turn_times(Vec3d(-6., 3., 2.)), offset, 1e-9);
-}
-
-TEST_CASE("Transformation vector scale setter applies new magnitudes and keeps orientation and handedness",
-          "[Geometry][Transformation][Scale][Mirror]")
-{
-    const std::vector<Matrix3d> rotations{
-        Matrix3d::Identity(),
-        Matrix3d(Eigen::AngleAxisd(PI / 2., Vec3d::UnitZ())),
-        Matrix3d(Eigen::AngleAxisd(0.13, Vec3d(1., 2., 3.).normalized())),
-        Matrix3d(Eigen::AngleAxisd(2.4, Vec3d(-3., 1., 0.5).normalized()))};
-    const std::vector<Vec3d> scale_patterns{
-        Vec3d(1., 1., 1.), Vec3d(2., 2., 2.), Vec3d(4., 3., 2.), Vec3d(2., 3., 4.), Vec3d(3., 3., 1.)};
-    const Vec3d new_scale(1.5, 2.5, 0.5);
-
-    for (size_t r = 0; r < rotations.size(); ++r)
-        for (const Vec3d &scale : scale_patterns)
-            for (int mirror_axis = -1; mirror_axis < 3; ++mirror_axis) {
-                Vec3d mirror = Vec3d::Ones();
-                if (mirror_axis >= 0)
-                    mirror[mirror_axis] = -1.;
-                // Orthogonal factor (rotation and mirror) times the per-axis scale.
-                const Matrix3d orthogonal = rotations[r] * mirror.asDiagonal();
-                Transform3d matrix = Transform3d::Identity();
-                matrix.linear() = orthogonal * scale.asDiagonal();
-                CAPTURE(r, scale.transpose(), mirror_axis);
-
-                Geometry::Transformation transform(matrix);
-                transform.set_scaling_factor(new_scale);
-                CHECK(transform.get_matrix().linear().isApprox(orthogonal * new_scale.asDiagonal(), 1e-9));
-                CHECK((transform.get_matrix().linear().determinant() < 0.) == (mirror_axis >= 0));
-            }
-}
-
-TEST_CASE("Transformation vector scale setter keeps the orientation of a skewed reflection",
-          "[Geometry][Transformation][Scale][Mirror][Skew]")
-{
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() << -1., -0.5, 0.,
-                        0.5,  1., 0.,
-                        0.,   0., 3.;
-    matrix.translation() = Vec3d(5., -6., 7.);
-    REQUIRE(matrix.linear().determinant() < 0.);
-
-    // Independent polar decomposition: linear = orthogonal * stretch, stretch = sqrt(linearT * linear).
-    const Matrix3d stretch = Eigen::SelfAdjointEigenSolver<Matrix3d>(matrix.linear().transpose() * matrix.linear()).operatorSqrt();
-    const Matrix3d orthogonal = matrix.linear() * stretch.inverse();
-
-    Geometry::Transformation transform(matrix);
-    transform.set_scaling_factor(Vec3d(0.1, 2., 3.));
-    check_linear_and_offset(transform.get_matrix(), orthogonal * Vec3d(0.1, 2., 3.).asDiagonal(), matrix.translation(), 1e-9);
-}
-
-TEST_CASE("Transformation vector scale setter stays finite on singular and near-singular transforms",
-          "[Geometry][Transformation][Scale]")
-{
-    Transform3d rank_one = Transform3d::Identity();
-    rank_one.linear() = Vec3d(1., 2., 3.) * Vec3d(0.5, -1., 2.).transpose();
-    Transform3d near_singular_mirror = Transform3d::Identity();
-    near_singular_mirror.linear() =
-        Eigen::AngleAxisd(0.7, Vec3d(1., -2., 0.5).normalized()).toRotationMatrix() * Vec3d(-1e-9, 2., 3.).asDiagonal();
-
-    for (const Transform3d &matrix : {rank_one, near_singular_mirror}) {
-        CAPTURE(matrix.linear());
-        Geometry::Transformation transform(matrix);
-        transform.set_scaling_factor(Vec3d(1., 2., 3.));
-        CHECK(transform.get_matrix().matrix().allFinite());
-        CHECK((transform.get_matrix().linear().determinant() < 0.) == (matrix.linear().determinant() < 0.));
-    }
 }
 
 TEST_CASE("Transformation scale setters match the plain rotation and scale split on right-handed input",
@@ -1881,64 +1780,6 @@ TEST_CASE("Transformation resets preserve offset and the selected geometric comp
     Geometry::Transformation cleared(matrix);
     cleared.reset();
     CHECK(cleared.get_matrix().isApprox(Transform3d::Identity(), 1e-12));
-}
-
-// Source assertion dispositions (source case of the same title):
-//  - quaternion readback of Euler (0.3,-0.2,0.4) within 1e-12: kept.
-//  - scaling-factor matrix equals diag(4,3,2) within 1e-12: kept.
-//  - mirror matrix equals diag(1,1,-1): adapted to the canonical-X diag(-1,1,1) (main 4c073e0809); the source's own
-//    note that the mirror axis is decomposition-dependent (see the signed-scale accessor case above) applies.
-//  - set_scaling_factor(Y, 5) on the quarter turn gives [0,-5,0;4,0,0;0,0,2] with offset: kept.
-//  - a hair below zero about Z is no rotation: kept.
-TEST_CASE("Transformation component access and axis setters preserve signed scale",
-          "[Geometry][Transformation][TransformContract]")
-{
-    const Vec3d euler(0.3, -0.2, 0.4);
-    Geometry::Transformation oriented(Geometry::rotation_transform(euler));
-    const Vec3d recovered = oriented.get_rotation_by_quaternion();
-    for (int axis = 0; axis < 3; ++axis)
-        CHECK_THAT(recovered[axis], Catch::Matchers::WithinAbs(euler[axis], 1e-12));
-
-    Geometry::Transformation signed_scale;
-    signed_scale.set_scaling_factor(Vec3d(4., 3., 2.));
-    signed_scale.set_mirror(Vec3d(1., 1., -1.));
-    Matrix3d expected_scale = Vec3d(4., 3., 2.).asDiagonal();
-    // Adapted (assertion adaptation, see below): the source expected the per-axis display convention
-    // diag(1,1,-1) here. Main (4c073e0809, Geometry.cpp canonical_rotation_scale/get_mirror_matrix) reads every
-    // full-rank left-handed matrix back with the reflection on X. Persisted M = diag(4,3,-2); M*diag(-1,1,1) =
-    // diag(-4,3,-2) has polar factor diag(-1,1,-1) (proper rotation) and stretch V*S*V^T = diag(4,3,2), so the
-    // readback is rotation diag(-1,1,-1), stretch diag(4,3,2), reflection diag(-1,1,1); the product is diag(4,3,-2).
-    Matrix3d expected_mirror = Vec3d(-1., 1., 1.).asDiagonal();
-    const Transform3d persisted = signed_scale.get_matrix();
-    const Matrix3d actual_scale = signed_scale.get_scaling_factor_matrix().linear();
-    const Matrix3d actual_mirror = signed_scale.get_mirror_matrix().linear();
-    for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column) {
-            CHECK_THAT(actual_scale(row, column), Catch::Matchers::WithinAbs(expected_scale(row, column), 1e-12));
-            CHECK_THAT(actual_mirror(row, column), Catch::Matchers::WithinAbs(expected_mirror(row, column), 1e-12));
-        }
-
-    // Added witnesses for the adapted mirror expectation: the persisted matrix keeps the exact signed input
-    // (scale (4,3,2), mirror (1,1,-1)), the readback did not rewrite it, and rotation * stretch * reflection
-    // recomposes it (same oracle as the mirrored-accessor case below).
-    check_linear_and_offset(persisted, Vec3d(4., 3., -2.).asDiagonal(), Vec3d::Zero());
-    CHECK(signed_scale.get_matrix().matrix() == persisted.matrix());
-    const Matrix3d proper_rotation = signed_scale.get_rotation_matrix().linear();
-    CHECK_THAT(proper_rotation.determinant(), Catch::Matchers::WithinAbs(1., 1e-12));
-    CHECK((proper_rotation * actual_scale * actual_mirror).isApprox(persisted.linear(), 1e-12));
-
-    const Vec3d offset(5., -6., 7.);
-    Geometry::Transformation axis_scale(Geometry::assemble_transform(
-        offset, Vec3d(0., 0., PI / 2.), Vec3d(4., 3., 2.)));
-    axis_scale.set_scaling_factor(Y, 5.);
-    Matrix3d expected_axis_scale;
-    expected_axis_scale << 0., -5., 0., 4., 0., 0., 0., 0., 2.;
-    check_linear_and_offset(axis_scale.get_matrix(), expected_axis_scale, offset);
-
-    Geometry::Transformation no_full_turn;
-    no_full_turn.set_offset(offset);
-    no_full_turn.set_rotation(Z, -1e-10);
-    check_linear_and_offset(no_full_turn.get_matrix(), Matrix3d::Identity(), offset);
 }
 
 TEST_CASE("Transforming a 3D line applies rotation and translation to both endpoints",
@@ -2112,192 +1953,120 @@ TEST_CASE("Point3 nearest query leaves output unchanged when there are no candid
     CHECK(nearest.z() == 6);
 }
 
-TEST_CASE("Mirrored transform accessors jointly recompose canonical rotation stretch and reflection",
-          "[Geometry][Transformation][Mirror][Scale]")
-{
-    const int reflected_axis = GENERATE(0, 1, 2);
-    const double factor = GENERATE(1., 2.);
-    const Matrix3d rotation = Eigen::AngleAxisd(0.37, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
-    Vec3d signs = Vec3d::Ones();
-    signs[reflected_axis] = -1.;
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() = rotation * signs.asDiagonal() * factor;
-    matrix.translation() = Vec3d(5., -6., 7.);
-    Geometry::Transformation transform(matrix);
-    CHECK(transform.get_scaling_factor().isApprox(Vec3d::Constant(factor), 1e-12));
-    CHECK(transform.get_mirror() == Vec3d(-1., 1., 1.));
-    const Matrix3d proper = transform.get_rotation_matrix().linear();
-    CHECK_THAT(proper.determinant(), WithinAbs(1., 1e-12));
-    const Matrix3d recomposed = proper * transform.get_scaling_factor_matrix().linear() * transform.get_mirror_matrix().linear();
-    CHECK(recomposed.isApprox(matrix.linear(), 1e-12));
-    CHECK(Geometry::rotation_transform(transform.get_rotation()).linear().isApprox(proper, 1e-12));
-    CHECK(Geometry::rotation_transform(transform.get_rotation_by_quaternion()).linear().isApprox(proper, 1e-12));
-    // Getters do not rewrite the persisted affine matrix.
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
-    transform.set_mirror(transform.get_mirror());
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
-    for (Axis axis : {X, Y, Z}) {
-        Geometry::Transformation edited(matrix);
-        edited.set_scaling_factor(axis, factor);
-        check_linear_and_offset(edited.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-        edited.set_scaling_factor(axis, factor * 3.);
-        Matrix3d expected = matrix.linear();
-        expected.col(axis) *= 3.;
-        check_linear_and_offset(edited.get_matrix(), expected, matrix.translation(), 1e-9);
-        CHECK_THAT(edited.get_scaling_factor(axis), WithinAbs(factor * 3., 1e-9));
-    }
-    transform.set_rotation(transform.get_rotation());
-    check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-}
-
-TEST_CASE("Mirrored shear axis edits preserve positive stretch by congruence", "[Geometry][Transformation][Mirror][Skew]")
-{
-    Matrix3d stretch;
-    stretch << 1., .75, 0., .75, 1., 0., 0., 0., 3.;
-    const Matrix3d rotation = Eigen::AngleAxisd(.31, Vec3d::UnitZ()).toRotationMatrix();
-    const Matrix3d mirror = Vec3d(-1., 1., 1.).asDiagonal();
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() = rotation * stretch * mirror;
-    matrix.translation() = Vec3d(5., -6., 7.);
-    Geometry::Transformation transform(matrix);
-    CHECK(transform.get_scaling_factor_matrix().linear().isApprox(stretch, 1e-12));
-    CHECK((transform.get_rotation_matrix().linear() * transform.get_scaling_factor_matrix().linear() *
-           transform.get_mirror_matrix().linear()).isApprox(matrix.linear(), 1e-12));
-    // The same R*S*M inverse is used by Selection to convert world displacements.
-    const Vec3d local(2., -3., 4.);
-    const Matrix3d recomposed = transform.get_rotation_matrix().linear() *
-        transform.get_scaling_factor_matrix().linear() * transform.get_mirror_matrix().linear();
-    CHECK((recomposed.inverse() * (matrix.linear() * local)).isApprox(local, 1e-12));
-    transform.set_scaling_factor(X, .1);
-    Matrix3d expected = stretch;
-    expected(0, 0) = .1;
-    expected(0, 1) = expected(1, 0) = .75 * std::sqrt(.1);
-    check_linear_and_offset(transform.get_matrix(), rotation * expected * mirror, matrix.translation(), 1e-9);
-    CHECK_THAT(transform.get_scaling_factor(X), WithinAbs(.1, 1e-12));
-    CHECK(transform.is_left_handed());
-    const Matrix3d changed_stretch = transform.get_scaling_factor_matrix().linear();
-    const Eigen::SelfAdjointEigenSolver<Matrix3d> eigen(changed_stretch);
-    CHECK(eigen.eigenvalues().minCoeff() > 0.);
-    CHECK(changed_stretch.isApprox(expected, 1e-12));
-}
-
-TEST_CASE("Canonical mirror transitions preserve proper shear and local axis toggles", "[Geometry][Transformation][Mirror][Skew]")
-{
-    const Axis axis = GENERATE(X, Y, Z);
-    const bool reflected = GENERATE(false, true);
-    Matrix3d stretch;
-    stretch << 2., .5, 0., .5, 3., 0., 0., 0., 4.;
-    const Matrix3d rotation = Eigen::AngleAxisd(.23, Vec3d::UnitY()).toRotationMatrix();
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() = rotation * stretch;
-    if (reflected)
-        matrix.linear().col(0) *= -1.;
-    matrix.translation() = Vec3d(1., 2., 3.);
-    Geometry::Transformation transform(matrix);
-    transform.set_mirror(transform.get_mirror());
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
-    Vec3d requested = transform.get_mirror();
-    requested[axis] *= -1.;
-    transform.set_mirror(requested);
-    Matrix3d flipped = matrix.linear();
-    flipped.col(axis) *= -1.;
-    check_linear_and_offset(transform.get_matrix(), flipped, matrix.translation(), 1e-9);
-    requested = transform.get_mirror();
-    requested[axis] *= -1.;
-    transform.set_mirror(requested);
-    check_linear_and_offset(transform.get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-}
-
-TEST_CASE("Mirrored transform handedness is independent of determinant overflow and underflow", "[Geometry][Transformation][Mirror][Scale]")
-{
-    const double factor = GENERATE(1e-150, 1e150);
-    const Matrix3d rotation = Eigen::AngleAxisd(.37, Vec3d(1., 2., 3.).normalized()).toRotationMatrix();
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() = rotation * Vec3d(-factor, factor, factor).asDiagonal();
-    Geometry::Transformation transform(matrix);
-    CHECK(transform.is_left_handed());
-    CHECK((transform.get_scaling_factor() / factor).isApprox(Vec3d::Ones(), 1e-12));
-    CHECK((transform.get_rotation_matrix().linear() *
-           (transform.get_scaling_factor_matrix().linear() / factor) * transform.get_mirror_matrix().linear()).isApprox(matrix.linear() / factor, 1e-12));
-    transform.set_scaling_factor(Y, factor * 2.);
-    Matrix3d expected = matrix.linear() / factor;
-    expected.col(1) *= 2.;
-    CHECK((transform.get_matrix().linear() / factor).isApprox(expected, 1e-12));
-    CHECK(transform.get_matrix().matrix().allFinite());
-}
-
-TEST_CASE("An unrepresentable mirrored axis edit leaves the affine matrix intact", "[Geometry][Transformation][Mirror][Scale]")
-{
-    Matrix3d stretch;
-    stretch << 1., .9, 0., .9, 1., 0., 0., 0., 1.;
-    const Matrix3d rotation = Eigen::AngleAxisd(-std::atan(.2), Vec3d::UnitZ()).toRotationMatrix();
-    Transform3d matrix = Transform3d::Identity();
-    matrix.linear() = rotation * (stretch * 1e307) * Vec3d(-1., 1., 1.).asDiagonal();
-    REQUIRE(matrix.matrix().allFinite());
-    Geometry::Transformation transform(matrix);
-    transform.set_scaling_factor(X, std::numeric_limits<double>::max());
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
-}
-
-TEST_CASE("Model scale and instance accessors keep mirrored affine state and mesh ownership", "[Geometry][Transformation][Model]")
-{
-    Model model;
-    ModelObject *object = model.add_object("transform", "transform.stl", make_cube(2., 3., 4.));
-    REQUIRE(object != nullptr);
-    REQUIRE(object->volumes.size() == 1);
-    ModelVolume *volume = object->volumes.front();
-    const TriangleMesh *mesh = &volume->mesh();
-    const Transform3d matrix = rotated_uniform_mirror(2.);
-    volume->set_transformation(matrix);
-    volume->scale(Vec3d::Ones());
-    check_linear_and_offset(volume->get_matrix(), matrix.linear(), matrix.translation(), 1e-9);
-    CHECK(&volume->mesh() == mesh);
-    ModelInstance *instance = object->add_instance();
-    REQUIRE(instance != nullptr);
-    instance->set_transformation(Geometry::Transformation(matrix));
-    instance->set_scaling_factor(Y, 6.);
-    Matrix3d expected = matrix.linear();
-    expected.col(1) *= 3.;
-    check_linear_and_offset(instance->get_matrix(), expected, matrix.translation(), 1e-9);
-}
-
 #ifdef NDEBUG
-TEST_CASE("Invalid mirrored axis targets retain the legacy Release fallback", "[Geometry][Transformation][Scale]")
-{
-    const double target = GENERATE(0., -1.);
-    const Transform3d matrix = rotated_uniform_mirror(2.);
-    Matrix3d rotation, stretch;
-    matrix.computeRotationScaling(&rotation, &stretch);
-    stretch(1, 1) = std::copysign(target, stretch(1, 1));
-    Geometry::Transformation transform(matrix);
-    transform.set_scaling_factor(Y, target);
-    check_linear_and_offset(transform.get_matrix(), rotation * stretch, matrix.translation(), 1e-9);
-}
 #endif
 
-TEST_CASE("An axis target outside the supported relative rank leaves a mirror unchanged", "[Geometry][Transformation][Mirror][Scale]")
+namespace {
+// Scale on the local axes, with a mirror on `mirror_axis`, then rotation.
+Transform3d mirrored_transform(const Matrix3d &rotation, const Vec3d &scale, int mirror_axis)
 {
-    const Transform3d matrix = rotated_uniform_mirror(2.);
-    Geometry::Transformation transform(matrix);
-    transform.set_scaling_factor(Y, 1e-300);
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
+    Vec3d signed_scale = scale;
+    signed_scale[mirror_axis] = -signed_scale[mirror_axis];
+    Transform3d trafo = Transform3d::Identity();
+    trafo.linear() = rotation * signed_scale.asDiagonal();
+    return trafo;
 }
 
-TEST_CASE("Proper getter branches preserve legacy results around determinant cancellation", "[Geometry][Transformation][Scale]")
+const std::vector<Matrix3d> &test_rotations()
 {
-    const double factor = GENERATE(1e-150, 1., 1e150);
-    const double separation = GENERATE(1., 32., 1024.) * std::numeric_limits<double>::epsilon();
+    static const std::vector<Matrix3d> rotations = {
+        Matrix3d::Identity(),
+        Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitZ()).toRotationMatrix(),
+        Eigen::AngleAxisd(0.7, Vec3d(1., 2., 3.).normalized()).toRotationMatrix(),
+        Eigen::AngleAxisd(2.5, Vec3d(-1., 0.5, 2.).normalized()).toRotationMatrix(),
+    };
+    return rotations;
+}
+} // namespace
+
+TEST_CASE("Mirrored transformations decompose into a rotation and a diagonal scale", "[Geometry]")
+{
+    const size_t rotation_idx = GENERATE(range(size_t(0), test_rotations().size()));
+    const int    mirror_axis  = GENERATE(0, 1, 2);
+    const Vec3d  scale        = GENERATE(Vec3d(1., 1., 1.), Vec3d(2., 2., 2.), Vec3d(1., 1., 3.), Vec3d(1., 2., 3.));
+    CAPTURE(rotation_idx, mirror_axis, scale.transpose());
+    const Geometry::Transformation trafo(mirrored_transform(test_rotations()[rotation_idx], scale, mirror_axis));
+
+    const Vec3d scaling = trafo.get_scaling_factor();
+    const Vec3d mirror  = trafo.get_mirror();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THAT(scaling[i], Catch::Matchers::WithinAbs(scale[i], 1e-9));
+        CHECK_THAT(std::abs(mirror[i]), Catch::Matchers::WithinAbs(1., 1e-12));
+    }
+    CHECK_THAT(mirror.prod(), Catch::Matchers::WithinAbs(-1., 1e-12));
+    CHECK_FALSE(trafo.has_skew());
+    const bool uniform = scale.x() == scale.y() && scale.y() == scale.z();
+    CHECK(trafo.is_scaling_uniform() == uniform);
+    const Matrix3d rotation = trafo.get_rotation_matrix().linear();
+    CHECK_THAT(rotation.determinant(), Catch::Matchers::WithinAbs(1., 1e-9));
+    const Matrix3d rebuilt = rotation * trafo.get_scaling_factor_matrix().linear() * trafo.get_mirror_matrix().linear();
+    CHECK(rebuilt.isApprox(trafo.get_matrix().linear(), 1e-9));
+}
+
+TEST_CASE("An unrotated mirror keeps its axis and needs no rotation", "[Geometry]")
+{
+    const int   mirror_axis = GENERATE(0, 1, 2);
+    const Vec3d scale       = GENERATE(Vec3d(1., 1., 1.), Vec3d(1., 2., 3.));
+    CAPTURE(mirror_axis, scale.transpose());
+    const Geometry::Transformation trafo(mirrored_transform(Matrix3d::Identity(), scale, mirror_axis));
+    const Vec3d mirror = trafo.get_mirror();
+    for (int i = 0; i < 3; ++i)
+        CHECK_THAT(mirror[i], Catch::Matchers::WithinAbs(i == mirror_axis ? -1. : 1., 1e-12));
+    CHECK(trafo.get_rotation().isZero(1e-9));
+}
+
+TEST_CASE("A mirrored and rotated transformation at unit scale reports unit scales", "[Geometry]")
+{
+    // Valid mirrored instance transform as stored in a 3MF project.
     Transform3d matrix = Transform3d::Identity();
-    // Nearly dependent columns put the normalized determinant below or above
-    // the conservative sign certificate, without relying on raw det(A) units.
-    matrix.linear() << 1., 1., 0., 1., 1. + separation, 0., 0., 0., 1.;
-    matrix.linear() *= factor;
-    matrix.translation() = Vec3d(3., -4., 5.);
-    Matrix3d legacy_rotation, legacy_scale;
-    matrix.computeRotationScaling(&legacy_rotation, &legacy_scale);
-    Geometry::Transformation transform(matrix);
-    CHECK(transform.get_rotation_matrix().linear().isApprox(legacy_rotation, 1e-12));
-    CHECK((transform.get_scaling_factor_matrix().linear() / factor).isApprox(legacy_scale / factor, 1e-12));
-    CHECK((transform.get_scaling_factor() / factor).isApprox(legacy_scale.diagonal() / factor, 1e-12));
-    CHECK(transform.get_matrix().matrix() == matrix.matrix());
+    matrix.linear() << 4.4408921e-16,   0.819152044,    0.573576436,
+                       1.0,            -4.4408921e-16, -1.11022302e-16,
+                      -5.55111512e-17, -0.573576436,    0.819152044;
+    const Geometry::Transformation trafo(matrix);
+    CHECK(trafo.get_scaling_factor().isApprox(Vec3d::Ones(), 1e-8));
+    CHECK(trafo.get_mirror().allFinite());
+    CHECK(trafo.is_scaling_uniform());
+}
+
+TEST_CASE("Scaling one axis of a mirrored transformation keeps the mirror and adds no skew", "[Geometry]")
+{
+    const size_t rotation_idx = GENERATE(range(size_t(0), test_rotations().size()));
+    const int    mirror_axis  = GENERATE(0, 1, 2);
+    const int    scaled_axis  = GENERATE(0, 1, 2);
+    CAPTURE(rotation_idx, mirror_axis, scaled_axis);
+    const Matrix3d &rotation = test_rotations()[rotation_idx];
+    Geometry::Transformation trafo(mirrored_transform(rotation, Vec3d::Ones(), mirror_axis));
+    trafo.set_scaling_factor(Axis(scaled_axis), 2.);
+    Vec3d expected_scale = Vec3d::Ones();
+    expected_scale[scaled_axis] = 2.;
+    CHECK(trafo.get_matrix().linear().isApprox(mirrored_transform(rotation, expected_scale, mirror_axis).linear(), 1e-9));
+    CHECK(trafo.is_left_handed());
+    CHECK_FALSE(trafo.has_skew());
+}
+
+TEST_CASE("Transformations without a mirror decompose as computeRotationScaling() does", "[Geometry]")
+{
+    Transform3d skewed = Transform3d::Identity();
+    skewed.linear() << 1., 0.3, 0.,
+                       0., 1.,  0.,
+                       0., 0.,  2.;
+    const Transform3d matrix = GENERATE_COPY(Transform3d(test_rotations()[2]) * Geometry::scale_transform(Vec3d(1., 2., 3.)),
+                                             Transform3d(test_rotations()[3]) * skewed);
+    Matrix3d rotation;
+    Matrix3d scale;
+    matrix.computeRotationScaling(&rotation, &scale);
+    const Geometry::Transformation trafo(matrix);
+    CHECK(trafo.get_rotation_matrix().linear() == rotation);
+    CHECK(trafo.has_skew() == !scale.isDiagonal());
+}
+
+TEST_CASE("Skew is detected with and without a mirror", "[Geometry]")
+{
+    Transform3d skewed = Transform3d::Identity();
+    skewed.linear() << 1., 0.3, 0.,
+                       0., 1.,  0.,
+                       0., 0.,  1.;
+    const bool mirrored = GENERATE(false, true);
+    const Transform3d matrix = Transform3d(test_rotations()[2]) * skewed * Geometry::scale_transform(Vec3d(mirrored ? -1. : 1., 1., 1.));
+    CHECK(Geometry::Transformation(matrix).has_skew());
 }

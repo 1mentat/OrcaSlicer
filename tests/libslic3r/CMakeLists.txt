@@ -71,6 +71,9 @@ add_executable(${_TEST_NAME}_tests
     test_fuzzy_skin.cpp
     test_small_area_infill_flow_compensator.cpp
     test_geometry.cpp
+    test_imex_arrange.cpp
+    test_imex_helpers.cpp
+    test_imex_zones.cpp
     test_multimaterial_segmentation.cpp
     test_placeholder_parser.cpp
     test_png_read_write.cpp
@@ -99,6 +102,7 @@ add_executable(${_TEST_NAME}_tests
     test_measure_utils.cpp
     test_meshboolean.cpp
     test_trianglemesh.cpp
+    test_mesh_repair.cpp
     test_trianglemesh_slicer.cpp
     test_marchingsquares.cpp
     test_texture_to_color_contracts.cpp

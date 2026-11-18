@@ -305,7 +305,7 @@ TEST_CASE("Layered validation honors bed and clumping keep-out areas",
     if (part.bed_keepout)
         CHECK(error.string.find("is too close to exclusion area") != std::string::npos);
     else
-        CHECK(error.string.find("is too close to clumping detection area") != std::string::npos);
+        CHECK(error.string.find("is too close to the clumping detection area") != std::string::npos);
 }
 
 TEST_CASE("Estimated prime tower validation distinguishes safe, model, bed, and clumping footprints",
@@ -354,7 +354,7 @@ TEST_CASE("Estimated prime tower validation distinguishes safe, model, bed, and 
 
     std::vector<StringObjectException> warnings;
     const StringObjectException error = print.validate(&warnings);
-    const std::string model_warning = "Prime Tower is too close to others, and collisions may be caused.";
+    const std::string model_warning = "Prime tower is too close to others, and collisions may be caused.";
     const size_t model_warning_count = count_warning_text(warnings, model_warning);
 
     if (part == TowerCase::Safe) {
@@ -380,9 +380,9 @@ TEST_CASE("Estimated prime tower validation distinguishes safe, model, bed, and 
         CHECK(error.opt_key.empty());
         CHECK(model_warning_count == 0);
         if (part == TowerCase::BedKeepout)
-            CHECK(error.string.find("Prime Tower is too close to an exclusion area") != std::string::npos);
+            CHECK(error.string.find("Prime tower is too close to an exclusion area") != std::string::npos);
         else
-            CHECK(error.string.find("Prime Tower is too close to clumping detection area") != std::string::npos);
+            CHECK(error.string.find("Prime tower is too close to the clumping detection area") != std::string::npos);
     }
 }
 
