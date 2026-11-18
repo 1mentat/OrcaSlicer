@@ -10360,6 +10360,11 @@ void  handle_legacy_sla(DynamicPrintConfig &config)
 {
     for (std::string corr : {"relative_correction", "material_correction"}) {
         if (config.has(corr)) {
+            // A malformed legacy vector has no X/Y and Z pair to expand.
+            const ConfigOptionFloats *legacy_correction = config.opt<ConfigOptionFloats>(corr);
+            if (legacy_correction->values.size() < 2)
+                continue;
+
             if (std::string corr_x = corr + "_x"; !config.has(corr_x)) {
                 auto* opt = config.opt<ConfigOptionFloat>(corr_x, true);
                 opt->value = config.opt<ConfigOptionFloats>(corr)->values[0];

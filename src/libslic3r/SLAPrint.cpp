@@ -643,6 +643,12 @@ std::string SLAPrint::output_filename(const std::string &filename_base) const
 
 StringObjectException SLAPrint::validate(std::vector<StringObjectException> *warnings, Polygons *collison_polygons, std::vector<std::pair<Polygon, float>> *height_polygons) const
 {
+    const Vec3d correction = this->relative_correction();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(correction(axis)) || correction(axis) <= 0.)
+            return {L("SLA correction scales must be finite and greater than zero.")};
+    }
+
     for(SLAPrintObject * po : m_objects) {
 
         const ModelObject *mo = po->model_object();
@@ -861,7 +867,10 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "display_pixels_y",
         "display_mirror_x",
         "display_mirror_y",
-        "display_orientation"
+        "display_orientation",
+        "fast_tilt_time",
+        "slow_tilt_time",
+        "area_fill"
     };
 
     static std::unordered_set<std::string> steps_ignore = {
@@ -869,9 +878,6 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "printable_height",
         "printer_technology",
         "filename_format",
-        "fast_tilt_time",
-        "slow_tilt_time",
-        "area_fill",
         "bottle_cost",
         "bottle_volume",
         "bottle_weight",
