@@ -2999,8 +2999,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     for (PrintObject *obj : m_objects)
         obj->clear_shared_object();
 
+    // The same model loaded more than once, e.g. several copies of one file, gets a mesh per object.
+    auto same_mesh = [](const indexed_triangle_set &its1, const indexed_triangle_set &its2) {
+        return its1.vertices == its2.vertices && its1.indices == its2.indices &&
+               std::equal(its1.properties.begin(), its1.properties.end(), its2.properties.begin(), its2.properties.end(),
+                          [](const FaceProperty &p1, const FaceProperty &p2) { return p1.type == p2.type && p1.area == p2.area; });
+    };
     //add the print_object share check logic
-    auto is_print_object_the_same = [](const PrintObject* object1, const PrintObject* object2) -> bool{
+    auto is_print_object_the_same = [&same_mesh](const PrintObject* object1, const PrintObject* object2) -> bool{
         if (object1->trafo().matrix() != object2->trafo().matrix())
             return false;
         const ModelObject* model_obj1 = object1->model_object();
@@ -3017,7 +3023,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             const ModelVolume &model_volume2 = *model_obj2->volumes[index];
             if (model_volume1.type() != model_volume2.type())
                 return false;
-            if (model_volume1.mesh_ptr() != model_volume2.mesh_ptr())
+            if (model_volume1.mesh_ptr() != model_volume2.mesh_ptr() && !same_mesh(model_volume1.mesh().its, model_volume2.mesh().its))
                 return false;
             if (!(model_volume1.get_transformation() == model_volume2.get_transformation()))
                 return false;
