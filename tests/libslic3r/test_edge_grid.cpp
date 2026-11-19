@@ -299,3 +299,26 @@ TEST_CASE("EdgeGrid simplifies a concave contour into one nonempty region", "[Ed
     CHECK(simplified.front().contains(Point(10, 50)));
     CHECK_FALSE(simplified.front().contains(Point(50, 50)));
 }
+
+TEST_CASE("EdgeGrid propagates signed distances across the interior and exterior", "[EdgeGrid][Regression]")
+{
+    const Polygon rectangle {Point::new_scale(-10., -12.), Point::new_scale(10., -12.),
+                             Point::new_scale(10., 12.), Point::new_scale(-10., 12.)};
+    const Polygons outlines {rectangle};
+    const BoundingBox bounds(Point::new_scale(-30., -32.), Point::new_scale(30., 32.));
+    EdgeGrid::Grid grid(bounds);
+    grid.create(outlines, scale_(1.));
+    // Distances beyond the initialized edge band require backward propagation.
+    // With -fsanitize=shift, this also checks negative neighbour offsets.
+    grid.calculate_sdf();
+    const auto distance = [&](double x, double y) {
+        return grid.signed_distance_bilinear(Point::new_scale(x, y)) * SCALING_FACTOR;
+    };
+    REQUIRE_THAT(distance(0., 0.), Catch::Matchers::WithinAbs(-10., 0.01));
+    for (double sign : {-1., 1.}) {
+        REQUIRE_THAT(distance(sign * 5., 0.), Catch::Matchers::WithinAbs(-5., 0.01));
+        REQUIRE_THAT(distance(0., sign * 7.), Catch::Matchers::WithinAbs(-5., 0.01));
+        REQUIRE_THAT(distance(sign * 20., 0.), Catch::Matchers::WithinAbs(10., 0.01));
+        REQUIRE_THAT(distance(0., sign * 22.), Catch::Matchers::WithinAbs(10., 0.01));
+    }
+}

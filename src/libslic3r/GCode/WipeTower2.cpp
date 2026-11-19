@@ -2372,7 +2372,10 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> 
         for (const auto& current_plan : m_plan)
             max_depth = std::max(max_depth, current_plan.depth);
         if (max_depth > EPSILON) {
-            m_wipe_tower_width = align_ceil(std::sqrt(max_depth * m_wipe_tower_width), m_perimeter_width);
+            // Three perimeter widths of the tower are not drawn into (see set_toolchange()), so a
+            // small purge on a wide nozzle would otherwise square down to a tower with no purge room.
+            m_wipe_tower_width = std::max(align_ceil(std::sqrt(max_depth * m_wipe_tower_width), m_perimeter_width),
+                                          4.f * m_perimeter_width);
             for (size_t idx = 0; idx < m_plan.size(); ++idx)
                 for (auto& toolchange : m_plan[idx].tool_changes)
                     toolchange = set_toolchange(toolchange.old_tool, toolchange.new_tool,

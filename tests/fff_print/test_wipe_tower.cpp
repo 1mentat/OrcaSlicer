@@ -225,6 +225,23 @@ TEST_CASE("The wipe tower's toolchange planner flush follows the gcode flavor", 
     }
 }
 
+TEST_CASE("The wipe tower sets Klipper's acceleration and accel_to_decel on one line", "[WipeTower]")
+{
+    // On separate lines, current Klipper finds nothing it reads on the ACCEL_TO_DECEL one and 0.13
+    // derives the cruise ratio from the acceleration before the change.
+    DynamicPrintConfig config = wipe_tower_toolchange_config("klipper");
+    // Type 2 towers leave the acceleration to the main G-code writer.
+    config.set_deserialize_strict({ { "wipe_tower_type", "type1" },
+                                    { "accel_to_decel_enable", "1" }, { "accel_to_decel_factor", "50%" },
+                                    { "default_acceleration", "1000" }, { "travel_acceleration", "2000" },
+                                    { "machine_max_acceleration_extruding", "5000" } });
+    const std::string tower = wipe_tower_regions(slice_with_prime_tower(config));
+    REQUIRE_THAT(tower, Catch::Matchers::ContainsSubstring("SET_VELOCITY_LIMIT ACCEL="));
+    CHECK_THAT(tower, Catch::Matchers::ContainsSubstring(" MINIMUM_CRUISE_RATIO=0.5\n"));
+    CHECK_THAT(tower, !Catch::Matchers::ContainsSubstring("SET_VELOCITY_LIMIT ACCEL_TO_DECEL") &&
+                      !Catch::Matchers::ContainsSubstring("M204"));
+}
+
 // What Print feeds the shared estimate. The libslic3r WipeTowerEstimate cases cannot see this:
 // they call the estimator directly. The estimate counts the filaments the print really uses,
 // so the two-filament shape gives the outer wall the second one.
@@ -1102,6 +1119,26 @@ void require_finite_result(const DirectRun &run)
             CHECK(std::isfinite(double(tcr.end_pos.x())));
             CHECK(std::isfinite(double(tcr.end_pos.y())));
         }
+}
+
+TEST_CASE("WipeTower2 rib wall keeps purge room for a small purge on a wide nozzle", "[WipeTower][WipeTower2]")
+{
+    // A 3 mm nozzle makes the tower lines 3.75 mm wide. Squaring a 15 mm3 purge used to shrink the
+    // tower to three line widths, all of them reserved, which left no width to purge into.
+    FullPrintConfig config = direct_tower_config(WipeTowerWallType::wtwRib);
+    config.nozzle_diameter.values = {3., 3.};
+    config.prime_tower_width.value = 30.; // one 3.75 mm row squares to sqrt(3.75 * 30) = 10.6 -> 11.25 mm, three lines
+    const std::vector<std::vector<float>> wiping_matrix{{0.f, 15.f}, {15.f, 0.f}};
+    WipeTower2 tower(config, static_cast<const PrintRegionConfig &>(config), 0, Vec3d::Zero(), wiping_matrix, 0);
+    tower.set_extruder(0, config);
+    tower.set_extruder(1, config);
+    tower.plan_toolchange(1.75f, 1.75f, 0, 1, 15.f);
+
+    std::vector<std::vector<WipeTower::ToolChangeResult>> result;
+    REQUIRE_NOTHROW(tower.generate(result));
+    CHECK(tower.width() >= 4.f * 3.75f - 1e-4f);
+    CHECK(std::isfinite(double(tower.get_depth())));
+    CHECK(tower.get_depth() > 0.f);
 }
 
 } // namespace

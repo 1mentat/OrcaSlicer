@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_flow.cpp
 	test_motion_flow_variance.cpp
 	test_gcode_processor.cpp
+	test_gcode_statistics.cpp
 	test_gcode_timing.cpp
 	test_gcode.cpp
 	test_gcode_settings_contracts.cpp
@@ -24,6 +25,8 @@ add_executable(${_TEST_NAME}_tests
 	test_gcodewriter.cpp
 	test_interlocking.cpp
 	test_layer_height_variance.cpp
+	test_imex_mode_gcode.cpp
+	test_imex_slice_offset.cpp
 	test_model.cpp
 	test_multifilament.cpp
 	test_painted_segmentation.cpp

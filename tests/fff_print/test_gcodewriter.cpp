@@ -516,7 +516,7 @@ TEST_CASE("Acceleration and velocity limit commands print their values in genera
     const Case c = GENERATE(values<Case>({
         {gcfKlipper, Command::KlipperLimits, 2000000, 25. / 3., false,
          {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
-        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
+        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5 ", "MINIMUM_CRUISE_RATIO=0.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
         {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL"}},
         {gcfKlipper, Command::Print, 3001, 0., true, {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
         {gcfMarlinFirmware, Command::Print, 2500, 0., false, {"M204 P2500\n"}, {}},
@@ -983,6 +983,270 @@ SCENARIO("Shipped dual-nozzle change_filament_gcode resolves during a real slice
     }
 }
 
+
+SCENARIO("set_pressure_advance emits nothing for negative PA", "[GCodeWriter][PressureAdvance]") {
+    GIVEN("A default GCodeWriter") {
+        GCodeWriter writer;
+        THEN("Negative PA returns empty regardless of firmware flavor") {
+            writer.config.gcode_flavor.value = gcfKlipper;
+            REQUIRE(writer.set_pressure_advance(-1.0).empty());
+            writer.config.gcode_flavor.value = gcfRepRapFirmware;
+            REQUIRE(writer.set_pressure_advance(-0.001).empty());
+            writer.config.gcode_flavor.value = gcfMarlinFirmware;
+            REQUIRE(writer.set_pressure_advance(-100.0).empty());
+        }
+    }
+}
+
+SCENARIO("set_pressure_advance emits Klipper form with optional EXTRUDER=extruder<N>", "[GCodeWriter][PressureAdvance]") {
+    GIVEN("A Klipper-flavored GCodeWriter") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfKlipper;
+
+        WHEN("set_pressure_advance is called without a tool index") {
+            std::string out = writer.set_pressure_advance(0.05);
+            THEN("Output contains SET_PRESSURE_ADVANCE ADVANCE=0.05 with no EXTRUDER qualifier") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("SET_PRESSURE_ADVANCE"));
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("ADVANCE=0.05; Override"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("EXTRUDER="));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=0") {
+            std::string out = writer.set_pressure_advance(0.04, 0);
+            THEN("Output targets EXTRUDER=extruder (no trailing index)") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("EXTRUDER=extruder;"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("EXTRUDER=extruder0"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=3") {
+            std::string out = writer.set_pressure_advance(0.06, 3);
+            THEN("Output targets EXTRUDER=extruder3") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("EXTRUDER=extruder3"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_pressure_advance emits RepRapFirmware form with D<N>", "[GCodeWriter][PressureAdvance]") {
+    GIVEN("An RRF-flavored GCodeWriter") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfRepRapFirmware;
+
+        WHEN("set_pressure_advance is called without a tool index") {
+            std::string out = writer.set_pressure_advance(0.07);
+            THEN("Output keeps the historical D0 rather than depending on the selected tool") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M572 D0 S0.07"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=0") {
+            std::string out = writer.set_pressure_advance(0.08, 0);
+            THEN("Output contains D0, same as the tool-less form") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M572 D0 S0.08"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=2") {
+            std::string out = writer.set_pressure_advance(0.09, 2);
+            THEN("Output contains D2") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M572 D2 S0.09"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_pressure_advance emits Marlin 2.x form with optional T<N>", "[GCodeWriter][PressureAdvance]") {
+    GIVEN("A Marlin 2-flavored GCodeWriter") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+
+        WHEN("set_pressure_advance is called without a tool index") {
+            std::string out = writer.set_pressure_advance(0.10);
+            THEN("Output is bare M900 K... with no T qualifier") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.1; Override"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=0") {
+            std::string out = writer.set_pressure_advance(0.11, 0);
+            THEN("Output contains T0") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.11 T0"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=1") {
+            std::string out = writer.set_pressure_advance(0.12, 1);
+            THEN("Output contains T1") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.12 T1"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_pressure_advance emits Marlin Legacy form without tool qualifier even when tool index is supplied",
+         "[GCodeWriter][PressureAdvance]") {
+    GIVEN("A Marlin Legacy-flavored GCodeWriter") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfMarlinLegacy;
+
+        WHEN("set_pressure_advance is called without a tool index") {
+            std::string out = writer.set_pressure_advance(0.05);
+            THEN("Output is bare M900 K...") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.05"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T"));
+            }
+        }
+        WHEN("set_pressure_advance is called with tool=2 (a hypothetical IMEX secondary)") {
+            std::string out = writer.set_pressure_advance(0.06, 2);
+            THEN("Output is still bare M900 — Marlin Legacy has no per-tool LA") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.06"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T2"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_temperature per-flavor command routing", "[GCodeWriter][Temperature]") {
+    GIVEN("temperature=210, no tool index, no wait") {
+        WHEN("flavor is Marlin 2") {
+            std::string out = GCodeWriter::set_temperature(210, gcfMarlinFirmware, false, -1, std::string());
+            THEN("output is M104 S210 with no tool qualifier") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S210"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("M109"));
+            }
+        }
+        WHEN("flavor is RepRapFirmware") {
+            std::string out = GCodeWriter::set_temperature(210, gcfRepRapFirmware, false, -1, std::string());
+            THEN("output is G10 S210 (M104 is deprecated on RRF)") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("G10 S210"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("M104"));
+            }
+        }
+        WHEN("flavor is Mach3 or Machinekit") {
+            std::string mach3      = GCodeWriter::set_temperature(210, gcfMach3,      false, -1, std::string());
+            std::string machinekit = GCodeWriter::set_temperature(210, gcfMachinekit, false, -1, std::string());
+            THEN("output uses P-prefix for the value instead of S") {
+                REQUIRE_THAT(mach3,      Catch::Matchers::ContainsSubstring("M104 P210"));
+                REQUIRE_THAT(machinekit, Catch::Matchers::ContainsSubstring("M104 P210"));
+                REQUIRE_THAT(mach3,      !Catch::Matchers::ContainsSubstring("S210"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_temperature wait=true handling per firmware", "[GCodeWriter][Temperature]") {
+    WHEN("flavor is Marlin 2 with wait") {
+        std::string out = GCodeWriter::set_temperature(210, gcfMarlinFirmware, true, -1, std::string());
+        THEN("output is M109 S210 (blocking wait)") {
+            REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M109 S210"));
+            REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("M104"));
+        }
+    }
+    WHEN("flavor is MakerWare or Sailfish with wait") {
+        std::string mw = GCodeWriter::set_temperature(210, gcfMakerWare, true, -1, std::string());
+        std::string sf = GCodeWriter::set_temperature(210, gcfSailfish,  true, -1, std::string());
+        THEN("output is empty — these flavors don't support blocking waits") {
+            REQUIRE(mw.empty());
+            REQUIRE(sf.empty());
+        }
+    }
+    WHEN("flavor is Teacup with wait") {
+        std::string out = GCodeWriter::set_temperature(210, gcfTeacup, true, -1, std::string());
+        THEN("output emits M104 + a separate M116 poll (Teacup doesn't support M109)") {
+            REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S210"));
+            REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M116"));
+            REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("M109"));
+        }
+    }
+    WHEN("flavor is RepRapFirmware with wait") {
+        std::string out = GCodeWriter::set_temperature(210, gcfRepRapFirmware, true, -1, std::string());
+        THEN("output emits G10 + M116 (same poll pattern as Teacup)") {
+            REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("G10 S210"));
+            REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M116"));
+        }
+    }
+}
+
+SCENARIO("set_temperature per-tool qualifier routing for IMEX secondary carriages",
+         "[GCodeWriter][Temperature]") {
+    // IMEX secondary tools never go through a tool-change, so layer-change temperature
+    // for them is emitted via the tool-qualified static set_temperature overload.
+    GIVEN("temperature=220, tool=2, no wait") {
+        WHEN("flavor is Marlin 2") {
+            std::string out = GCodeWriter::set_temperature(220, gcfMarlinFirmware, false, 2, std::string());
+            THEN("output contains T2 qualifier") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S220 T2"));
+            }
+        }
+        WHEN("flavor is RepRapFirmware") {
+            std::string out = GCodeWriter::set_temperature(220, gcfRepRapFirmware, false, 2, std::string());
+            THEN("output uses P-prefix for tool (RRF convention), not T") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("G10 S220 P2"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T2"));
+            }
+        }
+        WHEN("flavor is Klipper") {
+            std::string out = GCodeWriter::set_temperature(220, gcfKlipper, false, 1, std::string());
+            THEN("output contains T1 qualifier (Klipper layer-change temperature uses T)") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S220 T1"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_temperature instance overload forces tool=-1 on single-extruder writers",
+         "[GCodeWriter][Temperature]") {
+    // Guards against spuriously emitting `T0` on printers that only have one extruder.
+    // The instance overload discards the tool argument when !multiple_extruders.
+    GIVEN("A default GCodeWriter (multiple_extruders=false)") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+
+        WHEN("set_temperature is called with tool=2") {
+            std::string out = writer.set_temperature(210, false, 2);
+            THEN("output has no T qualifier despite the caller passing tool=2") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S210"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T"));
+            }
+        }
+    }
+    GIVEN("A GCodeWriter with multiple_extruders=true (not SEMM)") {
+        GCodeWriter writer;
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+        writer.multiple_extruders = true;
+
+        WHEN("set_temperature is called with tool=2") {
+            std::string out = writer.set_temperature(210, false, 2);
+            THEN("tool argument passes through — output contains T2") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M104 S210 T2"));
+            }
+        }
+    }
+}
+
+SCENARIO("set_pressure_advance emits BBL M900 L1000 M10 regardless of tool index",
+         "[GCodeWriter][PressureAdvance]") {
+    GIVEN("A BBL-flagged GCodeWriter (the flag overrides firmware flavor routing)") {
+        GCodeWriter writer;
+        writer.set_is_bbl_machine(true);
+        // Flavor intentionally set to something other than the BBL branch to prove the flag wins.
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+
+        WHEN("set_pressure_advance is called without a tool index") {
+            std::string out = writer.set_pressure_advance(0.05);
+            THEN("Output is the BBL-specific M900 Kx L1000 M10 form") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.05 L1000 M10"));
+            }
+        }
+        WHEN("set_pressure_advance is called with a tool index") {
+            std::string out = writer.set_pressure_advance(0.05, 2);
+            THEN("BBL output is unchanged — no per-tool qualifier is emitted on BBL printers") {
+                REQUIRE_THAT(out, Catch::Matchers::ContainsSubstring("M900 K0.05 L1000 M10"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring(" T2"));
+                REQUIRE_THAT(out, !Catch::Matchers::ContainsSubstring("EXTRUDER="));
+            }
+        }
+    }
+}
+
 TEST_CASE("Custom G-code motion limits are restored before generated moves", "[GCodeWriter]")
 {
     const std::string gcode = Slic3r::Test::slice({ cube(20) }, {
@@ -1008,6 +1272,41 @@ TEST_CASE("Custom G-code motion limits are restored before generated moves", "[G
     REQUIRE(custom_gcode_pos != std::string::npos);
     REQUIRE(gcode.find("M204 S6000 ; adjust acceleration", custom_gcode_pos) != std::string::npos);
     REQUIRE(gcode.find("M205 X8 Y8 ; adjust jerk", custom_gcode_pos) != std::string::npos);
+}
+
+TEST_CASE("Klipper acceleration commands send accel_to_decel both as ACCEL_TO_DECEL and as the cruise ratio", "[GCodeWriter]")
+{
+    // Klipper 0.13 defines MINIMUM_CRUISE_RATIO = 1 - ACCEL_TO_DECEL / ACCEL; older releases read only the
+    // first parameter and current ones only the second, so both have to describe the same limit.
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfKlipper;
+    writer.config.accel_to_decel_enable.value = true;
+    // The writer appends "; adjust ..." comments by default; keep them out so the line ends at the ratio.
+    struct CommentGuard
+    {
+        bool saved = GCodeWriter::full_gcode_comment;
+        ~CommentGuard() { GCodeWriter::full_gcode_comment = saved; }
+    } comment_guard;
+    GCodeWriter::full_gcode_comment = false;
+
+    SECTION("a 25% factor") {
+        writer.config.accel_to_decel_factor.value = 25;
+        REQUIRE_THAT(writer.set_print_acceleration(2000),
+                     Catch::Matchers::StartsWith("SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=500 MINIMUM_CRUISE_RATIO=0.75"));
+        REQUIRE_THAT(writer.set_accel_and_jerk(3000, 0.0),
+                     Catch::Matchers::StartsWith("SET_VELOCITY_LIMIT ACCEL=3000 ACCEL_TO_DECEL=750 MINIMUM_CRUISE_RATIO=0.75"));
+    }
+    SECTION("a 100% factor turns the cruise ratio off") {
+        writer.config.accel_to_decel_factor.value = 100;
+        REQUIRE_THAT(writer.set_print_acceleration(2000),
+                     Catch::Matchers::StartsWith("SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n"));
+    }
+    SECTION("neither is sent while the option is off") {
+        writer.config.accel_to_decel_enable.value = false;
+        const std::string line = writer.set_print_acceleration(2000);
+        REQUIRE_THAT(line, Catch::Matchers::StartsWith("SET_VELOCITY_LIMIT ACCEL=2000"));
+        REQUIRE_THAT(line, !Catch::Matchers::ContainsSubstring("ACCEL_TO_DECEL") && !Catch::Matchers::ContainsSubstring("MINIMUM_CRUISE_RATIO"));
+    }
 }
 
 // Regression test for the belt-printer "illegal gantry move at print start" bug.
@@ -2025,4 +2324,30 @@ TEST_CASE("Belt writer respects disabled belt and axis transforms", "[GCodeWrite
             belt_writer_check_physical_projection(endpoint.xyz, model, BeltRotationAxis::X, 0., false);
         }
     }
+}
+
+TEST_CASE("Initial filament start G-code tolerates a list shorter than the filament count", "[GCodeWriter]")
+{
+    // Two filaments but only one filament_start_gcode entry, and the only object prints on
+    // filament 2, so the BBL export starts on a filament past the end of the list.
+    DynamicPrintConfig config = multifilament_config(2);
+    config.set_key_value("filament_start_gcode", new ConfigOptionStrings({"; filament start"}));
+
+    Model model;
+    auto *obj = model.add_object();
+    obj->add_volume(cube(20));
+    obj->add_instance();
+    obj->config.set_key_value("extruder", new ConfigOptionInt(2));
+
+    Print print;
+    print.is_BBL_printer() = true;
+    arrange_objects_on_test_bed(model, config);
+    for (auto *mo : model.objects) {
+        mo->ensure_on_bed();
+        print.auto_assign_extruders(mo);
+    }
+    print.apply(model, config);
+    print.validate();
+
+    REQUIRE_NOTHROW(Slic3r::Test::gcode(print));
 }

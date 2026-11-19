@@ -6,6 +6,7 @@
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
+#include "IMEXHelpers.hpp"
 #include "ClipperUtils.hpp"
 #include "Geometry/ArcWelder.hpp"
 #include "Line.hpp"
@@ -370,8 +371,16 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, GCodeFlavor f
 std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, int tool) const
 {
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
-    if (!this->multiple_extruders || m_single_extruder_multi_material)
+    if (!this->multiple_extruders || m_single_extruder_multi_material) {
         tool = -1;
+    } else {
+        // Every caller of this overload addresses filaments by LOGICAL id, but M104/M109
+        // name a physical heater -- so translate at the one point they all pass through.
+        // The static overload below is already physical-in (GCode.cpp:5952,
+        // GCode/GCodeProcessor.cpp:1410) and must not be remapped, which is why the
+        // translation lives here and not there.
+        tool = imex_physical_heater_for(this->config.is_imex.value, this->config.physical_extruder_map, tool);
+    }
     return set_temperature(temperature, this->config.gcode_flavor, wait, tool);
 }
 
@@ -456,12 +465,11 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
         gcode += separate_travel ? "M204 T" : "M204 P";
         gcode += value;
     } else if (FLAVOR_IS(gcfKlipper)) {
-        gcode.reserve(96);
+        gcode.reserve(128);
         gcode += "SET_VELOCITY_LIMIT ACCEL=";
         gcode += value;
         if (this->config.accel_to_decel_enable) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);
+            append_klipper_accel_to_decel(gcode, acceleration, this->config.accel_to_decel_factor.value);
             if (GCodeWriter::full_gcode_comment)
                 gcode += " ; adjust ACCEL_TO_DECEL";
         }
@@ -474,6 +482,14 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
     gcode += "\n";
 
     return gcode;
+}
+
+void GCodeWriter::append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor)
+{
+    gcode += " ACCEL_TO_DECEL=";
+    gcode += float_to_string_decimal_point(acceleration * accel_to_decel_factor / 100);
+    gcode += " MINIMUM_CRUISE_RATIO=";
+    gcode += float_to_string_decimal_point(1. - accel_to_decel_factor / 100);
 }
 
 std::string GCodeWriter::set_jerk_xy(double jerk)
@@ -551,15 +567,13 @@ std::string GCodeWriter::set_accel_and_jerk(unsigned int acceleration, double je
         return std::string();
 
     std::string gcode;
-    gcode.reserve(96);
+    gcode.reserve(128);
     gcode += "SET_VELOCITY_LIMIT";
     if (set_acceleration) {
         gcode += " ACCEL=";
         gcode += std::to_string(acceleration);
-        if (this->config.accel_to_decel_enable) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(acceleration * this->config.accel_to_decel_factor / 100);
-        }
+        if (this->config.accel_to_decel_enable)
+            append_klipper_accel_to_decel(gcode, acceleration, this->config.accel_to_decel_factor.value);
         m_last_acceleration = acceleration;
     }
     if (set_jerk) {
@@ -594,26 +608,43 @@ std::string GCodeWriter::set_junction_deviation(double junction_deviation){
     return gcode.str();
 }
 
-std::string GCodeWriter::set_pressure_advance(double pa) const
+std::string GCodeWriter::set_pressure_advance(double pa, int tool) const
 {
     std::ostringstream gcode;
     if (pa < 0)
         return gcode.str();
-    if(m_is_bbl_printers){
-        //SoftFever: set L1000 to use linear model
-        gcode << "M900 K" <<std::setprecision(4)<< pa << " L1000 M10 ; Override pressure advance value\n";
-    }
-    else{
-        if (FLAVOR_IS(gcfKlipper))
-            gcode << "SET_PRESSURE_ADVANCE ADVANCE=" << std::setprecision(4) << pa << "; Override pressure advance value\n";
-        else if(FLAVOR_IS(gcfRepRapFirmware))
-            gcode << ("M572 D0 S") << std::setprecision(4) << pa << "; Override pressure advance value\n";
-        else if (FLAVOR_IS(gcfRepetier))
-            // Repetier M233: X is quadratic (K), Y is linear (L).
-            // Applying the value to both parameters simultaneously.
-            gcode << "M233 X" << std::setprecision(4) << pa << " Y" << std::setprecision(4) << pa << " ; Override pressure advance value\n";
-        else
-            gcode << "M900 K" <<std::setprecision(4)<< pa << "; Override pressure advance value\n";
+    if (m_is_bbl_printers) {
+        // SoftFever: set L1000 to use linear model
+        gcode << "M900 K" << std::setprecision(4) << pa << " L1000 M10 ; Override pressure advance value\n";
+    } else if (FLAVOR_IS(gcfKlipper)) {
+        // Klipper routes PA by extruder name, not active tool.
+        // Convention: first extruder is "extruder", subsequent are "extruder1", "extruder2", etc.
+        gcode << "SET_PRESSURE_ADVANCE ADVANCE=" << std::setprecision(4) << pa;
+        if (tool > 0)
+            gcode << " EXTRUDER=extruder" << tool;
+        else if (tool == 0)
+            gcode << " EXTRUDER=extruder";
+        gcode << "; Override pressure advance value\n";
+    } else if (FLAVOR_IS(gcfRepRapFirmware)) {
+        // RRF: M572 D<n> targets a specific extruder; a bare M572 applies to whatever tool is
+        // currently selected and errors when there isn't one. Callers with no tool index keep
+        // the historical D0 rather than the bare form: PA would otherwise depend on
+        // tool-selection state for every RRF user, none of whom are asking for IMEX.
+        gcode << "M572 D" << (tool >= 0 ? tool : 0)
+              << " S" << std::setprecision(4) << pa << "; Override pressure advance value\n";
+    } else if (FLAVOR_IS(gcfRepetier)) {
+        // Repetier M233: X is quadratic (K), Y is linear (L).
+        // Applying the value to both parameters simultaneously.
+        gcode << "M233 X" << std::setprecision(4) << pa << " Y" << std::setprecision(4) << pa << " ; Override pressure advance value\n";
+    } else if (FLAVOR_IS(gcfMarlinFirmware)) {
+        // Marlin 2.x supports T parameter for per-extruder LA
+        gcode << "M900 K" << std::setprecision(4) << pa;
+        if (tool >= 0)
+            gcode << " T" << tool;
+        gcode << "; Override pressure advance value\n";
+    } else {
+        // Marlin Legacy and everything else: single-extruder M900, no tool parameter
+        gcode << "M900 K" << std::setprecision(4) << pa << "; Override pressure advance value\n";
     }
     return gcode.str();
 }

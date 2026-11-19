@@ -7,6 +7,7 @@
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
+#include <libslic3r/MeshRepair.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -386,9 +387,9 @@ TEST_CASE("CGAL repair closes a cube with one missing triangle", "[MeshBoolean][
     REQUIRE(its_volume(open.its) < 999.f);
     REQUIRE(its_num_open_edges(open.its) > 0);
     REQUIRE_FALSE(MeshBoolean::cgal::does_bound_a_volume(*MeshBoolean::cgal::triangle_mesh_to_cgal(open)));
-    RepairedMeshErrors errors;
+    MeshRepairStats stats;
     std::string error;
-    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    REQUIRE(repair_mesh(open, &stats, &error));
     CHECK(error.empty());
     CHECK(its_num_open_edges(open.its) == 0);
     CHECK_THAT(its_volume(open.its), WithinRel(1000.f, 1e-3f));
@@ -529,9 +530,9 @@ namespace cuboid_face_repair {
 #ifdef ORCASLICER_TEST_HAS_MESHBOOLEAN_CGAL_REPAIR
 void check_repaired_mesh(TriangleMesh open)
 {
-    RepairedMeshErrors errors;
+    MeshRepairStats stats;
     std::string error;
-    REQUIRE(MeshBoolean::cgal::repair(open, &errors, &error));
+    REQUIRE(repair_mesh(open, &stats, &error));
     CHECK(error.empty());
     CHECK_FALSE(open.empty());
     CHECK(its_num_open_edges(open.its) == 0);

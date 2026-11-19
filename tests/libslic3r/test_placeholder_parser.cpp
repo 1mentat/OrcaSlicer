@@ -667,7 +667,7 @@ TEST_CASE("Placeholder boolean expressions compare strings and reject incompatib
     CHECK_THROWS_WITH(evaluate("true == 1"),
                       Catch::Matchers::ContainsSubstring("Cannot compare the types"));
     CHECK_THROWS_WITH(evaluate("1 and 2"),
-                      Catch::Matchers::ContainsSubstring("Cannot apply logical operation to non-boolean operators"));
+                      Catch::Matchers::ContainsSubstring("Cannot apply logical operation to non-boolean operands"));
     CHECK_THROWS_WITH(evaluate("1"),
                       Catch::Matchers::ContainsSubstring("Not a boolean expression"));
     CHECK_THROWS_WITH(parser.process("{if 1}never{endif}"),

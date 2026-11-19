@@ -255,8 +255,8 @@ public:
 
         m_font_directory = m_temporary_directory.path() / "fonts";
         std::filesystem::create_directory(m_font_directory);
-        for (const char *font_name : {"NotoSansKR-Regular.ttf",
-                                      "NotoSansKR-Bold.ttf",
+        for (const char *font_name : {"NanumGothic-Regular.ttf",
+                                      "NanumGothic-Bold.ttf",
                                       "Sarabun-Medium.ttf"}) {
             const std::filesystem::path source = bundled_font_path().parent_path() / font_name;
             std::filesystem::copy_file(source, m_font_directory / font_name);
@@ -326,7 +326,7 @@ TEST_CASE("OCCT font enumeration uses configured bundled fonts and filters style
         ++name;
     }
 
-    const auto noto_font = fonts.find("Noto Sans KR");
+    const auto noto_font = fonts.find("NanumGothic");
     REQUIRE(noto_font != fonts.end());
     CHECK(fonts.find("Sarabun Medium") == fonts.end());
     std::string extension = std::filesystem::path(noto_font->second).extension().string();

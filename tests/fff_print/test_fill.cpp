@@ -44,8 +44,8 @@
 #include "libslic3r/Fill/Fill.hpp"
 #include "libslic3r/Fill/FillAdaptive.hpp"
 #include "libslic3r/Fill/FillGyroid.hpp"
-#include "libslic3r/Fill/FillTpmsAdaptive.hpp"
 #include "libslic3r/Fill/Lightning/Generator.hpp"
+#include "libslic3r/Fill/AdaptiveInfillField.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include <string_view>
@@ -2402,9 +2402,10 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     const SparseInfillShape smooth = shape_for("100%");
 
     REQUIRE(sharp.path_count > 0);
-    // Smoothing should leave the loop count about where it was; uncapping the smoothing reach, the
-    // regression this guards against, adds about 10%.
-    const size_t allowed_extra = sharp.path_count / 50; // 2%
+    // Smoothing should leave the path count about where it was; uncapping the smoothing reach, the
+    // regression this guards against, adds a quarter to a third. Outline ends next to each other are
+    // joined into one path, so a few loops more or less are a larger share of the count.
+    const size_t allowed_extra = sharp.path_count / 10; // 10%
     REQUIRE(smooth.path_count <= sharp.path_count + allowed_extra);
     // The outlines are still rounded.
     REQUIRE(smooth.point_count > sharp.point_count);
@@ -3047,9 +3048,9 @@ TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior densi
         Slic3r::Test::init_and_process_print({Slic3r::Test::cube(60)}, print,
                                             {{"sparse_infill_pattern", pattern},
                                              {"sparse_infill_density", "25%"},
-                                             {"tpms_adaptive", adaptive},
-                                             {"tpms_interior_density", "5%"},
-                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"adaptive_infill_mode", adaptive},
+                                             {"adaptive_infill_interior_density", "5%"},
+                                             {"adaptive_infill_gradient", "linear"},
                                              {"layer_height", 0.4},
                                              {"initial_layer_print_height", 0.4}});
     };
@@ -3083,9 +3084,9 @@ TEST_CASE("Adaptive TPMS interior density endpoints change measured core infill"
         Slic3r::Test::init_print({Slic3r::Test::cube(side)}, print, model,
                                  {{"sparse_infill_pattern", "tpmsd"},
                                   {"sparse_infill_density", "25%"},
-                                  {"tpms_adaptive", adaptive},
-                                  {"tpms_interior_density", interior_density},
-                                  {"tpms_adaptive_gradient", "linear"},
+                                  {"adaptive_infill_mode", adaptive},
+                                  {"adaptive_infill_interior_density", interior_density},
+                                  {"adaptive_infill_gradient", "linear"},
                                   {"detect_overhang_wall", false},
                                   {"nozzle_diameter", "0.4"},
                                   {"layer_height", 0.2},
@@ -3131,9 +3132,9 @@ TEST_CASE("Adaptive TPMS infill of a tall object is sparsest at its middle heigh
     Slic3r::Test::init_and_process_print({make_cube(30., 30., 90.)}, print,
                                         {{"sparse_infill_pattern", "tpmsd"},
                                          {"sparse_infill_density", "25%"},
-                                         {"tpms_adaptive", "lobes"},
-                                         {"tpms_interior_density", "5%"},
-                                         {"tpms_adaptive_gradient", "linear"},
+                                         {"adaptive_infill_mode", "lobes"},
+                                         {"adaptive_infill_interior_density", "5%"},
+                                         {"adaptive_infill_gradient", "linear"},
                                          {"layer_height", 0.4},
                                          {"initial_layer_print_height", 0.4}});
     const Polygons core   = centered_square(5.);
@@ -3153,9 +3154,9 @@ TEST_CASE("2D adaptive TPMS infill does not change along its axis", "[Fill]")
         Slic3r::Test::init_and_process_print({along_x ? make_cube(90., 30., 30.) : make_cube(30., 30., 90.)}, print,
                                                          {{"sparse_infill_pattern", "gyroid"},
                                                           {"sparse_infill_density", "25%"},
-                                                          {"tpms_adaptive", adaptive},
-                                                          {"tpms_interior_density", "5%"},
-                                                          {"tpms_adaptive_gradient", "linear"},
+                                                          {"adaptive_infill_mode", adaptive},
+                                                          {"adaptive_infill_interior_density", "5%"},
+                                                          {"adaptive_infill_gradient", "linear"},
                                                           {"layer_height", 0.4},
                                                           {"initial_layer_print_height", 0.4}});
     };
@@ -3187,9 +3188,9 @@ TEST_CASE("Adaptive TPMS normal Y is invariant along its axis", "[Fill][TpmsAdap
         Slic3r::Test::init_and_process_print({make_cube(30., 90., 30.)}, print,
                                             {{"sparse_infill_pattern", "gyroid"},
                                              {"sparse_infill_density", "25%"},
-                                             {"tpms_adaptive", adaptive},
-                                             {"tpms_interior_density", "5%"},
-                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"adaptive_infill_mode", adaptive},
+                                             {"adaptive_infill_interior_density", "5%"},
+                                             {"adaptive_infill_gradient", "linear"},
                                              {"wall_loops", 2},
                                              {"top_shell_layers", 0},
                                              {"bottom_shell_layers", 0},
@@ -3238,9 +3239,9 @@ TEST_CASE("Adaptive TPMS shells and blend keep the whole deep core of a tall obj
         Slic3r::Test::init_and_process_print({make_cube(30., 30., 90.)}, print,
                                             {{"sparse_infill_pattern", "tpmsd"},
                                              {"sparse_infill_density", "25%"},
-                                             {"tpms_adaptive", adaptive},
-                                             {"tpms_interior_density", "5%"},
-                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"adaptive_infill_mode", adaptive},
+                                             {"adaptive_infill_interior_density", "5%"},
+                                             {"adaptive_infill_gradient", "linear"},
                                              {"layer_height", 0.4},
                                              {"initial_layer_print_height", 0.4}});
     };
@@ -3270,9 +3271,9 @@ TEST_CASE("Adaptive TPMS infill is sparse at the center of both of two united sp
         Slic3r::Test::init_and_process_print({TriangleMesh(spheres)}, print,
                                             {{"sparse_infill_pattern", "gyroid"},
                                              {"sparse_infill_density", "25%"},
-                                             {"tpms_adaptive", adaptive},
-                                             {"tpms_interior_density", "5%"},
-                                             {"tpms_adaptive_gradient", "linear"},
+                                             {"adaptive_infill_mode", adaptive},
+                                             {"adaptive_infill_interior_density", "5%"},
+                                             {"adaptive_infill_gradient", "linear"},
                                              {"layer_height", 0.4},
                                              {"initial_layer_print_height", 0.4}});
     };
@@ -3300,9 +3301,9 @@ TEST_CASE("Adaptive TPMS gradients keep the surface density deeper in the order 
         Slic3r::Test::init_and_process_print({Slic3r::Test::cube(40)}, print,
                                             {{"sparse_infill_pattern", "tpmsd"},
                                              {"sparse_infill_density", "25%"},
-                                             {"tpms_adaptive", "lobes"},
-                                             {"tpms_interior_density", "5%"},
-                                             {"tpms_adaptive_gradient", gradient},
+                                             {"adaptive_infill_mode", "lobes"},
+                                             {"adaptive_infill_interior_density", "5%"},
+                                             {"adaptive_infill_gradient", gradient},
                                              {"layer_height", 0.4},
                                              {"initial_layer_print_height", 0.4}});
         return sparse_infill_length(print, 0., 40., centered_square(20.));
@@ -3327,9 +3328,9 @@ TEST_CASE("Adaptive TPMS settings leave the infill unchanged when they do not ap
                                         {{"sparse_infill_pattern", pattern},
                                          {"sparse_infill_density", "20%"},
                                          {"layer_height", 0.2},
-                                         {"tpms_adaptive", adaptive},
-                                         {"tpms_interior_density", "40%"},
-                                         {"tpms_adaptive_gradient", "exponential"}});
+                                         {"adaptive_infill_mode", adaptive},
+                                         {"adaptive_infill_interior_density", "40%"},
+                                         {"adaptive_infill_gradient", "exponential"}});
     const SparseInfillShape expected = sparse_infill_shape(reference);
     REQUIRE(expected.path_count > 0);
     CHECK(sparse_infill_shape(tuned).sequence == expected.sequence);
@@ -3343,7 +3344,7 @@ TEST_CASE("Adaptive gyroid infill ignores the Z-buckling optimization", "[Fill]"
                                             {{"sparse_infill_pattern", "gyroid"},
                                              {"sparse_infill_density", "10%"},
                                              {"gyroid_optimized", gyroid_optimized},
-                                             {"tpms_adaptive", "lobes"},
+                                             {"adaptive_infill_mode", "lobes"},
                                              {"layer_height", 0.2}});
         return sparse_infill_shape(print);
     };
@@ -3359,10 +3360,10 @@ TEST_CASE("Adaptive TPMS infill of a region matches the infill of a larger regio
     // An 80 x 80 x 40 mm box around both regions, which share its radial field.
     const ExPolygons box{ExPolygon(Points{Point::new_scale(60., 20.), Point::new_scale(140., 20.), Point::new_scale(140., 100.),
                                           Point::new_scale(60., 100.)})};
-    std::vector<TpmsRadialField::Slice> slices;
+    std::vector<AdaptiveInfillField::Slice> slices;
     for (int i = 0; i < 200; ++i)
         slices.push_back({0.2 * i, 0.2 * (i + 1), &box});
-    const TpmsRadialField field(slices, get_extents(box), TpmsAdaptiveMode::Lobes, [] {});
+    const AdaptiveInfillField field(slices, get_extents(box), AdaptiveInfillMode::Lobes, [] {});
 
     auto circle = [](double radius) {
         Polygon contour = make_circle_num_segments(scale_(radius), 120);
@@ -3376,13 +3377,13 @@ TEST_CASE("Adaptive TPMS infill of a region matches the infill of a larger regio
         filler->spacing           = 0.45;
         filler->angle             = float(M_PI / 7.);
         filler->z                 = z;
-        filler->tpms_radial_field = &field;
+        filler->adaptive_infill_field = &field;
 
         FillParams params;
         params.density                = 0.2f;
-        params.tpms_adaptive          = TpmsAdaptiveMode::Lobes;
-        params.tpms_interior_density  = 0.05f;
-        params.tpms_adaptive_gradient = TpmsAdaptiveGradient::Linear;
+        params.adaptive_infill_mode          = AdaptiveInfillMode::Lobes;
+        params.adaptive_infill_interior_density  = 0.05f;
+        params.adaptive_infill_gradient = AdaptiveInfillGradient::Linear;
         params.layer_height           = 0.2;
         params.dont_adjust            = true;
         Surface surface(stInternal, expolygon);
@@ -3419,8 +3420,8 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][InternalBrid
     Slic3r::Test::init_and_process_print({Slic3r::Test::cube(30)}, print,
                                         {{"sparse_infill_pattern", pattern},
                                          {"sparse_infill_density", "25%"},
-                                         {"tpms_adaptive", "lobes"},
-                                         {"tpms_interior_density", "5%"},
+                                         {"adaptive_infill_mode", "lobes"},
+                                         {"adaptive_infill_interior_density", "5%"},
                                          {"layer_height", 0.2},
                                          {"initial_layer_print_height", 0.2},
                                          {"resolution", 0.012}});
@@ -4250,4 +4251,66 @@ TEST_CASE("Nil filament ironing spacing inherits process geometry",
     CHECK_THAT(from_process.model.length_mm, Catch::Matchers::WithinAbs(from_filament.model.length_mm, 1e-9));
     CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(same_as_process.model.filament_mm3, 1e-9));
     CHECK_THAT(from_process.model.filament_mm3, Catch::Matchers::WithinAbs(from_filament.model.filament_mm3, 1e-9));
+}
+TEST_CASE("Infill lines whose ends are next to each other join into one path", "[Fill]")
+{
+    // An out-and-back pair 1 mm apart, as multiline infill leaves, and a line 19 mm away.
+    Polylines lines { Polyline(Point::new_scale(0., 0.), Point::new_scale(10., 0.)), Polyline(Point::new_scale(0., 1.), Point::new_scale(10., 1.)),
+                      Polyline(Point::new_scale(0., 20.), Point::new_scale(10., 20.)) };
+    join_close_ends(lines, scale_(1.5), true);
+
+    REQUIRE(lines.size() == 2);
+    const auto joined = std::find_if(lines.begin(), lines.end(), [](const Polyline &pl) { return pl.size() == 4; });
+    REQUIRE(joined != lines.end());
+    // Both lines plus the 1 mm between them, joined at one end only, as joining the other end too would close a loop.
+    CHECK_THAT(unscale<double>(joined->length()), Catch::Matchers::WithinAbs(21., 1e-6));
+    CHECK(joined->first_point() != joined->last_point());
+}
+
+TEST_CASE("Joined infill lines print each line once", "[Fill]")
+{
+    // The middle line comes first and both of its ends get joined, so the group has to be walked from an outer line.
+    Polylines lines { Polyline(Point::new_scale(0., 0.), Point::new_scale(10., 0.)), Polyline(Point::new_scale(0., 1.), Point::new_scale(10., 1.)),
+                      Polyline(Point::new_scale(10., -1.), Point::new_scale(0., -1.)) };
+    join_close_ends(lines, scale_(1.5), true);
+
+    REQUIRE(lines.size() == 1);
+    CHECK(lines.front().size() == 6);
+    // Three 10 mm lines and two 1 mm joins.
+    CHECK_THAT(unscale<double>(lines.front().length()), Catch::Matchers::WithinAbs(32., 1e-6));
+}
+
+TEST_CASE("Infill line ends are not joined across another line", "[Fill]")
+{
+    // A pair 1 mm apart whose left ends have a third line running between them, which a join there would cross.
+    Polylines lines { Polyline(Point::new_scale(0., 0.), Point::new_scale(10., 0.)), Polyline(Point::new_scale(0., 1.), Point::new_scale(10., 1.)),
+                      Polyline(Point::new_scale(-5., 0.5), Point::new_scale(5., 0.5)) };
+    join_close_ends(lines, scale_(1.5), true);
+
+    REQUIRE(lines.size() == 2);
+    const auto joined = std::find_if(lines.begin(), lines.end(), [](const Polyline &pl) { return pl.size() == 4; });
+    REQUIRE(joined != lines.end());
+    // Joined on the right, where nothing is in between, so the left ends stay open.
+    CHECK(joined->first_point().x() == 0);
+    CHECK(joined->last_point().x() == 0);
+}
+
+TEST_CASE("Infill lines that cannot reverse join only end to start", "[Fill]")
+{
+    const Point a(Point::new_scale(0., 0.)), b(Point::new_scale(10., 0.)), c(Point::new_scale(10., 1.)), d(Point::new_scale(0., 1.));
+    SECTION("Ends that would need a reversal stay apart") {
+        Polylines lines { Polyline(a, b), Polyline(d, c) };
+        join_close_ends(lines, scale_(1.5), false);
+        CHECK(lines.size() == 2);
+    }
+    SECTION("The end of one line joins the start of the next, both kept in their direction") {
+        Polylines lines { Polyline(c, d), Polyline(a, b) };
+        join_close_ends(lines, scale_(1.5), false);
+        REQUIRE(lines.size() == 1);
+        const Points &points = lines.front().points;
+        REQUIRE(points.size() == 4);
+        auto position = [&points](const Point &p) { return std::find(points.begin(), points.end(), p) - points.begin(); };
+        CHECK(position(a) < position(b));
+        CHECK(position(c) < position(d));
+    }
 }
