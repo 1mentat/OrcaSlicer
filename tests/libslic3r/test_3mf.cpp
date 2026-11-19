@@ -1,6 +1,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -2438,6 +2439,333 @@ TEST_CASE("BBS 3MF preserves multiple plate records and plate-scoped metadata", 
     REQUIRE(loaded.plates[1]->obj_inst_map.size() == 1);
     CHECK(loaded.plates[0]->obj_inst_map.begin()->second.first == 0);
     CHECK(loaded.plates[1]->obj_inst_map.begin()->second.first == 1);
+}
+
+// Values for the XML entity round-trip tests: ordinary quotes and apostrophes, unicode, and text that
+// merely spells an entity. `main_legacy` is what the reader on main returned after the XML parser when it
+// decoded &lt; &gt; &amp; a second time (never &quot; or &apos;); ambiguous old keys must keep it.
+struct XmlEntityCase
+{
+    std::string value;
+    std::string main_legacy;
+};
+
+static const std::vector<XmlEntityCase>& xml_entity_cases()
+{
+    static const std::vector<XmlEntityCase> cases{
+        {"plain text", "plain text"},
+        {"He said \"hi\" and 'bye'", "He said \"hi\" and 'bye'"},
+        {"&quot;", "&quot;"},
+        {"&apos;", "&apos;"},
+        {"&amp;quot;", "&quot;"},
+        {"&amp;", "&"},
+        {"&lt;", "<"},
+        {"&gt;", ">"},
+        {"mix &quot; &apos; &amp;quot; &amp; &lt; \"'", "mix &quot; &apos; &quot; & < \"'"},
+        {"caf\xC3\xA9 \xE2\x82\xAC \"q\" 'a'", "caf\xC3\xA9 \xE2\x82\xAC \"q\" 'a'"}};
+    return cases;
+}
+
+// A one-object project with a single plate, stored as the production writer stores it.
+struct EntityArchive
+{
+    ScopedTemporaryDir     backup{"orca_bbs_entity_store"};
+    Model                  source;
+    DynamicPrintConfig     config = DynamicPrintConfig::full_print_config();
+    PlateData              plate;
+    ScopedTemporaryFile    archive{".3mf"};
+
+    EntityArchive()
+    {
+        ModelObject *object = source.add_object();
+        object->name        = "entity-part";
+        object->add_volume(make_cube(10., 10., 10.));
+        object->add_instance();
+        source.set_backup_path(backup.string());
+        source.model_info = std::make_shared<ModelInfo>();
+        make_plate(plate, 0, {{0, 0}});
+    }
+
+    void store()
+    {
+        PlateDataPtrs plates{&plate};
+        store_model(archive.string(), source, config, plates);
+    }
+
+    // Loads the archive, optionally after editing the root model XML.
+    void load(Model &model, LoadedProject &loaded,
+              const std::function<void(std::string &)> &edit_model_xml = nullptr)
+    {
+        if (edit_model_xml)
+            REQUIRE(rewrite_3mf_entries(archive.string(), [&](std::string &name, std::string &data) {
+                if (name != "3D/3dmodel.model")
+                    return false;
+                edit_model_xml(data);
+                return true;
+            }));
+        REQUIRE(load_model(archive.string(), model, loaded));
+        REQUIRE(model.model_info != nullptr);
+    }
+};
+
+static void erase_metadata_element(std::string &xml, const std::string &name)
+{
+    const std::string open  = "<metadata name=\"" + name + "\">";
+    const size_t      begin = xml.find(open);
+    if (begin == std::string::npos)
+        return;
+    size_t end = xml.find("</metadata>", begin);
+    REQUIRE(end != std::string::npos);
+    end += std::string("</metadata>").size();
+    if (end < xml.size() && xml[end] == '\n')
+        ++end;
+    const size_t newline    = xml.rfind('\n', begin);
+    const size_t line_start = newline == std::string::npos ? 0 : newline + 1;
+    xml.erase(line_start, end - line_start);
+}
+
+// Places a metadata element after every other metadata element of the root model.
+static void add_metadata_element_last(std::string &xml, const std::string &name, const std::string &value)
+{
+    const size_t resources = xml.find("<resources>");
+    REQUIRE(resources != std::string::npos);
+    const size_t line = xml.rfind('\n', resources);
+    xml.insert(line + 1, " <metadata name=\"" + name + "\">" + value + "</metadata>\n");
+}
+
+// The plate name is written with a single xml_escape, so the XML parser's one decode is the whole
+// round trip: a second entity decode would turn literal entity spellings into other characters.
+TEST_CASE("BBS 3MF plate names reload exactly, including literal entity spellings",
+          "[3MF][Bbs3mfExtended][Plates][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    CAPTURE(entry.value);
+    EntityArchive fixture;
+    fixture.plate.plate_name = entry.value;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded);
+    REQUIRE(loaded.plates.size() == 1);
+    CHECK(loaded.plates[0]->plate_name == entry.value);
+}
+
+// Header keys are escaped twice by Bambu Studio and OrcaSlicer, so for those producers the reader decodes
+// twice, including the quote entities.
+TEST_CASE("BBS 3MF header metadata reloads quotes and literal entity spellings exactly",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    const std::string &value = entry.value;
+    CAPTURE(value);
+    EntityArchive fixture;
+    fixture.source.model_info->model_name  = "T:" + value;
+    fixture.source.model_info->origin      = "O:" + value;
+    fixture.source.model_info->cover_file  = "C:" + value;
+    fixture.source.model_info->description = "D:" + value;
+    fixture.source.model_info->license     = "L:" + value;
+    fixture.source.model_info->copyright   = "R:" + value;
+    fixture.source.design_info             = std::make_shared<ModelDesignInfo>();
+    fixture.source.design_info->Designer   = "S:" + value;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded);
+    const auto &info = *loaded_model.model_info;
+    CHECK(info.model_name == "T:" + value);
+    CHECK(info.origin == "O:" + value);
+    CHECK(info.cover_file == "C:" + value);
+    CHECK(info.description == "D:" + value);
+    CHECK(info.license == "L:" + value);
+    CHECK(info.copyright == "R:" + value);
+    REQUIRE(loaded_model.design_info != nullptr);
+    CHECK(loaded_model.design_info->Designer == "S:" + value);
+    CHECK(info.metadata_items.at("Title") == "T:" + value);
+    CHECK(info.metadata_items.at("Description") == "D:" + value);
+}
+
+TEST_CASE("BBS 3MF MakerLab keys reload exactly, including quote and entity spellings",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    const std::string &value = entry.value;
+    CAPTURE(value);
+    EntityArchive fixture;
+    fixture.source.mk_name    = "N:" + value;
+    fixture.source.mk_version = "V:" + value;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded);
+    CHECK(loaded_model.model_info->metadata_items.at("MakerLab") == "N:" + value);
+    CHECK(loaded_model.model_info->metadata_items.at("MakerLabVersion") == "V:" + value);
+}
+
+// md_name/md_value pairs are written with the same double layer as MakerLab, but their keys are
+// arbitrary, so the reader decodes them with the legacy lt/gt/amp policy. The writer's layer keeps the
+// round trip exact for every value, including literal quote entities.
+TEST_CASE("BBS 3MF md_name pairs reload exactly through the legacy second decode",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    const std::string &value = entry.value;
+    CAPTURE(value);
+    EntityArchive fixture;
+    fixture.source.md_name  = {"CliKey"};
+    fixture.source.md_value = {"W:" + value};
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded);
+    CHECK(loaded_model.model_info->metadata_items.at("CliKey") == "W:" + value);
+}
+
+// Every other metadata item is written escaped once but, as on main, read through a second legacy
+// decode: ordinary quotes, apostrophes, unicode and literal &quot;/&apos; spellings survive, while literal
+// &amp;/&lt;/&gt; spellings are decoded. Old files with arbitrary keys cannot be told apart from
+// double-escaped ones, so this pre-existing behaviour is pinned rather than changed.
+TEST_CASE("BBS 3MF custom metadata items keep main's legacy reader behaviour",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    const std::string &value = entry.value;
+    CAPTURE(value);
+    EntityArchive fixture;
+    fixture.source.model_info->metadata_items["custom-item"]               = "I:" + value;
+    fixture.source.model_info->metadata_items[ORCA_PUBLISHED_TAG]          = "1";
+    fixture.source.model_info->metadata_items[ORCA_PUBLISHED_KEYS_TAG]     = "[\"K:" + value + "\"]";
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded);
+    const auto &items = loaded_model.model_info->metadata_items;
+    CHECK(items.at("custom-item") == "I:" + entry.main_legacy);
+    CHECK(items.at(ORCA_PUBLISHED_TAG) == "1");
+    CHECK(items.at(ORCA_PUBLISHED_KEYS_TAG) == "[\"K:" + entry.main_legacy + "\"]");
+}
+
+// Keys of Bambu Studio's cloud fields and ModelId/Region keep the legacy second decode too: whether
+// Bambu Studio escapes them twice is unknown, and unknown is not proof of a single escape.
+TEST_CASE("BBS 3MF ambiguous legacy keys keep main's second decode",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const auto entry = GENERATE(from_range(xml_entity_cases()));
+    const std::string key = GENERATE(std::string("ProfileTitle"), std::string("ProfileCover"), std::string("ProfileDescription"),
+                                     std::string("ProfileUserId"), std::string("ProfileUserName"), std::string("DesignerUserId"),
+                                     std::string("model_id"), std::string("Region"));
+    CAPTURE(key, entry.value);
+    EntityArchive fixture;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    // The text the XML parser sees is the escaped value, whichever writer produced it.
+    fixture.load(loaded_model, loaded, [&](std::string &xml) {
+        erase_metadata_element(xml, key);
+        add_metadata_element_last(xml, key, xml_escape(entry.value));
+    });
+    CHECK(loaded_model.model_info->metadata_items.at(key) == entry.main_legacy);
+}
+
+// The quote entities of the header keys are decoded only for Bambu Studio and OrcaSlicer producers. The
+// decision is made after the whole metadata block has been read, so it does not depend on element order.
+TEST_CASE("BBS 3MF header metadata decodes quote entities only for Bambu Studio and OrcaSlicer producers",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    struct Producer
+    {
+        const char *label;
+        // Elements placed after all other metadata; the written Application and OrcaSlicer tags are removed first.
+        std::vector<std::pair<std::string, std::string>> tags;
+        bool                                              edit;
+        bool                                              full_decode;
+    };
+    const Producer producer = GENERATE(
+        Producer{"as written by OrcaSlicer (Application sorts first)", {}, false, true},
+        Producer{"Application absent", {}, true, false},
+        Producer{"PrusaSlicer after the header", {{"Application", "PrusaSlicer-2.7.0"}}, true, false},
+        Producer{"Cura after the header", {{"Application", "Cura_SteamEngine"}}, true, false},
+        Producer{"BambuStudio with version, after the header", {{"Application", "BambuStudio-02.00.00.00"}}, true, true},
+        Producer{"BambuStudio- with empty version", {{"Application", "BambuStudio-"}}, true, false},
+        Producer{"BambuStudio 01.03.01.00 wrote each header value once", {{"Application", "BambuStudio-01.03.01.00"}}, true, false},
+        Producer{"BambuStudio 01.03.01.01 development build", {{"Application", "BambuStudio-01.03.01.01"}}, true, false},
+        Producer{"BambuStudio 01.04.00.17 four-part version", {{"Application", "BambuStudio-01.04.00.17"}}, true, true},
+        Producer{"BambuStudio unparseable version", {{"Application", "BambuStudio-abc"}}, true, false},
+        Producer{"BambuStudio 1.10.0 compares by component", {{"Application", "BambuStudio-1.10.0"}}, true, true},
+        Producer{"BambuStudio 1.4 with garbage suffix", {{"Application", "BambuStudio-1.4garbage"}}, true, false},
+        Producer{"BambuStudio 1.4 with empty components", {{"Application", "BambuStudio-1.4.."}}, true, false},
+        Producer{"BambuStudio 01.04.00.17 with letter suffix", {{"Application", "BambuStudio-01.04.00.17x"}}, true, false},
+        Producer{"BambuStudio 01.04.00.17.5 has five components", {{"Application", "BambuStudio-01.04.00.17.5"}}, true, false},
+        Producer{"BambuStudio without version separator", {{"Application", "BambuStudio"}}, true, false},
+        Producer{"OrcaSlicer with version, after the header", {{"Application", "OrcaSlicer-2.3.2"}}, true, true},
+        Producer{"OrcaSlicer without version", {{"Application", "OrcaSlicer"}}, true, false},
+        Producer{"OrcaSlicer tag only, valid version", {{"OrcaSlicer", "2.3.2"}}, true, true},
+        Producer{"OrcaSlicer tag only, invalid version", {{"OrcaSlicer", "not-a-version"}}, true, false});
+    CAPTURE(producer.label);
+
+    const std::string title = "Say \"hi\" & 'x'";
+    EntityArchive fixture;
+    fixture.source.model_info->model_name  = title;
+    fixture.source.model_info->description = title;
+    fixture.source.mk_name                 = title;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded, [&](std::string &xml) {
+        if (!producer.edit)
+            return;
+        erase_metadata_element(xml, "Application");
+        erase_metadata_element(xml, "OrcaSlicer");
+        for (const auto &[name, value] : producer.tags)
+            add_metadata_element_last(xml, name, value);
+    });
+    // On disk the value is `Say &amp;quot;hi&amp;quot; &amp;amp; &amp;apos;x&amp;apos;`; the parser returns
+    // `Say &quot;hi&quot; &amp; &apos;x&apos;`. Main's legacy decode turns only the &amp; into `&`.
+    const std::string legacy = "Say &quot;hi&quot; & &apos;x&apos;";
+    const std::string expected = producer.full_decode ? title : legacy;
+    const auto &info = *loaded_model.model_info;
+    CHECK(info.model_name == expected);
+    CHECK(info.description == expected);
+    CHECK(info.metadata_items.at("Title") == expected);
+    CHECK(info.metadata_items.at("Description") == expected);
+    // MakerLab values carry the quote-literal writer layer, so no producer decision changes them.
+    CHECK(info.metadata_items.at("MakerLab") == title);
+}
+
+// Main assigned the copyright field in document order, so the last of Copyright and CopyRight wins.
+TEST_CASE("BBS 3MF copyright keeps the document order precedence of the metadata elements",
+          "[3MF][Bbs3mfExtended][Metadata][XmlEntityRoundTrip]")
+{
+    const bool copyright_last = GENERATE(false, true);
+    const bool orca_producer  = GENERATE(false, true);
+    CAPTURE(copyright_last, orca_producer);
+    EntityArchive fixture;
+    fixture.store();
+
+    Model loaded_model;
+    LoadedProject loaded;
+    fixture.load(loaded_model, loaded, [&](std::string &xml) {
+        erase_metadata_element(xml, "Copyright");
+        erase_metadata_element(xml, "CopyRight");
+        if (!orca_producer) {
+            erase_metadata_element(xml, "Application");
+            erase_metadata_element(xml, "OrcaSlicer");
+        }
+        // On disk the values are single-escaped, so the parser returns the quote text below.
+        const std::string first  = copyright_last ? "CopyRight" : "Copyright";
+        const std::string second = copyright_last ? "Copyright" : "CopyRight";
+        add_metadata_element_last(xml, first, "first &amp;quot;");
+        add_metadata_element_last(xml, second, "second &amp;quot;");
+    });
+    // The parser returns `second &quot;`: Legacy gives `second &quot;`, Full gives `second "`.
+    const std::string expected = orca_producer ? "second \"" : "second &quot;";
+    CHECK(loaded_model.model_info->copyright == expected);
 }
 
 TEST_CASE("BBS 3MF gates slice metadata while retaining every plate instance mapping", "[3MF][Bbs3mfExtended][Plates][SliceInfo]")
@@ -5572,6 +5900,29 @@ TEST_CASE("Split model non-ASCII object names round trip", "[3MF][SplitModel]")
     REQUIRE(loaded.model.objects.size() == 2);
     const auto& object = named(loaded.model, "Größe-部品");
     CHECK_THAT(object.raw_mesh().volume(), WithinAbs(24., 1e-5));
+    CHECK_THAT(named(loaded.model, "second-cube").raw_mesh().volume(), WithinAbs(30., 1e-5));
+}
+
+// The object name is part of the part path, which the root model references through an attribute
+// written with a single xml_escape. The reader must resolve the path the XML parser decoded once.
+TEST_CASE("Split model part paths resolve for quotes and literal entity spellings in object names",
+          "[3MF][SplitModel][XmlEntityRoundTrip]")
+{
+    const std::string name = GENERATE(std::string("a\"b'c"),
+                                      std::string("a&quot;b"),
+                                      std::string("a&apos;b"),
+                                      std::string("a&amp;quot;b"),
+                                      std::string("a&amp;b"),
+                                      std::string("a&lt;b&gt;"),
+                                      std::string("caf\xC3\xA9 \xE2\x82\xAC"));
+    CAPTURE(name);
+    Fixture f;
+    f.source.objects[0]->name = name;
+    f.store();
+    LoadedSplit loaded;
+    REQUIRE(f.load(loaded));
+    REQUIRE(loaded.model.objects.size() == 2);
+    CHECK_THAT(named(loaded.model, name).raw_mesh().volume(), WithinAbs(24., 1e-5));
     CHECK_THAT(named(loaded.model, "second-cube").raw_mesh().volume(), WithinAbs(30., 1e-5));
 }
 

@@ -17,7 +17,7 @@
       "old": "    chain_open_polylines_close_gaps(open_polylines, loops, max_gap, true);",
       "new": "    chain_open_polylines_close_gaps(open_polylines, loops, max_gap, false);",
       "expected_matches": 1,
-      "test_filter": "Single-plane slicing joins reversed split facets into one contour",
+      "test_filter": "Single-plane slicing joins reversed split facets into one counter-clockwise contour",
       "description": "The reversed right wall requires the public slicer\u2019s reversed-endpoint close-gap pass to join the rectangle. The test requires one contour with the analytic 20 by 14 footprint and normalized orientation."
     }
   ]

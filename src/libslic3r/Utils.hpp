@@ -526,7 +526,10 @@ inline typename CONTAINER_TYPE::value_type& next_value_modulo(typename CONTAINER
 
 extern std::string xml_escape(std::string text, bool is_marked = false);
 extern std::string xml_escape_double_quotes_attribute_value(std::string text);
-extern std::string xml_unescape(std::string text);
+// Full decodes the five predefined entities in one pass. Legacy decodes only &lt; &gt; &amp;; it is for
+// call sites that must keep the behaviour of readers written before &quot; and &apos; were decoded.
+enum class XmlUnescapePolicy { Full, Legacy };
+extern std::string xml_unescape(std::string text, XmlUnescapePolicy policy = XmlUnescapePolicy::Full);
 
 
 #if defined __GNUC__ && __GNUC__ < 5 && !defined __clang__

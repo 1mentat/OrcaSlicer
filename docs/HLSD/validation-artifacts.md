@@ -80,6 +80,59 @@ the payload. Persistent-worktree modes need a separately managed cache adapter;
 they cannot silently preserve a per-run build tree. Test fixtures use temporary,
 owned stores without weakening production guards.
 
+## Test-validation producers
+
+The coverage, mutation, inventory, module-feedback and PR-validation scripts
+(`slicer_coverage.py`, `slicer_coverage_pair_collector.py`, `slicer_catch_batch.py`,
+`slicer_coverage_reconcile.py`, `slicer_mutation.py`, `slicer_module_feedback.py`,
+`settings_inventory.py` and `slicer_pr_validation.py`) end in `managed_main`, which
+refuses to run unless `scripts/validation_runner.py` supplied the artifact
+environment. Only `--help`/`-h` and `slicer_mutation.py list-defaults` run without it.
+The runner's `--source-sha` must equal `HEAD` of the checkout named by the producer's
+`--root`. The producer's output option (`--out`, or `--output-dir` for
+`slicer_pr_validation.py`) must resolve inside the leased payload and defaults to a
+path there. Options that would keep a build or worktree beyond the run
+(`--keep-worktree`, `--persistent-worktree`, `--reuse-detached-checkout`,
+`--reuse-worktree-from-report`, `--seed-worktree`) are rejected. `--work-root`,
+`--gcov-data-dir` and `--build` must be absolute paths inside the payload, and
+`--build-dir` must be relative without `..`.
+
+Settings inventory, which only reads sources:
+
+```sh
+python scripts/validation_runner.py --root /absolute/private/store \
+  --work-item WORK_ITEM --source-sha FULL_40_CHARACTER_COMMIT_SHA --owner maintainer \
+  --ttl-seconds 3600 --budget-bytes 1073741824 -- \
+  python scripts/settings_inventory.py --root /absolute/source/checkout
+```
+
+Bounded mutation validation uses `slicer_mutation.py run` in explicit mode, with a
+catalog from `tests/mutations/`. The checkout must be clean. The script configures and
+builds inside its own disposable worktree, expanding `{root}`, `{build}` and `{filter}`
+in the commands; with no `{filter}` in a CTest command it appends `-L <test_filter>`.
+Registering focused tests with CTest needs `SLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY`:
+
+```sh
+python scripts/validation_runner.py ...runner options as above... -- \
+  python scripts/slicer_mutation.py run --root /absolute/source/checkout \
+  --configure-command "cmake -S {root} -B {build} -DSLICER_ENABLE_FOCUSED_PR_CTEST_DISCOVERY=ON ..." \
+  --build-command "cmake --build {build} --config Release --target fff_print_wipe_tests" \
+  --test-command "ctest --test-dir {build} -C Release -L {filter} --no-tests=error" \
+  --mutants tests/mutations/<catalog>.json
+```
+
+The `--target` mode, which reads an exact control inventory from `tests/controls/`,
+needs an already configured build that persists between runs and cannot configure it
+itself, so it is not available under the runner. Explicit mode rejects
+`--expected-control-inventory`, `--control-regex` and the other target-mode options.
+
+A coverage run needs a build configured with `SLICER_ENABLE_LLVM_SOURCE_COVERAGE`
+(or `SLICER_ENABLE_GCC_GCOV_COVERAGE` for `--backend gcov`); the module docstring of
+`scripts/slicer_coverage.py` shows its `run` invocation. The profiles and the report
+it writes are payload files and disappear with the lease unless a report is promoted
+as described below. A run's result is a summary on the PR or CI job, not a retained
+tree.
+
 ## Promotion and hosted CI
 
 Promotion selects individual relative regular files, with an explicit retention

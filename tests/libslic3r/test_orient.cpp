@@ -207,6 +207,22 @@ TEST_CASE("Parallel orientation keeps per-item transforms rigid and reconstructi
     }
 }
 
+TEST_CASE("Orienting a flat cuboid places its broad face on the bed", "[Orient]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(40., 30., 2.), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    const double original_volume = std::abs(its_volume(object->mesh().its));
+
+    orientation::orient(object);
+
+    const BoundingBoxf3 box = object->instance_bounding_box(0);
+    CHECK_THAT(box.min.z(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT(box.size().z(), Catch::Matchers::WithinAbs(2., 1e-4));
+    CHECK_THAT(std::abs(its_volume(object->mesh().its)), Catch::Matchers::WithinRel(original_volume, 1e-6));
+}
+
 TEST_CASE("Orienting a tilted flat cuboid places its broad face on the bed", "[Orient]")
 {
     // Tilt and lift the cuboid so that orient() has to rotate it and drop it back onto the bed.

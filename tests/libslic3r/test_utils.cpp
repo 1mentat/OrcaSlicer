@@ -1116,3 +1116,38 @@ TEST_CASE("Memory diagnostics can be forced when verbose logging is disabled", "
     CHECK(forced.find("Peak memory usage:") != std::string::npos);
 #endif
 }
+
+TEST_CASE("xml_unescape decodes the five predefined entities in a single pass", "[Utils][XmlUnescape]")
+{
+    CHECK(xml_unescape("&lt;&gt;&amp;&quot;&apos;") == "<>&\"'");
+    CHECK(xml_unescape("a &quot;b&quot; &apos;c&apos; d") == "a \"b\" 'c' d");
+    // A decoded ampersand is never rescanned, so escaped entity text stays literal.
+    CHECK(xml_unescape("&amp;quot;") == "&quot;");
+    CHECK(xml_unescape("&amp;apos;") == "&apos;");
+    CHECK(xml_unescape("&amp;lt;") == "&lt;");
+    CHECK(xml_unescape("&amp;amp;") == "&amp;");
+}
+
+TEST_CASE("xml_unescape leaves unknown and truncated entities untouched", "[Utils][XmlUnescape]")
+{
+    CHECK(xml_unescape("&unknown; &") == "&unknown; &");
+    CHECK(xml_unescape("&quot") == "&quot");
+    CHECK(xml_unescape("x&apos") == "x&apos");
+    CHECK(xml_unescape("&quo") == "&quo");
+    CHECK(xml_unescape("").empty());
+}
+
+TEST_CASE("xml_unescape legacy policy decodes only lt, gt and amp in the same single pass", "[Utils][XmlUnescape]")
+{
+    const auto legacy = [](const std::string &text) { return xml_unescape(text, XmlUnescapePolicy::Legacy); };
+    CHECK(legacy("&lt;&gt;&amp;") == "<>&");
+    CHECK(legacy("&quot;&apos;") == "&quot;&apos;");
+    CHECK(legacy("a &quot;b&quot; &apos;c&apos;") == "a &quot;b&quot; &apos;c&apos;");
+    CHECK(legacy("&amp;quot;") == "&quot;");
+    CHECK(legacy("&amp;lt;") == "&lt;");
+    CHECK(legacy("&unknown; &quot") == "&unknown; &quot");
+    CHECK(legacy("").empty());
+    // The default policy is the full one.
+    CHECK(xml_unescape("&quot;&apos;") == xml_unescape("&quot;&apos;", XmlUnescapePolicy::Full));
+    CHECK(xml_unescape("&quot;&apos;") == "\"'");
+}

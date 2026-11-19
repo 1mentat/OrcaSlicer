@@ -72,7 +72,7 @@ TEST_CASE("Short-edge collapse preserves geometry when the face budget is alread
     }
 }
 
-TEST_CASE("Short-edge collapse decimates a closed sphere to its face budget without orphan vertices", "[ShortEdgeCollapse]")
+TEST_CASE("Short-edge collapse decimates a closed sphere to its face budget without orphan vertices", "[TriangleMesh][ShortEdgeCollapse]")
 {
     const indexed_triangle_set source = its_make_sphere(5., PI / 12.);
     REQUIRE(source.indices.size() > 8);
