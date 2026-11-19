@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_flow.cpp
 	test_motion_flow_variance.cpp
 	test_gcode_processor.cpp
+	test_gcode_statistics.cpp
 	test_gcode_timing.cpp
 	test_gcode.cpp
 	test_gcode_settings_contracts.cpp

@@ -290,7 +290,7 @@
       ],
       "reason": "The same multi-body fixtures run with separation disabled and enabled, requiring body-local infill matching or the expected shared-origin difference."
     },
-    "tpms_adaptive": {
+    "adaptive_infill_mode": {
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[Fill]",
       "dimensions": [
@@ -299,7 +299,7 @@
       ],
       "reason": "The source registry has exactly eight adaptive TPMS values: disabled, distance_warp, smooth_blend, stepped_shells, lobes, normal_z, normal_y, and normal_x. The accepted Fill cases exercise all eight with density, shell, gradient, or axis-invariance oracles. Numeric density bounds and every pattern-by-mode interaction are not claimed."
     },
-    "tpms_interior_density": {
+    "adaptive_infill_interior_density": {
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[Fill]",
       "dimensions": [
@@ -308,7 +308,7 @@
       ],
       "reason": "Adaptive TPMS fixtures use five, twenty-five, and forty percent interior density and compare measured core and shell infill; numeric boundaries are not claimed."
     },
-    "tpms_adaptive_gradient": {
+    "adaptive_infill_gradient": {
       "test": "tests/fff_print/test_fill.cpp",
       "tag": "[Fill]",
       "dimensions": [

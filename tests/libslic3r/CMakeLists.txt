@@ -1,5 +1,9 @@
 get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 
+# Observe the geometry backend's actual CGAL layout without duplicating its flags.
+# This source is only added when the test suite is enabled.
+target_sources(libslic3r_cgal PRIVATE texture_import_cgal.cpp)
+
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests.cpp
     test_3mf.cpp
@@ -35,7 +39,6 @@ add_executable(${_TEST_NAME}_tests
     test_parameter_utils.cpp
     test_locales_utils.cpp
     test_drc.cpp
-    test_edge_grid.cpp
     test_gcodereader.cpp
     test_filament_group.cpp
     test_filament_group_utils.cpp
@@ -48,6 +51,7 @@ add_executable(${_TEST_NAME}_tests
     test_printer_preset_collection.cpp
     test_vendor_cache.cpp
     test_preset_options.cpp
+    test_edge_grid.cpp
     test_elephant_foot_compensation.cpp
     test_emboss_contracts.cpp
     test_text_shape.cpp
@@ -65,11 +69,11 @@ add_executable(${_TEST_NAME}_tests
     test_flush_vol_predictor.cpp
     test_flush_volume_contracts.cpp
     test_fill_plane_path.cpp
-    test_fill_tpms_adaptive.cpp
     test_fill_lateral_honeycomb.cpp
     test_flow.cpp
     test_fuzzy_skin.cpp
     test_small_area_infill_flow_compensator.cpp
+    test_adaptive_infill_field.cpp
     test_geometry.cpp
     test_imex_arrange.cpp
     test_imex_helpers.cpp
@@ -122,6 +126,7 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_path.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp
+    test_shortest_path.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     test_connected_bodies.cpp
@@ -131,6 +136,7 @@ add_executable(${_TEST_NAME}_tests
     test_texture_bake_debug.cpp
     test_texture_to_color_cluster.cpp
     test_texture_to_color_repair.cpp
+    test_texture_import.cpp
     test_instance_lock.cpp
     ../libnest2d/printer_parts.cpp
     )

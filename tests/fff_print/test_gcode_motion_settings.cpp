@@ -1028,8 +1028,8 @@ TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command
     enabled_print.config.accel_to_decel_factor.value = 50;
     enabled_print.set_extruders({0});
     enabled_print.set_extruder(0);
-    CHECK(enabled_print.set_print_acceleration(1600) == "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=800\n");
-    CHECK(enabled.set_accel_and_jerk(1600, 0) == "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=800\n");
+    CHECK(enabled_print.set_print_acceleration(1600) == "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=800 MINIMUM_CRUISE_RATIO=0.5\n");
+    CHECK(enabled.set_accel_and_jerk(1600, 0) == "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=800 MINIMUM_CRUISE_RATIO=0.5\n");
 
     GCodeWriter disabled;
     disabled.config.gcode_flavor.value          = gcfKlipper;
@@ -1046,7 +1046,7 @@ TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command
     CHECK(disabled_print.set_print_acceleration(1600) == "SET_VELOCITY_LIMIT ACCEL=1600\n");
     CHECK(disabled.set_accel_and_jerk(1600, 0) == "SET_VELOCITY_LIMIT ACCEL=1600\n");
 
-    for (const auto &[factor, expected_accel_to_decel] : std::array<std::pair<int, int>, 2>{{{1, 16}, {100, 1600}}}) {
+    for (const auto &[factor, expected_accel_to_decel] : std::array<std::pair<int, const char *>, 2>{{{1, "16 MINIMUM_CRUISE_RATIO=0.99"}, {100, "1600 MINIMUM_CRUISE_RATIO=0"}}}) {
         CAPTURE(factor);
         GCodeWriter endpoint;
         endpoint.config.gcode_flavor.value = gcfKlipper;
@@ -1055,7 +1055,7 @@ TEST_CASE("Klipper accel-to-decel enable controls the emitted percentage command
         endpoint.set_extruders({0});
         endpoint.set_extruder(0);
         CHECK(endpoint.set_accel_and_jerk(1600, 0) ==
-              "SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=" + std::to_string(expected_accel_to_decel) + "\n");
+              std::string("SET_VELOCITY_LIMIT ACCEL=1600 ACCEL_TO_DECEL=") + expected_accel_to_decel + "\n");
     }
 }
 
