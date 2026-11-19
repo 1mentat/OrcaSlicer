@@ -70,8 +70,18 @@ jobs:
           cmakeVersion: "~4.3.0"
 
       - name: Build dependencies when the cache is missing or stale
+        id: build_deps
         if: steps.changes.outputs.cpp == 'true' && steps.deps.outputs.cache-hit != 'true'
         run: ./build_linux.sh -cdrlL
+
+      # Reuse the pre-build key: building deps creates files beneath deps/**.
+      - name: Save successfully rebuilt dependencies
+        if: steps.build_deps.outcome == 'success' && steps.deps.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Install clang-tidy
         if: steps.changes.outputs.cpp == 'true'
