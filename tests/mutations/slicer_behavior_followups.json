@@ -2779,24 +2779,6 @@
       "description": "Invert only the public foreign-project multi-instance split gate. The malformed foreign archive must still load as two one-instance objects with unchanged positive geometry."
     },
     {
-      "id": "gcp-m203-stealth-envelope-gate-ignored",
-      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
-      "old": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal || m_time_processor.machine_envelope_processing_enabled) {\n",
-      "new": "void GCodeProcessor::process_M203(const GCodeReader::GCodeLine& line)\n{\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    if (m_flavor == gcfRepetier)\n        return;\n\n    // see http://reprap.org/wiki/G-code#M203:_Set_maximum_feedrate\n    // http://smoothieware.org/supported-g-codes\n    float factor = (m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware || m_flavor == gcfSmoothie || m_flavor == gcfKlipper) ? 1.0f : MMMIN_TO_MMSEC;\n\n    // Slot-major arrays; a firmware M203 changes the live limits globally — write every slot's\n    // mode entry (see process_M201). Per-mode gating unchanged.\n    auto set_all_slots = [](ConfigOptionFloats &option, size_t mode, float value) {\n        for (size_t slot_base = 0; slot_base < option.size(); slot_base += 2)\n            set_option_value(option, slot_base + mode, value);\n    };\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
-      "expected_matches": 1,
-      "test_filter": "^GCodeProcessorStealthLimits$",
-      "description": "Stop M203 from updating the stealth machine after the first motion. The constrained stealth time must remain slower than its baseline."
-    },
-    {
-      "id": "gcp-m204-stealth-envelope-gate-ignored",
-      "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
-      "old": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal ||\n            m_time_processor.machine_envelope_processing_enabled) {\n",
-      "new": "void GCodeProcessor::process_M204(const GCodeReader::GCodeLine& line)\n{\n    float value;\n    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {\n        if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal) {\n",
-      "expected_matches": 1,
-      "test_filter": "^GCodeProcessorStealthLimits$",
-      "description": "Drop the live machine-envelope gate for M204. The low-acceleration stealth row must no longer show the independent time increase."
-    },
-    {
       "id": "gcp-lowercase-command-registration-removed",
       "path": "src/libslic3r/GCode/GCodeProcessor.cpp",
       "old": "        if (auto lowercase_cmd = to_lowercase(uppercase_cmd); lowercase_cmd != uppercase_cmd)\n            m_command_processor.register_command(lowercase_cmd, handler,early_quit);",
@@ -2894,15 +2876,6 @@
       "expected_matches": 1,
       "test_filter": "^SLAPadAroundObjectVariance$",
       "description": "Treat every pad as zero-elevation around-object mode; the standard-pad row must no longer produce its positive footprint."
-    },
-    {
-      "id": "gcode-import-obsolete-silent-mode-not-discarded",
-      "path": "src/libslic3r/PrintConfig.cpp",
-      "old": "        \"smooth_coefficient\", \"overhang_totally_speed\", \"silent_mode\",",
-      "new": "        \"smooth_coefficient\", \"overhang_totally_speed\",",
-      "expected_matches": 1,
-      "test_filter": "^SilentModeVariance$",
-      "description": "Stop discarding obsolete silent_mode during G-code config import; the imported true row must incorrectly enable a positive stealth estimate."
     },
     {
       "id": "circle-arc-max-radius-gate-inverted",

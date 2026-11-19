@@ -37,6 +37,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <cereal/access.hpp>
+#include <cereal/cereal.hpp>
 #include <cereal/types/base_class.hpp>
 // The serialize() members below archive ConfigOption hierarchies through
 // cereal::base_class, whose registration machinery lives in polymorphic.hpp.
@@ -377,7 +378,8 @@ public:
     virtual void set(const ConfigOption* rhs, size_t start, size_t len)                                                     = 0;
     virtual void set_with_restore(const ConfigOptionVectorBase* rhs, std::vector<int>& restore_index, int stride)           = 0;
     virtual void set_with_restore_2(const ConfigOptionVectorBase* rhs, std::vector<int>& restore_index, int start, int len, bool skip_error = false) = 0;
-    virtual void set_only_diff(const ConfigOptionVectorBase* rhs, std::vector<int>& diff_index, int stride)                 = 0;
+    // keep_nil: copy a nil column from rhs as well, for options whose nil means "disabled" rather than "inherit".
+    virtual void set_only_diff(const ConfigOptionVectorBase* rhs, std::vector<int>& diff_index, int stride, bool keep_nil = false) = 0;
     virtual void set_to_index(const ConfigOptionVectorBase* rhs, std::vector<int>& dest_index, int stride) = 0;
     virtual void set_with_nil(const ConfigOptionVectorBase* rhs, const ConfigOptionVectorBase* inherits, int stride)        = 0;
     // Resize the vector of values, copy the newly added values from opt_default if provided.
@@ -582,7 +584,7 @@ public:
     //set a item related with extruder variants when loading user config, only set the different value of some extruder
     //rhs: item from user config
     //diff_index: which index in this vector need to be set
-    virtual void set_only_diff(const ConfigOptionVectorBase* rhs, std::vector<int>& diff_index, int stride) override
+    virtual void set_only_diff(const ConfigOptionVectorBase* rhs, std::vector<int>& diff_index, int stride, bool keep_nil) override
     {
         if (rhs->type() == this->type()) {
             // Assign the first value of the rhs vector.
@@ -594,7 +596,7 @@ public:
             for (size_t i = 0; i < diff_index.size(); i++) {
                 if (diff_index[i] != -1) {
                     for (size_t j = 0; j < stride; j++) {
-                        if (!other->is_nil(diff_index[i] * stride))
+                        if (keep_nil || !other->is_nil(diff_index[i] * stride))
                             this->values[i * stride + j] = other->values[diff_index[i] * stride + j];
                     }
                 }
@@ -1628,6 +1630,11 @@ public:
 
     bool deserialize(const std::string &str, bool append = false) override
     {
+        // Extended exclusion-volume syntax belongs to the dedicated string option.
+        // Rejecting it here also makes --bed-exclude-area fail instead of silently
+        // turning a volume definition into malformed legacy points.
+        if (str.find('|') != std::string::npos || str.find(';') != std::string::npos || str.find("..") != std::string::npos)
+            return false;
         if (! append)
             this->values.clear();
         std::istringstream is(str);
@@ -1648,18 +1655,18 @@ public:
     }
 
 private:
-	friend class cereal::access;
-	template<class Archive> void save(Archive& archive) const {
-		size_t cnt = this->values.size();
-		archive(cnt);
-		archive.saveBinary((const char*)this->values.data(), sizeof(Vec2d) * cnt);
-	}
-	template<class Archive> void load(Archive& archive) {
-		size_t cnt;
-		archive(cnt);
-		this->values.assign(cnt, Vec2d());
-		archive.loadBinary((char*)this->values.data(), sizeof(Vec2d) * cnt);
-	}
+    friend class cereal::access;
+    template<class Archive> void save(Archive& archive) const {
+        size_t cnt = this->values.size();
+        archive(cnt);
+        archive.saveBinary((const char*)this->values.data(), sizeof(Vec2d) * cnt);
+    }
+    template<class Archive> void load(Archive& archive) {
+        size_t cnt;
+        archive(cnt);
+        this->values.assign(cnt, Vec2d());
+        archive.loadBinary((char*)this->values.data(), sizeof(Vec2d) * cnt);
+    }
 };
 
 class ConfigOptionPoint3 : public ConfigOptionSingle<Vec3d>

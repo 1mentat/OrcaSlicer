@@ -875,7 +875,7 @@ static std::string shipped_change_filament_gcode(const std::string &printer)
     const std::string template_name = "Bambu Lab " + printer + " 0.4 nozzle template change_filament_gcode";
     // PROFILES_DIR is an absolute path baked in at build time; a sparse test checkout
     // without resources/ leaves it missing. Skip rather than dereference a config that
-    // never loaded - this is the only fff_print test that reads a shipped profile.
+    // never loaded.
     if (!boost::filesystem::exists(machine_path))
         SKIP("shipped profile not present in this checkout: " << machine_path);
 
@@ -1791,7 +1791,7 @@ TEST_CASE("Spiral lifts reject explicit empty regions while missing and short ar
     const int area_kind = GENERATE(0, 1, 2, 3);
     PrintConfig config;
     config.printable_area.values = {{0., 0.}, {100., 0.}, {100., 100.}, {0., 100.}};
-    config.enable_arc_fitting.value = true;
+    config.enable_arc_fitting.value = ArcFittingMode::Enabled;
     config.travel_slope.values = {45.};
     if (area_kind == 1)
         config.extruder_printable_area.values = {{}};

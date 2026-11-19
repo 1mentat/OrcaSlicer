@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
 	test_extrusion_entity.cpp
 	test_fan_mover_contracts.cpp
 	test_extrusion_processor.cpp
+	test_exclusion_volumes.cpp
 	test_fill.cpp
 	test_flow.cpp
 	test_motion_flow_variance.cpp
@@ -30,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
 	test_model.cpp
 	test_multifilament.cpp
 	test_painted_segmentation.cpp
+	test_multimaterial_segmentation.cpp
 	test_perimeters.cpp
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
 	test_precise_seam.cpp

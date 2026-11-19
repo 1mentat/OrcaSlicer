@@ -458,11 +458,11 @@ TEST_CASE("ironing_type creates topmost ironing paths", "[SettingsBooleanVarianc
 TEST_CASE("enable_arc_fitting emits arcs for curved geometry", "[SettingsBooleanVariance][BooleanSettings]")
 {
     DynamicPrintConfig no_arc = boolean_config();
-    no_arc.set("enable_arc_fitting", false);
+    no_arc.set_deserialize_strict("enable_arc_fitting", "disabled");
     const TriangleMesh curved = make_cylinder(10., 4., PI / 90.);
     const BooleanEvidence linear = process_fixture(no_arc, curved);
     DynamicPrintConfig arc = no_arc;
-    arc.set("enable_arc_fitting", true);
+    arc.set_deserialize_strict("enable_arc_fitting", "enabled");
     const BooleanEvidence arcs = process_fixture(arc, curved);
     CHECK(linear.arc_moves == 0);
     CHECK(arcs.arc_moves > 0);
