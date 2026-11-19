@@ -776,6 +776,11 @@ target_link_libraries(libslic3r
         OpenSSL::Crypto
     )
 
+# libslic3r_cgal is built with CGAL_LINKED_WITH_TBB, which changes the layout of CGAL types
+# (CGAL::Kd_tree stores its points in a TBB container). Every other file that includes CGAL
+# has to see the same definition, or two layouts of one type get linked into one program.
+target_compile_definitions(libslic3r PUBLIC CGAL_LINKED_WITH_TBB)
+
 if(NOT WIN32)
     # OCCT's static targets name FreeType as a bare "freetype", which the macOS linker cannot
     # find; this target maps that name to FREETYPE_LIBRARIES.
