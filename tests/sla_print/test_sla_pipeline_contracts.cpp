@@ -543,6 +543,8 @@ TEST_CASE("SLA area fill selects fast versus slow layer timing",
     check_sla_layer_times(fast, { 2.0, 2.0, 2.0, 2.0, 2.0, 2.0 });
 }
 
+// Hollowing needs OpenVDB, which is an opt-in build option.
+#ifdef SLIC3R_HAS_OPENVDB
 TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAHollowingToggle]")
 {
     // Run the disabled control through the same public task boundary.  The
@@ -590,6 +592,7 @@ TEST_CASE("SLA hollowing creates a smaller interior volume", "[SLAFeatures][SLAH
     CHECK(interior_volume > 0.);
     CHECK(interior_volume < solid_volume);
 }
+#endif // SLIC3R_HAS_OPENVDB
 
 TEST_CASE("SLA pad processing creates printable pad geometry and slices", "[SLAFeatures][SLAPadToggle]")
 {
@@ -2205,6 +2208,8 @@ HollowRun run_hollowing_with_defaults(TriangleMesh mesh, double expected_sphere_
 }
 } // namespace sla_hollowing_thickness_followup_contracts
 
+// Hollowing needs OpenVDB, which is an opt-in build option.
+#ifdef SLIC3R_HAS_OPENVDB
 TEST_CASE("SLA hollowing wall thickness contracts the public interior",
           "[SLAPrint][SLAHollowing][SLAHollowingThickness]")
 {
@@ -2217,6 +2222,7 @@ TEST_CASE("SLA hollowing wall thickness contracts the public interior",
     CHECK(thick.width < thin.width);
     CHECK(thick.depth < thin.depth);
 }
+#endif // SLIC3R_HAS_OPENVDB
 
 namespace sla_support_pad_followup_v4 {
 
@@ -3931,6 +3937,8 @@ TEST_CASE("SLA maximum bridges per pillar bounds support head clustering",
     CHECK(maximum.pillar_bridges == 5);
 }
 
+// Hollowing needs OpenVDB, which is an opt-in build option.
+#ifdef SLIC3R_HAS_OPENVDB
 TEST_CASE("SLA hollowing settings span registered endpoints in public geometry",
           "[SLAPrint][SLAHollowing][SettingsVariance][SLAHollowingVariance]")
 {
@@ -3974,6 +3982,7 @@ TEST_CASE("SLA hollowing settings span registered endpoints in public geometry",
     const double default_voxel_scale = 3.5 + (8.0 - 3.5) * 0.5;
     CHECK(defaults.radial_rms_error < 2.0 / default_voxel_scale + source_faceting_allowance);
 }
+#endif // SLIC3R_HAS_OPENVDB
 
 TEST_CASE("SLA SL1 archive preserves material metadata through public config import",
           "[SLAPrint][SLAPipeline][SLAMaterialArchive]")

@@ -24,7 +24,8 @@ file(TO_NATIVE_PATH "${PROFILES_DIR}" PROFILES_DIR)
 include(CTest)
 include(Catch)
 
-set(CATCH_EXTRA_ARGS "" CACHE STRING "Semicolon-separated extra arguments for Catch2 test executions")
+set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments ctest passes to every Catch2 test case, as a command line.")
+separate_arguments(CATCH_EXTRA_ARGS_LIST NATIVE_COMMAND "${CATCH_EXTRA_ARGS}")
 
 # Optional Linux/CTest CPU allocation for suites whose tests are TBB-heavy.
 # Keep zero as the default so existing scheduling is unchanged; Parallel labels are additive.
@@ -137,7 +138,8 @@ function(orcaslicer_copy_test_dlls)
     endif()
 endfunction()
 
-# Register Catch2 tags as CTest labels so `ctest -L`/`-LE` can filter by tag.
+# Register Catch2 tags as CTest labels so `ctest -L`/`-LE` can filter by tag. A case or section
+# that runs no assertion fails.
 # Targets with original [Parallel] contracts. Gated partitions may be empty;
 # Catch discovery writes an empty list without NOT_BUILT placeholders.
 set(SLICER_TEST_TARGETS_WITH_PARALLEL
@@ -160,22 +162,22 @@ function(orcaslicer_discover_tests TARGET)
             # distinct CTest test names/files for the two partitions.
             catch_discover_tests(${TARGET} ${_test_prefix_args}
                 TEST_SPEC "~[Parallel]"
-                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
+                EXTRA_ARGS --warn NoAssertions ${CATCH_EXTRA_ARGS_LIST}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 1)
             catch_discover_tests(${TARGET} ${_test_prefix_args}
                 TEST_SPEC "[Parallel]~[.]"
-                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
+                EXTRA_ARGS --warn NoAssertions ${CATCH_EXTRA_ARGS_LIST}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS 2)
         else()
             catch_discover_tests(${TARGET} ${_test_prefix_args}
-                EXTRA_ARGS ${CATCH_EXTRA_ARGS}
+                EXTRA_ARGS --warn NoAssertions ${CATCH_EXTRA_ARGS_LIST}
                 ADD_TAGS_AS_LABELS
                 PROPERTIES PROCESSOR_AFFINITY TRUE PROCESSORS ${SLICER_TEST_PROCESSORS})
         endif()
     else()
-        catch_discover_tests(${TARGET} ${_test_prefix_args} EXTRA_ARGS ${CATCH_EXTRA_ARGS} ADD_TAGS_AS_LABELS)
+        catch_discover_tests(${TARGET} ${_test_prefix_args} EXTRA_ARGS --warn NoAssertions ${CATCH_EXTRA_ARGS_LIST} ADD_TAGS_AS_LABELS)
     endif()
 endfunction()
 

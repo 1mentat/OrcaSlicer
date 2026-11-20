@@ -7,6 +7,9 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "catch2/catch_approx.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Point.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfigConstants.hpp"
@@ -6280,39 +6283,6 @@ TEST_CASE("Grouped printable areas persist a terminal empty region through JSON 
     CHECK(loaded->serialize() == areas->serialize());
 }
 
-TEST_CASE("Shared bed shapes distinguish absent areas from empty and disjoint regions", "[Config][BedShape]")
-{
-    const Vec2ds bed{Vec2d(0., 0.), Vec2d(20., 0.), Vec2d(20., 20.), Vec2d(0., 20.)};
-    const Vec2ds outside{Vec2d(30., 0.), Vec2d(40., 0.), Vec2d(40., 10.), Vec2d(30., 10.)};
-    const auto groups = GENERATE_COPY(std::vector<Vec2ds>{bed, Vec2ds{}},
-                                     std::vector<Vec2ds>{Vec2ds{}, bed},
-                                     std::vector<Vec2ds>{bed, outside});
-    DynamicPrintConfig config;
-    config.set_key_value("printable_area", new ConfigOptionPoints(bed));
-    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(groups));
-    CHECK(get_shared_poly(groups).empty());
-    CHECK(get_bed_shape(config, true).empty());
-    CHECK_FALSE(get_bed_shape(config, false).empty());
-    FullPrintConfig full;
-    full.printable_area.values = bed;
-    full.extruder_printable_area.values = groups;
-    CHECK(get_bed_shape(full, true).empty());
-    CHECK(get_bed_shape_with_excluded_area(full, true).empty());
-    config.erase("extruder_printable_area");
-    CHECK_THAT(bed_area_mm2(get_bed_shape(config)), Catch::Matchers::WithinAbs(400., 1e-6));
-}
-
-TEST_CASE("An explicit empty extruder region overrides the missing-bed center fallback", "[Config][BedShape]")
-{
-    DynamicPrintConfig config;
-    config.set_key_value("center", new ConfigOptionPoint(Vec2d(10., 20.)));
-    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups({Vec2ds{}}));
-    CHECK(get_bed_shape(config).empty());
-    config.erase("extruder_printable_area");
-    REQUIRE(get_bed_shape(config).size() == 1);
-    CHECK(get_bed_shape(config).front() == Point(scaled(10.), scaled(20.)));
-}
-
 TEST_CASE("Flush matrix extraction preserves legacy blocks and explicit nozzle blocks", "[Config][FlushMatrix]")
 {
     const std::size_t nozzle = GENERATE(std::size_t(0), std::size_t(1));
@@ -8104,9 +8074,103 @@ TEST_CASE("An empty list applied by index replaces the target list", "[Config][R
     DynamicPrintConfig saved;
     saved.set_key_value("filament_ids", new ConfigOptionStrings());
     DynamicPrintConfig edited;
-    SECTION("target has entries") { edited.set_key_value("filament_ids", new ConfigOptionStrings({"GFA00"})); }
-    SECTION("target lacks the option") {}
+    const bool target_has_entries = GENERATE(false, true);
+    CAPTURE(target_has_entries);
+    if (target_has_entries)
+        edited.set_key_value("filament_ids", new ConfigOptionStrings({"GFA00"}));
 
     edited.apply_only(saved, {"filament_ids#0"});
     CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
+}
+
+namespace {
+
+const Pointfs shared_area_bed = { { 0., 0. }, { 350., 0. }, { 350., 350. }, { 0., 350. } };
+
+// A full-depth strip of the 350 mm bed from x = `left` to x = `right`.
+Pointfs bed_strip(double left, double right) { return { { left, 0. }, { right, 0. }, { right, 350. }, { left, 350. } }; }
+
+DynamicPrintConfig shared_area_config(const std::vector<Pointfs> &extruder_areas)
+{
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints(shared_area_bed));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(extruder_areas));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Overlapping extruder printable areas share their intersection", "[Config][BedShape]")
+{
+    const std::vector<Pointfs> areas  = { bed_strip(0., 200.), bed_strip(150., 350.) };
+    const DynamicPrintConfig   config = shared_area_config(areas);
+
+    const BoundingBox shared(get_shared_poly(areas, shared_area_bed).points);
+    CHECK(shared.min == Point(scaled(150.), 0));
+    CHECK(shared.max == Point(scaled(200.), scaled(350.)));
+    // Objects are placed on that area.
+    CHECK(get_bed_shape(config, true) == get_shared_poly(areas, shared_area_bed).points);
+}
+
+TEST_CASE("Extruder printable areas that do not overlap share no area", "[Config][BedShape]")
+{
+    const std::vector<Pointfs> areas = GENERATE(
+        std::vector<Pointfs>{ bed_strip(0., 175.), bed_strip(175., 350.) },                       // touching
+        std::vector<Pointfs>{ bed_strip(0., 100.), bed_strip(250., 350.) },                       // apart
+        std::vector<Pointfs>{ bed_strip(0., 200.), bed_strip(150., 350.), bed_strip(300., 350.) } // only the third is apart
+    );
+    CHECK(get_shared_poly(areas, shared_area_bed).points.empty());
+}
+
+TEST_CASE("An extruder printable area that is not a shape does not limit the shared area", "[Config][BedShape]")
+{
+    const Points whole_bed = get_bed_shape(shared_area_config({}), false);
+    REQUIRE(whole_bed.size() == shared_area_bed.size());
+
+    SECTION("no areas at all")
+    {
+        CHECK(get_shared_poly({}, shared_area_bed).points == whole_bed);
+    }
+    SECTION("a lone area with too few points")
+    {
+        const size_t points = GENERATE(size_t(0), size_t(1), size_t(2));
+        const Pointfs area(points, Vec2d(10., 10.));
+        CHECK(get_shared_poly({ area }, shared_area_bed).points == whole_bed);
+    }
+    SECTION("such an area next to a real one leaves the real one")
+    {
+        const bool    malformed_first = GENERATE(false, true);
+        const Pointfs left            = bed_strip(0., 200.);
+        const std::vector<Pointfs> areas = malformed_first ? std::vector<Pointfs>{ Pointfs{}, left } : std::vector<Pointfs>{ left, Pointfs{} };
+        const BoundingBox shared(get_shared_poly(areas, shared_area_bed).points);
+        CHECK(shared.min == Point(0, 0));
+        CHECK(shared.max == Point(scaled(200.), scaled(350.)));
+    }
+}
+
+TEST_CASE("Objects are placed on the whole bed when the extruders share no area", "[Config][BedShape]")
+{
+    const DynamicPrintConfig config = shared_area_config({ bed_strip(0., 175.), bed_strip(175., 350.) });
+    const Points whole_bed = get_bed_shape(config, false);
+    REQUIRE(whole_bed.size() == shared_area_bed.size());
+
+    CHECK(get_bed_shape(config, true) == whole_bed);
+
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    CHECK(get_bed_shape(print_config, true) == whole_bed);
+}
+
+TEST_CASE("The print speed table keeps a bed outline when the extruders share no area", "[Config][BedShape]")
+{
+    // The outline is the placement bed less the exclusion areas, and its first piece is read.
+    DynamicPrintConfig config = shared_area_config({ bed_strip(0., 175.), bed_strip(175., 350.) });
+    config.set_key_value("bed_exclude_area", new ConfigOptionPoints({ { 0., 0. }, { 20., 0. }, { 20., 20. }, { 0., 20. } }));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    Model::setPrintSpeedTable(config, print_config);
+    const BoundingBox outline(Model::getBedPolygon().points);
+    CHECK(outline.min == Point(0, 0));
+    CHECK(outline.max == Point(scaled(350.), scaled(350.)));
 }
