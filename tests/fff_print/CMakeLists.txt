@@ -6,6 +6,7 @@ add_executable(${_TEST_NAME}_tests
 	test_adaptive_bed_mesh.cpp
 	test_boolean_settings.cpp
 	test_adaptive_pressure_advance.cpp
+	test_calib.cpp
 	test_cooling.cpp
 	test_extrusion_entity.cpp
 	test_fan_mover_contracts.cpp

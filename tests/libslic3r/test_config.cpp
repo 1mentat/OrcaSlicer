@@ -323,6 +323,15 @@ TEST_CASE("Flush-volume warning predicate respects used filament transitions", "
     }
 }
 
+TEST_CASE("Enum list options copied from the print config defaults read and write their names", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // z_hop_types defaults to Slope Lift.
+    CHECK(config.opt_serialize("z_hop_types") == "Slope Lift");
+    config.set_deserialize_strict("z_hop_types", "Normal Lift");
+    CHECK(config.opt_serialize("z_hop_types") == "Normal Lift");
+}
+
 // TODO: https://github.com/SoftFever/OrcaSlicer/issues/11269 - Is this test still relevant? Delete if not.
 // It was failing so at least "nozzle_type" and "extruder_printable_area" could not be serialized
 // and an exception was thrown, but "nozzle_type" has been around for at least 3 months now.
@@ -1906,6 +1915,16 @@ TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config]") {
     CHECK(ctxt.substitutions.empty());
 }
 
+TEST_CASE("normalize_fdm leaves feature filaments on Default", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("internal_solid_filament_id", new ConfigOptionInt(0));
+    config.set_key_value("top_surface_filament_id", new ConfigOptionInt(3));
+    config.normalize_fdm();
+    CHECK(config.opt_int("internal_solid_filament_id") == 0);
+    CHECK_FALSE(config.has("bottom_surface_filament_id"));
+}
+
 TEST_CASE("silent_mode is no longer saved and is dropped on load", "[Config]") {
     DynamicPrintConfig full;
     full.apply(FullPrintConfig::defaults());
@@ -3284,7 +3303,7 @@ TEST_CASE("Print statistics placeholders distinguish totals from per-extruder qu
     check_schema(PrintStatisticsConfigDef{}, {
         {"extruded_volume", coFloats}, {"total_toolchanges", coInt}, {"extruded_volume_total", coFloat},
         {"extruded_weight", coFloats}, {"extruded_weight_total", coFloat}, {"total_layer_count", coInt},
-        {"normal_print_time", coString}, {"print_time", coString}, {"silent_print_time", coString},
+        {"normal_print_time", coString}, {"printing_filament_types", coString}, {"print_time", coString}, {"silent_print_time", coString},
         {"total_cost", coFloat}, {"total_weight", coFloat}, {"total_wipe_tower_cost", coFloat},
         {"total_wipe_tower_filament", coFloat}, {"used_filament", coFloat}, {"print_time_total_sec", coString},
         {"print_time_day", coString}, {"print_time_hour", coString}, {"print_time_minute", coString},
@@ -4411,7 +4430,7 @@ TEST_CASE("Firmware retraction validation rejects wipe on any extruder", "[Confi
     CHECK_THAT(error_message(both.validate(), "use_firmware_retraction"), Catch::Matchers::ContainsSubstring("only supported by"));
 }
 
-TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder and from related roles", "[Config][NormalizeFdm]")
+TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder only", "[Config][NormalizeFdm]")
 {
     // normalize_fdm(0) and normalize_fdm_1() share the role logic; with 0 used filaments
     // normalize_fdm skips the prime tower step.
@@ -4429,9 +4448,9 @@ TEST_CASE("normalize_fdm backfills unset filament roles from the legacy extruder
     const Row rows[] = {
         {"legacy extruder fills every unset role but keeps an explicit one", 2, {0, 0, 0, 0, 3, 0}, {2, 2, 2, 2, 3, 2}},
         {"legacy extruder never overrides explicit roles",                   9, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
-        {"sparse infill role fills the unset solid roles",                   no_legacy_extruder, {4, 0, 0, 0, 0, 0}, {4, 4, 4, 4, 0, 0}},
-        {"explicit solid role is not replaced by the sparse infill role",    no_legacy_extruder, {4, 3, 0, 0, 0, 0}, {4, 3, 3, 3, 0, 0}},
-        {"solid role fills the unset top and bottom roles",                  no_legacy_extruder, {0, 7, 0, 0, 0, 0}, {0, 7, 7, 7, 0, 0}},
+        {"sparse infill role leaves the unset solid roles alone",            no_legacy_extruder, {4, 0, 0, 0, 0, 0}, {4, 0, 0, 0, 0, 0}},
+        {"explicit solid role is not replaced by the sparse infill role",    no_legacy_extruder, {4, 3, 0, 0, 0, 0}, {4, 3, 0, 0, 0, 0}},
+        {"solid role leaves the unset top and bottom roles alone",           no_legacy_extruder, {0, 7, 0, 0, 0, 0}, {0, 7, 0, 0, 0, 0}},
         {"explicit roles are left alone without a legacy extruder",          no_legacy_extruder, {2, 3, 4, 5, 6, 7}, {2, 3, 4, 5, 6, 7}},
     };
     const char *const role_keys[6] = {"sparse_infill_filament_id", "internal_solid_filament_id", "top_surface_filament_id",
@@ -6936,7 +6955,7 @@ TEST_CASE("PrintConfig validates mixed filament metadata cardinality", "[PrintCo
 
 }
 
-TEST_CASE("normalize_fdm_1 backfills active filament roles through the split public step", "[PrintConfigBehavior][Config][NormalizeFdm1]")
+TEST_CASE("normalize_fdm_1 backfills filament roles from the legacy extruder only", "[PrintConfigBehavior][Config][NormalizeFdm1]")
 {
     using namespace testing_branch_support_test_config;
     using namespace testing_branch_support_test_config::print_config_behavior_contracts;
@@ -6963,7 +6982,7 @@ TEST_CASE("normalize_fdm_1 backfills active filament roles through the split pub
         CHECK(config.opt_int("bottom_surface_filament_id") == 2);
     }
 
-    SECTION("a sparse-filament override backfills missing solid and surface roles")
+    SECTION("a sparse-filament override leaves the solid and surface roles unset")
     {
         DynamicPrintConfig config = complete_config();
         config.set("sparse_infill_filament_id", 4);
@@ -6974,9 +6993,9 @@ TEST_CASE("normalize_fdm_1 backfills active filament roles through the split pub
         config.normalize_fdm_1();
 
         CHECK(config.opt_int("sparse_infill_filament_id") == 4);
-        CHECK(config.opt_int("internal_solid_filament_id") == 4);
-        CHECK(config.opt_int("top_surface_filament_id") == 4);
-        CHECK(config.opt_int("bottom_surface_filament_id") == 4);
+        CHECK(config.opt_int("internal_solid_filament_id") == 0);
+        CHECK(config.opt_int("top_surface_filament_id") == 0);
+        CHECK(config.opt_int("bottom_surface_filament_id") == 0);
     }
 
 }
@@ -8063,4 +8082,31 @@ TEST_CASE("Every listed filament override is nullable", "[Config]")
         if (overrides.count(key) == 1)
             CHECK(def.nullable);
     }
+}
+
+TEST_CASE("Entries of a list applied by index onto an empty list are copied", "[Config][Regression]")
+{
+    const std::vector<std::string> ids = GENERATE(std::vector<std::string>{"GFA00"}, std::vector<std::string>{"GFA00", "GFA01"});
+    DynamicPrintConfig edited;
+    edited.set_key_value("filament_ids", new ConfigOptionStrings(ids));
+    std::vector<std::string> keys;
+    for (size_t i = 0; i < ids.size(); ++i)
+        keys.push_back("filament_ids#" + std::to_string(i));
+
+    DynamicPrintConfig saved;
+    saved.set_key_value("filament_ids", new ConfigOptionStrings());
+    saved.apply_only(edited, keys);
+    CHECK(saved.option<ConfigOptionStrings>("filament_ids")->values == ids);
+}
+
+TEST_CASE("An empty list applied by index replaces the target list", "[Config][Regression]")
+{
+    DynamicPrintConfig saved;
+    saved.set_key_value("filament_ids", new ConfigOptionStrings());
+    DynamicPrintConfig edited;
+    SECTION("target has entries") { edited.set_key_value("filament_ids", new ConfigOptionStrings({"GFA00"})); }
+    SECTION("target lacks the option") {}
+
+    edited.apply_only(saved, {"filament_ids#0"});
+    CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
 }

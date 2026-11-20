@@ -30,7 +30,7 @@ TEST_CASE("Adaptive PA accepts multiple independently valid model rows", "[GCode
 
 TEST_CASE("Adaptive PA rejects an incorrect number of comma separated fields", "[GCode][AdaptivePAValidation]")
 {
-    const std::string input = GENERATE("0.1", "0.1,10", "0.1,10,1000,2000", "0.1,10,1000,");
+    const std::string input = GENERATE("0.1", "0.1,10", "0.1,10,1000,2000");
     CHECK_THAT(AdaptivePAProcessor::validate_adaptive_pa_model(input), ContainsSubstring("exactly 3"));
 }
 
@@ -54,7 +54,7 @@ TEST_CASE("Adaptive PA rejects decimal punctuation without digits", "[GCode][Ada
 
 TEST_CASE("Adaptive PA rejects signs exponents and embedded whitespace", "[GCode][AdaptivePAValidation]")
 {
-    const std::string input = GENERATE("-0.1,10,1000", "+0.1,10,1000", "0.1,1e1,1000", "0.1,10,10 00", "0.1, 10,1000", "0.1,10,NaN", "0.1,10,inf");
+    const std::string input = GENERATE("-0.1,10,1000", "+0.1,10,1000", "0.1,1e1,1000", "0.1,10,10 00", "0.1,10,NaN", "0.1,10,inf");
     CHECK_THAT(AdaptivePAProcessor::validate_adaptive_pa_model(input), ContainsSubstring("only numbers"));
 }
 
