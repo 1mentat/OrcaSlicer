@@ -344,7 +344,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--inspector", type=Path, required=True)
     parser.add_argument("--export", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

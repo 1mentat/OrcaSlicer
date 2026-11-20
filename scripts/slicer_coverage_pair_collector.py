@@ -563,7 +563,7 @@ def collect(args: argparse.Namespace) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--root", default=".")
     parser.add_argument("--source-root", default="src")
     parser.add_argument("--build-dir", default="build")
