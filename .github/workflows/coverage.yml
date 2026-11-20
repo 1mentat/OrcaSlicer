@@ -48,9 +48,11 @@ jobs:
       # Same key and path as build_check_cache.yml, so the dependencies the main
       # Linux build already cached are reused. They are C and C++ libraries built
       # against libstdc++, which GCC links as well as Clang does.
+      # Restore only: on a miss the main build saves the cache, not this job, and
+      # a save step would hash deps/** again once it holds the built tree.
       - name: Restore cached deps
         id: deps
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
           key: linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
