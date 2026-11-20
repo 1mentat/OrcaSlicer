@@ -40,7 +40,6 @@ orcaslicer_add_cmake_project(OCCT
         ${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
         ${CMAKE_CURRENT_LIST_DIR}/0002-BRepGraph-MSVC-ARM64-ICE-workaround.patch
     #DEPENDS dep_Boost
-    DEPENDS ${FREETYPE_PKG}
     CMAKE_ARGS
         -DCMAKE_CXX_STANDARD=17
         -DBUILD_LIBRARY_TYPE=${library_build_type}
@@ -53,7 +52,7 @@ orcaslicer_add_cmake_project(OCCT
         -DINSTALL_DIR_CMAKE=lib/cmake/occt
         -DUSE_TK=OFF
         -DUSE_TBB=OFF
-	#-DUSE_FREETYPE=OFF
+        -DUSE_FREETYPE=OFF
         -DUSE_FFMPEG=OFF
         -DUSE_VTK=OFF
         -DBUILD_DOC_Overview=OFF
@@ -66,5 +65,3 @@ orcaslicer_add_cmake_project(OCCT
         -DBUILD_MODULE_Visualization=OFF
         ${_occt_compiler_args}
 )
-
-# add_dependencies(dep_OCCT ${FREETYPE_PKG})

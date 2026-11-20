@@ -1967,6 +1967,14 @@ static std::pair<bool, bool> construct_extruder_unprintable_error(ObjectFilament
         output_text = tips[idx];
     }
 
+    // Conflicts on extruders beyond the left/right pair (3+ tool machines) have
+    // no bucket above; without a message the slice would be blocked silently.
+    if (left_unprintable_objects.empty() && right_unprintable_objects.empty()) {
+        left_extruder_unprintable_text = _u8L("The position or size of some models exceeds the assigned extruder's printable range. "
+                                              "Please check and adjust the part's position or size to fit the printable range.");
+        return { true, false };
+    }
+
     return { !left_unprintable_objects.empty(),!right_unprintable_objects.empty() };
 }
 
@@ -3923,6 +3931,19 @@ void GLCanvas3D::bind_event_handlers()
                 render();
                 evt.Skip();
             });
+        // ORCA If the mouse capture is lost while a button is held (Alt+Tab, dialog, lock screen), the button-up
+        // never arrives and ImGui keeps the widget active. Cancel the interaction: clear the active widget
+        // before releasing the buttons so the release is not taken as a click.
+        m_canvas->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
+                if (GImGui != nullptr) {
+                    ImGui::ClearActiveID();
+                    ImGuiIO& io = ImGui::GetIO();
+                    for (bool& down : io.MouseDown)
+                        down = false;
+                }
+                m_navigator_dragging = false;
+                render();
+            });
         m_event_handlers_bound = true;
 
         m_canvas->Bind(wxEVT_GESTURE_PAN, &GLCanvas3D::on_gesture, this);
@@ -4202,15 +4223,11 @@ bool GLCanvas3D::handle_shortcut(const KeyChord& chord)
         m_dirty = true;
         break;
     case Shortcut::Mouse3DSettings: {
-#ifdef _WIN32
-        if (wxGetApp().app_config->get("use_legacy_3DConnexion") == "true") {
-#endif //_WIN32
-            Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
+        Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
+        if (controller.can_show_settings_dialog()) {
             controller.show_settings_dialog(!controller.is_settings_dialog_shown());
             m_dirty = true;
-#ifdef _WIN32
         }
-#endif //_WIN32
         break;
     }
     case Shortcut::ReloadDevicePage:
@@ -8539,12 +8556,26 @@ GLCanvas3D::EShadowMode GLCanvas3D::_shadow_mode() const
     return mode == "static" ? EShadowMode::Static : mode == "orbit" ? EShadowMode::Orbit : EShadowMode::Off;
 }
 
+// The Z range _render_objects() draws the volumes in.
+static std::array<float, 2> volumes_z_range(const GLCanvas3D& canvas)
+{
+    if (!canvas.get_use_clipping_planes())
+        return { -FLT_MAX, FLT_MAX };
+    const std::array<ClippingPlane, 2>& planes = canvas.get_clipping_planes();
+    return { float(-planes[0].get_data()[3]), float(planes[1].get_data()[3]) };
+}
+
 size_t GLCanvas3D::_shadow_casters_signature(bool toolpath_casters) const
 {
     if (toolpath_casters)
         return m_gcode_viewer.shadow_casters_signature();
 
     size_t hash = 1;
+    const ClippingPlane clipping_plane = get_raycaster_clipping_plane();
+    for (double value : clipping_plane.get_data())
+        boost::hash_combine(hash, value);
+    for (float value : volumes_z_range(*this))
+        boost::hash_combine(hash, value);
     for (const GLVolume* volume : m_volumes.volumes) {
         if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
             continue;
@@ -9211,11 +9242,17 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
             }
             // Only the enabled layers are drawn, so fitting the map to the whole print wastes
             // its depth range and makes contact shadows shift as the slider moves. The z = 0
-            // shadow is enclosed separately below, so the plate shadow is unaffected.
+            // shadow is enclosed separately below, so the plate shadow is unaffected. A belt
+            // print's layers are tilted and its layer Zs are print Zs, which bound none of its
+            // toolpaths in either view, so it keeps the whole print.
             const std::vector<double> layer_zs = m_gcode_viewer.get_layers_zs();
-            if (!layer_zs.empty()) {
-                const size_t top = std::min<size_t>(m_gcode_viewer.get_layers_z_range()[1], layer_zs.size() - 1);
-                obj_bb.max.z() = std::max(obj_bb.min.z(), std::min(obj_bb.max.z(), layer_zs[top]));
+            if (!layer_zs.empty() && !m_gcode_viewer.is_belt_view()) {
+                const std::array<size_t, 2>& layers_range = m_gcode_viewer.get_layers_z_range();
+                const size_t top    = std::min<size_t>(layers_range[1], layer_zs.size() - 1);
+                const size_t bottom = std::min(layers_range[0], top);
+                // Layer Z drops back down for each object in a by object print, so take the highest enabled layer.
+                const double max_z = *std::max_element(layer_zs.begin() + bottom, layer_zs.begin() + top + 1);
+                obj_bb.max.z() = std::max(obj_bb.min.z(), std::min(obj_bb.max.z(), max_z));
             }
         }
         else {
@@ -9372,15 +9409,19 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
 
                 if (toolpath_casters)
                     m_gcode_viewer.render_shadow_casters(Transform3d(light_view), Transform3d(light_proj), eye);
-                // Only this branch draws through "flat"; the toolpaths bring their own program.
-                else if (GLShaderProgram* shader = wxGetApp().get_shader("flat"); shader != nullptr) {
+                // Only this branch draws through "flat_clip"; the toolpaths bring their own program.
+                else if (GLShaderProgram* shader = wxGetApp().get_shader("flat_clip"); shader != nullptr) {
                     shader->start_using();
                     shader->set_uniform("projection_matrix", Transform3d(light_proj));
+                    // Clipped as _render_objects() clips them, so a cut away part casts no shadow.
+                    shader->set_uniform("clipping_plane", get_raycaster_clipping_plane().inverted_normal().get_data());
+                    shader->set_uniform("z_range", volumes_z_range(*this));
                     for (GLVolume* volume : m_volumes.volumes) {
                         if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
                             continue;
-                        const Transform3d view_model = Transform3d(light_view) * volume->world_matrix();
-                        shader->set_uniform("view_model_matrix", view_model);
+                        const Transform3d world = volume->world_matrix();
+                        shader->set_uniform("volume_world_matrix", world);
+                        shader->set_uniform("view_model_matrix", Transform3d(light_view) * world);
                         volume->model.render(shader);
                     }
                     shader->stop_using();
@@ -9567,10 +9608,8 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         }
     }
 
-    if (m_use_clipping_planes)
-        m_volumes.set_z_range(-m_clipping_planes[0].get_data()[3], m_clipping_planes[1].get_data()[3]);
-    else
-        m_volumes.set_z_range(-FLT_MAX, FLT_MAX);
+    const std::array<float, 2> z_range = volumes_z_range(*this);
+    m_volumes.set_z_range(z_range[0], z_range[1]);
 
     GLGizmosManager& gm = get_gizmos_manager();
     GLGizmoBase* current_gizmo = gm.get_current();
@@ -12375,9 +12414,10 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                 extruder_name += (boost::format(_u8L("Tool %d"))%extruder_id).str();
             }
 
-            text += (boost::format(into_u8(_L_PLURAL("Filament %s is placed in the %s, but the generated G-code path exceeds the printable range of the %s.",
-                                                     "Filaments %s are placed in the %s, but the generated G-code path exceeds the printable range of the %s.",
-                                                     error_iter->second.size()))) %filaments %extruder_name %extruder_name).str();
+            text += format(_L_PLURAL("Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+                                     "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+                                     error_iter->second.size()),
+                           filaments, extruder_name);
         }
         error = ErrorType::SLICING_LIMIT_ERROR;
         break;
@@ -12425,9 +12465,10 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                 }
             }
             std::string extruder_name = extruder_name_list[extruder_id-1];
-            text += (boost::format(into_u8(_L_PLURAL("Filament %s is placed in the %s, but the generated G-code path exceeds the printable height of the %s.",
-                                                     "Filaments %s are placed in the %s, but the generated G-code path exceeds the printable height of the %s.",
-                                                     filament_ids.size()))) % filaments % extruder_name % extruder_name).str();
+            text += format(_L_PLURAL("Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+                                     "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+                                     filament_ids.size()),
+                           filaments, extruder_name);
         }
         if (!text.empty()) {
             text += "\n";
@@ -12592,7 +12633,9 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                     try_pop_up_before_slice(false, plater, partplate, true); // ignore the return value
                     return false;
                 };
-                notification_manager.push_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel, text,  _u8L("Click here to regroup"), callback);
+                // Only Bambu printers can regroup; without the link the callback is unreachable.
+                const std::string regroup = wxGetApp().preset_bundle->is_bbl_vendor() ? _u8L("Click here to regroup") : "";
+                notification_manager.push_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel, text,  regroup, callback);
             }
             else
                 notification_manager.close_slicing_customize_error_notification(NotificationType::BBLFilamentPrintableError, NotificationLevel::ErrorNotificationLevel);

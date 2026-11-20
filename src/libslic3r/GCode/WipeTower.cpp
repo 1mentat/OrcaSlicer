@@ -40,13 +40,6 @@
 
 namespace Slic3r
 {
-// Cached config columns retain ConfigOptionVector::get_at's first-value fallback.
-// Checked access rejects an empty column only when it is actually consumed.
-static double cached_value_at(const std::vector<double> &values, size_t idx)
-{
-    return values.at(idx < values.size() ? idx : 0);
-}
-
 float         flat_iron_speed                = 10.f * 60.f;
 static const double wipe_tower_wall_infill_overlap = 0.0;
 static constexpr double WIPE_TOWER_RESOLUTION = 0.1;
@@ -136,6 +129,14 @@ inline float align_ceil(float value, float base)
 inline float align_floor(float value, float base)
 {
     return std::floor((value) / base) * base;
+}
+
+// ConfigOptionVector::get_at() for the vectors copied out of the config.
+template<class T> static inline T at_or_front(const std::vector<T> &v, size_t i)
+{
+    if (v.empty())
+        return T(0);
+    return i < v.size() ? v[i] : v.front();
 }
 
 static bool is_valid_gcode(const std::string &gcode)
@@ -2015,8 +2016,8 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
         m_filpar[idx].precool_t_first_layer.second.resize(extruder_count, 0.f);
         m_filpar[idx].precool_target_temp.first     = 0;
         m_filpar[idx].precool_target_temp.second     = 0;
-        float nozzle_temp_first_layer = (config.nozzle_temperature_initial_layer.get_at(idx) == ConfigOptionIntsNullable::nil_value()) ? -1.f : float(config.nozzle_temperature_initial_layer.get_at(idx));
-        float nozzle_temp_other_layer = (config.nozzle_temperature.get_at(idx) == ConfigOptionIntsNullable::nil_value()) ? -1.f : float(config.nozzle_temperature.get_at(idx));
+        float nozzle_temp_first_layer = config.nozzle_temperature_initial_layer.is_nil(idx) ? -1.f : float(config.nozzle_temperature_initial_layer.get_at(idx));
+        float nozzle_temp_other_layer = config.nozzle_temperature.is_nil(idx) ? -1.f : float(config.nozzle_temperature.get_at(idx));
         auto  is_need_precooling      = [&](bool extruder_change) -> bool
         {
             bool res = config.enable_pre_heating.value; 
@@ -2025,20 +2026,18 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
         };
         if (is_need_precooling(true)) {
             for (int i = 0; i < m_filpar[idx].precool_t.first.size(); i++) {
-                const double cooling_rate = config.hotend_cooling_rate.get_at(i);
-                if (std::isnan(cooling_rate)) continue;
-                m_filpar[idx].precool_t.first[i] = std::max(0.f, nozzle_temp_other_layer - float(config.filament_pre_cooling_temperature.get_at(idx))) / float(cooling_rate);
-                m_filpar[idx].precool_t_first_layer.first[i] = std::max(0.f, nozzle_temp_first_layer -float(config.filament_pre_cooling_temperature.get_at(idx))) /float(cooling_rate);
+                if (config.hotend_cooling_rate.is_nil(i)) continue;
+                m_filpar[idx].precool_t.first[i] = std::max(0.f, nozzle_temp_other_layer - float(config.filament_pre_cooling_temperature.get_at(idx))) / float(config.hotend_cooling_rate.get_at(i));
+                m_filpar[idx].precool_t_first_layer.first[i] = std::max(0.f, nozzle_temp_first_layer -float(config.filament_pre_cooling_temperature.get_at(idx))) /float(config.hotend_cooling_rate.get_at(i));
             }
             m_filpar[idx].precool_target_temp.first = config.filament_pre_cooling_temperature.get_at(idx);
         }
 
         if (is_need_precooling(false)) {
             for (int i = 0; i < m_filpar[idx].precool_t.second.size(); i++) {
-                const double cooling_rate = config.hotend_cooling_rate.get_at(i);
-                if (std::isnan(cooling_rate)) continue;
-                m_filpar[idx].precool_t.second[i] = std::max(0.f, nozzle_temp_other_layer - float(config.filament_pre_cooling_temperature_nc.get_at(idx))) / float(cooling_rate);
-                m_filpar[idx].precool_t_first_layer.second[i] = std::max(0.f, nozzle_temp_first_layer -float(config.filament_pre_cooling_temperature_nc.get_at(idx))) /float(cooling_rate);
+                if (config.hotend_cooling_rate.is_nil(i)) continue;
+                m_filpar[idx].precool_t.second[i] = std::max(0.f, nozzle_temp_other_layer - float(config.filament_pre_cooling_temperature_nc.get_at(idx))) / float(config.hotend_cooling_rate.get_at(i));
+                m_filpar[idx].precool_t_first_layer.second[i] = std::max(0.f, nozzle_temp_first_layer -float(config.filament_pre_cooling_temperature_nc.get_at(idx))) /float(config.hotend_cooling_rate.get_at(i));
             }
             m_filpar[idx].precool_target_temp.second = config.filament_pre_cooling_temperature_nc.get_at(idx);
         }
@@ -2969,7 +2968,7 @@ WipeTower::WipeTowerInfo::ToolChange WipeTower::set_toolchange(int old_tool, int
     float length_to_extrude = volume_to_length(wipe_volume, m_perimeter_width, layer_height);
     float                             toolchange_gap_width    = get_block_gap_width(new_tool,false);
     float                             nozzlechange_gap_width  = get_block_gap_width(old_tool,true);
-    float filament_change_length = !is_same_extruder(old_tool, new_tool, layer_id) ? cached_value_at(m_filaments_change_length.first, old_tool) : cached_value_at(m_filaments_change_length.second, old_tool);
+    float filament_change_length = !is_same_extruder(old_tool, new_tool, layer_id) ? at_or_front(m_filaments_change_length.first, old_tool) : at_or_front(m_filaments_change_length.second, old_tool);
     depth += std::ceil(length_to_extrude / width) * toolchange_gap_width;
     // depth *= m_extra_spacing;
 
@@ -3034,7 +3033,7 @@ void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned in
 
     depth += std::ceil(length_to_extrude / width) * m_perimeter_width;
     //depth *= m_extra_spacing;
-    float filament_change_length = !is_same_extruder(old_tool, new_tool, layer_id) ? cached_value_at(m_filaments_change_length.first, old_tool) : cached_value_at(m_filaments_change_length.second, old_tool);
+    float filament_change_length = !is_same_extruder(old_tool, new_tool, layer_id) ? at_or_front(m_filaments_change_length.first, old_tool) : at_or_front(m_filaments_change_length.second, old_tool);
     float nozzle_change_depth = 0;
     float nozzle_change_length = 0;
     if (is_need_ramming(old_tool, new_tool, layer_id)) {
@@ -3064,8 +3063,8 @@ bool WipeTower::is_petg_filament(int filament_id) const
 bool WipeTower::is_need_reverse_travel(int filament_id,bool extruder_change) const
 {
     if (extruder_change)
-        return m_filpar[filament_id].ramming_travel_time.first > EPSILON && cached_value_at(m_filaments_change_length.first, filament_id)>EPSILON;
-    return m_filpar[filament_id].ramming_travel_time.second > EPSILON && cached_value_at(m_filaments_change_length.second, filament_id) > EPSILON;
+        return m_filpar[filament_id].ramming_travel_time.first > EPSILON && at_or_front(m_filaments_change_length.first, filament_id) > EPSILON;
+    return m_filpar[filament_id].ramming_travel_time.second > EPSILON && at_or_front(m_filaments_change_length.second, filament_id) > EPSILON;
 }
 
 // BBS: consider both soluable and support properties
@@ -3425,8 +3424,11 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
         bool need_change_flow   = false;
         float ramming_length    = nozzle_change_line_count * (xr - xl);
         int   extruder_id      = get_extruder_id(m_current_tool, m_cur_layer_id);
-        float precool_t         = extruder_change ? m_filpar[m_current_tool].precool_t.first[extruder_id] : m_filpar[m_current_tool].precool_t.second[extruder_id];
-        float precool_t_first_layer = extruder_change ? m_filpar[m_current_tool].precool_t_first_layer.first[extruder_id] :
+        // -1: the filament is not in this layer's nozzle map.
+        float precool_t             = extruder_id < 0 ? 0.f :
+                                      extruder_change ? m_filpar[m_current_tool].precool_t.first[extruder_id] : m_filpar[m_current_tool].precool_t.second[extruder_id];
+        float precool_t_first_layer = extruder_id < 0 ? 0.f :
+                                      extruder_change ? m_filpar[m_current_tool].precool_t_first_layer.first[extruder_id] :
                                                         m_filpar[m_current_tool].precool_t_first_layer.second[extruder_id];
         float per_cooling_max_speed = nozzle_change_speed;
         if (extruder_change) {
@@ -4160,8 +4162,10 @@ void WipeTower::set_nozzle_last_layer_id()
         for(int i =0 ; i<info.tool_changes.size();i++) {
             int old_tool = info.tool_changes[i].old_tool;
             int new_tool = info.tool_changes[i].new_tool;
-            if (old_tool >= 0) m_last_layer_id[get_extruder_id(old_tool, idx)] = idx;
-            m_last_layer_id[get_extruder_id(new_tool, idx)] = idx;
+            if (int ex = old_tool >= 0 ? get_extruder_id(old_tool, idx) : -1; ex >= 0 && ex < (int) m_last_layer_id.size())
+                m_last_layer_id[ex] = idx;
+            if (int ex = get_extruder_id(new_tool, idx); ex >= 0 && ex < (int) m_last_layer_id.size())
+                m_last_layer_id[ex] = idx;
         }
     }
 }
@@ -4631,6 +4635,9 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
         auto get_wall_filament_for_this_layer = [this, &layer, &wall_filament]() -> int {
             if (layer.tool_changes.size() == 0)
                 return -1;
+
+            if (wall_filament < 0)
+                return layer.tool_changes[0].new_tool;
 
             int candidate_id = -1;
             for (size_t idx = 0; idx < layer.tool_changes.size(); ++idx) {

@@ -948,10 +948,10 @@ TEST_CASE("Placeholder parser uses the external filament map for vector access",
     DynamicPrintConfig external = DynamicPrintConfig::full_print_config();
     auto *filament_map = external.option<ConfigOptionInts>("filament_map");
     REQUIRE(filament_map != nullptr);
-    // Requests 0 and 1 resolve to distinct nonzero stored slots 1 and 2.
-    // Thus both the mapping branch and its last-slot bound are observable;
-    // the fallback 0 cannot accidentally satisfy either row.
-    filament_map->values = { 1, 2 };
+    // filament_map holds 1-based extruder ids, so requests 0 and 1 resolve to stored
+    // slots 1 and 2. Thus both the mapping branch and its last-slot bound are observable;
+    // the unmapped fallback, the request's own index, cannot satisfy either row.
+    filament_map->values = { 2, 3 };
 
     PlaceholderParser parser(&external);
     REQUIRE(parser.apply_config(stored));
@@ -1091,7 +1091,8 @@ TEST_CASE("Placeholder parser resolves vector percentages against the selected p
         FloatOrPercent{ 150., true }, FloatOrPercent{ 50., true }
     }));
     DynamicConfig external;
-    external.set_key_value("filament_map", new ConfigOptionInts({ 1, 0 }));
+    // 1-based extruder ids: filament 0 reads slot 1 and filament 1 reads slot 0.
+    external.set_key_value("filament_map", new ConfigOptionInts({ 2, 1 }));
     PlaceholderParser parser(&external);
     REQUIRE(parser.apply_config(config));
 
@@ -1790,5 +1791,36 @@ TEST_CASE("Placeholder parser deferred values can be printed but not computed wi
         CHECK(process("{label + 1}") == "W1");
         CHECK(process("{if label > \"A\"}yes{endif}") == "yes");
         CHECK(process("{if regex_replace(label, /X/, total_weight) == \"W\"}yes{endif}") == "yes");
+    }
+}
+
+SCENARIO("Placeholder parser unindexed vector access with filament_map", "[PlaceholderParser]") {
+    DynamicPrintConfig external_config;
+    external_config.set_key_value("filament_map", new ConfigOptionInts({ 1, 1 }));
+
+    PlaceholderParser parser(&external_config);
+    DynamicPrintConfig config;
+    config.set_key_value("z_hop", new ConfigOptionFloats({ 0.4, 3.0 }));
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.6 }));
+    parser.apply_config(config);
+
+    SECTION("Retraction option (z_hop) resolves per filament") {
+        CHECK(parser.process("{z_hop}", 0) == "0.4");
+        CHECK(parser.process("{z_hop}", 1) == "3");
+    }
+
+    SECTION("Non-retraction option (nozzle_diameter) resolves to physical extruder 0 via filament_map") {
+        CHECK(parser.process("{nozzle_diameter}", 0) == "0.4");
+        CHECK(parser.process("{nozzle_diameter}", 1) == "0.4");
+    }
+
+    SECTION("Multi-extruder printer with filament_map {1, 2} resolves nozzle_diameter per extruder") {
+        DynamicPrintConfig idex_config;
+        idex_config.set_key_value("filament_map", new ConfigOptionInts({ 1, 2 }));
+        PlaceholderParser idex_parser(&idex_config);
+        idex_parser.apply_config(config);
+
+        CHECK(idex_parser.process("{nozzle_diameter}", 0) == "0.4");
+        CHECK(idex_parser.process("{nozzle_diameter}", 1) == "0.6");
     }
 }
