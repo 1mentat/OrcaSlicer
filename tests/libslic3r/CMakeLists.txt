@@ -26,6 +26,8 @@ add_executable(${_TEST_NAME}_tests
     test_bambu_networking.cpp
     test_belt_brim.cpp
     test_bridge_detector.cpp
+    # Mouse ear detection is pure contour geometry; the slicing pipeline stays in fff_print.
+    test_brim.cpp
     test_buildvolume.cpp
     test_calib.cpp
     test_circle.cpp
@@ -37,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
     test_color_utils_contracts.cpp
     test_normal_utils_contracts.cpp
     test_cut_connectors.cpp
+    test_cut.cpp
     test_config.cpp
     test_conflict_checker_contracts.cpp
     test_config_variant_expansion.cpp
@@ -82,6 +85,7 @@ add_executable(${_TEST_NAME}_tests
     test_small_area_infill_flow_compensator.cpp
     test_adaptive_infill_field.cpp
     test_geometry.cpp
+    test_measure.cpp
     test_kdtree.cpp
     test_lightning.cpp
     test_imex_arrange.cpp
@@ -104,6 +108,7 @@ add_executable(${_TEST_NAME}_tests
     test_sl1.cpp
     test_slicing.cpp
     test_zipper_archive_import.cpp
+    test_painted_modifier.cpp
     test_step.cpp
     test_stl.cpp
     test_nsvg_utils.cpp
@@ -135,6 +140,7 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_tower_estimate.cpp
     test_wipe_tower.cpp
     test_wipe_path.cpp
+    test_slicing.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp
     test_parameter_utils.cpp
@@ -370,7 +376,9 @@ orcaslicer_copy_test_dlls(libslic3r_texture_displacement_tests)
 slicer_enable_llvm_source_coverage(libslic3r_texture_displacement_tests)
 
 # Explicitly built TextureToColor contracts, without duplicate CTest registration.
-add_executable(libslic3r_texture_to_color_tests EXCLUDE_FROM_ALL test_texture_to_color_contracts.cpp)
+add_executable(libslic3r_texture_to_color_tests EXCLUDE_FROM_ALL
+    test_texture_to_color_contracts.cpp
+    ../fff_print/fff_print_tests.cpp)
 target_link_libraries(libslic3r_texture_to_color_tests test_common libslic3r Catch2::Catch2WithMain)
 target_include_directories(libslic3r_texture_to_color_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set_property(TARGET libslic3r_texture_to_color_tests PROPERTY FOLDER "tests")

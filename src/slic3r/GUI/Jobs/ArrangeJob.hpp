@@ -5,7 +5,6 @@
 #include <map>
 #include "libslic3r/Polygon.hpp"
 #include <exception>
-#include <string>
 #include <optional>
 #include <vector>
 
@@ -57,7 +56,6 @@ class ArrangeJob : public Job
     ImexArrangeInput m_imex;
 
     arrangement::ArrangeParams params;
-    std::string m_bed_error;
     int current_plate_index = 0;
     Polygon bed_poly;
     Plater *m_plater;

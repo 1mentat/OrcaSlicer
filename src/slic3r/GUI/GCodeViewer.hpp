@@ -88,6 +88,7 @@ public:
             float m_z_offset{ 0.0f };
             // z offset of the model
             float m_model_z_offset{ 0.5f };
+            Vec3d m_nozzle_axis{ Vec3d::UnitZ() }; // ORCA nozzle direction, tilted for belt printers
             bool m_visible{ true };
             bool m_is_dark = false;
             // the G-code was exported with high_precision_gcode, so positions are shown with one more decimal
@@ -107,6 +108,8 @@ public:
             void set_world_position(const Vec3f& position) { m_world_position = position; }
             void set_world_offset(const Vec3f& offset) { m_world_offset = offset; }
             void set_z_offset(float z_offset) { m_z_offset = z_offset; }
+            void set_nozzle_axis(const Vec3d& axis) { m_nozzle_axis = axis.normalized(); } // ORCA
+            const Vec3d& get_nozzle_axis() const { return m_nozzle_axis; }
             void set_high_precision_gcode(bool high_precision) { m_high_precision_gcode = high_precision; }
 
 #if ENABLE_ACTUAL_SPEED_DEBUG
@@ -530,8 +533,8 @@ public:
     }
     // ORCA: select a view type in the preview combo box and apply it
     void select_view_type(libvgcode::EViewType type);
-    // ORCA: apply the "preview_default_view_type" preference, see the definition for the supported values
-    void apply_default_view_type();
+    // ORCA: apply the "preview_default_view_type" preference, or the view of the calibration being previewed
+    void apply_default_view_type(std::optional<libvgcode::EViewType> calibration_view = std::nullopt);
 
     // ORCA: stable, locale independent name of a view type, as stored in the application config
     static std::string view_type_to_config_name(libvgcode::EViewType type);

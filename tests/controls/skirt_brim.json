@@ -17,7 +17,7 @@
     "FocusedSkirtBrim::Belt brim spans many layers instead of one",
     "FocusedSkirtBrim::Belt brim writes every generated segment exactly once",
     "FocusedSkirtBrim::Belt inner-only leading brim does not reject the prime tower or spiral vase",
-    "FocusedSkirtBrim::Brim ear detection length zero keeps a small corner in the emitted geometry",
+    "FocusedSkirtBrim::Brim ear detection lengths up to the corner size keep a small corner in the emitted geometry",
     "FocusedSkirtBrim::Brim ears appear only at corners within the max angle",
     "FocusedSkirtBrim::Brim flow boundaries scale brim material independently of first layer flow",
     "FocusedSkirtBrim::Brim object gap changes emitted clearance without changing the model",

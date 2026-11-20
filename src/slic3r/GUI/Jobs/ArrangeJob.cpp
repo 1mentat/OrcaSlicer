@@ -1,7 +1,6 @@
 #include "ArrangeJob.hpp"
 
 #include "libslic3r/BuildVolume.hpp"
-#include "libslic3r/Exception.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/MTUtils.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -722,7 +721,6 @@ void ArrangeJob::check_unprintable()
 
 void ArrangeJob::process(Ctl &ctl)
 {
-    m_bed_error.clear();
     static const auto arrangestr = _u8L("Arranging");
     ctl.update_status(0, arrangestr);
     ctl.call_on_main_thread([this]{ prepare(); }).wait();;
@@ -735,19 +733,9 @@ void ArrangeJob::process(Ctl &ctl)
     if (is_bbl && params.avoid_extrusion_cali_region && global_config.opt_bool("scan_first_layer"))
         partplate_list.preprocess_nonprefered_areas(m_unselected, MAX_NUM_PLATES);
 
-    update_arrange_params(params, m_plater->config(), m_selected);
-    Points bedpts;
-    try {
-        bedpts = get_shrink_bedpts(m_plater->config(), params);
-    } catch (const Slic3r::RuntimeError &ex) {
-        m_bed_error = ex.what();
-        return;
-    }
-    update_selected_items_inflation(m_selected, m_plater->config(), params);
-    update_unselected_items_inflation(m_unselected, m_plater->config(), params);
-    update_selected_items_axis_align(m_selected, m_plater->config(), params);
-    // Again after the inflation, which may give back part of the bed margin.
-    bedpts = get_shrink_bedpts(m_plater->config(), params);
+    update_arrange_items(m_selected, m_unselected, m_plater->config(), params);
+
+    Points      bedpts = get_shrink_bedpts(m_plater->config(),params);
 
     // Keep the parts on IDEX/IQEX plates in their primary zones; see ImexArranger.
     const ImexArranger imex(m_imex, params, bedpts);
@@ -826,12 +814,6 @@ static std::string concat_strings(const std::set<std::string> &strings,
 }
 
 void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
-    if (!m_bed_error.empty()) {
-        m_plater->get_notification_manager()->close_notification_of_type(NotificationType::ArrangeOngoing);
-        if (!canceled)
-            show_error(m_plater, m_bed_error);
-        return;
-    }
     try {
         if (eptr)
             std::rethrow_exception(eptr);

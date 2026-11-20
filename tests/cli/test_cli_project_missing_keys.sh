@@ -169,32 +169,19 @@ for tag, expected in {"area-missing": [], "area-square": ["0x0,200x0,200x200,0x2
                       "exported_extruder_printable_area": config.get("extruder_printable_area", [])}))
 EOF
 
-reject_empty_arrange() {
-    local tag="$1" out="$WORK/$1" status
-    mkdir -p "$out"
-    timeout 300 "$BIN" --datadir "$out/datadir" --arrange 1 --slice 0 --outputdir "$out" \
-        --export-3mf out.3mf "$WORK/$tag.3mf" > "$out/log" 2>&1
-    status=$?
-    "$PY" - "$out" "$status" <<'EOF' || { tail -n 40 "$out/log"; exit 1; }
+# Extruder areas that share nothing, or an empty one, leave the whole bed to arrange on.
+for tag in area-terminal-empty area-disjoint; do
+    slice "$tag" "$WORK/$tag.3mf" --arrange 1
+    "$PY" - "$WORK/$tag" <<'EOF' || exit $?
 import json, pathlib, sys
 
-out, status = pathlib.Path(sys.argv[1]), int(sys.argv[2])
-# CLI_OBJECT_ARRANGE_FAILED is -21; a signal, timeout or uncaught exception is not rejection success.
-assert status == (-21 & 255), (out.name, status)
+out = pathlib.Path(sys.argv[1])
 result = json.loads((out / "result.json").read_text())
-assert result["return_code"] == -21, result
-assert result["error_string"] == "An error occurred when auto-arranging object(s).", result
-assert result["plate_index"] == 0, result
-message = "error: Extruder printable areas have no common printable region."
-assert message in (out / "log").read_text().splitlines()
-assert not (out / "out.3mf").exists()
-print(json.dumps({"variant": out.name, "shell_status": status, "return_code": result["return_code"],
-                  "error_string": result["error_string"], "diagnostic": message}))
+assert result["return_code"] == 0, (out.name, result)
+assert (out / "out.3mf").exists()
+print(json.dumps({"variant": out.name, "return_code": result["return_code"]}))
 EOF
-}
-
-reject_empty_arrange area-terminal-empty
-reject_empty_arrange area-disjoint
+done
 
 # The same project with no list and with an empty entry for every preset, and without two per-variant
 # filament keys and one filament_dev key. A plain run keeps the stored values; --uptodate refreshes them

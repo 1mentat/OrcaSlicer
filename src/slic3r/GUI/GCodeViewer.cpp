@@ -3,6 +3,7 @@
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/calib.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Model.hpp"
@@ -206,6 +207,22 @@ static const std::vector<std::pair<std::string, libvgcode::EViewType>>& view_typ
     return map;
 }
 
+// ORCA: the view type showing the value a calibration varies, when the preview has one.
+static std::optional<libvgcode::EViewType> calibration_view_type(CalibMode mode)
+{
+    switch (mode) {
+    case CalibMode::Calib_PA_Line:
+    case CalibMode::Calib_PA_Pattern:
+    case CalibMode::Calib_PA_Tower:        return libvgcode::EViewType::PressureAdvance;
+    case CalibMode::Calib_Temp_Tower:      return libvgcode::EViewType::Temperature;
+    case CalibMode::Calib_Flow_Rate:
+    case CalibMode::Calib_Vol_speed_Tower: return libvgcode::EViewType::VolumetricFlowRate;
+    case CalibMode::Calib_VFA_Tower:       return libvgcode::EViewType::Speed;
+    case CalibMode::Calib_Cornering:       return libvgcode::EViewType::Jerk;
+    default:                               return std::nullopt;
+    }
+}
+
 // Find an index of a value in a sorted vector, which is in <z-eps, z+eps>.
 // Returns -1 if there is no such member.
 static int find_close_layer_idx(const std::vector<double> &zs, double &z, double eps)
@@ -362,9 +379,11 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     const Camera& camera = wxGetApp().plater()->get_camera();
     const Transform3d& view_matrix = camera.get_view_matrix();
     float scale_factor = m_scale_factor;
-    const Transform3d model_matrix = (Geometry::translation_transform((m_world_position + m_model_z_offset * Vec3f::UnitZ()).cast<double>()) *
-        Geometry::translation_transform(scale_factor * m_model.get_bounding_box().size().z() * Vec3d::UnitZ()) * Geometry::rotation_transform({ M_PI, 0.0, 0.0 })) *
-        Geometry::scale_transform(scale_factor);
+    // ORCA Tilt the model around the nozzle tip
+    const Transform3d tilt(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), m_nozzle_axis));
+    const Transform3d model_matrix = Geometry::translation_transform(m_world_position.cast<double>()) * tilt *
+        Geometry::translation_transform((m_model_z_offset + scale_factor * m_model.get_bounding_box().size().z()) * Vec3d::UnitZ()) *
+        Geometry::rotation_transform({ M_PI, 0.0, 0.0 }) * Geometry::scale_transform(scale_factor);
     shader->set_uniform("view_model_matrix", view_matrix * model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
     const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
@@ -1284,14 +1303,19 @@ void GCodeViewer::select_view_type(libvgcode::EViewType type)
 // ORCA: Pick the view type the preview opens with, following the "preview_default_view_type" preference:
 // a fixed view type, the one the user picked last ("last"), or the automatic choice ("auto", the default)
 // which shows Filament for multi material prints and Line Type for single material ones.
+// A calibration's view, when given, takes precedence over the preference.
 // The default is only (re)applied when it actually changes, so a view type picked by hand survives a reslice.
-void GCodeViewer::apply_default_view_type()
+void GCodeViewer::apply_default_view_type(std::optional<libvgcode::EViewType> calibration_view)
 {
     const std::string preference = wxGetApp().app_config->get("preview_default_view_type");
 
     std::string key = preference;
     libvgcode::EViewType type = libvgcode::EViewType::FeatureType;
-    if (preference == "last") {
+    if (calibration_view) {
+        type = *calibration_view;
+        key  = "calibration_" + view_type_to_config_name(type);
+    }
+    else if (preference == "last") {
         if (!view_type_from_config_name(wxGetApp().app_config->get("preview_last_view_type"), type))
             type = libvgcode::EViewType::FeatureType;
     }
@@ -1539,6 +1563,11 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     }
     libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer,
         apply_belt ? &belt_inv : nullptr);
+    // ORCA Tilt the marker to the layer normal of the designed belt view
+    Vec3d nozzle_axis = Vec3d::UnitZ();
+    if (apply_belt)
+        nozzle_axis = BeltTransformPipeline::build_rotation_matrix(print.config()).row(2).transpose();
+    m_sequential_view.marker.set_nozzle_axis(nozzle_axis);
 
 //#define ENABLE_DATA_EXPORT 1
 //#if ENABLE_DATA_EXPORT
@@ -1758,7 +1787,8 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     // load_toolpaths(gcode_result, build_volume, exclude_bounding_box);
     
     // ORCA: Apply the default view type now that we know how many tools the G-code actually uses.
-    apply_default_view_type();
+    const bool flowrate_calib = print.calib_mode() == CalibMode::Calib_None && wxGetApp().plater()->is_flowrate_calib();
+    apply_default_view_type(calibration_view_type(flowrate_calib ? CalibMode::Calib_Flow_Rate : print.calib_mode()));
 
     // BBS: data for rendering color arrangement recommendation
     m_nozzle_nums = print.config().option<ConfigOptionFloats>("nozzle_diameter")->values.size();
@@ -2379,6 +2409,7 @@ void GCodeViewer::render_markers(int canvas_width, int canvas_height)
                                              prim_pos.z() };
                         m_sequential_view.m_imex_secondary_markers[i].set_world_position(sec_pos);
                         m_sequential_view.m_imex_secondary_markers[i].set_z_offset(m_z_offset + 0.5f);
+                        m_sequential_view.m_imex_secondary_markers[i].set_nozzle_axis(m_sequential_view.marker.get_nozzle_axis());
                         carriage_box_draws.push_back({
                             sec_pos, carriage_colors[i + 1],
                             carriage.box_offset_x, carriage.box_offset_y });
