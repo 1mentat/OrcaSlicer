@@ -25,6 +25,7 @@
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/pemerr.h>
+#include <openssl/types.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <cmath>
