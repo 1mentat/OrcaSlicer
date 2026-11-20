@@ -1509,7 +1509,7 @@ TEST_CASE("M400, M191, and SYNC add exactly their modeled delays", "[GCodeProces
 TEST_CASE("Object labels attach to moves until the matching stop tag", "[GCodeProcessor][GCodeProcessorDeep][Metadata]")
 {
     const auto result = process_buffer(
-        "M83\nG90\n; start printing object: 7\n"
+        "M83\nG90\n; start printing object, unique label id: 7\n"
         "G1 X10 Y0 Z0.2 E1 F600\n; stop printing object\n"
         "G1 X20 Y0 E1 F600\n");
     const auto extrusions = moves_of(result, EMoveType::Extrude);
