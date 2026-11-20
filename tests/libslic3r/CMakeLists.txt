@@ -34,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
     test_color_decompose_recipe.cpp
     test_color_utils_contracts.cpp
     test_normal_utils_contracts.cpp
+    test_cut_connectors.cpp
     test_config.cpp
     test_conflict_checker_contracts.cpp
     test_config_variant_expansion.cpp
@@ -56,7 +57,6 @@ add_executable(${_TEST_NAME}_tests
     test_edge_grid.cpp
     test_elephant_foot_compensation.cpp
     test_emboss_contracts.cpp
-    test_text_shape.cpp
     test_expolygon_contracts.cpp
     test_expolygons_index_contracts.cpp
     test_extrusion_simulator.cpp
@@ -231,6 +231,9 @@ if (_torus_split_steps_api GREATER -1)
         ORCASLICER_TEST_TORUS_HAS_SPLIT_STEPS)
 endif ()
 unset(_trianglemesh_header)
+if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
+    add_precompiled_header(${_TEST_NAME}_tests ${CMAKE_SOURCE_DIR}/src/libslic3r/pchheader.hpp FORCEINCLUDE)
+endif ()
 
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 

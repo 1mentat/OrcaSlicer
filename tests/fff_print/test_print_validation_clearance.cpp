@@ -121,10 +121,11 @@ size_t count_warning_text(const std::vector<StringObjectException> &warnings, co
 TEST_CASE("Print validation applies rod and lid height limits to sequential order",
           "[Print][ValidationContracts][PrintValidationSequentialHeight]")
 {
+    // One object over a limit is not an error: it is printed after the objects it would hit.
     const auto part = GENERATE(
-        SequentialHeightCase{"overlapping Y bands use rod limit", 30.0, 8.0, 0.0, 2, 0.0, 25.0, 120.0, 1, 25.0},
+        SequentialHeightCase{"one object over the rod limit prints later", 30.0, 8.0, 0.0, 2, 0.0, 25.0, 120.0, 0, 0.0},
         SequentialHeightCase{"rod equality is safe", 25.0, 8.0, 0.0, 2, 0.0, 25.0, 120.0, 0, 0.0},
-        SequentialHeightCase{"separate Y bands use lid limit", 41.0, 8.0, 0.0, 2, 40.0, 25.0, 40.0, 1, 40.0},
+        SequentialHeightCase{"one object over the lid limit prints last", 41.0, 8.0, 0.0, 2, 40.0, 25.0, 40.0, 0, 0.0},
         SequentialHeightCase{"lid equality is safe", 40.0, 8.0, 0.0, 2, 40.0, 25.0, 40.0, 0, 0.0},
         SequentialHeightCase{"multiple tall objects are aggregated", 30.0, 30.0, 8.0, 3, 0.0, 25.0, 120.0, 2, 25.0});
     CAPTURE(part.name, part.first_height, part.second_height, part.later_y,

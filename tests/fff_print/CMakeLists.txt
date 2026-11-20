@@ -5,11 +5,13 @@ add_executable(${_TEST_NAME}_tests
 	test_helpers.hpp
 	test_adaptive_bed_mesh.cpp
 	test_boolean_settings.cpp
+	test_adaptive_pressure_advance.cpp
 	test_cooling.cpp
 	test_extrusion_entity.cpp
 	test_fan_mover_contracts.cpp
 	test_extrusion_processor.cpp
 	test_exclusion_volumes.cpp
+	test_fan_mover.cpp
 	test_fill.cpp
 	test_flow.cpp
 	test_motion_flow_variance.cpp
@@ -45,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
 	test_settings_variance.cpp
 	test_skirt_brim.cpp
 	test_slicing_pipeline_hook.cpp
+	test_spiral_vase.cpp
 	test_support_material.cpp
 	test_texture_displacement.cpp
 	test_toolordering_nozzle_group.cpp
@@ -57,6 +60,10 @@ target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2Wi
 # PrintExtents.hpp uses a library-root include that libslic3r exposes privately.
 set_property(SOURCE test_gcode.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
     "${CMAKE_SOURCE_DIR}/src/libslic3r")
+if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
+    add_precompiled_header(${_TEST_NAME}_tests ${CMAKE_SOURCE_DIR}/src/libslic3r/pchheader.hpp FORCEINCLUDE)
+endif ()
+
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()

@@ -437,7 +437,7 @@ TEST_CASE("Primitive generators preserve analytic bounds and positive solids", "
     const double top_area    = polygon_area(3.);
     const double expected_frustum_volume = 8. / 3. * (bottom_area + top_area + std::sqrt(bottom_area * top_area));
     CHECK_THAT(its_volume(frustum), WithinAbs(float(expected_frustum_volume), 1e-2f));
-    const indexed_triangle_set torus = its_make_torus(8., 2., PI / 8.);
+    const indexed_triangle_set torus = its_make_torus(8., 2., PI / 8., PI / 8.);
     const BoundingBoxf3 torus_box    = bounding_box(torus);
     CHECK_THAT(torus_box.size().x(), WithinAbs(20., 0.2));
     CHECK_THAT(torus_box.size().y(), WithinAbs(20., 0.2));
