@@ -2921,7 +2921,7 @@ TEST_CASE("The processor reports build-volume errors and clears them on recheck"
     CHECK(parsed.gcode_check_result.error_code == 0);
     CHECK(parsed.gcode_check_result.print_area_error_infos.empty());
     CHECK(parsed.gcode_check_result.print_height_error_infos.empty());
-    CHECK(parsed.limit_filament_maps == std::vector<int>{0});
+    CHECK(parsed.limit_filament_maps == std::vector<uint64_t>{0});
 }
 
 TEST_CASE("The processor maps multi-extruder area, height and material restrictions",

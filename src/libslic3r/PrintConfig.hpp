@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 #include <utility>
 #include <cstddef>
 #include <cassert>
@@ -1120,10 +1121,12 @@ protected:
                 const ConfigOptionDef *def = defs->get(kvp.first);
                 assert(def != nullptr);
                 if (def->default_value) {
-                    // Take the default through create_default_option(), which attaches the enum name map
-                    // of coEnums options; the stored default_value has none.
-                    ConfigOptionUniquePtr default_option(def->create_default_option());
-                    opt->set(default_option.get());
+                    if (def->default_value->type() == coEnums) {
+                        // Enum list defaults are built without a keys map; set() adopts the one create_default_option() adds.
+                        std::unique_ptr<ConfigOption> default_option(def->create_default_option());
+                        opt->set(default_option.get());
+                    } else
+                        opt->set(def->default_value.get());
                 }
             }
         }

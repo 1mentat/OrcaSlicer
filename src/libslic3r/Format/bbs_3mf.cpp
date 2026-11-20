@@ -376,6 +376,7 @@ static constexpr const char* TRANSFORM_ATTR = "transform";
 static constexpr const char* OFFSET_ATTR = "offset";
 static constexpr const char* PRINTABLE_ATTR = "printable";
 static constexpr const char* AUTO_DROP_ATTR = "auto_drop";
+static constexpr const char* IMPORTED_PARTS_HIDDEN_KEY = "orca:imported_parts_hidden";
 static constexpr const char* INSTANCESCOUNT_ATTR = "instances_count";
 static constexpr const char* CUSTOM_SUPPORTS_ATTR = "paint_supports";
 static constexpr const char* CUSTOM_FUZZY_SKIN_ATTR  = "paint_fuzzy_skin";
@@ -1192,6 +1193,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_load_model = false;
         bool m_load_aux = false;
         bool m_load_config = false;
+        bool m_keep_original_names = false;
         // backup & restore
         bool m_load_restore = false;
         std::string m_backup_path;
@@ -1517,6 +1519,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_load_aux = strategy & LoadStrategy::LoadAuxiliary;
         m_load_restore = strategy & LoadStrategy::Restore;
         m_load_config = strategy & LoadStrategy::LoadConfig;
+        // Project part metadata remains authoritative; the opt-in only fills missing CAD labels.
+        m_keep_original_names = (strategy & LoadStrategy::KeepOriginalNames) && !m_load_config;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object = nullptr;
@@ -2284,6 +2288,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
+            bool imported_parts_hidden = false;
 
             // 2.4.x stored auto_drop on build items, shared by all instances of an object; any "off" wins
             const bool legacy_auto_drop = !m_items_auto_drop_off.count(object.first.second);
@@ -2298,6 +2303,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 for (const Metadata& metadata : obj_metadata->second.metadata) {
                     if (metadata.key == "name")
                         model_object->name = metadata.value;
+                    // This is model presentation state, never a print configuration option.
+                    else if (metadata.key == IMPORTED_PARTS_HIDDEN_KEY)
+                        imported_parts_hidden = metadata.value == "1";
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
@@ -2341,6 +2349,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             if (!_generate_volumes_new(*model_object, object_id_list, *volumes_ptr, config_substitutions))
                 return false;
+            // add_volume reveals edited objects, so restore persisted presentation after creation.
+            model_object->imported_parts_hidden = imported_parts_hidden;
 
             // Apply cut information for object if any was loaded
             // m_cut_object_ids are indexed by a 1 based model object index.
@@ -4868,7 +4878,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             std::istringstream(used_for_object) >> std::boolalpha >> filament_info.used_for_object;
             std::istringstream(used_for_support) >> std::boolalpha >> filament_info.used_for_support;
             filament_info.group_id = parse_int_list(group_id);
-            filament_info.nozzle_diameter = atof(nozzle_diameter.c_str());
+            filament_info.nozzle_diameter = string_to_double_decimal_point(nozzle_diameter);
             filament_info.nozzle_volume_type = volume_type;
             m_curr_plater->slice_filaments_info.push_back(filament_info);
         }
@@ -5487,6 +5497,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             // this may happen for 3mf saved by 3rd part softwares
+            if (volume->name.empty() && m_keep_original_names)
+                volume->name = sub_object->name;
             if (volume->name.empty()) {
                 volume->name = object.name;
                 if (renamed_volumes_count > 0)
@@ -8327,6 +8339,9 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
 
                 // stores object's config data
+                if (obj->imported_parts_hidden)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << IMPORTED_PARTS_HIDDEN_KEY
+                           << "\" " << VALUE_ATTR << "=\"1\"/>\n";
                 for (const std::string& key : obj->config.keys()) {
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
                 }
@@ -8814,7 +8829,7 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
 
                 if (plate_data->limit_filament_maps.size() > 0) {
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LIMIT_FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
-                    add_vector<int>(stream, plate_data->limit_filament_maps);
+                    add_vector<uint64_t>(stream, plate_data->limit_filament_maps);
                     stream << "\"/>\n";
                 }
 

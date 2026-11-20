@@ -855,7 +855,7 @@ TEST_CASE("Placeholder parser preserves UTF-8 literals and validates escapes",
     invalid.append("\xE2\x28\xA1", 3);
     invalid += "\"}";
     CHECK_THROWS_WITH(parser.process(invalid),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+                      Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
 }
 
 TEST_CASE("Placeholder parser rejects non-ASCII code and reports malformed macro lines",
@@ -886,13 +886,13 @@ TEST_CASE("Placeholder parser rejects truncated and standalone UTF-8 continuatio
     std::string truncated = "truncated ";
     truncated.append("\xE2\x82", 2);
     CHECK_THROWS_WITH(parser.process(truncated),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+                      Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
 
     std::string continuation = "{\"";
     continuation.push_back(static_cast<char>(0x80));
     continuation += "\"}";
     CHECK_THROWS_WITH(parser.process(continuation),
-                      Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+                      Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
 }
 
 TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is not a continuation",
@@ -903,7 +903,7 @@ TEST_CASE("Placeholder parser rejects a multibyte sequence whose last byte is no
     std::string literal = "{\"";
     literal.append("\xE2\x82\x28", 3);
     literal += "\"}";
-    CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+    CHECK_THROWS_WITH(parser.process(literal), Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
 }
 
 TEST_CASE("Placeholder parser checks final continuation bytes only in quoted expressions",
@@ -918,9 +918,9 @@ TEST_CASE("Placeholder parser checks final continuation bytes only in quoted exp
         CHECK(parser.process("{\"" + value + "\"}") == value);
     for (const std::string &value : malformed) {
         CHECK_THROWS_WITH(parser.process("{\"" + value + "\"}"),
-                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+                          Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
         CHECK_THROWS_WITH(parser.process("{if false}{\"" + value + "\"}{endif}"),
-                          Catch::Matchers::ContainsSubstring("Invalid utf8 sequence"));
+                          Catch::Matchers::ContainsSubstring("Invalid UTF-8 sequence"));
     }
 
     // Previously accepted Latin1/CP1252 bytes in template comments remain byte-for-byte text.
