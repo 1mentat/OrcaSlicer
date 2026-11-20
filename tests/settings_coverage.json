@@ -3,15 +3,6 @@
   "description": "Explicit settings-variance evidence claims. The inventory generator derives every registered option from PrintConfigDef and marks all other options uncovered.",
   "default_uncovered_reason": "No dedicated settings-variance evidence is declared for this registered option; full_print_config() construction, schema serialization, and source coverage do not establish behavior.",
   "entries": {
-    "silent_mode": {
-      "test": "tests/fff_print/test_gcode_processor.cpp",
-      "tag": "[SilentModeVariance]",
-      "dimensions": [
-        "boolean_values",
-        "pipeline_oracle"
-      ],
-      "reason": "A real Marlin-firmware Print export applies typed silent_mode false/true directly, with explicit normal/stealth speed and acceleration limits. Both runs retain equal positive normal time; false has zero stealth time, while true has a finite stealth estimate greater than normal. The live-case assertion checks the final export estimator gate; the separate imported-GCode control checks legacy-key compatibility. That separate importer intentionally ignores serialized false/true legacy keys. Other firmware flavors and broader interactions are not claimed."
-    },
     "ooze_prevention": {
       "test": "tests/fff_print/test_gcodeprocessor.cpp",
       "tag": "[GCodeProcessor]",

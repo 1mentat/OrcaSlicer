@@ -12,6 +12,8 @@ add_executable(${_TEST_NAME}_tests
     test_precise_seam_3mf.cpp
     # Pure perimeter extraction is independent of Print/Layer fixtures.
     test_precise_seam.cpp
+    # Contour correspondence is pure geometry; Print integration stays in fff_print.
+    test_seam_contour.cpp
     test_aabbindirect.cpp
     test_adaptive_pa.cpp
     test_appconfig.cpp
@@ -63,6 +65,7 @@ add_executable(${_TEST_NAME}_tests
     test_extrusion_processor.cpp
     test_belt_transform.cpp
     test_intersection_points_contracts.cpp
+    test_exclusion_volumes.cpp
     test_fill_corner_smoothing.cpp
     test_aabb_mesh.cpp
     test_filament_mixer.cpp
@@ -75,6 +78,7 @@ add_executable(${_TEST_NAME}_tests
     test_small_area_infill_flow_compensator.cpp
     test_adaptive_infill_field.cpp
     test_geometry.cpp
+    test_kdtree.cpp
     test_imex_arrange.cpp
     test_imex_helpers.cpp
     test_imex_zones.cpp
@@ -119,6 +123,7 @@ add_executable(${_TEST_NAME}_tests
     test_utils.cpp
     test_miniz_extension.cpp
     test_timeutils.cpp
+    test_semver.cpp
     test_voronoi.cpp
     test_voxel_utils.cpp
     test_wipe_tower_estimate.cpp

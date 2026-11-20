@@ -742,48 +742,6 @@ TestResult process_buffer_with_caller_dialect(const std::string &gcode, FullPrin
     return result;
 }
 
-float stealth_time(const GCodeProcessorResult &result)
-{
-    return result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].time;
-}
-
-FullPrintConfig stealth_config()
-{
-    FullPrintConfig config;
-    config.gcode_flavor.value = gcfMarlinFirmware;
-    // Pin the source defaults consumed by the live M203/M204 paths.
-    config.machine_max_speed_x.values = {500., 200.};
-    config.machine_max_speed_y.values = {500., 200.};
-    config.machine_max_speed_z.values = {12., 12.};
-    config.machine_max_speed_e.values = {120., 120.};
-    config.machine_max_acceleration_x.values = {1000., 1000.};
-    config.machine_max_acceleration_y.values = {1000., 1000.};
-    config.machine_max_acceleration_z.values = {500., 200.};
-    config.machine_max_acceleration_e.values = {5000., 5000.};
-    config.machine_max_acceleration_extruding.values = {1500., 1250.};
-    config.machine_max_acceleration_retracting.values = {1500., 1250.};
-    config.machine_max_acceleration_travel.values = {0., 0.};
-    return config;
-}
-
-TestResult process_buffer_with_stealth(const std::string &gcode,
-                                       FullPrintConfig config = stealth_config())
-{
-    const bool previous_bbl = GCodeProcessor::s_IsBBLPrinter;
-    const ScopeGuard restore_bbl([previous_bbl] { GCodeProcessor::s_IsBBLPrinter = previous_bbl; });
-    GCodeProcessor::s_IsBBLPrinter = true;
-    GCodeProcessor processor;
-    processor.apply_config(config);
-    processor.enable_stealth_time_estimator(true);
-    processor.initialize("gcode_processor_stealth_contract.gcode");
-    processor.initialize_result_moves();
-    processor.process_buffer(gcode);
-    processor.finalize(false);
-    TestResult result;
-    result = std::move(processor.extract_result());
-    return result;
-}
-
 } // namespace
 } // namespace public_processor_contracts
 
@@ -1824,89 +1782,6 @@ TEST_CASE("Partial free cooling respects its target and preheating avoids skippa
 
 } // namespace gcode_processor_reachable_contracts
 
-namespace silent_mode_variance_contracts {
-
-FullPrintConfig config_with_silent_mode(bool enabled)
-{
-    FullPrintConfig config;
-    config.gcode_flavor.value = gcfMarlinFirmware;
-    config.silent_mode.value = enabled;
-    config.machine_max_speed_x.values = {500., 200.};
-    config.machine_max_speed_y.values = {500., 200.};
-    config.machine_max_speed_z.values = {12., 12.};
-    config.machine_max_speed_e.values = {120., 120.};
-    config.machine_max_acceleration_x.values = {1000., 200.};
-    config.machine_max_acceleration_y.values = {1000., 1000.};
-    config.machine_max_acceleration_z.values = {500., 200.};
-    config.machine_max_acceleration_e.values = {5000., 5000.};
-    config.machine_max_acceleration_extruding.values = {1500., 1250.};
-    config.machine_max_acceleration_retracting.values = {1500., 1250.};
-    config.machine_max_acceleration_travel.values = {0., 0.};
-    return config;
-}
-
-
-public_processor_contracts::TestResult export_with_typed_silent_mode(bool enabled)
-{
-    FullPrintConfig typed_config = config_with_silent_mode(enabled);
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    // Apply the typed PrintConfig directly. Do not serialize and deserialize silent_mode:
-    // the legacy config loader intentionally drops that key.
-    config.apply(typed_config);
-
-    Print print;
-    Model model;
-    Test::init_print({Test::TestMesh::A}, print, model, config);
-    public_processor_contracts::TestResult result;
-    const std::string exported_gcode = Test::gcode(print, &result);
-    REQUIRE_FALSE(exported_gcode.empty());
-    return result;
-}
-
-} // namespace silent_mode_variance_contracts
-
-TEST_CASE("Typed silent mode enables stealth estimates on a real G-code export",
-          "[GCodeProcessor][GCodeProcessorPublic][SilentModeVariance]")
-{
-    using namespace silent_mode_variance_contracts;
-    const auto normal = export_with_typed_silent_mode(false);
-    const auto silent = export_with_typed_silent_mode(true);
-
-    const float normal_mode_time = public_processor_contracts::normal_time(normal);
-    const float silent_config_normal_time = public_processor_contracts::normal_time(silent);
-    const float silent_mode_time = public_processor_contracts::stealth_time(silent);
-
-    REQUIRE(normal_mode_time > 0.0f);
-    REQUIRE(silent_config_normal_time > 0.0f);
-    CHECK_THAT(silent_config_normal_time, WithinAbs(normal_mode_time, 1e-5f));
-    CHECK_THAT(public_processor_contracts::stealth_time(normal), WithinAbs(0.0f, 1e-6f));
-    REQUIRE(std::isfinite(silent_mode_time));
-    CHECK(silent_mode_time > silent_config_normal_time);
-}
-
-TEST_CASE("Imported G-code ignores the obsolete silent_mode setting",
-          "[GCodeProcessor][GCodeProcessorPublic][SilentModeVariance]")
-{
-    const std::string gcode =
-        "G90\nM83\n"
-        "G1 X100 Y0 Z0.2 E10 F600\n"
-        "G1 X0 Y0 E10 F600\n";
-
-    const auto normal = public_processor_contracts::process_file(
-        public_processor_contracts::orca_header(silent_mode_variance_contracts::config_with_silent_mode(false)) + gcode);
-    const auto silent = public_processor_contracts::process_file(
-        public_processor_contracts::orca_header(silent_mode_variance_contracts::config_with_silent_mode(true)) + gcode);
-
-    REQUIRE(public_processor_contracts::normal_time(normal) > 0.0f);
-    REQUIRE(public_processor_contracts::normal_time(silent) > 0.0f);
-    CHECK_THAT(public_processor_contracts::normal_time(silent),
-               WithinAbs(public_processor_contracts::normal_time(normal), 1e-6f));
-    CHECK_THAT(public_processor_contracts::stealth_time(normal), WithinAbs(0.0f, 1e-6f));
-    // The G-code importer applies PrintConfig's legacy-key filter, which
-    // discards silent_mode even though the option remains registered.
-    CHECK_THAT(public_processor_contracts::stealth_time(silent), WithinAbs(0.0f, 1e-6f));
-}
-
 TEST_CASE("Machine minimum feed rates set independent estimator floors",
           "[GCodeProcessor][ProcessorMachineSettingsVariance]")
 {
@@ -1957,39 +1832,6 @@ TEST_CASE("Machine minimum feed rates set independent estimator floors",
     CHECK(floor_extrusion_move->time[0] < default_extrusion_move->time[0] * 0.1f);
     CHECK_THAT(floor_extrusion_move->time[0], WithinAbs(100.f / 24.f, 0.2f));
 }
-
-TEST_CASE("Machine minimum feed rates select independent Normal and Stealth floors",
-          "[GCodeProcessor][ProcessorMachineSettingsVariance]")
-{
-    FullPrintConfig config = public_processor_contracts::stealth_config();
-    config.machine_min_travel_rate.values = {30., 0.};
-    config.machine_min_extruding_rate.values = {0., 24.};
-
-    const std::string gcode =
-        "G90\nM83\n"
-        "G1 X100 Y0 Z0.2 F90\nG1 X200 Y0 Z0.2 F90\n"
-        "G1 X300 Y0 Z0.2 E20 F90\nG1 X400 Y0 Z0.2 E20 F90\n";
-    const auto result = public_processor_contracts::process_buffer_with_stealth(gcode, config);
-    const auto travels = public_processor_contracts::moves_of(result, EMoveType::Travel);
-    const auto extrusions = public_processor_contracts::moves_of(result, EMoveType::Extrude);
-
-    REQUIRE(travels.size() == 2);
-    REQUIRE(extrusions.size() == 2);
-    for (size_t i = 0; i < 2; ++i) {
-        CHECK_THAT(travels[i]->position.x(), WithinAbs(100.f * static_cast<float>(i + 1), 1e-4f));
-        CHECK_THAT(travels[i]->time[0], WithinAbs(100.f / 30.f, 0.2f));
-        CHECK_THAT(travels[i]->time[1], WithinAbs(100.f / 1.5f, 0.2f));
-        CHECK(travels[i]->time[0] < travels[i]->time[1] * 0.1f);
-
-        CHECK_THAT(extrusions[i]->position.x(), WithinAbs(300.f + 100.f * static_cast<float>(i), 1e-4f));
-        CHECK_THAT(extrusions[i]->delta_extruder, WithinAbs(20.f, 1e-4f));
-        CHECK_THAT(extrusions[i]->time[0], WithinAbs(100.f / 1.5f, 0.2f));
-        CHECK_THAT(extrusions[i]->time[1], WithinAbs(100.f / 24.f, 0.2f));
-        CHECK(extrusions[i]->time[1] < extrusions[i]->time[0] * 0.1f);
-    }
-}
-
-
 
 TEST_CASE("Filament changes add configured load, unload, and tool delays",
           "[GCodeProcessor][ProcessorMachineSettingsVariance]")
@@ -2389,17 +2231,6 @@ TEST_CASE("Dynamic config selects spiral mode and propagates settings identifier
     CHECK(result.settings_ids.printer == "printer-42");
     REQUIRE(result.settings_ids.filament.size() == 1);
     CHECK(result.settings_ids.filament[0] == "filament-42");
-}
-
-TEST_CASE("Stealth estimator flag can be toggled through the public API", "[GCodeProcessor][GCodeProcessorPublic]")
-{
-    GCodeProcessor processor;
-    processor.apply_config(FullPrintConfig{});
-    CHECK_FALSE(processor.is_stealth_time_estimator_enabled());
-    processor.enable_stealth_time_estimator(true);
-    CHECK(processor.is_stealth_time_estimator_enabled());
-    processor.enable_stealth_time_estimator(false);
-    CHECK_FALSE(processor.is_stealth_time_estimator_enabled());
 }
 
 TEST_CASE("Invalid time mode reports N/A and valid mode reports a formatted duration", "[GCodeProcessor][GCodeProcessorPublic]")
@@ -2813,32 +2644,6 @@ TEST_CASE("M203 converts non-Marlin maximum feedrate units",
     CHECK_THAT(reprap_move->position.x(), WithinAbs(20.f, 1e-4f));
     CHECK_THAT(marlin_move->delta_extruder, WithinAbs(1.f, 1e-4f));
     CHECK_THAT(reprap_move->delta_extruder, WithinAbs(1.f, 1e-4f));
-}
-
-TEST_CASE("Live M203 updates the stealth estimator after motion starts",
-          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorStealthLimits]")
-{
-    const std::string prefix = "M83\nG1 X0 Y0 Z0.2 F600\n";
-    const auto baseline = process_buffer_with_stealth(prefix + "G1 X40 Y0 E1 F1200\n");
-    const auto limited = process_buffer_with_stealth(prefix + "M203 X5\nG1 X40 Y0 E1 F1200\n");
-
-    REQUIRE(normal_time(baseline) > 0.f);
-    REQUIRE(stealth_time(baseline) > 0.f);
-    CHECK(normal_time(limited) > normal_time(baseline) + 0.5f);
-    CHECK(stealth_time(limited) > stealth_time(baseline) + 0.5f);
-}
-
-TEST_CASE("Live M204 updates the stealth acceleration estimate after motion starts",
-          "[GCodeProcessor][GCodeProcessorPublic][GCodeProcessorStealthLimits]")
-{
-    const std::string prefix = "M83\nG1 X0 Y0 Z0.2 F600\n";
-    const auto baseline = process_buffer_with_stealth(prefix + "G1 X40 Y0 E1 F1200\n");
-    const auto limited = process_buffer_with_stealth(prefix + "M204 P20\nG1 X40 Y0 E1 F1200\n");
-
-    REQUIRE(normal_time(baseline) > 0.f);
-    REQUIRE(stealth_time(baseline) > 0.f);
-    CHECK(normal_time(limited) > normal_time(baseline) + 0.5f);
-    CHECK(stealth_time(limited) > stealth_time(baseline) + 0.5f);
 }
 
 TEST_CASE("Lowercase standard commands retain public motion state semantics",

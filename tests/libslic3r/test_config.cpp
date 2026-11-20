@@ -1843,6 +1843,21 @@ TEST_CASE("Config aliases deserialize into their canonical setting",
     CHECK(canonical->value == 42);
 }
 
+TEST_CASE("handle_legacy maps the boolean arc fitting values to modes", "[Config]") {
+    const auto [value, mode] = GENERATE(table<std::string, ArcFittingMode>({
+        { "0",             ArcFittingMode::Disabled },
+        { "false",         ArcFittingMode::Disabled },
+        { "1",             ArcFittingMode::Enabled },
+        { "true",          ArcFittingMode::Enabled },
+        { "sparse_infill", ArcFittingMode::SparseInfill },
+    }));
+    INFO(value);
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Disable);
+    DynamicPrintConfig config;
+    config.set_deserialize("enable_arc_fitting", value, ctxt);
+    CHECK(config.opt_enum<ArcFittingMode>("enable_arc_fitting") == mode);
+}
+
 TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config]") {
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Enable);
     DynamicPrintConfig config;
@@ -1854,6 +1869,19 @@ TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config]") {
     CHECK(config.option<ConfigOptionPercent>("adaptive_infill_interior_density")->value == Catch::Approx(12.));
     CHECK(config.opt_enum<AdaptiveInfillGradient>("adaptive_infill_gradient") == AdaptiveInfillGradient::Quadratic);
     CHECK(ctxt.substitutions.empty());
+}
+
+TEST_CASE("silent_mode is no longer saved and is dropped on load", "[Config]") {
+    DynamicPrintConfig full;
+    full.apply(FullPrintConfig::defaults());
+    CHECK_FALSE(full.has("silent_mode"));
+
+    // Projects saved before its removal still carry it.
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Enable);
+    DynamicPrintConfig        config;
+    config.set_deserialize("silent_mode", "0", ctxt);
+    CHECK_FALSE(config.has("silent_mode"));
+    CHECK(ctxt.unrecogized_keys == std::vector<std::string>{"silent_mode"});
 }
 
 TEST_CASE("handle_legacy migrates every IDEX/IQEX key testers already have", "[Config]") {
@@ -7905,4 +7933,99 @@ TEST_CASE("Malformed legacy SLA correction vectors leave axis options unchanged"
         }
     }
 
+}
+
+TEST_CASE("Custom G-code placeholder lists are keyed by option keys", "[Config]")
+{
+    const auto &placeholders = custom_gcode_specific_placeholders();
+    REQUIRE_FALSE(placeholders.empty());
+    for (const auto &[gcode_key, keys] : placeholders) {
+        INFO(gcode_key);
+        CHECK(print_config_def.has(gcode_key));
+    }
+
+    // Multiline text options that aren't custom G-code; add any new one that isn't G-code here.
+    const std::set<std::string> not_gcode = { "notes", "filament_notes", "printer_notes", "post_process",
+                                              "adaptive_pressure_advance_model", "small_area_infill_flow_compensation_model" };
+    size_t gcode_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!def.multiline || not_gcode.count(key) > 0)
+            continue;
+        INFO(key);
+        CHECK(placeholders.count(key) == 1);
+        ++gcode_options;
+    }
+    CHECK(gcode_options == placeholders.size());
+}
+
+TEST_CASE("A disabled filament override survives the merge with a parent that sets it", "[Config][Variant]")
+{
+    std::set<std::string>      no_keys;
+    Slic3r::DynamicPrintConfig parent;
+    parent.set_deserialize_strict("filament_retract_before_wipe", "100%");
+    parent.set_deserialize_strict("filament_ironing_flow", "15%");
+    Slic3r::DynamicPrintConfig child;
+    child.set_deserialize_strict("filament_retract_before_wipe", "nil");
+    child.set_deserialize_strict("filament_ironing_flow", "nil");
+    parent.update_diff_values_to_child_config(child, "", "filament_extruder_variant",
+                                              Slic3r::filament_options_with_variant, no_keys);
+    CHECK(parent.opt_serialize("filament_retract_before_wipe") == "nil");
+    CHECK(parent.opt_serialize("filament_ironing_flow") == "nil");
+}
+
+SCENARIO("A two-variant child's disabled override column is matched to the parent's variant by name", "[Config][Variant]")
+{
+    std::set<std::string> no_keys;
+    GIVEN("A two-variant filament parent") {
+        Slic3r::DynamicPrintConfig parent;
+        parent.set_deserialize_strict("filament_extruder_variant", "Direct Drive Standard;Direct Drive High Flow");
+        parent.set_deserialize_strict("filament_retract_before_wipe", "100%,100%");
+        parent.set_deserialize_strict("filament_flow_ratio", "1,1");
+        WHEN("the child disables the override on one variant and leaves a plain option nil on it") {
+            Slic3r::DynamicPrintConfig child;
+            child.set_deserialize_strict("filament_extruder_variant", "Direct Drive Standard;Direct Drive High Flow");
+            child.set_deserialize_strict("filament_retract_before_wipe", "nil,100%");
+            child.set_deserialize_strict("filament_flow_ratio", "nil,1.1");
+            parent.update_diff_values_to_child_config(child, "", "filament_extruder_variant",
+                                                      Slic3r::filament_options_with_variant, no_keys);
+            THEN("the override column is disabled while the plain option's nil column inherits") {
+                CHECK(parent.opt_serialize("filament_retract_before_wipe") == "nil,100%");
+                CHECK(parent.opt_serialize("filament_flow_ratio") == "1,1.1");
+            }
+        }
+        WHEN("the child lists the same variants in the other order") {
+            Slic3r::DynamicPrintConfig child;
+            child.set_deserialize_strict("filament_extruder_variant", "Direct Drive High Flow;Direct Drive Standard");
+            child.set_deserialize_strict("filament_retract_before_wipe", "70%,nil");
+            child.set_deserialize_strict("filament_flow_ratio", "1.1,nil");
+            parent.update_diff_values_to_child_config(child, "", "filament_extruder_variant",
+                                                      Slic3r::filament_options_with_variant, no_keys);
+            THEN("columns are matched by variant name, the disabled one included") {
+                CHECK(parent.opt_serialize("filament_retract_before_wipe") == "nil,70%");
+                CHECK(parent.opt_serialize("filament_flow_ratio") == "1,1.1");
+            }
+        }
+        WHEN("the child was saved with a single variant") {
+            Slic3r::DynamicPrintConfig child;
+            child.set_deserialize_strict("filament_extruder_variant", "Direct Drive Standard");
+            child.set_deserialize_strict("filament_retract_before_wipe", "nil");
+            parent.update_diff_values_to_child_config(child, "", "filament_extruder_variant",
+                                                      Slic3r::filament_options_with_variant, no_keys);
+            THEN("its one value applies to every variant of that extruder, as slicing does") {
+                CHECK(parent.opt_serialize("filament_retract_before_wipe") == "nil,nil");
+            }
+        }
+    }
+}
+
+TEST_CASE("Every listed filament override is nullable", "[Config]")
+{
+    std::set<std::string> overrides(Slic3r::filament_extruder_override_keys.begin(), Slic3r::filament_extruder_override_keys.end());
+    overrides.insert({ "filament_retract_length_nc", "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed" });
+    for (const auto &[key, def] : Slic3r::print_config_def.options) {
+        INFO(key);
+        CHECK(Slic3r::is_filament_extruder_override_key(key) == (overrides.count(key) == 1));
+        if (overrides.count(key) == 1)
+            CHECK(def.nullable);
+    }
 }
