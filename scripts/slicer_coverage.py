@@ -1071,9 +1071,9 @@ def run_coverage(args: argparse.Namespace) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
-    run = sub.add_parser("run", help="run tests, merge profiles, and enforce the coverage gate")
+    run = sub.add_parser("run", allow_abbrev=False, help="run tests, merge profiles, and enforce the coverage gate")
     run.add_argument("--backend", choices=("llvm", "gcov"), default="llvm",
                      help="coverage format; GCC gcov reports are backend-specific")
     run.add_argument("--root", default=".", help="repository root (default: current directory)")

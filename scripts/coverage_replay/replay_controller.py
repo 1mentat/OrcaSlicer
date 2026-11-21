@@ -412,7 +412,7 @@ def self_check() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--out", type=Path)

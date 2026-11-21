@@ -1224,10 +1224,10 @@ def discover_ctest(ctest_argv: Sequence[str], *, build_dir: Path | str,
     return command, payload, receipt
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _parser():
     import argparse
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--build-dir", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--batch-timeout", type=float, required=True,
@@ -1235,7 +1235,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--discovery-timeout", type=float, default=120.0)
     parser.add_argument("ctest_argv", nargs=argparse.REMAINDER,
                         help="explicit CTest argv after --; selection flags are preserved")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     ctest_argv = list(args.ctest_argv)
     if ctest_argv and ctest_argv[0] == "--":
         ctest_argv.pop(0)
