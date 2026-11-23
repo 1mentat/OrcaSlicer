@@ -52,6 +52,7 @@ add_executable(${_TEST_NAME}_tests
     test_filament_group_utils.cpp
     test_tool_order_utils.cpp
     test_toolordering_nozzle_group.cpp
+    test_parallel_for_first_error.cpp
     test_parallel_resolve.cpp
     test_preset_bundle_loading.cpp
     test_preset_collection.cpp
@@ -72,6 +73,7 @@ add_executable(${_TEST_NAME}_tests
     test_extrusion_processor.cpp
     test_belt_transform.cpp
     test_intersection_points_contracts.cpp
+    test_expolygon.cpp
     test_exclusion_volumes.cpp
     test_fill_corner_smoothing.cpp
     test_aabb_mesh.cpp
